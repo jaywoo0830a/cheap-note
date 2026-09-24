@@ -62,6 +62,14 @@ pub struct Settings {
     /// What is printed on that sheet, when no PDF is open.
     pub canvas_style: CanvasStyle,
 
+    /// Whether PDF pages are rendered in grayscale.
+    ///
+    /// A reader's comfort setting, and — as importantly — a *render option*: it changes the bytes
+    /// Pdfium produces, so it is a field of [`crate::pdf::PageKey`] and toggling it invalidates
+    /// exactly the bitmaps it should. Leaving an option like this out of the key is how a viewer
+    /// ends up showing colour pages after the toggle was switched.
+    pub grayscale_pages: bool,
+
     /// Whether the top bar — tools, canvas controls and the live status line — is shown.
     ///
     /// The bar floats over the canvas, so hiding it gives the whole window to the sheet and
@@ -114,6 +122,7 @@ impl Default for Settings {
             page_display_width: CanvasSize::A4.display_width(),
             canvas_size: CanvasSize::A4,
             canvas_style: CanvasStyle::Plain,
+            grayscale_pages: false,
             show_toolbar: true,
             show_status: true,
             // On by default: a digitizer's tilt is data the user paid for, and a cursor that shows

@@ -44,7 +44,7 @@ use crate::canvas::{contrast_color, CanvasSize, CanvasStyle, Ruling, Swatch, INK
 use crate::cursor::{PenCursor, NIB_RADIUS};
 use crate::ink::{InkDocument, InkTransform, Stroke, Tool};
 use crate::pen::{capture_config, PenInbox, PenService};
-use crate::pdf::{PdfDocumentView, RenderedPage};
+use crate::pdf::{PageRequest, PdfDocumentView, RenderedPage};
 use crate::refresh::{Cadence, DisplayRefresh};
 use crate::settings::Settings;
 use crate::system_cursor::SystemCursor;
@@ -152,6 +152,22 @@ fn display_due(probed_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(probed_at) >= DISPLAY_INTERVAL
 }
 
+/// How long the pen has to be quiet before a page is rasterised for it.
+///
+/// A rasterisation blocks the thread that runs the pump, so while a stroke is being laid the rung
+/// already on screen is the right one; the sharp one can wait for the hand to stop. An eighth of a
+/// second is short enough that a person pausing to think sees it land, and long enough that the
+/// pause between two letters of a word is not mistaken for one.
+const PDF_QUIET_INTERVAL: Duration = Duration::from_millis(120);
+
+/// Whether the pen has been quiet long enough to spend a rasterisation on it.
+///
+/// A free function for the same reason [`status_due`] and [`display_due`] are: it is a decision,
+/// and decisions that can be tested without a window are worth testing without one.
+fn pdf_render_due(last_ink_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(last_ink_at) >= PDF_QUIET_INTERVAL
+}
+
 /// The sheet as the last frame drew it: its size in paper units, and where that was placed.
 ///
 /// The pump has no window to ask, and does not need one: a reading has to land on the sheet the
@@ -250,6 +266,13 @@ pub struct NoteApp {
     timings: Arc<Timings>,
     /// When the pump last woke, for the gap it reports against its own interval.
     last_pump: Option<Instant>,
+    /// The page the view is waiting for, if the cache does not have it yet.
+    ///
+    /// One slot, always the current page: the renderer has a single job, so there is nothing to
+    /// prioritise and nothing to reorder — a request the view has moved past is simply replaced.
+    pending_pdf: Option<PageRequest>,
+    /// When the pen last laid ink, for [`pdf_render_due`].
+    last_ink_at: Instant,
     /// The pump's current interval in microseconds, shared with the pump task.
     ///
     /// A frame measured faster than the mode it read has to change how often the queue is drained,
@@ -315,6 +338,8 @@ impl NoteApp {
             sheet: Sheet::default(),
             timings: Arc::new(Timings::default()),
             last_pump: None,
+            pending_pdf: None,
+            last_ink_at: Instant::now(),
             pump_interval_micros: Arc::new(AtomicU64::new(
                 refresh.pump_interval().as_micros() as u64
             )),
@@ -369,10 +394,16 @@ impl NoteApp {
                 // pen was down would report "measured —" at every other moment.
                 let display_moved = app.follow_display_cadence(woke);
 
+                // The page the view is waiting for, paid for here rather than inside a frame. It
+                // is skipped while the pen is laying ink, so the queue keeps draining at the pace
+                // the display has.
+                let page_rendered = app.serve_pdf(woke);
+
                 if batch.samples.is_empty() {
-                    // Nothing from the pen: the display's numbers are the only thing that can have
-                    // moved, and they only need a frame if they did.
-                    if display_moved {
+                    // Nothing from the pen: the display's numbers and the page are the only things
+                    // that can have moved, and the page only needs a frame once it has landed.
+                    if display_moved || page_rendered {
+                        app.refresh_status(woke);
                         cx.notify();
                     }
                     return;
@@ -390,6 +421,10 @@ impl NoteApp {
                 let cursor = app.pen_cursor();
                 let laid_ink = app.consume_ink(&batch.samples);
                 let cursor_moved = app.pen_cursor() != cursor;
+                if laid_ink {
+                    // The clock the page render waits on: see `serve_pdf`.
+                    app.last_ink_at = woke;
+                }
 
                 // The system pointer follows the ghost on every read, so the two can never disagree
                 // about whether the pen has a cursor of its own.
@@ -499,6 +534,16 @@ impl NoteApp {
     /// Changes what is printed on the sheet.
     fn set_canvas_style(&mut self, style: CanvasStyle, cx: &mut Context<Self>) {
         self.settings.canvas_style = style;
+        self.finish_setting(cx);
+    }
+
+    /// Renders PDF pages in grayscale, or back in colour.
+    ///
+    /// Nothing has to be invalidated by hand: the colour is a field of the cache key, so the
+    /// bitmaps the toggle changed simply are not the bitmaps the cache holds, and the next frame
+    /// asks for the ones it now wants.
+    fn set_pdf_grayscale(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.grayscale_pages = on;
         self.finish_setting(cx);
     }
 
@@ -781,43 +826,110 @@ impl NoteApp {
 
     /// The rendered page for the current index, when a PDF is open.
     ///
-    /// [`PdfDocumentView`] caches rendered pages, so on the common path this is a map lookup
-    /// and an `Arc` clone — no rasterisation in the frame. Rasterising is timed, because it runs
-    /// here, on this thread, inside the frame that asked for it.
+    /// A frame must never wait for Pdfium, so this *asks the cache only*: the exact rung if it is
+    /// there, and otherwise whatever rung of the same page is (a soft page for a frame or two beats
+    /// a blank one for twenty milliseconds). If the cache has nothing at all for the page — a page
+    /// turn, the first frame of a document — the cheapest rung is rendered here, because it costs
+    /// about a millisecond and showing nothing is worse.
+    ///
+    /// What the zoom actually asked for, and could not have, becomes [`Self::pending_pdf`]: the
+    /// pump pays for it when the pen is quiet.
     fn current_page(&mut self) -> Option<RenderedPage> {
         if !self.pdf.is_loaded() {
             return None;
         }
 
-        let pixel_width = self.pdf_render_pixel_width();
+        let wanted = PageRequest::new(self.page_index, self.pdf_render_pixel_width())
+            .grayscale(self.settings.grayscale_pages);
 
-        // Rasterising happens here, on this thread, inside the frame — so it is measured where the
-        // time is actually spent, rather than amortised into the frame's total. A cache hit is not
-        // recorded at all: its cost is a map lookup and it would otherwise dilute the mean.
-        let started = Instant::now();
-        let before = self.pdf.rasterised();
+        if let Some(page) = self.pdf.page_for_frame(wanted) {
+            self.plan_pdf(wanted);
+            return Some(page);
+        }
 
-        let page = match self.pdf.render_page(self.page_index, pixel_width) {
+        // Nothing for this page at any rung: pay for the cheapest one now, so the frame has
+        // something to draw, then leave the rung the zoom wanted to the pump.
+        let preview = PageRequest::new(self.page_index, PDF_PIXEL_WIDTHS[0])
+            .grayscale(self.settings.grayscale_pages);
+        let page = match self.render_now(preview) {
             Ok(page) => Some(page),
             Err(error) => {
-                let message = error.to_string();
-                if self.message != message {
-                    self.message = message;
-                    // The message is part of the status line, which is now stale. The line is
-                    // rebuilt in the same frame rather than on the clock, because an error has to
-                    // reach the user as soon as it happens.
-                    self.touch_status();
-                }
+                self.report(error.to_string());
                 None
             }
         };
+
+        self.plan_pdf(wanted);
+        page
+    }
+
+    /// Records what the view is waiting for, and counts a request that was dropped for it.
+    ///
+    /// This is the whole of the app's cancellation: a render is only ever started by the pump, so a
+    /// request that the view has moved on from is *never started* — the pending one is replaced
+    /// here, and the replacement is what the counter counts. The progressive path (a render that can
+    /// be interrupted mid-call) is the one that will need a token of its own.
+    fn plan_pdf(&mut self, wanted: PageRequest) {
+        if self.pending_pdf.is_some_and(|pending| pending != wanted) {
+            self.pdf.count_cancelled();
+        }
+
+        self.pending_pdf = self.pdf.plan(wanted);
+    }
+
+    /// Rasterises one page here and now, timed.
+    fn render_now(&mut self, request: PageRequest) -> Result<RenderedPage> {
+        let started = Instant::now();
+        let before = self.pdf.rasterised();
+
+        let page = self.pdf.render_page(request.page, request.pixels)?;
 
         self.timings.count_rasterised(self.pdf.rasterised() - before);
         if self.pdf.rasterised() != before {
             self.timings.pdf.record(started.elapsed());
         }
 
-        page
+        Ok(page)
+    }
+
+    /// Pays for the page the view is waiting for, when the pen is quiet enough to afford it.
+    ///
+    /// The render happens *here*, in the pump, and not in the frame: a rasterisation blocks this
+    /// thread either way, but the pump is between frames rather than inside one, so the cost lands
+    /// on how soon the next reading is consumed instead of on whether a frame is drawn at all.
+    ///
+    /// It waits for the pen to stop because that is the trade the user feels: while a stroke is
+    /// being laid the rung already on screen is the right one, and the sharp one is worth waiting
+    /// for until the hand stops. Nothing else competes for this work — there is one pending request,
+    /// it is always the current page, and it is always the *final* quality.
+    fn serve_pdf(&mut self, now: Instant) -> bool {
+        let Some(request) = self.pending_pdf else {
+            return false;
+        };
+
+        if !pdf_render_due(self.last_ink_at, now) {
+            return false;
+        }
+
+        self.pending_pdf = None;
+        match self.render_now(request) {
+            Ok(_) => true,
+            Err(error) => {
+                self.report(error.to_string());
+                self.touch_status();
+                true
+            }
+        }
+    }
+
+    /// Puts a message in the status line, rebuilding it at once.
+    ///
+    /// An error has to reach the user as soon as it happens rather than on the status clock.
+    fn report(&mut self, message: String) {
+        if self.message != message {
+            self.message = message;
+            self.touch_status();
+        }
     }
 
     /// Where the sheet is drawn, in the window the frame is painting.
@@ -915,6 +1027,13 @@ impl NoteApp {
             ink.resampled,
             ink.resample_ratio() * 100.0
         ));
+
+        // What the page cache has done, when there is a page to cache. The counters are the whole
+        // reason the cache can be argued about rather than guessed at: a hit ratio of 0% and one of
+        // 99% look identical from the outside, and the placeholders are what the eye actually saw.
+        if self.pdf.is_loaded() {
+            parts.push(self.pdf.stats().summary());
+        }
 
         // Where the reading goes and what it costs to put it there. The zoom is the one piece of
         // view state the sheet's own controls cannot show a number for, and the rest is the
@@ -1191,6 +1310,18 @@ impl NoteApp {
             .child(toolbar_divider(border_color))
             .child(control_label("Ink", muted_foreground))
             .children(ink)
+            .child(toolbar_divider(border_color))
+            // A render option for the *page*, next to the colours it overrides: this row wraps, so
+            // one more control here cannot push the others off the edge.
+            .child(visibility_switch(
+                "gray-pages",
+                "Gray",
+                self.settings.grayscale_pages,
+                cx,
+                |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
+                    app.set_pdf_grayscale(on, cx)
+                },
+            ))
     }
 
     /// The way back when the bar is hidden.
@@ -1498,9 +1629,9 @@ mod tests {
     // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
     // scope and shadow the attribute this module needs.
     use super::{
-        display_due, notch_in_pixels, pinch_zoom_factor, quantise_width, solid_path, status_due,
-        wheel_pan, wheel_zoom_factor, DISPLAY_INTERVAL, STATUS_INTERVAL, WHEEL_LINE_HEIGHT,
-        WHEEL_LINES_PER_NOTCH, WHEEL_ZOOM_STEP,
+        display_due, notch_in_pixels, pdf_render_due, pinch_zoom_factor, quantise_width, solid_path,
+        status_due, wheel_pan, wheel_zoom_factor, DISPLAY_INTERVAL, PDF_QUIET_INTERVAL,
+        STATUS_INTERVAL, WHEEL_LINE_HEIGHT, WHEEL_LINES_PER_NOTCH, WHEEL_ZOOM_STEP,
     };
     use crate::ink::{InkPoint, Stroke};
     use gpui_kit::{point, px, Path, PathBuilder, Pixels, Point};
@@ -1734,6 +1865,29 @@ mod tests {
 
         // A clock that goes backwards must not force a probe on every frame either.
         assert!(!display_due(now + Duration::from_secs(1), now));
+    }
+
+    /// A page is rasterised when the pen stops, not while it is writing.
+    ///
+    /// The render blocks the thread that runs the pump, so this clock is the difference between a
+    /// sharp page and a queue that drains late. It is a decision, so it is pinned down.
+    #[test]
+    fn a_page_render_waits_for_the_pen_to_stop() {
+        let now = Instant::now();
+
+        assert!(!pdf_render_due(now, now), "the pen has just laid ink");
+        assert!(
+            !pdf_render_due(now, now + PDF_QUIET_INTERVAL - Duration::from_millis(1)),
+            "a pause inside a word is not the end of writing"
+        );
+        assert!(
+            pdf_render_due(now, now + PDF_QUIET_INTERVAL),
+            "and a hand that has stopped is one to spend a render on"
+        );
+        assert!(
+            !pdf_render_due(now + Duration::from_secs(1), now),
+            "a clock that goes backwards must not force a render either"
+        );
     }
 
     /// The status line is rebuilt on a clock, not on every frame.

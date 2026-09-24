@@ -14,7 +14,9 @@
 //! Nothing here polls for pen input. The pen thread pushes readings into a queue, and an async
 //! task (see [`NoteApp::start_pen_pump`]) drains it on a timer derived from the display's
 //! refresh rate, feeds the ink model, and calls `cx.notify()` — so a frame is scheduled exactly
-//! when there is new ink, and the app is idle otherwise.
+//! when there is something new to show, and the app is idle otherwise. "Something new" is two
+//! things: ink that changed, and a cursor that moved. A pen held in range without touching lays no
+//! ink at all, and it is the ghost cursor (see [`crate::cursor`]) that has to follow it.
 //!
 //! ## The top bar, and why it can be turned off
 //!
@@ -38,7 +40,8 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::*;
 
-use crate::canvas::{CanvasSize, CanvasStyle, Ruling, Swatch, INK_COLORS, PAPER_COLORS};
+use crate::canvas::{contrast_color, CanvasSize, CanvasStyle, Ruling, Swatch, INK_COLORS, PAPER_COLORS};
+use crate::cursor::{PenCursor, NIB_RADIUS};
 use crate::ink::{InkDocument, Stroke, Tool};
 use crate::pen::{capture_config, PenInbox, PenService};
 use crate::pdf::{PdfDocumentView, RenderedPage};
@@ -179,12 +182,17 @@ impl NoteApp {
             }
 
             let alive = this.update(cx, |app, cx| {
-                // `consume` reports whether anything on screen actually changed. A pen in range
-                // but not touching produces a continuous stream of hover readings that lay no ink
-                // and move no cursor, and repainting an identical scene for each of them is what
-                // made the top of the window look like it was flickering. `consume` already
-                // knows the difference, so the frame is simply not scheduled for those.
-                if !app.ink.consume(&samples, app.scale, &app.settings) {
+                // The cursor is read on both sides of the batch because a pen in range but not
+                // touching lays no ink and still has to be followed around the window: `consume`
+                // reports the ink, and the comparison reports the cursor. A frame is scheduled
+                // when either of them moved.
+                let cursor = app.pen_cursor();
+                let laid_ink = app.ink.consume(&samples, app.scale, &app.settings);
+
+                if !laid_ink && app.pen_cursor() == cursor {
+                    // Nothing on screen changed: a reading the resampler and the pointer gate both
+                    // dropped, or a hover that moved nothing. Repainting an identical scene on each
+                    // of those is what made the top of the window look like it was flickering.
                     return;
                 }
 
@@ -262,6 +270,32 @@ impl NoteApp {
     fn set_status_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.settings.show_status = shown;
         self.finish_setting(cx);
+    }
+
+    /// Shows or hides the pen's ghost cursor.
+    fn set_tilt_cursor_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        self.settings.show_tilt_cursor = shown;
+        self.finish_setting(cx);
+    }
+
+    /// The cursor the pen's most recent reading describes, whatever the ghost is set to.
+    ///
+    /// Reading it from the ink model rather than from a batch means the cursor survives the batches
+    /// that lay nothing — which is most of them, while the pen is merely held over the window —
+    /// and disappears only when the pen does.
+    fn last_cursor(&self) -> Option<PenCursor> {
+        self.ink
+            .last_sample()
+            .and_then(|sample| PenCursor::from_sample(sample, self.scale))
+    }
+
+    /// The cursor to draw, if the ghost cursor is switched on.
+    fn pen_cursor(&self) -> Option<PenCursor> {
+        if !self.settings.show_tilt_cursor {
+            return None;
+        }
+
+        self.last_cursor()
     }
 
     /// Persists and repaints after a setting changed.
@@ -454,6 +488,13 @@ impl NoteApp {
             None => parts.push(self.pen.status().to_string()),
         }
 
+        // The live lean, when the pen is here to have one. This is the number the ghost cursor is
+        // drawing, so it is where a person checks that the cursor is telling the truth about which
+        // way the pen leans — worth reporting whether or not the ghost itself is drawn.
+        if let Some(tilt) = self.last_cursor().and_then(PenCursor::tilt) {
+            parts.push(format!("lean {tilt}"));
+        }
+
         let ink = self.ink.stats();
         parts.push(format!(
             "ink {} strokes, {} points ({} resampled, {:.0}%)",
@@ -586,6 +627,15 @@ impl NoteApp {
                 cx,
                 |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
                     app.set_status_shown(on, cx)
+                },
+            ),
+            visibility_switch(
+                "show-tilt",
+                "Tilt",
+                self.settings.show_tilt_cursor,
+                cx,
+                |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
+                    app.set_tilt_cursor_shown(on, cx)
                 },
             ),
         ];
@@ -779,6 +829,14 @@ impl Render for NoteApp {
         let ink_color: Hsla = rgb(self.settings.ink_color).into();
         let page_color: Hsla = rgb(self.settings.page_color).into();
 
+        // The ghost cursor: a mark at the nib with the pen's body leaning away from it. Drawn last,
+        // because a cursor belongs on top of everything, and only while the pen is in range — the
+        // ink model drops the cursor the moment it hears the pen leave.
+        let cursor = self.pen_cursor();
+        // Its own colour rather than the ink's: it is not ink, and it has to be visible on a sheet
+        // of any colour, including one where the ink would disappear.
+        let cursor_color: Hsla = rgb(contrast_color(self.settings.page_color)).into();
+
         // The bar floats over the canvas, so pen coordinates need no offset and the ink can run
         // the full height of the window. When it is hidden, the handle that brings it back takes
         // its place — a bar that could be hidden with no way back would be a trap.
@@ -839,6 +897,10 @@ impl Render for NoteApp {
                         }
                         if let Some(stroke) = &open {
                             paint_stroke(window, stroke, ink_color);
+                        }
+
+                        if let Some(cursor) = cursor {
+                            paint_cursor(window, cursor, cursor_color);
                         }
                     },
                 )
@@ -1009,6 +1071,53 @@ fn paint_rect(window: &mut Window, origin: Point<Pixels>, width: f32, height: f3
     if let Ok(path) = builder.build() {
         window.paint_path(path, color);
     }
+}
+
+/// Draws the pen's ghost cursor: the nib, and the pen's body leaning away from it.
+///
+/// The body is a filled polygon rather than a quad, because a quad cannot be rotated and pointing
+/// somewhere is the entire point of the shape. It is built fresh on every frame the pen moves —
+/// there is no way to draw something whose position and angle are both new each frame — which is
+/// affordable because it is four points, not a stroke.
+fn paint_cursor(window: &mut Window, cursor: PenCursor, color: Hsla) {
+    let [x, y] = cursor.position();
+
+    // The body is absent for a pen with no tilt sensor, and for one held straight up.
+    if let Some([a, b, c, d]) = cursor.body_outline() {
+        let corners = [
+            point(px(a[0]), px(a[1])),
+            point(px(b[0]), px(b[1])),
+            point(px(c[0]), px(c[1])),
+            point(px(d[0]), px(d[1])),
+        ];
+
+        let mut builder = PathBuilder::fill();
+        builder.add_polygon(&corners, true);
+
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, color);
+        }
+    }
+
+    // The nib: a small circle, always, so there is a fixed point that says exactly where the ink
+    // will land. A square rounded by half its own side is a circle.
+    let radius = NIB_RADIUS;
+    let corner = px(radius);
+    window.paint_quad(
+        fill(
+            Bounds {
+                origin: point(px(x - radius), px(y - radius)),
+                size: size(px(radius * 2.0), px(radius * 2.0)),
+            },
+            color,
+        )
+        .corner_radii(Corners {
+            top_left: corner,
+            top_right: corner,
+            bottom_right: corner,
+            bottom_left: corner,
+        }),
+    );
 }
 
 /// Fills a stroke's ribbon outline.

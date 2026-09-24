@@ -129,6 +129,14 @@ impl InkPoint {
 pub struct Stroke {
     /// The positions, oldest first.
     pub points: Vec<InkPoint>,
+    /// The colour this stroke was written in, as `0xRRGGBB`.
+    ///
+    /// Per stroke, not per page: the palette is a set of pens, and picking up a different one must
+    /// not repaint what the others wrote. A note written before this field existed loads as
+    /// [`Stroke::DEFAULT_COLOR`] — the ink colour those notes were drawn in, since there was only
+    /// ever one.
+    #[serde(default = "Stroke::default_color")]
+    pub color: u32,
     /// The ribbon outline, in logical pixels, cached when the stroke is closed.
     ///
     /// Recomputing the outline every frame is pure waste: the points never change once the
@@ -141,13 +149,25 @@ pub struct Stroke {
 }
 
 impl Stroke {
-    /// A stroke beginning at one point.
-    pub fn new(point: InkPoint) -> Self {
+    /// The colour strokes from a note without one are given.
+    ///
+    /// The near-black the app drew everything in before a stroke could carry its own colour: an old
+    /// note therefore opens looking exactly as it did.
+    pub const DEFAULT_COLOR: u32 = 0x1B_1B_1F;
+
+    /// The colour a stroke beginning at one point is written in.
+    pub fn new(point: InkPoint, color: u32) -> Self {
         Stroke {
             points: vec![point],
+            color,
             outline: Vec::new(),
             bounds: [point.x, point.y, point.x, point.y],
         }
+    }
+
+    /// The default for the field's `serde` attribute, which wants a path it can call.
+    fn default_color() -> u32 {
+        Self::DEFAULT_COLOR
     }
 
     /// Whether this stroke has nothing to draw.
@@ -540,7 +560,10 @@ impl InkDocument {
                         }
                         Tool::Pen => {
                             let width = settings.width_for_pressure(sample.applied_pressure());
-                            self.open = Some(Stroke::new(InkPoint::new(x, y, width)));
+                            // The pen in hand is stamped into the stroke: it is chosen at the
+                            // moment the nib goes down, and it stays with that line for good.
+                            self.open =
+                                Some(Stroke::new(InkPoint::new(x, y, width), settings.ink_color));
                         }
                     }
                     changed = true;
@@ -842,6 +865,46 @@ impl Notes {
 
         self.current = current;
     }
+
+    /// Makes room at `page` for a page being inserted there: every page from it onwards becomes the
+    /// page after it, and the ink moves with the name.
+    ///
+    /// The page the pen is on moves too. That is the half of this that is easy to forget and
+    /// impossible to notice: leave it behind and the next stroke lands on the page before the one
+    /// on screen.
+    pub fn insert_at(&mut self, page: usize) {
+        self.taken = std::mem::take(&mut self.taken)
+            .into_iter()
+            .map(|(index, ink)| (if index >= page { index + 1 } else { index }, ink))
+            .collect();
+
+        if self.page >= page {
+            self.page += 1;
+        }
+    }
+
+    /// Removes the page at `page` and the ink written on it, moving everything after it up one.
+    ///
+    /// The ink goes with the page: a deleted page's writing has nowhere to be shown, and keeping it
+    /// would need an identity for "the page that used to be here" that no later page could be
+    /// confused with. Undo is one stroke at a time (see [`InkDocument::undo`]), so nothing here is
+    /// expected to be reversible.
+    pub fn remove_at(&mut self, page: usize) {
+        self.taken.remove(&page);
+
+        if page == self.page {
+            // The page in front of the reader is the one that followed the deleted page, or a blank
+            // sheet when it was the last.
+            self.current = self.taken.remove(&(page + 1)).unwrap_or_default();
+        } else if page < self.page {
+            self.page -= 1;
+        }
+
+        self.taken = std::mem::take(&mut self.taken)
+            .into_iter()
+            .map(|(index, ink)| (if index > page { index - 1 } else { index }, ink))
+            .collect();
+    }
 }
 
 
@@ -907,6 +970,40 @@ mod tests {
         let stroke = &ink.finished()[0];
         assert_eq!(stroke.points.len(), 3, "down, move and the lift");
         assert_eq!(stroke.points[2].x, 18.0, "the lift is the last point");
+    }
+
+    /// Each stroke keeps the pen it was written with.
+    ///
+    /// The palette is a set of pens, not a page setting: choosing a different colour has to leave
+    /// what the previous one wrote exactly as it was, which is only true if the colour is stamped
+    /// into the stroke when the nib goes down.
+    #[test]
+    fn a_stroke_keeps_the_colour_it_was_written_in() {
+        let mut ink = InkDocument::new();
+        let mut s = settings();
+
+        s.ink_color = 0xDC_26_26;
+        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Up, 18.0, 10.0, None)], &id(), &s);
+
+        s.ink_color = 0x1D_4E_D8;
+        ink.consume(&[reading(7, PenPhase::Down, 10.0, 40.0, Some(0.5))], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Up, 18.0, 40.0, None)], &id(), &s);
+
+        assert_eq!(ink.finished().len(), 2);
+        assert_eq!(ink.finished()[0].color, 0xDC_26_26, "the red line stays red");
+        assert_eq!(ink.finished()[1].color, 0x1D_4E_D8, "the blue line is blue");
+    }
+
+    /// A note written before a stroke carried a colour of its own loads as the colour it was drawn
+    /// in: there was only ever one, and it was this.
+    #[test]
+    fn a_stroke_without_a_colour_loads_as_the_one_ink_used_to_be() {
+        let old = r#"{"points":[{"x":1.0,"y":2.0,"width":3.0}]}"#;
+        let stroke: Stroke = serde_json::from_str(old).expect("an older stroke still parses");
+
+        assert_eq!(stroke.color, Stroke::DEFAULT_COLOR);
+        assert_eq!(stroke.points.len(), 1);
     }
 
     /// A cancel ends the stroke but does not add the position it carries.
@@ -1119,7 +1216,7 @@ mod tests {
     /// Off-screen ink is rejected by four comparisons rather than turned into a polygon.
     #[test]
     fn a_stroke_outside_the_view_is_not_visible() {
-        let mut stroke = Stroke::new(InkPoint::new(500.0, 500.0, 2.0));
+        let mut stroke = Stroke::new(InkPoint::new(500.0, 500.0, 2.0), Stroke::DEFAULT_COLOR);
         stroke.points.push(InkPoint::new(540.0, 520.0, 2.0));
         stroke.close();
 
@@ -1236,6 +1333,72 @@ mod tests {
         assert_eq!(notes.page_count(), 4, "pages 0..=3 exist for turning");
     }
 
+    /// One stroke written on the page the notes are on, starting at `x`: how a test says which page
+    /// holds what.
+    fn write(notes: &mut Notes, s: &Settings, x: f32) {
+        notes.consume(&[reading(7, PenPhase::Down, x, x, Some(0.5))], &id(), s);
+        notes.consume(&[reading(7, PenPhase::Up, x + 4.0, x, None)], &id(), s);
+    }
+
+    /// Inserting a page renames the pages after it, and the ink moves with the names.
+    #[test]
+    fn inserting_a_page_moves_the_ink_with_the_names() {
+        let mut notes = Notes::new();
+        let s = settings();
+
+        // Page 0 and page 2 written on, page 1 left alone.
+        write(&mut notes, &s, 1.0);
+        notes.go_to(2);
+        write(&mut notes, &s, 50.0);
+        assert_eq!(notes.written_pages(), vec![0, 2]);
+
+        // A page is inserted where page 1 was, and the reader turns to it.
+        notes.insert_at(1);
+        notes.go_to(1);
+
+        assert!(notes.is_blank(), "the inserted page has no ink");
+        assert_eq!(
+            notes.written_pages(),
+            vec![0, 3],
+            "the page that was at 2 is now at 3"
+        );
+
+        notes.go_to(3);
+        assert_eq!(notes.stroke_count(), 1, "and its ink moved with it");
+        assert_eq!(notes.finished()[0].points[0].x, 50.0);
+    }
+
+    /// Deleting a page takes its ink with it, and shows the page that followed.
+    #[test]
+    fn deleting_a_page_takes_its_ink_and_shows_the_next_one() {
+        let mut notes = Notes::new();
+        let s = settings();
+
+        write(&mut notes, &s, 1.0);
+        notes.go_to(1);
+        write(&mut notes, &s, 20.0);
+        notes.go_to(2);
+        write(&mut notes, &s, 40.0);
+        assert_eq!(notes.written_pages(), vec![0, 1, 2]);
+
+        // The page being shown is the one deleted: the reader lands on what followed it.
+        notes.remove_at(1);
+
+        assert_eq!(notes.written_pages(), vec![0, 1]);
+        assert_eq!(notes.stroke_count(), 1, "the page that followed is on screen");
+        assert_eq!(
+            notes.finished()[0].points[0].x,
+            40.0,
+            "and it is the page that followed, not the one deleted"
+        );
+
+        // Deleting a page *before* the one being read keeps the reader on the same ink.
+        notes.go_to(1);
+        notes.remove_at(0);
+        assert_eq!(notes.stroke_count(), 1);
+        assert_eq!(notes.finished()[0].points[0].x, 40.0);
+    }
+
     /// Opening a note puts the ink where it was written, on the page that was open.
     #[test]
     fn replacing_a_note_restores_its_pages() {
@@ -1345,7 +1508,7 @@ mod tests {
         // ── Closing a stroke: the ribbon geometry ────────────────────────────
         let mut closings = Vec::new();
         for points in [100usize, 1_000, 3_000] {
-            let mut stroke = Stroke::new(InkPoint::new(0.0, 0.0, 2.0));
+            let mut stroke = Stroke::new(InkPoint::new(0.0, 0.0, 2.0), Stroke::DEFAULT_COLOR);
             for step in 1..points {
                 stroke
                     .points

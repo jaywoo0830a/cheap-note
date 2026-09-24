@@ -20,8 +20,9 @@
 //! * `pen→app` is the one that answers "how responsive is this": how long a reading waited between
 //!   the digitizer producing it and this process acting on it, including the system's own delay
 //!   (which no code here can remove — see `PenSample::delay_ms`).
-//! * `pump` is the gap between two wakes of the frame loop against the interval it asked for. A
-//!   gap that runs long is the timer oversleeping, which puts a ceiling on everything else.
+//! * `pump` is the gap between two wakes of the ink pump — that is, how often the pen handed the app
+//!   a batch. It is the number that says whether the ink is reaching the screen at the rate the pen
+//!   reports it; it is no longer compared with a timer the app set, because there is no timer.
 //! * `ink`, `render`, `paint` and `pdf` split the per-frame work. `paint` growing with the amount
 //!   of ink on the page is the shape of the immediate-mode renderer, and the counters beside it
 //!   say how much of that ink was actually on screen.
@@ -140,7 +141,7 @@ pub struct Timings {
     pub ruling: Meter,
     /// The wait between the digitizer and this process acting on a reading.
     pub pen_latency: Meter,
-    /// The gap between two wakes of the pump.
+    /// The gap between two wakes of the ink pump: how often the pen reported.
     pub pump_gap: Meter,
 
     /// Strokes the last frame painted.

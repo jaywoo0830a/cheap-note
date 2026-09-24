@@ -122,7 +122,10 @@ impl Default for Settings {
             max_width: 4.5,
             no_pressure_width: 2.0,
             erase_radius: 14.0,
-            ink_color: 0x1B_1B_1F,
+            // The palette's black, so the swatch that is in use is ringed on a fresh install: see
+            // `canvas::INK_COLORS`. A saved note's strokes carry their own colour, so this is only
+            // what the *next* stroke is written in.
+            ink_color: 0x1C_1C_1E,
             page_color: 0xFF_FF_FF,
             // A4's own width at the application's scale, so the default sheet and the default
             // size agree: choosing the size that is already selected changes nothing.

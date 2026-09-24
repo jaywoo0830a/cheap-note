@@ -78,20 +78,18 @@ impl CanvasSize {
         }
     }
 
-    /// The stable element id of this size's button.
+    /// The size a label names.
     ///
-    /// Stable, and unique per size: GPUI keeps hover, focus and press state against an element
-    /// id, so an id derived from a position in the list would move that state onto a neighbour
-    /// whenever the list changed.
-    pub fn button_id(self) -> &'static str {
-        match self {
-            CanvasSize::A4 => "size-a4",
-            CanvasSize::A5 => "size-a5",
-            CanvasSize::Letter => "size-letter",
-            CanvasSize::Legal => "size-legal",
-            CanvasSize::Square => "size-square",
-            CanvasSize::Wide => "size-wide",
-        }
+    /// The toolbar's chooser carries a choice back as the text that was showing in it — the
+    /// options it holds are strings, not sizes — so the label is what has to become a size again.
+    /// It is looked up by name rather than by position on purpose: the position is the one thing
+    /// about the list that may change, and a size inserted in the middle must not rename the
+    /// choice that was already made.
+    pub fn from_label(label: &str) -> Option<CanvasSize> {
+        CanvasSize::ALL
+            .iter()
+            .copied()
+            .find(|size| size.label() == label)
     }
 
     /// The sheet's width and height in millimetres.
@@ -155,14 +153,12 @@ impl CanvasStyle {
         }
     }
 
-    /// The stable element id of this style's button.
-    pub fn button_id(self) -> &'static str {
-        match self {
-            CanvasStyle::Plain => "style-plain",
-            CanvasStyle::Ruled => "style-ruled",
-            CanvasStyle::Grid => "style-grid",
-            CanvasStyle::Dots => "style-dots",
-        }
+    /// The style a label names. See [`CanvasSize::from_label`] for why the lookup is by name.
+    pub fn from_label(label: &str) -> Option<CanvasStyle> {
+        CanvasStyle::ALL
+            .iter()
+            .copied()
+            .find(|style| style.label() == label)
     }
 
     /// The distance between two rules, in logical pixels, or `None` for a blank sheet.
@@ -195,36 +191,50 @@ pub struct Swatch {
 
 /// The paper colours offered.
 ///
-/// Deliberately paper-like rather than a full colour wheel: a sheet is white, off-white, kraft or
-/// grey, and the two dark entries are there so a dark board can be paired with light ink. A full
-/// picker would also let someone choose a sheet the same colour as their ink.
+/// The colours a notebook's own paper comes in rather than a full colour wheel: white, the cream and
+/// yellow of a legal pad, a cool grey, and the two darks for writing on with a light pen. A full
+/// picker would also let someone choose a sheet the same colour as their ink, which is the one
+/// combination that cannot be written in.
 pub const PAPER_COLORS: [Swatch; 6] = [
     Swatch { name: "white", id: "paper-white", color: 0xFF_FF_FF },
-    Swatch { name: "ivory", id: "paper-ivory", color: 0xFA_F3_E3 },
-    Swatch { name: "kraft", id: "paper-kraft", color: 0xE7_D8_B4 },
-    Swatch { name: "grey", id: "paper-grey", color: 0xE2_E2_E6 },
-    Swatch { name: "slate", id: "paper-slate", color: 0x2E_32_3A },
-    Swatch { name: "black", id: "paper-black", color: 0x14_16_1A },
+    Swatch { name: "cream", id: "paper-cream", color: 0xFB_F3_E4 },
+    Swatch { name: "yellow", id: "paper-yellow", color: 0xFC_F1_C4 },
+    Swatch { name: "grey", id: "paper-grey", color: 0xE9_EA_ED },
+    Swatch { name: "slate", id: "paper-slate", color: 0x2C_2F_36 },
+    Swatch { name: "black", id: "paper-black", color: 0x15_17_1B },
 ];
 
 /// The ink colours offered.
-pub const INK_COLORS: [Swatch; 6] = [
-    Swatch { name: "black", id: "ink-black", color: 0x1B_1B_1F },
-    Swatch { name: "blue", id: "ink-blue", color: 0x1D_4E_D8 },
-    Swatch { name: "red", id: "ink-red", color: 0xDC_26_26 },
-    Swatch { name: "green", id: "ink-green", color: 0x15_80_3D },
-    Swatch { name: "grey", id: "ink-grey", color: 0x6B_72_80 },
-    Swatch { name: "white", id: "ink-white", color: 0xF5_F5_F5 },
+///
+/// A notebook's pen case: the four greys a page is annotated in — black, grey, light grey, and the
+/// white that only shows on a dark sheet — and the colours a diagram is drawn in. Twelve, because
+/// they are read as a palette and not picked from a wheel: two rows of six is a set a person can
+/// learn, and the toolbar wraps them anyway.
+pub const INK_COLORS: [Swatch; 12] = [
+    Swatch { name: "black", id: "ink-black", color: 0x1C_1C_1E },
+    Swatch { name: "grey", id: "ink-grey", color: 0x7A_7A_80 },
+    Swatch { name: "light grey", id: "ink-light-grey", color: 0xC7_C7_CC },
+    Swatch { name: "white", id: "ink-white", color: 0xFF_FF_FF },
+    Swatch { name: "red", id: "ink-red", color: 0xE5_48_4D },
+    Swatch { name: "orange", id: "ink-orange", color: 0xF0_8A_24 },
+    Swatch { name: "yellow", id: "ink-yellow", color: 0xFF_C4_00 },
+    Swatch { name: "green", id: "ink-green", color: 0x2F_A8_4F },
+    Swatch { name: "teal", id: "ink-teal", color: 0x1F_A8_A0 },
+    Swatch { name: "blue", id: "ink-blue", color: 0x0A_84_FF },
+    Swatch { name: "purple", id: "ink-purple", color: 0x8E_5B_F0 },
+    Swatch { name: "pink", id: "ink-pink", color: 0xE8_50_8C },
 ];
 
 /// The colour a rule is drawn in on the given paper.
 ///
-/// One fixed grey cannot serve both a white sheet and a blackboard: it vanishes on one of them.
-/// The rule is mixed toward whichever end the paper is *not*, so it stays visible without turning
-/// into a heavy line that competes with the ink written over it.
+/// One fixed grey cannot serve both a white sheet and a blackboard: it vanishes on one of them. On a
+/// light sheet the rule is mixed *toward a blue-grey* rather than toward black, because that is what
+/// a printed rule looks like — the ink a notebook's ruling is printed in is blue-black, and a
+/// neutral grey line reads as a pencil mark rather than as part of the page. On a dark sheet there
+/// is nothing to print and the rule is mixed toward white instead.
 pub fn rule_color(paper: u32) -> u32 {
     if relative_luminance(paper) > 0.5 {
-        mix(paper, 0x00_00_00, 0.18)
+        mix(paper, 0x5A_7C_9E, 0.25)
     } else {
         mix(paper, 0xFF_FF_FF, 0.22)
     }
@@ -666,6 +676,40 @@ mod tests {
         }
     }
 
+    /// Every label a chooser can show leads back to the choice it stood for.
+    ///
+    /// The toolbar's selects hold their options as the strings they draw, so a label is the *only*
+    /// thing that comes back out of them: a size whose label did not resolve would leave the sheet
+    /// unchanged while the box showed the new name, and two sizes sharing a label would resolve to
+    /// whichever came first in the list rather than to the one that was picked.
+    #[test]
+    fn a_label_leads_back_to_its_choice() {
+        let mut seen: Vec<&str> = Vec::new();
+
+        for size in CanvasSize::ALL {
+            assert!(
+                !seen.contains(&size.label()),
+                "two sizes are labelled {}",
+                size.label()
+            );
+            seen.push(size.label());
+            assert_eq!(CanvasSize::from_label(size.label()), Some(size));
+        }
+
+        for style in CanvasStyle::ALL {
+            assert_eq!(CanvasStyle::from_label(style.label()), Some(style));
+            assert!(
+                CanvasSize::from_label(style.label()).is_none(),
+                "a ruling is not a paper size: {}",
+                style.label()
+            );
+        }
+
+        assert_eq!(CanvasSize::from_label("A0"), None);
+        assert_eq!(CanvasStyle::from_label("graph"), None);
+        assert_eq!(CanvasSize::from_label(""), None);
+    }
+
     /// Element ids address the element tree, so two swatches sharing one would silently share
     /// their hover and press state.
     #[test]
@@ -675,19 +719,14 @@ mod tests {
         let controls = PAPER_COLORS
             .iter()
             .chain(INK_COLORS.iter())
-            .map(|swatch| swatch.id)
-            .chain(CanvasSize::ALL.iter().map(|size| size.button_id()))
-            .chain(CanvasStyle::ALL.iter().map(|style| style.button_id()));
+            .map(|swatch| swatch.id);
 
         for id in controls {
             assert!(!ids.contains(&id), "duplicate element id {id}");
             ids.push(id);
         }
 
-        assert_eq!(
-            ids.len(),
-            PAPER_COLORS.len() + INK_COLORS.len() + CanvasSize::ALL.len() + CanvasStyle::ALL.len()
-        );
+        assert_eq!(ids.len(), PAPER_COLORS.len() + INK_COLORS.len());
     }
 
     /// What building a sheet's ruling costs.

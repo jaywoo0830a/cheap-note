@@ -26,10 +26,12 @@
 //!
 //! ## What the numbers are for
 //!
-//! [`DisplayRefresh::frame_interval`] is how long a frame is *in force* for pacing, and
+//! [`DisplayRefresh::frame_interval`] is how long a frame is *in force*, and
 //! [`DisplayRefresh::pump_interval`] is half of that, clamped to a range a person cannot perceive
-//! but an idle app can afford. Half a frame is the right unit: a reading never waits for a whole
-//! frame before the app has done its part of putting it on screen.
+//! but an idle app can afford. They pace the app's *housekeeping* loop — the monitor probe, the
+//! counters, and the page being rasterised (see [`crate::app`]) — and not the ink, which is drawn a
+//! frame per batch at whatever rate the pen reports. Half a frame is the right unit for what they do
+//! govern: housekeeping faster than the display can present is housekeeping nobody can see.
 //!
 //! The four rates are the supported steps the reported mode is snapped to. A 165 Hz panel reports a
 //! rate no step names, and is paced by the nearer step's shorter frame — a fifth of a millisecond

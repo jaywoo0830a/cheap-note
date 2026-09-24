@@ -12,29 +12,32 @@
 //!   the app's own palette and its own font: see [`theme`];
 //! * PDF pages are rasterised by Pdfium, which the app drives through its own C entry points so
 //!   that a render can be sliced across frames and the budget can bound it (see [`pdfium`]);
-//! * the writing loop is paced against the display's frame rate: the monitor's mode is read
-//!   (`EnumDisplaySettingsW`), the frames this app paints are measured, and the pump interval
-//!   follows whichever of the two describes what the eye sees.
+//! * the writing loop is *not* paced against the display: the pump parks on the pen's queue and
+//!   draws a frame per batch, so the ink reaches the screen at the rate the pen reports it. The
+//!   monitor's mode is still read (`EnumDisplaySettingsW`) and the frames this app paints are still
+//!   measured, and both now pace the *housekeeping* loop — the monitor probe, the counters, and the
+//!   PDF page being rasterised — rather than the writing itself.
 //!
 //! ## Module map
 //!
-//! | Module      | Responsibility                                             |
-//! | ----------- | ---------------------------------------------------------- |
+//! | Module      | Responsibility                                                     |
+//! | ----------- | ------------------------------------------------------------------ |
 //! | [`refresh`] | supported refresh rates, the monitor's mode, and the measured frame rate |
-//! | [`pen`]     | the capture, its worker thread, and the hand-off queue     |
-//! | [`ink`]     | readings to strokes: edges, resampling, width, erasing     |
-//! | [`canvas`]  | the sheet's size, colour and ruling                        |
-//! | [`view`]    | zoom, fit, and where the sheet sits in the window          |
-//! | [`cursor`]  | the pen's ghost cursor: where it is and how it leans       |
-//! | [`system_cursor`] | hiding the system pointer while the pen is in range |
-//! | [`pdf`]     | the Pdfium document, page rendering, and the page cache    |
-//! | [`pdfium`]  | Pdfium's own C API: documents, pages, and the sliced render |
-//! | [`bundle`]  | a saved note: the original PDF and the ink, in one zip     |
-//! | [`app`]     | the view: toolbar, canvas painting, and the pen pump       |
-//! | [`timing`]  | what every hot path costs, measured rather than guessed    |
-//! | [`settings`]| the user's tuning, serialised as JSON                      |
-//! | [`theme`]   | the palette, the bundled font, and the icons' asset source |
-//! | [`error`]   | the error type every fallible boundary returns             |
+//! | [`pen`]     | the capture, its worker thread, and the hand-off queue             |
+//! | [`ink`]     | readings to strokes: edges, resampling, width, erasing             |
+//! | [`canvas`]  | the sheet's size, colour and ruling                                |
+//! | [`view`]    | zoom, fit, and where the sheet sits in the window                  |
+//! | [`cursor`]  | the pen's ghost cursor: where it is and how it leans               |
+//! | [`system_cursor`] | hiding the system pointer while the pen is in range          |
+//! | [`pdf`]     | the Pdfium document, page rendering, and the page cache            |
+//! | [`pages`]   | what a note's pages are, and what each one shows                   |
+//! | [`pdfium`]  | Pdfium's own C API: documents, pages, and the sliced render        |
+//! | [`bundle`]  | a saved note: the original PDF and the ink, in one zip             |
+//! | [`app`]     | the view: the bar and the pills, canvas painting, the two pumps     |
+//! | [`timing`]  | what every hot path costs, measured rather than guessed            |
+//! | [`settings`]| the user's tuning, serialised as JSON                              |
+//! | [`theme`]   | the palette, the bundled font, and the icons' asset source         |
+//! | [`error`]   | the error type every fallible boundary returns                     |
 //!
 //! ## Running
 //!
@@ -54,6 +57,7 @@ mod ink;
 mod pdf;
 mod pdfium;
 mod pen;
+mod pages;
 mod refresh;
 mod settings;
 mod system_cursor;

@@ -9,13 +9,12 @@
 //! the pen's body, drawn from the nib in the direction the pen leans, with a length that is the
 //! lean.
 //!
-//! ## What it cannot do
+//! ## What the platform does about it
 //!
-//! GPUI gives no way to turn the system pointer off: `CursorStyle` has a variant for every arrow it
-//! can show and none that hides it, and there is no hook for a custom bitmap. So this ghost is
-//! drawn *in addition* to whatever the platform puts under it. Where Windows suppresses the mouse
-//! pointer while the pen is in range it reads as the cursor; where it does not, it reads as a nib
-//! marker beside one.
+//! A Windows cursor is a fixed bitmap: the system can choose *which* cursor to show, never which
+//! angle, so a rotated cursor has to be drawn by the application — which is what this module is
+//! for. The system pointer itself is taken out of the way by [`crate::system_cursor`] while this
+//! ghost is drawn, so the ghost *is* the cursor rather than a marker beside one.
 //!
 //! ## The convention, which is the whole design
 //!

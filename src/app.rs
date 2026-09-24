@@ -35,12 +35,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::button::Button;
+use gpui_kit::assets::IconName;
+use gpui_kit::base::Selectable as _;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::*;
 
-use crate::canvas::{contrast_color, CanvasSize, CanvasStyle, Ruling, Swatch, INK_COLORS, PAPER_COLORS};
+use crate::canvas::{
+    contrast_color, relative_luminance, CanvasSize, CanvasStyle, Ruling, Swatch, INK_COLORS,
+    PAPER_COLORS,
+};
 use crate::cursor::{PenCursor, NIB_RADIUS};
 use crate::ink::{InkTransform, Notes, Stroke, Tool};
 use crate::pen::{capture_config, PenInbox, PenService};
@@ -111,14 +116,22 @@ const WHEEL_LINE_HEIGHT: f32 = 32.0;
 /// and in exchange the top of the page sits under the bar until the bar is switched off.
 const PAGE_MARGIN: f32 = 24.0;
 
+/// How far the floating bar and the floating page pill sit from the window's edges.
+///
+/// The desk shows in that gap, which is what makes the sheet read as paper on a desk rather than as
+/// a rectangle filling a window — and the bar floats for a second reason too: an overlay takes no
+/// part in the layout, so a pen reading needs no offset arithmetic (see the module docs).
+const BAR_MARGIN: f32 = 12.0;
+
 /// How tall the top bar is, in logical pixels, as an estimate.
 ///
 /// Used for exactly one decision: whether the pen is over the bar, where the ghost cursor is drawn
-/// behind the bar's opaque background and the system pointer therefore has to stay. The estimate
-/// errs upward deliberately — being wrong upward leaves a strip of sheet still showing the pointer
-/// (a small surprise), while being wrong downward would leave part of the toolbar with no cursor at
-/// all, and the pen is how those controls get clicked.
-const BAR_HEIGHT: f32 = 96.0;
+/// behind the bar's opaque background and the system pointer therefore has to stay. The estimate is
+/// the bar at its tallest — its margin, its padding and two rows of controls, the second of which
+/// may have wrapped — and it errs upward deliberately: being wrong upward leaves a strip of sheet
+/// still showing the pointer (a small surprise), while being wrong downward would leave part of the
+/// bar with no cursor at all, and the pen is how those controls get clicked.
+const BAR_HEIGHT: f32 = 148.0;
 
 /// How often the status line is rebuilt at most.
 ///
@@ -1347,71 +1360,87 @@ impl NoteApp {
         }
     }
 
-    /// The command surface: tools, actions, pages, and the three visibility switches.
+    /// The bar: floating, rounded, over the sheet.
     ///
-    /// The elements are collected into owned vectors before they are chained onto the row.
-    /// That is deliberate: each `cx.listener` takes a mutable borrow of the context, and a
-    /// single long builder chain would hold them all at once.
-    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Two rows and one surface. The first is what the reader is *doing* — the document, the tool in
+    /// hand, and the commands that act on the note — and the second is what is being written *on*:
+    /// the sheet's size, its ruling, and the two colours. The bar floats for the reason the module
+    /// docs give (an overlay needs no offset arithmetic for the pen), and it is rounded and lifted
+    /// off the desk because that is what makes the sheet underneath read as paper.
+    fn top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (title_bar, border_color, muted_foreground) = (
-            theme.title_bar,
-            theme.title_bar_border,
-            theme.muted_foreground,
-        );
+        let (surface, hairline) = (theme.title_bar, theme.title_bar_border);
 
-        let current_tool = self.ink.mode();
+        div()
+            .absolute()
+            .top(px(BAR_MARGIN))
+            .left(px(BAR_MARGIN))
+            .right(px(BAR_MARGIN))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p(px(8.0))
+            .rounded(theme.radius_lg)
+            .bg(surface)
+            .border_1()
+            .border_color(hairline)
+            // The one place in the interface that casts a renderer shadow: a bar is a *layer* over
+            // the desk. The sheet's shadow is painted with the sheet instead — it is a path in a
+            // paint callback, and a callback cannot put a layer behind itself.
+            .shadow_md()
+            .child(self.command_row(cx))
+            .child(self.sheet_row(cx))
+    }
 
-        let mut tools: Vec<AnyElement> = Vec::new();
-        tools.push(
-            action_button("tool-pen", "Pen", current_tool == Tool::Pen, cx, |app, cx| {
+    /// The bar's first row: where the document is, what the nib does, and what acts on the note.
+    ///
+    /// The elements are collected into owned vectors before they are chained onto the row: each
+    /// `cx.listener` takes a mutable borrow of the context, and a single long builder chain would
+    /// hold them all at once.
+    fn command_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (hairline, muted) = (theme.title_bar_border, theme.muted_foreground);
+
+        let tool = self.ink.mode();
+
+        let tools = vec![
+            tool_button("tool-pen", IconName::Pen, "Pen", tool == Tool::Pen, cx, |app, cx| {
                 app.set_tool(Tool::Pen, cx)
             })
             .into_any_element(),
-        );
-        tools.push(
-            action_button(
+            tool_button(
                 "tool-eraser",
+                IconName::Eraser,
                 "Eraser",
-                current_tool == Tool::Eraser,
+                tool == Tool::Eraser,
                 cx,
                 |app, cx| app.set_tool(Tool::Eraser, cx),
             )
             .into_any_element(),
-        );
+        ];
 
-        let mut actions: Vec<AnyElement> = Vec::new();
-        actions.push(
-            action_button("undo", "Undo", false, cx, |app, cx| app.undo(cx)).into_any_element(),
-        );
-        actions.push(
-            action_button("clear", "Clear", false, cx, |app, cx| app.clear(cx)).into_any_element(),
-        );
-        actions.push(
-            // Saves over the note this session has already written, and asks where to put it the
-            // first time — so writing repeatedly is one click, and the file is still the user's to
-            // choose.
-            action_button("save-note", "Save", false, cx, |app, cx| app.save(cx))
+        // Reading order is left to right, so the commands sit in the order they are reached for:
+        // take the last stroke back, take everything back, open something else, write it out.
+        let actions = vec![
+            icon_button("undo", IconName::Undo2, "Undo", cx, |app, cx| app.undo(cx))
                 .into_any_element(),
-        );
-        actions.push(
-            action_button("open-note", "Open…", false, cx, |app, cx| {
-                app.prompt_for_pdf(cx)
+            icon_button("clear", IconName::Trash, "Clear the ink", cx, |app, cx| {
+                app.clear(cx)
             })
             .into_any_element(),
-        );
-
-        let mut pages: Vec<AnyElement> = Vec::new();
-        pages.push(
-            action_button("page-prev", "Prev", false, cx, |app, cx| {
-                app.previous_page(cx)
+            icon_button(
+                "open-note",
+                IconName::FolderOpen,
+                "Open a note or a PDF",
+                cx,
+                |app, cx| app.prompt_for_pdf(cx),
+            )
+            .into_any_element(),
+            icon_button("save-note", IconName::Save, "Save the note", cx, |app, cx| {
+                app.save(cx)
             })
             .into_any_element(),
-        );
-        pages.push(
-            action_button("page-next", "Next", false, cx, |app, cx| app.next_page(cx))
-                .into_any_element(),
-        );
+        ];
 
         let switches = vec![
             visibility_switch(
@@ -1443,69 +1472,112 @@ impl NoteApp {
             ),
         ];
 
-        // The live status line is the only text here that changes on its own, so it is built only
-        // when it is wanted. `whitespace_nowrap` matters: text that may wrap is text the layout
-        // has to re-measure whenever it changes, and this line changes more than any other.
-        let status = self.settings.show_status.then(|| {
-            div()
-                .flex_shrink_1()
-                .text_size(px(12.0))
-                .text_color(muted_foreground)
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .child(self.status.clone())
-                .into_any_element()
-        });
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .text_color(muted)
+            .child(self.document_chip(cx))
+            .child(toolbar_divider(hairline))
+            .children(tools)
+            .child(div().flex_1())
+            .children(actions)
+            .child(toolbar_divider(hairline))
+            .children(switches)
+    }
+
+    /// The document's name, at the left of the bar, where a notebook shows its title.
+    ///
+    /// A label and not a button: this app has no library to go back to, and a control that does
+    /// nothing is worse than no control. With nothing open it says so — the one place the interface
+    /// explains itself, because a blank sheet is otherwise indistinguishable from a page of a
+    /// document that has not finished rendering.
+    fn document_chip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, foreground) = (theme.muted_foreground, theme.foreground);
+        let open = self.pdf.is_loaded();
+        let name = if open {
+            self.pdf.file_name()
+        } else {
+            String::from("Untitled note")
+        };
 
         div()
             .flex()
-            .flex_col()
-            .w_full()
-            .bg(title_bar)
-            .border_b_1()
-            .border_color(border_color)
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .pl(px(4.0))
+            .pr_1()
+            // A long file name is cut rather than wrapped or allowed to push the commands off the
+            // row: the bar has a fixed height, and the name is the one piece of text here whose
+            // length the user chooses.
+            .max_w(px(260.0))
+            .text_color(if open { foreground } else { muted })
+            .child(div().text_size(px(15.0)).child(IconName::BookOpen))
             .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .children(tools)
-                    .child(toolbar_divider(border_color))
-                    .children(actions)
-                    .child(toolbar_divider(border_color))
-                    .children(pages)
-                    .child(div().flex_1())
-                    .children(status)
-                    .child(toolbar_divider(border_color))
-                    .children(switches),
+                    .text_size(px(13.0))
+                    .whitespace_nowrap()
+                    .truncate()
+                    .child(name),
             )
-            .child(self.canvas_row(cx))
     }
 
-    /// The canvas controls: the sheet's size, what is printed on it, and the two colours.
+    /// The bar's second row: the sheet's size, what is printed on it, and its two colours.
     ///
-    /// A row of its own rather than more of the first: the two rows answer different questions —
-    /// "what does the nib do" and "what am I writing on" — and this one wraps, so a narrow window
-    /// moves its controls onto another line instead of hiding them.
-    fn canvas_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// This row wraps and the first does not. Four paper sizes, the ruling and twelve colours are
+    /// more than a narrow window holds, and a control that moves onto a second line is still a
+    /// control, while one pushed off the edge is not. Each group is captioned because without the
+    /// words it would be a guess which of the two runs of squares is the paper and which the ink.
+    fn sheet_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (border_color, muted_foreground, accent) =
-            (theme.title_bar_border, theme.muted_foreground, theme.primary);
+        let (hairline, muted, accent) = (
+            theme.title_bar_border,
+            theme.muted_foreground,
+            theme.primary,
+        );
 
+        // Zoom: the two steps and the number they are at. The number is a readout rather than a
+        // button — a percentage is the only thing that says whether Fit Width has already been
+        // pressed — and it is given a fixed width so that stepping through 99% to 100% to 101% does
+        // not shuffle the buttons either side of it.
         let mut zooms: Vec<AnyElement> = Vec::new();
         zooms.push(
-            action_button("zoom-out", "−", false, cx, |app, cx| app.zoom_out(cx)).into_any_element(),
+            icon_button(
+                "zoom-out",
+                IconName::Minus,
+                "Zoom out",
+                cx,
+                |app, cx| app.zoom_out(cx),
+            )
+            .into_any_element(),
         );
         zooms.push(
-            action_button("zoom-in", "+", false, cx, |app, cx| app.zoom_in(cx)).into_any_element(),
+            div()
+                .text_size(px(12.0))
+                .text_color(accent)
+                .whitespace_nowrap()
+                .min_w(px(42.0))
+                .text_center()
+                .child(format!("{:.0}%", self.view.zoom() * 100.0))
+                .into_any_element(),
+        );
+        zooms.push(
+            icon_button("zoom-in", IconName::Plus, "Zoom in", cx, |app, cx| app.zoom_in(cx))
+                .into_any_element(),
         );
         for fit in Fit::ALL {
+            // A double arrow, pointing the way the sheet is made to fit: the axis a fit is against
+            // is the direction its arrow points.
+            let icon = match fit {
+                Fit::Width => IconName::MoveHorizontal,
+                Fit::Height => IconName::MoveVertical,
+            };
             zooms.push(
-                action_button(fit.button_id(), fit.label(), false, cx, move |app, cx| {
+                icon_button(fit.button_id(), icon, fit.label(), cx, move |app, cx| {
                     app.fit_sheet(fit, cx)
                 })
                 .into_any_element(),
@@ -1540,6 +1612,8 @@ impl NoteApp {
             );
         }
 
+        // Paper is a square — a page has corners — and ink is a circle, which is what a pen's
+        // colour looks like on every writing app there is. Two shapes, one table of colours.
         let mut paper: Vec<AnyElement> = Vec::new();
         for swatch in PAPER_COLORS.iter() {
             paper.push(
@@ -1547,6 +1621,7 @@ impl NoteApp {
                     swatch,
                     self.settings.page_color == swatch.color,
                     accent,
+                    false,
                     cx,
                     |app, color, cx| app.set_paper_color(color, cx),
                 )
@@ -1561,6 +1636,7 @@ impl NoteApp {
                     swatch,
                     self.settings.ink_color == swatch.color,
                     accent,
+                    true,
                     cx,
                     |app, color, cx| app.set_ink_color(color, cx),
                 )
@@ -1575,32 +1651,24 @@ impl NoteApp {
             .items_center()
             .gap_1()
             .w_full()
-            .px_3()
-            .pb_2()
-            .child(control_label("Zoom", muted_foreground))
+            .pt_2()
+            .border_t_1()
+            .border_color(hairline)
+            .child(control_label("Zoom", muted))
             .children(zooms)
-            // What the zoom *is*, next to the controls that change it: a percentage is the only
-            // thing that says whether Fit Width has already been pressed.
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(accent)
-                    .whitespace_nowrap()
-                    .child(format!("{:.0}%", self.view.zoom() * 100.0)),
-            )
-            .child(toolbar_divider(border_color))
-            .child(control_label("Sheet", muted_foreground))
+            .child(toolbar_divider(hairline))
+            .child(control_label("Sheet", muted))
             .children(sizes)
-            .child(toolbar_divider(border_color))
-            .child(control_label("Style", muted_foreground))
+            .child(toolbar_divider(hairline))
+            .child(control_label("Style", muted))
             .children(styles)
-            .child(toolbar_divider(border_color))
-            .child(control_label("Paper", muted_foreground))
+            .child(toolbar_divider(hairline))
+            .child(control_label("Paper", muted))
             .children(paper)
-            .child(toolbar_divider(border_color))
-            .child(control_label("Ink", muted_foreground))
+            .child(toolbar_divider(hairline))
+            .child(control_label("Ink", muted))
             .children(ink)
-            .child(toolbar_divider(border_color))
+            .child(toolbar_divider(hairline))
             // A render option for the *page*, next to the colours it overrides: this row wraps, so
             // one more control here cannot push the others off the edge.
             .child(visibility_switch(
@@ -1614,19 +1682,144 @@ impl NoteApp {
             ))
     }
 
+    /// The desk's own row: the counters at the left, the page in the middle.
+    ///
+    /// Two floating things rather than one bar, because they are read at different distances: the
+    /// page number is reached for constantly and sits in the middle of the desk where the hand
+    /// already is, while the counters are glanced at and stay out of the way at the edge.
+    ///
+    /// The page is centred by *this* row and the counters are taken out of the flow, so a counter
+    /// growing by a digit cannot shove the page off centre — a page number that moved whenever a
+    /// number changed would be worse than no page number.
+    fn bottom_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut row = div()
+            .absolute()
+            .bottom(px(BAR_MARGIN))
+            .left(px(BAR_MARGIN))
+            .right(px(BAR_MARGIN))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .child(self.page_pill(cx));
+
+        // Built only when it is wanted: `compose_status` returns an empty line for a hidden status,
+        // and a pill drawn around nothing is still a pill.
+        if self.settings.show_status {
+            row = row.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .bottom_0()
+                    .child(self.status_pill(cx)),
+            );
+        }
+
+        row
+    }
+
+    /// Which page is on the desk, and the way to the others.
+    ///
+    /// A pill of its own, floating in the middle of the bottom edge: the page is what a reader
+    /// navigates most, and it is the one control that belongs under the sheet rather than above it.
+    fn page_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (surface, hairline, foreground) = (
+            theme.title_bar,
+            theme.title_bar_border,
+            theme.foreground,
+        );
+
+        // One page is still one page: a document with a single page, or no document at all, reads
+        // as "1 / 1" rather than as a count of nothing.
+        let total = self.page_total().max(1);
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px(px(4.0))
+            .py(px(4.0))
+            .rounded(theme.radius_lg)
+            .bg(surface)
+            .border_1()
+            .border_color(hairline)
+            .shadow_sm()
+            .child(icon_button(
+                "page-prev",
+                IconName::ChevronLeft,
+                "Previous page",
+                cx,
+                |app, cx| app.previous_page(cx),
+            ))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(foreground)
+                    .whitespace_nowrap()
+                    .px_1()
+                    .child(format!("{} / {total}", self.page_index + 1)),
+            )
+            .child(icon_button(
+                "page-next",
+                IconName::ChevronRight,
+                "Next page",
+                cx,
+                |app, cx| app.next_page(cx),
+            ))
+    }
+
+    /// The counters, in a translucent pill on the desk.
+    ///
+    /// Out of the bar and over the desk, because it is a readout rather than a control, and because
+    /// the line changes four times a second: text in the bar would re-lay-out the bar, while text in
+    /// a pill of its own re-lays-out the pill.
+    fn status_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+
+        div()
+            .px_2()
+            .py_1()
+            .rounded(theme.radius)
+            .bg(theme.title_bar.opacity(0.92))
+            .text_size(px(11.0))
+            .text_color(theme.muted_foreground)
+            .whitespace_nowrap()
+            .truncate()
+            .max_w(px(460.0))
+            .child(self.status.clone())
+    }
+
     /// The way back when the bar is hidden.
     ///
-    /// A bar that can be hidden must never be hidden *permanently*: the switch that brings it
-    /// back lives inside the bar, so hiding the bar would take the way back with it. This handle
-    /// is drawn over the canvas whenever the bar is away.
+    /// A bar that can be hidden must never be hidden *permanently*: the switch that brings it back
+    /// lives inside the bar, so hiding the bar would take the way back with it. This handle is drawn
+    /// over the desk whenever the bar is away — the same pill the page is in, with one button in it.
     fn bar_handle(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div().absolute().top_0().left_0().p_1().child(action_button(
-            "show-bar-again",
-            "Bar",
-            false,
-            cx,
-            |app, cx| app.set_toolbar_shown(true, cx),
-        ))
+        let theme = cx.theme();
+
+        div()
+            .absolute()
+            .top(px(BAR_MARGIN))
+            .left(px(BAR_MARGIN))
+            .flex()
+            .flex_row()
+            .items_center()
+            .px(px(4.0))
+            .py(px(4.0))
+            .rounded(theme.radius_lg)
+            .bg(theme.title_bar)
+            .border_1()
+            .border_color(theme.title_bar_border)
+            .shadow_sm()
+            .child(icon_button(
+                "show-bar-again",
+                IconName::PanelTopOpen,
+                "Show the bar",
+                cx,
+                |app, cx| app.set_toolbar_shown(true, cx),
+            ))
     }
 }
 
@@ -1723,20 +1916,14 @@ impl Render for NoteApp {
         // of any colour, including one where the ink would disappear.
         let cursor_color: Hsla = rgb(contrast_color(self.settings.page_color)).into();
 
-        // The bar floats over the canvas, so pen coordinates need no offset and the ink can run
-        // the full height of the window. When it is hidden, the handle that brings it back takes
-        // its place — a bar that could be hidden with no way back would be a trap.
+        // The bar floats over the desk, so pen coordinates need no offset and the ink can run the
+        // full height of the window. When it is hidden, the handle that brings it back takes its
+        // place — a bar that could be hidden with no way back would be a trap.
         //
-        // The bar is not built at all when it is hidden, rather than built and not shown: the
-        // status line is the one element whose whole cost is in being built.
+        // The bar is not built at all when it is hidden, rather than built and not shown: the status
+        // line is the one element whose whole cost is in being built.
         let bar: AnyElement = if self.settings.show_toolbar {
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .w_full()
-                .child(self.toolbar(cx))
-                .into_any_element()
+            self.top_bar(cx).into_any_element()
         } else {
             self.bar_handle(cx).into_any_element()
         };
@@ -1762,6 +1949,11 @@ impl Render for NoteApp {
                         // the one place the display's rate can be measured rather than asked about.
                         // Two atomic adds; the pump reads the answer on its next wake.
                         cadence.record(Instant::now());
+
+                        // The sheet's shadow first, on the desk, then the sheet over it: a paint
+                        // callback cannot put a layer behind what it draws, so the shadow is a few
+                        // translucent rectangles rather than a renderer shadow (see the helper).
+                        paint_page_shadow(window, page_origin, page_size.0, page_size.1);
 
                         // The sheet: a filled rectangle, then its ruling, then the page image.
                         paint_rect(window, page_origin, page_size.0, page_size.1, page_color);
@@ -1830,13 +2022,19 @@ impl Render for NoteApp {
                 .size_full(),
             )
             .child(bar)
+            // The desk's own row: the page in the middle, the counters at the edge. Last, so it
+            // paints over the sheet — a page pill *under* the paper would be no pill at all.
+            .child(self.bottom_row(cx))
     }
 }
 
-/// A compact toolbar button that mutates the view.
+/// A compact toolbar button with a text label.
 ///
-/// `active` is the control's selected state: a tool that is in force has to look different
-/// from one that is merely available, or the toolbar lies about what the nib will do.
+/// The label is the command's name as well as its face. These are the controls whose words are worth
+/// the room — a paper size, a ruling — and there are few enough of them that naming them costs the
+/// row nothing. `active` is set twice on purpose: `.selected` is what the component library paints
+/// with, and `.toggled` is what a screen reader is told. Setting only the second is what a toolbar
+/// looks like when the tool in hand cannot be seen.
 fn action_button(
     id: &'static str,
     label: &'static str,
@@ -1847,22 +2045,99 @@ fn action_button(
     Button::new(id)
         .label(label)
         .compact()
+        .selected(active)
         .toggled(active)
         .on_click(cx.listener(move |app, _, _, cx| handler(app, cx)))
 }
 
-/// A thin vertical rule between toolbar groups.
+/// An icon button that puts a tool in hand.
+///
+/// The tool that *is* in hand is drawn in the accent colour, on a wash of it; every other tool is
+/// muted grey on nothing. That is not styling layered over a component — it is which of two variants
+/// the button is built with, because the variant is what decides the colours of the states the
+/// pointer moves through, and a tool that is blue while idle and grey while hovered would be a tool
+/// that changes what it is saying.
+fn tool_button(
+    id: &'static str,
+    icon: IconName,
+    label: &'static str,
+    active: bool,
+    cx: &mut Context<NoteApp>,
+    handler: impl Fn(&mut NoteApp, &mut Context<NoteApp>) + 'static,
+) -> Button {
+    let theme = cx.theme();
+    let (wash, accent, idle, hover, pressed, muted) = (
+        theme.accent,
+        theme.accent_foreground,
+        theme.transparent,
+        theme.secondary_hover,
+        theme.secondary_active,
+        theme.muted_foreground,
+    );
+
+    let variant = if active {
+        ButtonCustomVariant::new(cx)
+            .color(wash)
+            .hover(wash)
+            .active(wash)
+            .foreground(accent)
+    } else {
+        ButtonCustomVariant::new(cx)
+            .color(idle)
+            .hover(hover)
+            .active(pressed)
+            .foreground(muted)
+    };
+
+    Button::new(id)
+        .icon(icon)
+        .custom(variant)
+        .rounded(px(999.0))
+        .compact()
+        .selected(active)
+        .toggled(active)
+        .tooltip(label)
+        .on_click(cx.listener(move |app, _, _, cx| handler(app, cx)))
+}
+
+/// An icon button for a command: a page, a zoom step, a file.
+///
+/// No visible label, so the words that name it are still set — as the tooltip a person reads and as
+/// the name a screen reader is given. The variant is a ghost: nothing at rest, a small tint under
+/// the pointer, and the icon in the foreground colour, which is what keeps a dozen of these from
+/// reading as a form.
+fn icon_button(
+    id: &'static str,
+    icon: IconName,
+    label: &'static str,
+    cx: &mut Context<NoteApp>,
+    handler: impl Fn(&mut NoteApp, &mut Context<NoteApp>) + 'static,
+) -> Button {
+    Button::new(id)
+        .icon(icon)
+        .ghost()
+        .rounded(px(999.0))
+        .compact()
+        .accessibility_label(label)
+        .tooltip(label)
+        .on_click(cx.listener(move |app, _, _, cx| handler(app, cx)))
+}
+
+/// A hairline between two groups of controls.
+///
+/// One logical pixel wide and tall enough to span a row of buttons: the line is punctuation between
+/// groups, and anything heavier turns a toolbar into a table.
 fn toolbar_divider(color: Hsla) -> impl IntoElement {
-    div().w_1().h_4().bg(color).mx_1()
+    div().w(px(1.0)).h_5().bg(color).mx_1()
 }
 
 /// A small muted caption in front of a group of controls.
 ///
-/// The caption is what makes the canvas row readable: six of its controls are paper sizes and
+/// The caption is what makes the second row readable: four of its controls are paper sizes and
 /// twelve are colours, and without the words it would be a guess which is which.
 fn control_label(text: &'static str, color: Hsla) -> impl IntoElement {
     div()
-        .text_size(px(11.0))
+        .text_size(px(10.0))
         .text_color(color)
         .mr_1()
         .child(text)
@@ -1887,31 +2162,62 @@ fn visibility_switch(
         .on_change(cx.listener(move |app, checked: &bool, _, cx| handler(app, *checked, cx)))
 }
 
-/// One colour swatch: a filled square, framed when it is the colour in use.
+/// One colour swatch: a filled shape, ringed when it is the colour in use.
 ///
-/// The frame is this element's own background rather than a border, so the selection reads
-/// against a swatch of *any* colour — including one that is the same colour as a border would
-/// be — and the control stays a square of colour with a little padding around it.
+/// The ring is the accent colour rather than a neutral frame, because a swatch can be *any* colour —
+/// including the one a frame would be drawn in — and a page-coloured square in a white bar would
+/// otherwise have no edge at all. Ink is a circle, because a colour is what a pen is; paper keeps its
+/// corners, because a page has them.
+///
+/// The ring is a border on this element's own box rather than a second element behind it: a border
+/// takes part in the layout, so the swatch is the same size selected or not, and the row of them
+/// never shuffles under the pointer.
 fn swatch_button(
     swatch: &Swatch,
     in_use: bool,
-    frame: Hsla,
+    ring: Hsla,
+    circle: bool,
     cx: &mut Context<NoteApp>,
     handler: impl Fn(&mut NoteApp, u32, &mut Context<NoteApp>) + 'static,
 ) -> impl IntoElement {
+    let theme = cx.theme();
     let color = swatch.color;
 
-    div()
+    // A white or ivory chip on a white bar would have no edge of its own, so a light colour is given
+    // a hairline; a dark one is its own edge and is given nothing.
+    let edge = if relative_luminance(color) > 0.85 {
+        theme.border
+    } else {
+        theme.transparent
+    };
+
+    let mut chip = div()
+        .w(px(16.0))
+        .h(px(16.0))
+        .bg(rgb(color))
+        .border_1()
+        .border_color(edge);
+
+    let mut button = div()
         .id(swatch.id)
-        // A colour square says nothing to a screen reader, and nothing to anyone who cannot
-        // tell "ivory" from "white" by eye. The name is what both need to hear or see.
+        // A square of colour says nothing to a screen reader, and nothing to anyone who cannot tell
+        // "ivory" from "white" by eye. The name is what both need to hear or see.
         .aria_label(swatch.name)
-        .p(px(1.5))
-        .rounded_sm()
-        .bg(if in_use { frame } else { transparent_black() })
+        .p(px(2.0))
+        .border_2()
+        .border_color(if in_use { ring } else { theme.transparent })
         .cursor_pointer()
-        .on_click(cx.listener(move |app, _, _, cx| handler(app, color, cx)))
-        .child(div().w(px(16.0)).h(px(16.0)).rounded_xs().bg(rgb(color)))
+        .on_click(cx.listener(move |app, _, _, cx| handler(app, color, cx)));
+
+    if circle {
+        chip = chip.rounded_full();
+        button = button.rounded_full();
+    } else {
+        chip = chip.rounded(px(4.0));
+        button = button.rounded(px(6.0));
+    }
+
+    button.child(chip)
 }
 
 #[cfg(test)]
@@ -2274,6 +2580,41 @@ fn solid_path() -> PathBuilder {
     PathBuilder::fill().with_style(PathStyle::Fill(
         FillOptions::default().with_fill_rule(FillRule::NonZero),
     ))
+}
+
+/// The shadow a sheet casts on the desk.
+///
+/// Three translucent rectangles, each a little wider than the last and a little fainter, the largest
+/// first: painted in that order they accumulate into one soft edge. The renderer's own shadows are
+/// for *elements* — they cost a layer, and they are painted behind an element's own background,
+/// which a rectangle drawn inside a paint callback does not have. A page is a path in a callback, so
+/// its shadow is drawn as a path too; three steps read as one blurred edge at the sizes a page is
+/// drawn at, and they cost three quads.
+///
+/// The sheet is lifted *and* offset downward, the way a sheet of paper lies on a desk: a shadow
+/// centred on the paper reads as a glow, and one that is only offset reads as a hard edge.
+fn paint_page_shadow(window: &mut Window, origin: Point<Pixels>, width: f32, height: f32) {
+    /// Spread, vertical offset beyond the spread, and colour — widest and faintest first.
+    const STEPS: [(f32, f32, u32); 3] = [
+        (12.0, 4.0, 0x0000_0008),
+        (7.0, 2.5, 0x0000_000C),
+        (3.0, 1.0, 0x0000_0014),
+    ];
+
+    for (spread, drop, color) in STEPS {
+        let corner = point(
+            px(f32::from(origin.x) - spread),
+            px(f32::from(origin.y) - spread + drop),
+        );
+
+        paint_rect(
+            window,
+            corner,
+            width + spread * 2.0,
+            height + spread * 2.0,
+            rgba(color).into(),
+        );
+    }
 }
 
 /// Fills a rectangle given in window coordinates.

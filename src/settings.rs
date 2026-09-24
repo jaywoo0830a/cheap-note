@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::canvas::{CanvasSize, CanvasStyle};
 use crate::refresh::RefreshMode;
 
 /// The file the settings are persisted to, relative to the working directory.
@@ -56,8 +57,31 @@ pub struct Settings {
     /// The width a rendered PDF page is drawn at, in logical pixels.
     pub page_display_width: f32,
 
-    /// Whether to print pen capture statistics to the status bar.
-    pub show_pen_stats: bool,
+    /// The sheet written on when no PDF is open.
+    ///
+    /// Choosing a size sets [`Self::page_display_width`] with it, because a paper size is a
+    /// physical size: A5 means half a sheet of A4, not the same sheet under another name. A PDF
+    /// page keeps its own shape whatever this says — only the width it is drawn at follows.
+    pub canvas_size: CanvasSize,
+    /// What is printed on that sheet, when no PDF is open.
+    pub canvas_style: CanvasStyle,
+
+    /// Whether the top bar — tools, canvas controls and the live status line — is shown.
+    ///
+    /// The bar floats over the canvas, so hiding it gives the whole window to the sheet and
+    /// stops anything at the top of the window repainting while the pen moves.
+    pub show_toolbar: bool,
+
+    /// Whether the live status line is shown at the right of the top bar.
+    ///
+    /// That line carries counters that change on every reading, and text that changes is text
+    /// that has to be re-shaped and re-laid-out. It is the part of the interface a person is
+    /// most likely to want gone while writing, so it has its own switch.
+    ///
+    /// The name this field used to have is still accepted, so an older settings file keeps the
+    /// answer the user gave rather than silently reverting to the default.
+    #[serde(alias = "show_pen_stats")]
+    pub show_status: bool,
 }
 
 impl Default for Settings {
@@ -75,8 +99,13 @@ impl Default for Settings {
             erase_radius: 14.0,
             ink_color: 0x1B_1B_1F,
             page_color: 0xFF_FF_FF,
-            page_display_width: 720.0,
-            show_pen_stats: true,
+            // A4's own width at the application's scale, so the default sheet and the default
+            // size agree: choosing the size that is already selected changes nothing.
+            page_display_width: CanvasSize::A4.display_width(),
+            canvas_size: CanvasSize::A4,
+            canvas_style: CanvasStyle::Plain,
+            show_toolbar: true,
+            show_status: true,
         }
     }
 }
@@ -171,5 +200,38 @@ mod tests {
 
         assert_eq!(settings.width_for_pressure(Some(-1.0)), settings.min_width);
         assert_eq!(settings.width_for_pressure(Some(2.0)), settings.max_width);
+    }
+
+    /// A settings file written before the canvas controls existed still loads, and keeps the
+    /// answers it already holds.
+    ///
+    /// Adding a field must not throw a file away, and renaming one must not quietly discard what
+    /// the user chose — so the old name is still read, and the new fields take their defaults.
+    #[test]
+    fn an_older_settings_file_still_loads() {
+        let older = r#"{
+            "refresh": "Auto",
+            "resample_spacing": 0.75,
+            "smoothing_ms": 0.0,
+            "min_width": 1.0,
+            "max_width": 4.5,
+            "no_pressure_width": 2.0,
+            "erase_radius": 14.0,
+            "ink_color": 1776415,
+            "page_color": 16777215,
+            "page_display_width": 720.0,
+            "show_pen_stats": false
+        }"#;
+
+        let loaded: Settings = serde_json::from_str(older).expect("an older file still parses");
+
+        assert_eq!(loaded.page_display_width, 720.0, "a value in the file is kept");
+        assert!(
+            !loaded.show_status,
+            "the renamed field keeps the answer the old file gave"
+        );
+        assert_eq!(loaded.canvas_size, CanvasSize::A4, "a new field takes its default");
+        assert_eq!(loaded.canvas_style, CanvasStyle::Plain);
+        assert!(loaded.show_toolbar, "the bar is shown unless it is turned off");
     }
 }

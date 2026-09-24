@@ -23,16 +23,17 @@
 //! to GPUI untouched — no per-pixel conversion on the way to the screen.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use anyhow::Context as _;
 use gpui_kit::RenderImage;
-use pdfium_render::prelude::{
-    PdfBitmapFormat, PdfDocument, PdfPageRenderRotation, PdfRenderConfig, Pdfium,
-};
 
 use crate::error::{AppError, Result};
+use crate::pdfium::{Document, RenderJob};
+
+/// What one slice of a render did, re-exported because it is part of this module's own API.
+pub use crate::pdfium::Progress;
 
 /// Which page, at what size, with which render options.
 ///
@@ -152,20 +153,6 @@ impl RenderedPage {
     }
 }
 
-/// Where an open document's bytes can be got from again.
-#[derive(Debug, Clone)]
-pub enum Source {
-    /// A file on disk, read back when the note is saved.
-    File(PathBuf),
-    /// Bytes handed to the app — from a saved note — with the name it had.
-    Memory {
-        /// The file name to show for it.
-        name: String,
-        /// The bytes.
-        bytes: Vec<u8>,
-    },
-}
-
 /// What the app is asking to see: one page, at one size, with one set of options.
 ///
 /// Separate from the [`PageKey`] derived from it, because the key also carries what only the
@@ -236,14 +223,16 @@ fn ratio(pixels: u32, wanted: u32) -> f32 {
 
 /// The document the user is annotating, if one is open.
 pub struct PdfDocumentView {
-    /// The open document, borrowing the leaked `Pdfium` returned by [`bind_pdfium`].
-    document: Option<PdfDocument<'static>>,
-    /// Where the document was loaded from, and how to get its bytes again.
+    /// The render in flight, if any.
     ///
-    /// A saved note hands the app bytes rather than a file, and the file it came from may not exist
-    /// any more — so the bytes are kept; a document opened from a path is read from that path when
-    /// it is time to save, so what the note carries is the document as it is now.
-    source: Option<Source>,
+    /// Declared *first* because Rust drops fields in declaration order, and a render job holds a
+    /// page handle that belongs to the document below it: the job has to go first, or Pdfium is
+    /// asked to close a page of a document that is already closed.
+    job: Option<RenderJob>,
+    /// What the job in flight is rendering, for the cache key it will be filed under.
+    job_request: Option<PageRequest>,
+    /// The open document.
+    document: Option<Document>,
     /// Rendered pages, keyed by everything their pixels depend on.
     ///
     /// Keyed properly rather than by page index with a "width changed, throw it all away" rule:
@@ -270,6 +259,14 @@ pub struct PdfDocumentView {
     stats: PdfStats,
 }
 
+/// How much of a page the pump renders per wake, when the pen is quiet.
+///
+/// Four milliseconds is a budget rather than a deadline: Pdfium is asked whether to stop between
+/// the pieces of a page, so a slice ends near this, not at it. It is chosen against the frame rate —
+/// at 165 Hz a frame is 6 ms, so a slice has to be shorter than that to stay out of the way, and
+/// four leaves room for the pen queue to be drained in the same wake.
+pub const SLICE_BUDGET: Duration = Duration::from_millis(4);
+
 /// How much of the memory budget is spent on cached page bitmaps.
 ///
 /// A 1650-pixel-wide A4 page is about 11 MB and the top rung about 44 MB, so 128 MB holds the
@@ -280,8 +277,9 @@ const CACHE_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
 impl Default for PdfDocumentView {
     fn default() -> Self {
         PdfDocumentView {
+            job: None,
+            job_request: None,
             document: None,
-            source: None,
             cache: HashMap::new(),
             order: Vec::new(),
             document_id: 0,
@@ -298,53 +296,44 @@ impl PdfDocumentView {
         PdfDocumentView::default()
     }
 
-    /// Opens a PDF and renders its first page.
+    /// Opens a PDF from a file and renders its first page.
     ///
     /// `render_pixel_width` is the bitmap width the first page is rendered at; it should be the
     /// page width in logical pixels multiplied by the display's scale factor.
+    ///
+    /// The file is read here and handed to Pdfium as bytes: Pdfium's own file handling takes a path
+    /// it interprets itself, and a note carries the document as bytes anyway — so there is one way
+    /// in, and it is the one that does not care what the path is spelled like.
     pub fn open(path: &Path, render_pixel_width: u32) -> Result<Self> {
-        let pdfium = bind_pdfium()?;
-        let document = pdfium.load_pdf_from_file(path, None)?;
+        let bytes = std::fs::read(path).map_err(|error| {
+            AppError::Other(format!("{} could not be read: {error}", path.display()))
+        })?;
 
-        let mut view = PdfDocumentView {
-            document: Some(document),
-            source: Some(Source::File(path.to_path_buf())),
-            cache: HashMap::new(),
-            order: Vec::new(),
-            // A new document: the keys of the old one must never match this one's bitmaps.
-            document_id: 1,
-            budget: CACHE_BUDGET_BYTES,
-            rotations: Vec::new(),
-            stats: PdfStats::default(),
-        };
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from("document.pdf"));
 
-        // Render the first page now, so an open PDF shows something other than a blank page.
-        view.render_page(0, render_pixel_width)?;
-        Ok(view)
+        PdfDocumentView::open_bytes(name, bytes, render_pixel_width)
     }
 
     /// Opens a PDF that is already in memory — what a saved note carries — and renders its first
     /// page.
     ///
-    /// Pdfium reads the bytes it is given and keeps its own copy, so nothing has to be written to a
-    /// temporary file for a note to be readable: opening one leaves nothing behind on disk, and a
-    /// note can be opened from a drive the app cannot write to.
+    /// Nothing is written to a temporary file, so a note opens from anywhere the app can read, and
+    /// opening one leaves nothing behind on disk.
     pub fn open_bytes(name: String, bytes: Vec<u8>, render_pixel_width: u32) -> Result<Self> {
-        let pdfium = bind_pdfium()?;
-        let document = pdfium.load_pdf_from_byte_vec(bytes.clone(), None)?;
-
         let mut view = PdfDocumentView {
-            document: Some(document),
-            source: Some(Source::Memory { name, bytes }),
-            cache: HashMap::new(),
-            order: Vec::new(),
-            // A new document: the keys of the old one must never match this one's bitmaps.
-            document_id: 1,
-            budget: CACHE_BUDGET_BYTES,
-            rotations: Vec::new(),
-            stats: PdfStats::default(),
+            document: Some(Document::open(name, bytes)?),
+            ..PdfDocumentView::default()
         };
 
+        // A new document: the keys of the old one must never match this one's bitmaps.
+        view.document_id = 1;
+
+        // Render the first page now, so an open PDF shows something other than a blank page. This
+        // is the one blocking render left in the app, and it is deliberate: the frame that follows
+        // an open has nothing to show until it has happened.
         view.render_page(0, render_pixel_width)?;
         Ok(view)
     }
@@ -358,20 +347,16 @@ impl PdfDocumentView {
     pub fn page_count(&self) -> usize {
         self.document
             .as_ref()
-            .map(|document| document.pages().len().max(0) as usize)
+            .map(|document| document.page_count())
             .unwrap_or(0)
     }
 
     /// The file name of the open document, for the status bar.
     pub fn file_name(&self) -> String {
-        match &self.source {
-            Some(Source::File(path)) => path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| String::from("untitled page")),
-            Some(Source::Memory { name, .. }) => name.clone(),
-            None => String::from("untitled page"),
-        }
+        self.document
+            .as_ref()
+            .map(|document| document.name().to_string())
+            .unwrap_or_else(|| String::from("untitled page"))
     }
 
     /// The page's own size in PDF points, without rendering it.
@@ -379,24 +364,18 @@ impl PdfDocumentView {
     /// The page bitmap carries this too, but only for the page that is rendered; this answers for
     /// any page, which is what the app needs to describe the sheet it is writing on.
     pub fn page_point_size(&self, index: usize) -> Option<(f32, f32)> {
-        let document = self.document.as_ref()?;
-        let page = document.pages().get(index as i32).ok()?;
-        Some((page.width().value, page.height().value))
+        self.document.as_ref()?.page_point_size(index)
     }
 
     /// The bytes of the open document, for saving it into a note.
     ///
-    /// A document opened from a file is read from that file *now*: the user may have edited it,
-    /// replaced it, or moved it since, and what a note should carry is the document as it is, not
-    /// as it was when the app read it.
+    /// The bytes Pdfium is reading from, which is why they are kept: what a note carries is the
+    /// document as it was opened, byte for byte, and saving needs no second read of the file.
     pub fn document_bytes(&self) -> Result<Vec<u8>> {
-        match &self.source {
-            Some(Source::File(path)) => std::fs::read(path).map_err(|error| {
-                AppError::Other(format!("{} could not be read: {error}", path.display()))
-            }),
-            Some(Source::Memory { bytes, .. }) => Ok(bytes.clone()),
-            None => Err(AppError::Other(String::from("no PDF is open"))),
-        }
+        self.document
+            .as_ref()
+            .map(|document| document.bytes().to_vec())
+            .ok_or_else(|| AppError::Other(String::from("no PDF is open")))
     }
 
     /// The best bitmap available *now* for a request, without rasterising anything.
@@ -439,6 +418,117 @@ impl PdfDocumentView {
         (!self.cache.contains_key(&key)).then_some(request)
     }
 
+    /// Starts rendering `request`, abandoning whatever was in flight.
+    ///
+    /// There is one job at a time, always for the page in front of the user: Pdfium renders on the
+    /// thread that calls it, so two pages at once is not something it offers, and a render the view
+    /// has moved past is work nobody will ever see.
+    pub fn begin(&mut self, request: PageRequest) -> Result<()> {
+        self.abandon();
+
+        let Some(document) = self.document.as_ref() else {
+            return Err(AppError::Other(String::from("no PDF is open")));
+        };
+
+        let job = RenderJob::new(
+            document,
+            request.page,
+            request.pixels,
+            match request.colour {
+                Colour::Bgra => crate::pdfium::Format::Bgra,
+                Colour::Grayscale => crate::pdfium::Format::Grayscale,
+            },
+            request.annotations,
+        )?;
+        self.job_request = Some(request);
+        self.job = Some(job);
+        Ok(())
+    }
+
+    /// Renders the job in flight for up to `budget`, then hands control back.
+    ///
+    /// A finished page lands in the cache under the key it was asked for, counted like any other
+    /// render: this is where a sliced render becomes a bitmap the frames can use. The budget is what
+    /// keeps the call short — Pdfium checks the pause callback between the pieces of a page, so the
+    /// slice ends on time rather than on the page.
+    pub fn advance(&mut self, budget: Duration) -> Progress {
+        let Some(mut job) = self.job.take() else {
+            return Progress::Unfinished;
+        };
+
+        let progress = job.advance(budget);
+
+        match progress {
+            Progress::Finished => {
+                let request = self.job_request.take().expect("a job always has a request");
+                let key = self
+                    .key_for(request.page, request.pixels)
+                    .expect("a job is only started for an open document");
+
+                match self.page_from_job(&job, request) {
+                    Ok(page) => {
+                        self.stats.rendered += 1;
+                        self.insert(key, page);
+                    }
+                    Err(error) => return Progress::Failed(error.to_string()),
+                }
+            }
+            Progress::Unfinished => self.job = Some(job),
+            Progress::Failed(_) => {
+                self.job_request = None;
+            }
+        }
+
+        progress
+    }
+
+    /// Abandons the render in flight, if there is one.
+    ///
+    /// This is the whole of cancellation: the job is dropped, which releases the page and the
+    /// unfinished bitmap and is what tells Pdfium to stop, and the counter says it happened. Nothing
+    /// has to be signalled, because a render only runs inside [`Self::advance`] — so between calls,
+    /// "not wanted any more" and "never advanced again" are the same thing.
+    pub fn abandon(&mut self) {
+        if self.job.take().is_some() {
+            self.stats.cancelled += 1;
+        }
+        self.job_request = None;
+    }
+
+    /// Whether a render is in flight.
+    pub fn rendering(&self) -> bool {
+        self.job.is_some()
+    }
+
+    /// What the render in flight is for, if there is one.
+    pub fn job_request(&self) -> Option<PageRequest> {
+        self.job_request
+    }
+
+    /// Turns a finished job's pixels into a page the frames can draw.
+    fn page_from_job(&self, job: &RenderJob, request: PageRequest) -> Result<RenderedPage> {
+        let (width, height, pixels) = job
+            .pixels()
+            .ok_or_else(|| AppError::Pdf(String::from("the rendered page had no pixels")))?;
+
+        let (point_width, point_height) = self
+            .page_point_size(request.page)
+            .unwrap_or((width as f32, height as f32));
+
+        let buffer = image::RgbaImage::from_raw(width, height, pixels).ok_or_else(|| {
+            AppError::Pdf(String::from(
+                "the rendered page did not match the buffer size Pdfium reported",
+            ))
+        })?;
+
+        Ok(RenderedPage {
+            image: Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])),
+            point_width,
+            point_height,
+            pixels: width,
+        })
+    }
+
     /// The rendered page at `index`, rasterising it if the cache does not have it.
     ///
     /// Blocking, and deliberately so: it runs on the calling thread *inside* a frame, which is what
@@ -458,10 +548,9 @@ impl PdfDocumentView {
         }
 
         self.stats.misses += 1;
-        let page = self.render(request)?;
-        self.stats.rendered += 1;
-        self.insert(key, page.clone());
-        Ok(page)
+        // The render itself counts itself, when it finishes: `advance` is the one place a page is
+        // known to be complete, and counting here as well would count every blocking render twice.
+        self.render(request)
     }
 
     /// What rasterising has cost and what the cache has saved.
@@ -515,14 +604,7 @@ impl PdfDocumentView {
         let rotation = self
             .document
             .as_ref()
-            .and_then(|document| document.pages().get(index as i32).ok())
-            .and_then(|page| page.rotation().ok())
-            .map(|rotation| match rotation {
-                PdfPageRenderRotation::None => 0,
-                PdfPageRenderRotation::Degrees90 => 1,
-                PdfPageRenderRotation::Degrees180 => 2,
-                PdfPageRenderRotation::Degrees270 => 3,
-            })
+            .map(|document| document.page_rotation(index))
             .unwrap_or(0);
 
         self.rotations.resize(index + 1, 0);
@@ -582,147 +664,160 @@ impl PdfDocumentView {
             .copied()
     }
 
-    /// Renders one page to a GPUI image.
+    /// Renders one page to a GPUI image, blocking until it is finished.
     ///
-    /// The whole of the request — page, width, rotation, options — comes from the caller as one
-    /// value, because the config built from it here is exactly what [`PageKey`] describes: if the
-    /// two ever disagree, the cache is keyed on something other than what was rendered.
-    fn render(&self, request: PageRequest) -> Result<RenderedPage> {
-        let index = request.page;
-        let pixel_width = request.pixels.max(1);
-        let Some(document) = self.document.as_ref() else {
-            return Err(AppError::Other(String::from("no PDF is open")));
-        };
+    /// The same job the pump slices, advanced with a budget generous enough to finish it: one code
+    /// path for both, so a page that arrives from a blocking render and a page that arrives from the
+    /// pump cannot disagree about what the page looks like.
+    ///
+    /// Only two callers are worth blocking for — the first page of a document, and the cheapest rung
+    /// of a page the frames have nothing at all for — and both are a few milliseconds.
+    fn render(&mut self, request: PageRequest) -> Result<RenderedPage> {
+        self.begin(request)?;
 
-        let pages = document.pages();
-        if index >= pages.len().max(0) as usize {
-            return Err(AppError::Other(format!("page {index} is past the end")));
+        // Bounded, because a page that cannot finish rendering must not hang the app: Pdfium has no
+        // timeout of its own, and a minute is far past anything a page has ever taken here.
+        let give_up_at = Instant::now() + Duration::from_secs(60);
+
+        loop {
+            match self.advance(Duration::from_secs(1)) {
+                Progress::Finished => break,
+                Progress::Failed(message) => return Err(AppError::Pdf(message)),
+                Progress::Unfinished if Instant::now() >= give_up_at => {
+                    self.abandon();
+                    return Err(AppError::Pdf(format!(
+                        "page {} of {} took longer than a minute to render",
+                        request.page + 1,
+                        self.file_name()
+                    )));
+                }
+                Progress::Unfinished => {}
+            }
         }
 
-        let page = pages.get(index as i32)?;
-        let point_width = page.width().value;
-        let point_height = page.height().value;
+        // `advance` has just filed it under the key this request makes.
+        let key = self
+            .key_for(request.page, request.pixels)
+            .ok_or_else(|| AppError::Other(String::from("no PDF is open")))?;
 
-        // Ask for BGRA in Pdfium's native byte order, which is the order GPUI's renderer
-        // uploads: the rendered bytes need no conversion at all.
-        let config = PdfRenderConfig::new()
-            .set_target_width(pixel_width as i32)
-            .set_format(match request.colour {
-                Colour::Bgra => PdfBitmapFormat::BGRA,
-                Colour::Grayscale => PdfBitmapFormat::Gray,
-            })
-            .set_reverse_byte_order(false)
-            .render_annotations(request.annotations);
-
-        let bitmap = page.render_with_config(&config)?;
-        let pixel_width = bitmap.width().max(0) as u32;
-        let pixel_height = bitmap.height().max(0) as u32;
-
-        let buffer = image::RgbaImage::from_raw(pixel_width, pixel_height, bitmap.as_raw_bytes())
-            .ok_or_else(|| {
-                AppError::Other(String::from(
-                    "the rendered page did not match the buffer size Pdfium reported",
-                ))
-            })?;
-
-        Ok(RenderedPage {
-            image: Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])),
-            point_width,
-            point_height,
-            pixels: pixel_width,
-        })
+        self.cache
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| AppError::Pdf(String::from("the rendered page was not cached")))
     }
 }
 
-/// Loads Pdfium once for the whole process and returns the handle.
-///
-/// ## Why this is cached, and not just leaked
-///
-/// `Pdfium::bind_to_library` initializes a process-wide binding slot and *fails* with
-/// `PdfiumLibraryBindingsAlreadyInitialized` on a second call. Opening a second document must
-/// therefore reuse the first binding rather than rebind, so the handle is kept in a `OnceLock`
-/// and every caller after the first gets the same one.
-///
-/// ## Why the library is loaded at run time
-///
-/// The library is a DLL, not a link-time dependency: the app ships without linking against it
-/// and reports a missing library as an error in the status bar rather than failing to start.
-fn bind_pdfium() -> Result<&'static Pdfium> {
-    /// The process-wide Pdfium handle.
-    static PDFIUM: std::sync::OnceLock<&'static Pdfium> = std::sync::OnceLock::new();
-
-    if let Some(pdfium) = PDFIUM.get() {
-        return Ok(pdfium);
-    }
-
-    let pdfium = load_pdfium()?;
-    Ok(PDFIUM.get_or_init(|| pdfium))
-}
-
-/// Finds and binds the Pdfium shared library, leaking the handle so it lasts for the process.
-fn load_pdfium() -> Result<&'static Pdfium> {
-    for directory in library_candidates() {
-        let candidate = Pdfium::pdfium_platform_library_name_at_path(&directory);
-        if !candidate.is_file() {
-            continue;
-        }
-
-        // `anyhow::Context` attaches which file failed, which the raw `libloading` error does
-        // not say. The chain is then flattened into this app's own error type, so the status
-        // bar shows one message with the cause rather than a bare "load failed".
-        let bindings = Pdfium::bind_to_library(&candidate)
-            .with_context(|| format!("{} could not be loaded", candidate.display()))
-            .map_err(|error| AppError::PdfiumLibrary(error.to_string()))?;
-
-        // Leaked once, on purpose: see the module docs. The `Pdfium` handle is a thin wrapper
-        // over a process-wide binding, so this is a fixed, small, intentional allocation.
-        return Ok(Box::leak(Box::new(Pdfium::new(bindings))));
-    }
-
-    Err(AppError::PdfiumLibrary(String::from(
-        "pdfium.dll was not found next to the executable, in the working directory, or in vendor/lib",
-    )))
-}
-
-/// Where the app looks for the Pdfium shared library, nearest first.
-fn library_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(directory) = executable.parent() {
-            candidates.push(directory.to_path_buf());
-        }
-    }
-
-    if let Ok(working_directory) = std::env::current_dir() {
-        // The repository ships the library under `vendor/lib`, which is where a `cargo run`
-        // from the project root finds it.
-        candidates.push(working_directory.join("vendor").join("lib"));
-        candidates.push(working_directory.join("vendor"));
-        candidates.push(working_directory);
-    }
-
-    candidates
-}
 
 #[cfg(test)]
 mod tests {
-    /// A one-page PDF on disk, or `None` when Pdfium is not available.
+    use std::path::PathBuf;
+
+    /// A one-page A4 PDF with a grid of black rectangles on it, built object by object.
     ///
-    /// The tests that exercise the cache need a document to rasterise; the ones that do not skip
-    /// themselves rather than fail, because a missing optional DLL is a supported state.
+    /// Built here rather than taken from a library so the tests can assert on *content*: a blank
+    /// page renders the same whatever a renderer gets wrong, and what these tests are here to catch
+    /// is a wrong stride, format, rotation, background, or slice boundary. The grid is also what
+    /// gives Pdfium a page with many *runs* to render, which is the only way a sliced render can
+    /// show that its slices are real.
+    ///
+    /// The cross-reference table carries real byte offsets, because a table Pdfium silently repairs
+    /// would let a broken fixture pass for the wrong reason.
+    fn a_page_with_rectangles() -> Vec<u8> {
+        let mut content = String::from("0 0 0 rg\n");
+        for column in 0..4 {
+            for row in 0..12 {
+                // A grid of 300×40 pt blocks with gaps, spread over the page: the last one is the
+                // rectangle the content assertions look for.
+                content.push_str(&format!(
+                    "{} {} 60 30 re f\n",
+                    40 + column * 130,
+                    40 + row * 60
+                ));
+            }
+        }
+
+        let objects = [
+            String::from("<< /Type /Catalog /Pages 2 0 R >>"),
+            String::from("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            String::from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R >>"),
+            format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+        ];
+
+        let mut out = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+        }
+
+        let xref = out.len();
+        out.push_str(&format!("xref\n0 {}\n", objects.len() + 1));
+        out.push_str("0000000000 65535 f \n");
+        for offset in &offsets {
+            out.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        out.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        ));
+
+        out.into_bytes()
+    }
+
+    /// The right to use Pdfium, for a test that rasterises.
+    ///
+    /// One process, one Pdfium library, and `cargo test` runs tests on parallel threads: Pdfium is
+    /// not thread-safe, so the tests that render take this and the ones that do not (a cache key, a
+    /// file format) do not. Without it the failures are intermittent and look like bugs in the
+    /// renderer — which is exactly the kind of thing this suite is not allowed to produce.
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        // A test that panicked while holding the lock must not poison it for the others: the panic
+        // is reported by the test that caused it, and the rest still have to run.
+        LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// The fixture on disk, or `None` when Pdfium is not available.
+    ///
+    /// Written once for the process and never deleted: the tests run in parallel threads, and a
+    /// fixture that one of them removed would fail the others for a reason that has nothing to do
+    /// with what they are testing. The name carries the process id, so two test runs at once do not
+    /// tread on each other either.
     fn a_one_page_pdf() -> Option<PathBuf> {
-        let pdfium = bind_pdfium().ok()?;
+        static FIXTURE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
-        let mut document = pdfium.create_new_pdf().expect("a new document");
-        document
-            .pages_mut()
-            .create_page_at_start(PdfPagePaperSize::a4())
-            .expect("a page is created");
+        FIXTURE
+            .get_or_init(|| {
+                if !crate::pdfium::available() {
+                    return None;
+                }
 
-        let path = std::env::temp_dir().join("cheap-note-cache-fixture.pdf");
-        document.save_to_file(&path).expect("the document is saved");
-        Some(path)
+                let path = std::env::temp_dir().join(format!(
+                    "cheap-note-fixture-{}.pdf",
+                    std::process::id()
+                ));
+                std::fs::write(&path, a_page_with_rectangles()).ok()?;
+                Some(path)
+            })
+            .clone()
+    }
+
+    /// The colour at one pixel of a rendered page, as `(blue, green, red, alpha)`.
+    ///
+    /// The pixels are BGRA, which is why the channels are named rather than indexed as RGB.
+    fn pixel(page: &RenderedPage, x: u32, y: u32) -> (u8, u8, u8, u8) {
+        let bytes = page.image.as_bytes(0).expect("the page has pixels");
+        let stride = page.pixels as usize * 4;
+        let offset = y as usize * stride + x as usize * 4;
+
+        (
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        )
     }
 
     /// A document that arrives as bytes — what a saved note carries — opens and renders.
@@ -731,6 +826,8 @@ mod tests {
     /// temporary file and a note opens from anywhere the app can read it.
     #[test]
     fn a_document_opens_from_memory() {
+        let _pdfium = exclusive();
+
         let Some(path) = a_one_page_pdf() else {
             eprintln!("skipping: pdfium.dll is not available");
             return;
@@ -754,7 +851,6 @@ mod tests {
             "a document opened from memory can be saved again without the file"
         );
 
-        let _ = std::fs::remove_file(&path);
     }
 
     /// Every field of the cache key is in it, because every field changes the pixels.
@@ -806,6 +902,8 @@ mod tests {
     /// A rung of the ladder that has been rendered once is never rendered again.
     #[test]
     fn a_zoom_step_returns_to_a_cached_rung() {
+        let _pdfium = exclusive();
+
         let Some(path) = a_one_page_pdf() else {
             eprintln!("skipping: pdfium.dll is not available");
             return;
@@ -826,12 +924,13 @@ mod tests {
         );
         assert_eq!(first.pixels, 1_024);
         assert_eq!(second.pixels, 1_536);
-        let _ = std::fs::remove_file(&path);
     }
 
     /// The frame path never rasterises, whatever it is asked for.
     #[test]
     fn the_frame_path_never_rasterises() {
+        let _pdfium = exclusive();
+
         let Some(path) = a_one_page_pdf() else {
             eprintln!("skipping: pdfium.dll is not available");
             return;
@@ -851,12 +950,13 @@ mod tests {
         assert_eq!(view.stats().rendered, rendered, "the frame rasterised nothing");
         assert_eq!(view.stats().placeholders, before.placeholders + 1);
         assert_eq!(view.stats().misses, before.misses + 1);
-        let _ = std::fs::remove_file(&path);
     }
 
     /// Inside the budget the cache keeps everything; past it the oldest bitmap goes first.
     #[test]
     fn the_least_recently_used_bitmap_goes_first() {
+        let _pdfium = exclusive();
+
         let Some(path) = a_one_page_pdf() else {
             eprintln!("skipping: pdfium.dll is not available");
             return;
@@ -884,44 +984,42 @@ mod tests {
             view.plan(PageRequest::new(0, 200)).is_some(),
             "and the rung that went is the least recently used one"
         );
-        let _ = std::fs::remove_file(&path);
     }
 
 
     use super::*;
-    use pdfium_render::prelude::PdfPagePaperSize;
 
-    /// The whole PDF path end to end: find the library, create a document, open it through the
-    /// same function the app uses, and rasterise a page.
+    /// The whole PDF path end to end: find the library, open a document through the same function
+    /// the app uses, and rasterise a page.
     ///
     /// This is the only test that needs `pdfium.dll`. It skips itself when the library is not
     /// present — a missing optional DLL is a supported state, not a test failure — so the suite
     /// stays meaningful on a machine without the vendored library.
+    ///
+    /// The assertions are about *content*: the rectangle in the fixture is black and the paper
+    /// around it is white, where the page's own coordinate system puts them. A renderer that got the
+    /// stride, the byte order, the background or the vertical flip wrong would pass a test that only
+    /// counted pixels, and would not light up the sheet the way this one does.
     #[test]
     fn a_document_round_trips_through_pdfium_and_renders() {
-        let Ok(pdfium) = bind_pdfium() else {
+        let _pdfium = exclusive();
+
+        let Some(path) = a_one_page_pdf() else {
             eprintln!("skipping: pdfium.dll is not available");
             return;
         };
 
-        let mut document = pdfium.create_new_pdf().expect("a new document");
-        document
-            .pages_mut()
-            .create_page_at_start(PdfPagePaperSize::a4())
-            .expect("a page is created");
-
-        let path = std::env::temp_dir().join("cheap-note-round-trip.pdf");
-        document.save_to_file(&path).expect("the document is saved");
-        // Close it before reopening, so the file is not left held open by Pdfium.
-        drop(document);
-
-        let mut view = PdfDocumentView::open(&path, 300).expect("the document reopens");
+        let mut view = PdfDocumentView::open(&path, 300).expect("the document opens");
         assert_eq!(view.page_count(), 1);
-        assert_eq!(view.file_name(), "cheap-note-round-trip.pdf");
+        assert_eq!(
+            view.file_name(),
+            path.file_name().expect("the fixture has a name").to_string_lossy()
+        );
 
         let page = view.render_page(0, 300).expect("the page renders");
         assert!(page.point_width > 0.0, "an A4 page has a width");
         assert!(page.point_height > page.point_width, "A4 is portrait");
+        assert_eq!(page.pixels, 300, "the bitmap is the width that was asked for");
 
         // A second request at the same width must be served from the cache, not re-rasterised.
         let cached = view.render_page(0, 300).expect("the cached page");
@@ -931,10 +1029,145 @@ mod tests {
             "the same bitmap comes back"
         );
 
-        let _ = std::fs::remove_file(&path);
+        // The grid: 60×30 pt blocks whose lower-left corners are at 40 + column·130, 40 + row·60. At
+        // 300 px wide that is 0.504 px/pt, and the page is measured from the top, so a block in the
+        // bottom row is 56..71 px down and a gap between columns is 50..86 px across.
+        let width = page.pixels;
+        let height = (page.pixels as f32 * page.point_height / page.point_width) as u32;
+        assert_eq!(height, 424, "300 px wide is 424 px tall for A4");
+
+        let inside = pixel(&page, 35, 63);
+        assert!(
+            inside.0 < 40 && inside.1 < 40 && inside.2 < 40,
+            "a block of the grid is black, where the page puts it: got {inside:?}"
+        );
+        assert_eq!(inside.3, 255, "and it is opaque");
+
+        let paper = pixel(&page, 70, 63);
+        assert!(
+            paper.0 > 240 && paper.1 > 240 && paper.2 > 240,
+            "the gap between two blocks is paper, not a hole in the window: got {paper:?}"
+        );
+
+        let corner = pixel(&page, width - 5, height - 5);
+        assert!(
+            corner.0 > 240 && corner.1 > 240 && corner.2 > 240,
+            "and so is the corner: got {corner:?}"
+        );
+
     }
 
-    /// What rasterising a page costs, and what the cache saves.
+    /// A render sliced across several calls is the same page as one that was not.
+    ///
+    /// This is what the progressive path is for, and it is the property that makes it safe to use:
+    /// the budget changes *when* the work happens, never what it produces. A slice boundary that
+    /// lost a band, or a bitmap read out before it was finished, shows up here.
+    #[test]
+    fn a_sliced_render_is_the_whole_page() {
+        let _pdfium = exclusive();
+
+        let Some(path) = a_one_page_pdf() else {
+            eprintln!("skipping: pdfium.dll is not available");
+            return;
+        };
+
+        let whole = {
+            let mut view = PdfDocumentView::open(&path, 1_200).expect("the document opens");
+            view.render_page(0, 1_200).expect("the page renders")
+        };
+
+        let mut view = PdfDocumentView::open(&path, 1_200).expect("the document opens");
+        view.begin(PageRequest::new(0, 1_200)).expect("the render starts");
+
+        // Four milliseconds at a time: several slices for a page this size, and the same budget the
+        // pump uses between frames.
+        let mut slices = 0;
+        loop {
+            match view.advance(Duration::from_millis(4)) {
+                Progress::Unfinished => slices += 1,
+                Progress::Finished => break,
+                other => panic!("the render ended as {other:?}"),
+            }
+
+            assert!(slices < 1_000, "the render is not making progress");
+        }
+
+        let sliced = view
+            .render_page(0, 1_200)
+            .expect("the finished page is cached");
+        assert_eq!(sliced.pixels, whole.pixels);
+        assert_eq!(
+            sliced.image.as_bytes(0),
+            whole.image.as_bytes(0),
+            "a sliced render must be the same page, byte for byte"
+        );
+        assert_eq!(
+            view.stats().rendered,
+            2,
+            "and the sliced one counted as a render"
+        );
+    }
+
+    /// A slice with no time in it renders nothing, and says so.
+    ///
+    /// The budget is what keeps the pump's wake short, so "no time" has to mean "no work": Pdfium
+    /// is asked before the first piece of the page, which is why this can be answered without
+    /// rendering anything at all.
+    #[test]
+    fn a_slice_with_no_budget_renders_nothing() {
+        let _pdfium = exclusive();
+
+        let Some(path) = a_one_page_pdf() else {
+            eprintln!("skipping: pdfium.dll is not available");
+            return;
+        };
+
+        let mut view = PdfDocumentView::open(&path, 1_200).expect("the document opens");
+        view.begin(PageRequest::new(0, 3_456))
+            .expect("a bigger render starts");
+        assert!(view.rendering(), "and it is in flight");
+
+        let started = Instant::now();
+        let progress = view.advance(Duration::ZERO);
+
+        assert_eq!(
+            progress,
+            Progress::Unfinished,
+            "no time was given, so none was used"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "a slice with no budget must not render the page"
+        );
+        assert!(view.rendering(), "and the job is still there to carry on");
+    }
+
+    /// Abandoning a render in flight releases it, and says so.
+    #[test]
+    fn an_abandoned_render_is_counted_and_forgotten() {
+        let _pdfium = exclusive();
+
+        let Some(path) = a_one_page_pdf() else {
+            eprintln!("skipping: pdfium.dll is not available");
+            return;
+        };
+
+        let mut view = PdfDocumentView::open(&path, 1_200).expect("the document opens");
+        let before = view.stats();
+
+        view.begin(PageRequest::new(0, 3_456))
+            .expect("a render starts");
+        assert!(view.rendering());
+
+        view.abandon();
+        assert!(!view.rendering(), "the job is gone");
+        assert_eq!(view.stats().cancelled, before.cancelled + 1, "and it was counted");
+        assert_eq!(
+            view.stats().rendered, before.rendered,
+            "an abandoned render is not a rendered page"
+        );
+    }
+
     ///
     /// This is the only part of a frame that can take *milliseconds*, and it runs on the frame's
     /// own thread: whenever the requested bitmap width changes — opening a document, turning a
@@ -942,22 +1175,21 @@ mod tests {
     /// what keeps it from being a per-frame cost: an unchanged width is a map lookup.
     ///
     /// Run `cargo test --release -- --nocapture measures_the_pdf_costs`.
+    /// What rasterising a page costs, what the cache saves, and what slicing costs.
+    ///
+    /// Rasterising is the one part of a frame that can take *milliseconds*, which is why it is
+    /// sliced: this measures both the whole cost and how many slices a page takes at the budget the
+    /// pump uses, so the pump's budget can be argued about with numbers rather than a guess.
+    ///
+    /// Run `cargo test --release -- --nocapture measures_the_pdf_costs`.
     #[test]
     fn measures_the_pdf_costs() {
-        let Ok(pdfium) = bind_pdfium() else {
+        let _pdfium = exclusive();
+
+        let Some(path) = a_one_page_pdf() else {
             eprintln!("skipping: pdfium.dll is not available");
             return;
         };
-
-        let mut document = pdfium.create_new_pdf().expect("a new document");
-        document
-            .pages_mut()
-            .create_page_at_start(PdfPagePaperSize::a4())
-            .expect("a page is created");
-
-        let path = std::env::temp_dir().join("cheap-note-measured.pdf");
-        document.save_to_file(&path).expect("the document is saved");
-        drop(document);
 
         eprintln!("\n── pdf, measured ──────────────────────────────────────────────");
         for width in [720u32, 1_440, 2_880, 5_760] {
@@ -969,6 +1201,33 @@ mod tests {
             let page = view.render_page(0, width).expect("the page renders");
             let rasterised = started.elapsed();
 
+            // And the same page in slices of the pump's budget, counting what it takes. The setup is
+            // measured apart from the slices, because it is the part no budget can interrupt: it
+            // allocates the bitmap and writes the paper into it.
+            let started = std::time::Instant::now();
+            view.begin(PageRequest::new(0, width)).expect("a sliced render");
+            let setup = started.elapsed();
+
+            let started = std::time::Instant::now();
+            let mut slices = 0u32;
+            let mut longest = std::time::Duration::ZERO;
+            loop {
+                let slice = std::time::Instant::now();
+                match view.advance(SLICE_BUDGET) {
+                    Progress::Unfinished => {
+                        slices += 1;
+                        longest = longest.max(slice.elapsed());
+                    }
+                    Progress::Finished => {
+                        slices += 1;
+                        longest = longest.max(slice.elapsed());
+                        break;
+                    }
+                    other => panic!("the sliced render ended as {other:?}"),
+                }
+            }
+            let sliced = started.elapsed();
+
             let started = std::time::Instant::now();
             let rounds = 1_000;
             for _ in 0..rounds {
@@ -979,9 +1238,15 @@ mod tests {
             let height = (width as f32 * page.point_height / page.point_width.max(1.0)) as u64;
             let megabytes = (width as u64 * height * 4) / (1024 * 1024);
             eprintln!(
-                "  a page {width:>4} px wide, {megabytes:>3} MB  rasterise {rasterised:>9.1?}   then {cached:>7.1?} per frame"
+                "  a page {width:>4} px wide, {megabytes:>3} MB  rasterise {rasterised:>9.1?}   or setup {setup:>8.1?} + {slices:>3} slices, longest {longest:>8.1?} ({sliced:>8.1?} total)   then {cached:>7.1?} per frame"
             );
 
+            // A slice is not the whole render: the paper write and the allocation happen in the
+            // setup, and what is left is what a budget can stop between.
+            assert!(
+                longest < rasterised,
+                "the longest slice ({longest:?}) was no shorter than the whole render ({rasterised:?})"
+            );
             assert!(
                 cached.as_micros() < 500,
                 "a cached page cost {cached:?} per frame; it is meant to be a map lookup"
@@ -1017,6 +1282,5 @@ mod tests {
             "the preview rung took {preview_time:?}; it is meant to be the cheap one"
         );
 
-        let _ = std::fs::remove_file(&path);
     }
 }

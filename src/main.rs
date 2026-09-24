@@ -9,7 +9,8 @@
 //!   it — because a system cursor cannot be rotated, and the system pointer is hidden while it is
 //!   drawn;
 //! * the interface is built with GPUI Kit (theme tokens, components, a GPU-accelerated scene);
-//! * PDF pages are rasterised by Pdfium through `pdfium-render`;
+//! * PDF pages are rasterised by Pdfium, which the app drives through its own C entry points so
+//!   that a render can be sliced across frames and the budget can bound it (see [`pdfium`]);
 //! * the writing loop is paced against the display's frame rate: the monitor's mode is read
 //!   (`EnumDisplaySettingsW`), the frames this app paints are measured, and the pump interval
 //!   follows whichever of the two describes what the eye sees.
@@ -26,6 +27,7 @@
 //! | [`cursor`]  | the pen's ghost cursor: where it is and how it leans       |
 //! | [`system_cursor`] | hiding the system pointer while the pen is in range |
 //! | [`pdf`]     | the Pdfium document, page rendering, and the page cache    |
+//! | [`pdfium`]  | Pdfium's own C API: documents, pages, and the sliced render |
 //! | [`bundle`]  | a saved note: the original PDF and the ink, in one zip     |
 //! | [`app`]     | the view: toolbar, canvas painting, and the pen pump       |
 //! | [`timing`]  | what every hot path costs, measured rather than guessed    |
@@ -48,6 +50,7 @@ mod cursor;
 mod error;
 mod ink;
 mod pdf;
+mod pdfium;
 mod pen;
 mod refresh;
 mod settings;

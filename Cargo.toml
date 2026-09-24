@@ -16,8 +16,13 @@ gpui-kit = "=0.6.6"
 # pinned to the 0.2.0 git tag requested by the project.
 pen-windows = { git = "https://github.com/jaywoo0830a/pen-windows", tag = "0.2.0", features = ["window-handle"] }
 
-# PDF rendering: loads Pdfium at run-time and renders pages to bitmaps.
-pdfium-render = "0.9.4"
+# PDF: Pdfium, loaded at run time from `vendor/lib/pdfium.dll`.
+#
+# The app resolves the handful of C entry points it calls itself — see `src/pdfium.rs` — because it
+# needs the *progressive* render (`IFSDK_PAUSE`), which `pdfium-render` does not surface, and because
+# the wrapper keeps its document and page handles private. `pdfium-render` is therefore a *test*
+# dependency: it builds the fixture documents and cross-checks this app's rendering against a second
+# implementation of the same API.
 
 # Serialisable application state / settings. Pinned exactly, at the versions this project was
 # built and measured against.
@@ -45,6 +50,9 @@ windows = { version = "0.62", features = [
     # GPUI's own window procedure does. This is the comctl32 chain pen-windows already hooks on
     # that same window, so the two procedures coexist without either knowing about the other.
     "Win32_UI_Shell",
+    # LoadLibraryW / GetProcAddress: resolving Pdfium's own entry points, including the progressive
+    # render the wrapper crate does not expose. See `src/pdfium.rs`.
+    "Win32_System_LibraryLoader",
 ] }
 # Named types for the raw window handle GPUI hands out (used to bind the pen capture).
 raw-window-handle = "0.6"

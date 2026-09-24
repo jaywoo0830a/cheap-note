@@ -26,6 +26,7 @@
 //! | [`cursor`]  | the pen's ghost cursor: where it is and how it leans       |
 //! | [`system_cursor`] | hiding the system pointer while the pen is in range |
 //! | [`pdf`]     | the Pdfium document, page rendering, and the page cache    |
+//! | [`bundle`]  | a saved note: the original PDF and the ink, in one zip     |
 //! | [`app`]     | the view: toolbar, canvas painting, and the pen pump       |
 //! | [`timing`]  | what every hot path costs, measured rather than guessed    |
 //! | [`settings`]| the user's tuning, serialised as JSON                      |
@@ -41,6 +42,7 @@
 //! app starts and draws without it; only opening a PDF needs it.
 
 mod app;
+mod bundle;
 mod canvas;
 mod cursor;
 mod error;

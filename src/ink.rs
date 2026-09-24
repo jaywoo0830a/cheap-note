@@ -25,6 +25,7 @@
 //! their own for the same reason one level down: a vector of pointers can be appended to,
 //! undone and filtered without touching the strokes themselves.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use pen_windows::{PenPhase, PenSample};
@@ -475,6 +476,27 @@ impl InkDocument {
         self.last_erase = None;
     }
 
+    /// A page holding strokes that came from somewhere else — a saved note, or the clipboard of a
+    /// future version — with the caches [`Stroke::close`] computes rebuilt.
+    ///
+    /// Rebuilding is not optional: a stroke's bounds and outline are `#[serde(skip)]`, because they
+    /// are derivable from its points, and they are what the eraser hit-tests against and what a
+    /// frame culls by. A page loaded without them would draw, and would refuse to be erased.
+    pub fn from_strokes(strokes: Vec<Stroke>) -> Self {
+        let finished = strokes
+            .into_iter()
+            .map(|mut stroke| {
+                stroke.close();
+                Arc::new(stroke)
+            })
+            .collect::<Vec<_>>();
+
+        InkDocument {
+            finished: Arc::new(finished),
+            ..InkDocument::default()
+        }
+    }
+
     /// Feeds a batch of pen readings to the model.
     ///
     /// `transform` is how a physical reading becomes a place on the sheet: the window's DPI scale,
@@ -702,6 +724,127 @@ impl InkDocument {
         self.stats.erased_strokes += (before - self.finished.len()) as u64;
     }
 }
+/// Every page's ink, and which page is being written on.
+///
+/// ## Why the ink is per page
+///
+/// A stroke belongs to the sheet it was drawn on. The app used to hold a single [`InkDocument`] and
+/// simply not move it when the user turned the page, so the ink of the page written on last was
+/// still there on the next one — and worse, drawing on page two appended to page one's ink.
+///
+/// ## Why only one page is hot
+///
+/// The page being written on is the one the pen appends to several hundred times a second, so it is
+/// kept inline; the others are moved in and out of a map on a page turn, which happens at the speed
+/// of a hand, not a digitizer. A page whose ink is empty is not kept at all, so the map holds
+/// exactly the pages that have been written on and `written_pages` is the truth about the note.
+///
+/// `Notes` dereferences to the current page, so the writing path reads `notes.consume(..)` and
+/// `notes.finished()` and never has to name a page at all: there is only ever one page the pen can
+/// be writing on, and this type owns which.
+#[derive(Debug, Default)]
+pub struct Notes {
+    /// Which page [`Self::current`] is the ink of.
+    page: usize,
+    /// The ink of the page being written on.
+    current: InkDocument,
+    /// The ink of every other page that has been written on.
+    taken: BTreeMap<usize, InkDocument>,
+}
+
+impl std::ops::Deref for Notes {
+    type Target = InkDocument;
+
+    fn deref(&self) -> &InkDocument {
+        &self.current
+    }
+}
+
+impl std::ops::DerefMut for Notes {
+    fn deref_mut(&mut self) -> &mut InkDocument {
+        &mut self.current
+    }
+}
+
+impl Notes {
+    /// A note with one blank page.
+    pub fn new() -> Self {
+        Notes::default()
+    }
+
+    /// Moves to a page, taking the ink of the page being left behind with it.
+    ///
+    /// The page being moved to keeps its own ink, which is the whole point: what was drawn there is
+    /// still there on the way back.
+    pub fn go_to(&mut self, page: usize) {
+        if page == self.page {
+            return;
+        }
+
+        let leaving = std::mem::take(&mut self.current);
+        if !leaving.is_blank() {
+            self.taken.insert(self.page, leaving);
+        }
+
+        self.current = self.taken.remove(&page).unwrap_or_default();
+        self.page = page;
+    }
+
+    /// The ink of any page, whether or not it has been written on.
+    pub fn page_ink(&self, page: usize) -> Option<&InkDocument> {
+        if page == self.page {
+            return Some(&self.current);
+        }
+
+        self.taken.get(&page).filter(|ink| !ink.is_blank())
+    }
+
+    /// The pages that hold ink, in page order: what a save writes out.
+    pub fn written_pages(&self) -> Vec<usize> {
+        let mut pages: Vec<usize> = self
+            .taken
+            .iter()
+            .filter(|(_, ink)| !ink.is_blank())
+            .map(|(page, _)| *page)
+            .collect();
+
+        if !self.current.is_blank() {
+            pages.push(self.page);
+        }
+
+        pages.sort_unstable();
+        pages.dedup();
+        pages
+    }
+
+    /// How many pages this note has, for turning between them.
+    ///
+    /// A note written on a blank sheet has no document to ask, so its own pages are the count:
+    /// the last page written on, plus one. It never reports zero, because there is always the page
+    /// in front of the user.
+    pub fn page_count(&self) -> usize {
+        self.written_pages().last().map_or(1, |page| page + 1)
+    }
+
+    /// Replaces every page's ink, moving to `page` — what opening a saved note does.
+    pub fn replace(&mut self, pages: Vec<(usize, InkDocument)>, page: usize) {
+        self.taken.clear();
+        self.page = page;
+
+        let mut current = InkDocument::new();
+        for (index, ink) in pages {
+            if index == page {
+                current = ink;
+            } else if !ink.is_blank() {
+                self.taken.insert(index, ink);
+            }
+        }
+
+        self.current = current;
+    }
+}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -1039,7 +1182,78 @@ mod tests {
         assert_eq!(ink.finished().len(), 200);
     }
 
-    /// A page of `count` two-point strokes, each 10 px apart.
+    /// Ink stays on the page it was written on.
+    ///
+    /// This is the bug the per-page model exists for: with one document for the whole note, writing
+    /// on page one and turning to page two left the writing on screen — laid over a page it was
+    /// never drawn on, and appended to by the pen.
+    #[test]
+    fn ink_stays_on_the_page_it_was_written_on() {
+        let mut notes = Notes::new();
+        let s = settings();
+
+        notes.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+        notes.consume(&[reading(7, PenPhase::Up, 30.0, 30.0, None)], &id(), &s);
+
+        assert_eq!(notes.stroke_count(), 1, "page one has the stroke");
+
+        notes.go_to(1);
+        assert!(notes.is_blank(), "page two is empty");
+        assert_eq!(notes.stroke_count(), 0);
+
+        notes.consume(&[reading(7, PenPhase::Down, 50.0, 50.0, Some(0.5))], &id(), &s);
+        notes.consume(&[reading(7, PenPhase::Up, 70.0, 70.0, None)], &id(), &s);
+        assert_eq!(notes.stroke_count(), 1, "page two has its own stroke");
+
+        notes.go_to(0);
+        assert_eq!(notes.stroke_count(), 1, "page one still has exactly its own");
+        assert_eq!(notes.written_pages(), vec![0, 1], "and both pages are written on");
+
+        // The stroke on page two is the one that starts at (50, 50): erasing where page one's ink
+        // is must leave page two alone, and vice versa.
+        let first = notes.finished()[0].points[0];
+        assert_eq!((first.x, first.y), (10.0, 10.0), "page one's stroke is its own");
+    }
+
+    /// A page that was written on and left keeps its ink; a page that was never touched stays out
+    /// of the note.
+    #[test]
+    fn a_page_keeps_its_ink_and_a_blank_page_is_not_kept() {
+        let mut notes = Notes::new();
+        let s = settings();
+
+        notes.go_to(3);
+        assert!(notes.is_blank());
+        notes.consume(&[reading(7, PenPhase::Down, 5.0, 5.0, Some(0.5))], &id(), &s);
+        notes.consume(&[reading(7, PenPhase::Up, 9.0, 9.0, None)], &id(), &s);
+
+        // Visiting pages that are not written on must not invent pages.
+        notes.go_to(1);
+        notes.go_to(2);
+        notes.go_to(3);
+        assert_eq!(notes.written_pages(), vec![3], "only the page with ink");
+        assert_eq!(notes.stroke_count(), 1, "and its ink came back with it");
+        assert_eq!(notes.page_count(), 4, "pages 0..=3 exist for turning");
+    }
+
+    /// Opening a note puts the ink where it was written, on the page that was open.
+    #[test]
+    fn replacing_a_note_restores_its_pages() {
+        let mut notes = Notes::new();
+        let s = settings();
+        notes.consume(&[reading(7, PenPhase::Down, 1.0, 1.0, Some(0.5))], &id(), &s);
+        notes.consume(&[reading(7, PenPhase::Up, 2.0, 2.0, None)], &id(), &s);
+
+        let pages = vec![(2, page_with(3)), (5, page_with(4))];
+        notes.replace(pages, 5);
+
+        assert_eq!(notes.stroke_count(), 4, "the page that was open is the one on screen");
+        assert_eq!(notes.written_pages(), vec![2, 5]);
+        notes.go_to(2);
+        assert_eq!(notes.stroke_count(), 3, "and the other page is where it was saved");
+    }
+
+    /// A page of `count` two-point strokes, each 10 px apart, for the tests above.
     fn page_with(count: usize) -> InkDocument {
         let mut ink = InkDocument::new();
         let s = settings();

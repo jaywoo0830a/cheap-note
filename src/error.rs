@@ -34,6 +34,10 @@ pub enum AppError {
     #[error("the settings file is not valid: {0}")]
     SettingsFormat(#[from] serde_json::Error),
 
+    /// A saved note — the zip holding the PDF and the ink — could not be read or written.
+    #[error("the note file could not be read or written: {0}")]
+    Note(String),
+
     /// A request that does not fit any of the cases above.
     #[error("{0}")]
     Other(String),

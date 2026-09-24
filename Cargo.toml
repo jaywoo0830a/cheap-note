@@ -19,13 +19,17 @@ pen-windows = { git = "https://github.com/jaywoo0830a/pen-windows", tag = "0.2.0
 # PDF rendering: loads Pdfium at run-time and renders pages to bitmaps.
 pdfium-render = "0.9.4"
 
-# Serialisable application state / settings.
-serde = { version = "1", features = ["derive"] }
+# Serialisable application state / settings. Pinned exactly, at the versions this project was
+# built and measured against.
+serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "1"
+# The note container: a zip holding the original PDF and the ink as JSON. Deflate only — the
+# document inside is already compressed, so it is stored rather than deflated, and the ink is small.
+zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 # Ergonomic custom error types.
-thiserror = "2"
+thiserror = "=2.0.21"
 # Ergonomic error propagation at the application boundary.
-anyhow = "1"
+anyhow = "=1.0.104"
 # Raw pixel buffers, used to hand a rendered PDF page to GPUI's image pipeline.
 image = { version = "0.25", default-features = false }
 

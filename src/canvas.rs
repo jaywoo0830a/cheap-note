@@ -230,6 +230,20 @@ pub fn rule_color(paper: u32) -> u32 {
     }
 }
 
+/// The colour a mark that has to be *noticed* is drawn in on the given paper.
+///
+/// Where [`rule_color`] is deliberately faint — a guide must not compete with the ink written over
+/// it — this is the other end of the same idea: mixed most of the way to the far extreme, so it
+/// stands out on white paper and on a blackboard alike, while on neither does it look like ink.
+/// It is what the pen's ghost cursor is drawn in.
+pub fn contrast_color(paper: u32) -> u32 {
+    if relative_luminance(paper) > 0.5 {
+        mix(paper, 0x00_00_00, 0.62)
+    } else {
+        mix(paper, 0xFF_FF_FF, 0.72)
+    }
+}
+
 /// The perceived brightness of `0xRRGGBB`, from 0 (black) to 1 (white).
 ///
 /// The channels are weighted the way the eye weights them — green carries most of the perceived
@@ -422,8 +436,8 @@ mod tests {
     // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
     // scope and shadow the attribute this module needs.
     use super::{
-        build_ruling, relative_luminance, rule_color, rules_that_fit, CanvasSize, CanvasStyle,
-        Ruling, INK_COLORS, PAPER_COLORS,
+        build_ruling, contrast_color, relative_luminance, rule_color, rules_that_fit, CanvasSize,
+        CanvasStyle, Ruling, INK_COLORS, PAPER_COLORS,
     };
     use gpui_kit::{point, px, rgb, size, Bounds, Hsla, PaintQuad, Pixels};
     use std::sync::Arc;
@@ -580,6 +594,31 @@ mod tests {
             assert!(
                 (relative_luminance(rule) - paper).abs() > 0.04,
                 "the rule on the {} paper is too faint to see",
+                swatch.name
+            );
+        }
+    }
+
+    /// The ghost cursor's colour has to sit on the opposite side of mid-grey from the sheet, and
+    /// be stronger than the ruling on that sheet.
+    ///
+    /// Both halves matter: on the same side of mid-grey it would be invisible on some sheet the
+    /// toolbar offers, and a cursor no stronger than a rule is a cursor that cannot be found.
+    #[test]
+    fn a_cursor_reads_on_every_paper_and_beats_a_rule() {
+        for swatch in PAPER_COLORS.iter() {
+            let paper = relative_luminance(swatch.color);
+            let cursor = relative_luminance(contrast_color(swatch.color));
+            let rule = relative_luminance(rule_color(swatch.color));
+
+            assert!(
+                (cursor > 0.5) != (paper > 0.5),
+                "the cursor on the {} paper is not across mid-grey from it",
+                swatch.name
+            );
+            assert!(
+                (cursor - paper).abs() > (rule - paper).abs(),
+                "the cursor on the {} paper is no stronger than its ruling",
                 swatch.name
             );
         }

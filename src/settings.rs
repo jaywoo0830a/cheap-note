@@ -82,6 +82,14 @@ pub struct Settings {
     /// answer the user gave rather than silently reverting to the default.
     #[serde(alias = "show_pen_stats")]
     pub show_status: bool,
+
+    /// Whether the pen's ghost cursor is drawn.
+    ///
+    /// The ghost is a mark at the nib with the pen's body extending from it in the direction the
+    /// pen leans, so a digitizer's tilt becomes something the user can see rather than data the app
+    /// keeps to itself. It is switchable because a second marker beside the system pointer is a
+    /// matter of taste, not of correctness.
+    pub show_tilt_cursor: bool,
 }
 
 impl Default for Settings {
@@ -106,6 +114,9 @@ impl Default for Settings {
             canvas_style: CanvasStyle::Plain,
             show_toolbar: true,
             show_status: true,
+            // On by default: a digitizer's tilt is data the user paid for, and a cursor that shows
+            // it is the only place it is ever visible.
+            show_tilt_cursor: true,
         }
     }
 }
@@ -233,5 +244,6 @@ mod tests {
         assert_eq!(loaded.canvas_size, CanvasSize::A4, "a new field takes its default");
         assert_eq!(loaded.canvas_style, CanvasStyle::Plain);
         assert!(loaded.show_toolbar, "the bar is shown unless it is turned off");
+        assert!(loaded.show_tilt_cursor, "so is the ghost cursor");
     }
 }

@@ -343,6 +343,16 @@ impl InkDocument {
         self.stats
     }
 
+    /// The last reading consumed, whatever it did.
+    ///
+    /// This is the reading *as the pen reported it* — physical pixels, raw tilt — and it is kept
+    /// for anything that has to follow the pen rather than draw with it, such as the ghost cursor.
+    /// Unlike the ink, it is also updated by the phases that lay nothing: hovering, entering, and
+    /// leaving are all positions the cursor has to know about.
+    pub fn last_sample(&self) -> Option<PenSample> {
+        self.last_sample
+    }
+
     /// Whether the page has no ink at all.
     pub fn is_blank(&self) -> bool {
         self.finished.is_empty() && self.open.is_none()

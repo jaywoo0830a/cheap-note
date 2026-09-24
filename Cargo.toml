@@ -1,0 +1,60 @@
+[package]
+name = "cheap-note"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "Minimal, high-performance handwriting note-taking prototype (pen input + PDF pages + 60/120/180/240 Hz)."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# UI framework. GPUI Kit 0.6.6 pulls in GPUI + gpui-base + gpui-component; the app never
+# lists GPUI itself. `component` and `assets` are on by default.
+gpui-kit = "=0.6.6"
+
+# Low-latency pen input on Windows. This crate is not published on crates.io, so it is
+# pinned to the 0.2.0 git tag requested by the project.
+pen-windows = { git = "https://github.com/jaywoo0830a/pen-windows", tag = "0.2.0", features = ["window-handle"] }
+
+# PDF rendering: loads Pdfium at run-time and renders pages to bitmaps.
+pdfium-render = "0.9.4"
+
+# Serialisable application state / settings.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Ergonomic custom error types.
+thiserror = "2"
+# Ergonomic error propagation at the application boundary.
+anyhow = "1"
+# Raw pixel buffers, used to hand a rendered PDF page to GPUI's image pipeline.
+image = { version = "0.25", default-features = false }
+
+# Windows-only: display refresh-rate detection for 60/120/180/240 Hz support.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+] }
+# Named types for the raw window handle GPUI hands out (used to bind the pen capture).
+raw-window-handle = "0.6"
+
+# Keep debug builds usable: the UI stack is compiled with optimizations while the
+# application's own crates stay fast to rebuild and debuggable.
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-kit = { opt-level = 3 }
+gpui-base = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+gpui-kit-assets = { opt-level = 3 }
+gpui-pre-macros = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+
+# The writing loop is latency-sensitive, so the release build favours a fast binary.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

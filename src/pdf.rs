@@ -152,6 +152,20 @@ impl RenderedPage {
     }
 }
 
+/// Where an open document's bytes can be got from again.
+#[derive(Debug, Clone)]
+pub enum Source {
+    /// A file on disk, read back when the note is saved.
+    File(PathBuf),
+    /// Bytes handed to the app — from a saved note — with the name it had.
+    Memory {
+        /// The file name to show for it.
+        name: String,
+        /// The bytes.
+        bytes: Vec<u8>,
+    },
+}
+
 /// What the app is asking to see: one page, at one size, with one set of options.
 ///
 /// Separate from the [`PageKey`] derived from it, because the key also carries what only the
@@ -224,8 +238,12 @@ fn ratio(pixels: u32, wanted: u32) -> f32 {
 pub struct PdfDocumentView {
     /// The open document, borrowing the leaked `Pdfium` returned by [`bind_pdfium`].
     document: Option<PdfDocument<'static>>,
-    /// Where the document was loaded from.
-    path: Option<PathBuf>,
+    /// Where the document was loaded from, and how to get its bytes again.
+    ///
+    /// A saved note hands the app bytes rather than a file, and the file it came from may not exist
+    /// any more — so the bytes are kept; a document opened from a path is read from that path when
+    /// it is time to save, so what the note carries is the document as it is now.
+    source: Option<Source>,
     /// Rendered pages, keyed by everything their pixels depend on.
     ///
     /// Keyed properly rather than by page index with a "width changed, throw it all away" rule:
@@ -263,7 +281,7 @@ impl Default for PdfDocumentView {
     fn default() -> Self {
         PdfDocumentView {
             document: None,
-            path: None,
+            source: None,
             cache: HashMap::new(),
             order: Vec::new(),
             document_id: 0,
@@ -290,7 +308,7 @@ impl PdfDocumentView {
 
         let mut view = PdfDocumentView {
             document: Some(document),
-            path: Some(path.to_path_buf()),
+            source: Some(Source::File(path.to_path_buf())),
             cache: HashMap::new(),
             order: Vec::new(),
             // A new document: the keys of the old one must never match this one's bitmaps.
@@ -301,6 +319,32 @@ impl PdfDocumentView {
         };
 
         // Render the first page now, so an open PDF shows something other than a blank page.
+        view.render_page(0, render_pixel_width)?;
+        Ok(view)
+    }
+
+    /// Opens a PDF that is already in memory — what a saved note carries — and renders its first
+    /// page.
+    ///
+    /// Pdfium reads the bytes it is given and keeps its own copy, so nothing has to be written to a
+    /// temporary file for a note to be readable: opening one leaves nothing behind on disk, and a
+    /// note can be opened from a drive the app cannot write to.
+    pub fn open_bytes(name: String, bytes: Vec<u8>, render_pixel_width: u32) -> Result<Self> {
+        let pdfium = bind_pdfium()?;
+        let document = pdfium.load_pdf_from_byte_vec(bytes.clone(), None)?;
+
+        let mut view = PdfDocumentView {
+            document: Some(document),
+            source: Some(Source::Memory { name, bytes }),
+            cache: HashMap::new(),
+            order: Vec::new(),
+            // A new document: the keys of the old one must never match this one's bitmaps.
+            document_id: 1,
+            budget: CACHE_BUDGET_BYTES,
+            rotations: Vec::new(),
+            stats: PdfStats::default(),
+        };
+
         view.render_page(0, render_pixel_width)?;
         Ok(view)
     }
@@ -320,11 +364,39 @@ impl PdfDocumentView {
 
     /// The file name of the open document, for the status bar.
     pub fn file_name(&self) -> String {
-        self.path
-            .as_ref()
-            .and_then(|path| path.file_name())
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| String::from("untitled page"))
+        match &self.source {
+            Some(Source::File(path)) => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| String::from("untitled page")),
+            Some(Source::Memory { name, .. }) => name.clone(),
+            None => String::from("untitled page"),
+        }
+    }
+
+    /// The page's own size in PDF points, without rendering it.
+    ///
+    /// The page bitmap carries this too, but only for the page that is rendered; this answers for
+    /// any page, which is what the app needs to describe the sheet it is writing on.
+    pub fn page_point_size(&self, index: usize) -> Option<(f32, f32)> {
+        let document = self.document.as_ref()?;
+        let page = document.pages().get(index as i32).ok()?;
+        Some((page.width().value, page.height().value))
+    }
+
+    /// The bytes of the open document, for saving it into a note.
+    ///
+    /// A document opened from a file is read from that file *now*: the user may have edited it,
+    /// replaced it, or moved it since, and what a note should carry is the document as it is, not
+    /// as it was when the app read it.
+    pub fn document_bytes(&self) -> Result<Vec<u8>> {
+        match &self.source {
+            Some(Source::File(path)) => std::fs::read(path).map_err(|error| {
+                AppError::Other(format!("{} could not be read: {error}", path.display()))
+            }),
+            Some(Source::Memory { bytes, .. }) => Ok(bytes.clone()),
+            None => Err(AppError::Other(String::from("no PDF is open"))),
+        }
     }
 
     /// The best bitmap available *now* for a request, without rasterising anything.
@@ -651,6 +723,38 @@ mod tests {
         let path = std::env::temp_dir().join("cheap-note-cache-fixture.pdf");
         document.save_to_file(&path).expect("the document is saved");
         Some(path)
+    }
+
+    /// A document that arrives as bytes — what a saved note carries — opens and renders.
+    ///
+    /// This is the path a note takes: the PDF never touches the disk, so nothing is written to a
+    /// temporary file and a note opens from anywhere the app can read it.
+    #[test]
+    fn a_document_opens_from_memory() {
+        let Some(path) = a_one_page_pdf() else {
+            eprintln!("skipping: pdfium.dll is not available");
+            return;
+        };
+
+        let bytes = std::fs::read(&path).expect("the fixture reads");
+        let mut view = PdfDocumentView::open_bytes(String::from("from-memory.pdf"), bytes, 200)
+            .expect("the document opens from bytes");
+
+        assert_eq!(view.page_count(), 1);
+        assert_eq!(view.file_name(), "from-memory.pdf");
+
+        let page = view.render_page(0, 200).expect("the page renders");
+        assert_eq!(page.pixels, 200, "the rung it was asked for");
+        assert!(page.point_height > page.point_width, "A4 is portrait");
+
+        // And its bytes come back out, which is what saving a note needs.
+        assert_eq!(
+            view.document_bytes().expect("the bytes are kept").len(),
+            std::fs::metadata(&path).expect("the fixture is there").len() as usize,
+            "a document opened from memory can be saved again without the file"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Every field of the cache key is in it, because every field changes the pixels.

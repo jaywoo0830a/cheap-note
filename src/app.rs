@@ -30,7 +30,7 @@
 //! What the user writes on is described by [`crate::canvas`]: its size, its colour, and what is
 //! printed on it. A PDF page overrides all three, because a PDF page is its own paper.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -42,7 +42,7 @@ use gpui_kit::*;
 
 use crate::canvas::{contrast_color, CanvasSize, CanvasStyle, Ruling, Swatch, INK_COLORS, PAPER_COLORS};
 use crate::cursor::{PenCursor, NIB_RADIUS};
-use crate::ink::{InkDocument, InkTransform, Stroke, Tool};
+use crate::ink::{InkTransform, Notes, Stroke, Tool};
 use crate::pen::{capture_config, PenInbox, PenService};
 use crate::pdf::{PageRequest, PdfDocumentView, RenderedPage};
 use crate::refresh::{Cadence, DisplayRefresh};
@@ -160,6 +160,23 @@ fn display_due(probed_at: Instant, now: Instant) -> bool {
 /// pause between two letters of a word is not mistaken for one.
 const PDF_QUIET_INTERVAL: Duration = Duration::from_millis(120);
 
+/// Whether a note was written on the sheet in use.
+///
+/// Compared with a tolerance rather than exactly: the numbers travel through JSON as `f32`, and a
+/// note written on the same sheet must not be reported as a different one because of a rounding
+/// step. One logical pixel is far below what a person could notice and far above what the round
+/// trip can introduce.
+fn sheet_matches(written: (f32, f32), current: (f32, f32)) -> bool {
+    (written.0 - current.0).abs() <= 1.0 && (written.1 - current.1).abs() <= 1.0
+}
+
+/// The file name of a path, for a message about it.
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 /// Whether the pen has been quiet long enough to spend a rasterisation on it.
 ///
 /// A free function for the same reason [`status_due`] and [`display_due`] are: it is a decision,
@@ -245,7 +262,7 @@ pub struct NoteApp {
     /// screen: the callback runs after the element tree is built and cannot borrow the view.
     cadence: Arc<Cadence>,
     /// The page's ink.
-    ink: InkDocument,
+    ink: Notes,
     /// The PDF being annotated, if any.
     pdf: PdfDocumentView,
     /// The pen capture and its queue.
@@ -328,7 +345,7 @@ impl NoteApp {
             refresh,
             display_at: Instant::now(),
             cadence: Arc::new(Cadence::new()),
-            ink: InkDocument::new(),
+            ink: Notes::new(),
             pdf: PdfDocumentView::empty(),
             pen,
             system_cursor,
@@ -745,9 +762,14 @@ impl NoteApp {
     }
 
     /// Shows the previous page.
+    ///
+    /// The ink moves with the page — `go_to` takes the page being left behind with it — which is
+    /// what keeps a note on the sheet it was written on rather than on whichever sheet is shown
+    /// next.
     fn previous_page(&mut self, cx: &mut Context<Self>) {
         if self.page_index > 0 {
             self.page_index -= 1;
+            self.ink.go_to(self.page_index);
             // The status line names the page, so it is stale as soon as the page changes.
             self.touch_status();
             cx.notify();
@@ -755,21 +777,31 @@ impl NoteApp {
     }
 
     /// Shows the next page.
+    ///
+    /// The page count is the document's when there is one, and the note's otherwise: a note written
+    /// on blank sheets has pages of its own, and without this the sheet it was written on beyond the
+    /// first could never be reached again.
     fn next_page(&mut self, cx: &mut Context<Self>) {
-        if self.page_index + 1 < self.pdf.page_count() {
+        if self.page_index + 1 < self.page_total() {
             self.page_index += 1;
+            self.ink.go_to(self.page_index);
             self.touch_status();
             cx.notify();
         }
     }
 
-    /// Asks the platform for a PDF and opens it.
+    /// How many pages there are to move between.
+    fn page_total(&self) -> usize {
+        self.pdf.page_count().max(self.ink.page_count())
+    }
+
+    /// Asks the platform for a PDF, or for a saved note, and opens it.
     fn prompt_for_pdf(&mut self, cx: &mut Context<Self>) {
         let options = PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Open a PDF to annotate".into()),
+            prompt: Some("Open a PDF, or a note saved from this app".into()),
         };
         let receiver = cx.prompt_for_paths(options);
 
@@ -778,11 +810,97 @@ impl NoteApp {
             // a platform error both mean "nothing was chosen".
             if let Ok(Ok(Some(paths))) = receiver.await {
                 if let Some(path) = paths.into_iter().next() {
-                    this.update(cx, |app, cx| app.open_pdf(path, cx)).ok();
+                    this.update(cx, |app, cx| app.open_any(path, cx)).ok();
                 }
             }
         })
         .detach();
+    }
+
+    /// Opens whatever the user chose: a saved note, or a bare PDF to write on.
+    ///
+    /// Told apart by the file rather than by a menu of two commands: a note *is* a zip, and making
+    /// the user remember which of two dialogs to pick would be asking them to keep track of this
+    /// app's internals for it.
+    fn open_any(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let is_note = path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"));
+
+        if is_note {
+            self.open_bundle(path, cx);
+        } else {
+            self.open_pdf(path, cx);
+        }
+    }
+
+    /// Opens a saved note: the document it holds, and the ink over it.
+    ///
+    /// A note without a document was written on a blank sheet, and reopening it puts the app back
+    /// on a blank sheet — leaving whatever document happened to be open behind it would be putting
+    /// one sheet's writing on another's.
+    fn open_bundle(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let bundle = match crate::bundle::read(&path) {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                self.report(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        let pixel_width = self.pdf_render_pixel_width();
+        let mut failed = false;
+
+        self.pdf = match bundle.document {
+            Some(document) => match PdfDocumentView::open_bytes(
+                document.name.clone(),
+                document.bytes,
+                pixel_width,
+            ) {
+                Ok(view) => view,
+                Err(error) => {
+                    self.report(format!(
+                        "the document in {} could not be opened: {error}",
+                        file_label(&path)
+                    ));
+                    failed = true;
+                    PdfDocumentView::empty()
+                }
+            },
+            None => PdfDocumentView::empty(),
+        };
+
+        if failed {
+            cx.notify();
+            return;
+        }
+
+        let strokes: usize = bundle.pages.iter().map(|(_, ink)| ink.stroke_count()).sum();
+        self.ink.replace(bundle.pages, bundle.page);
+        self.page_index = bundle.page;
+        self.settings.bundle_path = Some(path.clone());
+        self.save_settings();
+
+        // A note written on a different sheet than the one in use would be drawn at the wrong
+        // scale, so that is said out loud rather than silently rescaled.
+        let sheet = self.sheet_size();
+        self.message = match bundle.sheet {
+            Some((width, height)) if !sheet_matches((width, height), sheet) => format!(
+                "opened {} — written on a {width:.0}×{height:.0} sheet, this one is {:.0}×{:.0}",
+                file_label(&path),
+                sheet.0,
+                sheet.1
+            ),
+            _ => format!(
+                "opened {} ({strokes} strokes on {} pages)",
+                file_label(&path),
+                self.ink.written_pages().len()
+            ),
+        };
+
+        self.touch_status();
+        cx.notify();
     }
 
     /// Opens a PDF and renders its first page.
@@ -793,6 +911,10 @@ impl NoteApp {
             Ok(view) => {
                 self.pdf = view;
                 self.page_index = 0;
+                // A new document is a new note: the ink that was on screen belonged to the sheet
+                // that is no longer there, and keeping it would put one document's writing on
+                // another's page.
+                self.ink = Notes::new();
                 self.message = format!("opened {}", self.pdf.file_name());
             }
             Err(error) => {
@@ -804,7 +926,133 @@ impl NoteApp {
         cx.notify();
     }
 
-    /// Writes the settings out, reporting a failure rather than hiding it.
+    /// Asks the platform where to write the note, then writes it.
+    fn prompt_to_save(&mut self, cx: &mut Context<Self>) {
+        if !self.pdf.is_loaded() && self.ink.is_blank() {
+            self.report(String::from("there is nothing to save yet"));
+            cx.notify();
+            return;
+        }
+
+        // The suggestion is the document's name with the extension changed: a note about
+        // `chapter-3.pdf` is one the user will look for as `chapter-3`.
+        let suggested = format!("{}.zip", self.note_stem());
+        let directory = self
+            .settings
+            .bundle_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        let receiver = cx.prompt_for_new_path(&directory, Some(&suggested));
+
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = receiver.await {
+                this.update(cx, |app, cx| app.save_bundle(path, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Writes the note back to where it came from, asking for a place the first time.
+    fn save(&mut self, cx: &mut Context<Self>) {
+        match self.settings.bundle_path.clone() {
+            Some(path) => self.save_bundle(path, cx),
+            None => self.prompt_to_save(cx),
+        }
+    }
+
+    /// Writes the note now: the document, and every page that was written on.
+    fn save_bundle(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // The document is optional: a blank sheet can be written on with nothing open, and what is
+        // written then has to be saveable too.
+        let document = if self.pdf.is_loaded() {
+            match self.pdf.document_bytes() {
+                Ok(bytes) => Some(crate::bundle::Document {
+                    name: self.pdf.file_name(),
+                    bytes,
+                }),
+                Err(error) => {
+                    self.report(error.to_string());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        // Each page's ink is copied out of the model, because the model keeps only one page *hot*
+        // and the bundle is written from the map: this is the page-turn code path run in reverse,
+        // and it happens once per save.
+        let pages: Vec<(usize, crate::ink::InkDocument)> = self
+            .ink
+            .written_pages()
+            .into_iter()
+            .filter_map(|page| {
+                let strokes = self
+                    .ink
+                    .page_ink(page)?
+                    .finished()
+                    .iter()
+                    .map(|stroke| (**stroke).clone())
+                    .collect();
+
+                Some((page, crate::ink::InkDocument::from_strokes(strokes)))
+            })
+            .collect();
+
+        let strokes: usize = pages.iter().map(|(_, ink)| ink.stroke_count()).sum();
+        let bundle = crate::bundle::Bundle {
+            document,
+            pages,
+            page: self.page_index,
+            sheet: Some(self.sheet_size()),
+        };
+
+        match crate::bundle::write(&path, &bundle) {
+            Ok(()) => {
+                self.settings.bundle_path = Some(path.clone());
+                self.save_settings();
+                self.message = format!("saved {} ({strokes} strokes)", file_label(&path));
+            }
+            Err(error) => self.message = error.to_string(),
+        }
+
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// The name a note about the open document should suggest.
+    fn note_stem(&self) -> String {
+        if !self.pdf.is_loaded() {
+            return String::from("note");
+        }
+
+        let name = self.pdf.file_name();
+        match name.rsplit_once('.') {
+            Some((stem, _)) if !stem.is_empty() => stem.to_string(),
+            _ => name,
+        }
+    }
+
+    /// The sheet the ink is written on, in logical pixels.
+    ///
+    /// With a document open the sheet *is* the page, so its own aspect ratio decides the height;
+    /// without one it is the chosen canvas size. This is the space every stroke's coordinates are
+    /// in, which is why it is what a note records about itself.
+    fn sheet_size(&self) -> (f32, f32) {
+        let width = self.settings.page_display_width;
+
+        self.pdf
+            .page_point_size(self.page_index)
+            .map(|(point_width, point_height)| {
+                let scale = width / point_width.max(1.0);
+                (width, point_height * scale)
+            })
+            .unwrap_or_else(|| self.settings.canvas_size.display_size(width))
+    }
     fn save_settings(&mut self) {
         if let Err(error) = self.settings.save(&self.settings_path) {
             self.message = format!("settings could not be saved: {error}");
@@ -978,7 +1226,7 @@ impl NoteApp {
             "{}  page {}/{}",
             self.pdf.file_name(),
             self.page_index + 1,
-            self.pdf.page_count().max(1)
+            self.page_total().max(1)
         ));
         parts.push(format!(
             "{}  {:.2} ms/frame",
@@ -1105,7 +1353,14 @@ impl NoteApp {
             action_button("clear", "Clear", false, cx, |app, cx| app.clear(cx)).into_any_element(),
         );
         actions.push(
-            action_button("open-pdf", "Open PDF…", false, cx, |app, cx| {
+            // Saves over the note this session has already written, and asks where to put it the
+            // first time — so writing repeatedly is one click, and the file is still the user's to
+            // choose.
+            action_button("save-note", "Save", false, cx, |app, cx| app.save(cx))
+                .into_any_element(),
+        );
+        actions.push(
+            action_button("open-note", "Open…", false, cx, |app, cx| {
                 app.prompt_for_pdf(cx)
             })
             .into_any_element(),
@@ -1629,9 +1884,10 @@ mod tests {
     // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
     // scope and shadow the attribute this module needs.
     use super::{
-        display_due, notch_in_pixels, pdf_render_due, pinch_zoom_factor, quantise_width, solid_path,
-        status_due, wheel_pan, wheel_zoom_factor, DISPLAY_INTERVAL, PDF_QUIET_INTERVAL,
-        STATUS_INTERVAL, WHEEL_LINE_HEIGHT, WHEEL_LINES_PER_NOTCH, WHEEL_ZOOM_STEP,
+        display_due, file_label, notch_in_pixels, pdf_render_due, pinch_zoom_factor, quantise_width,
+        sheet_matches, solid_path, status_due, wheel_pan, wheel_zoom_factor, DISPLAY_INTERVAL,
+        PDF_QUIET_INTERVAL, STATUS_INTERVAL, WHEEL_LINE_HEIGHT, WHEEL_LINES_PER_NOTCH,
+        WHEEL_ZOOM_STEP,
     };
     use crate::ink::{InkPoint, Stroke};
     use gpui_kit::{point, px, Path, PathBuilder, Pixels, Point};
@@ -1865,6 +2121,34 @@ mod tests {
 
         // A clock that goes backwards must not force a probe on every frame either.
         assert!(!display_due(now + Duration::from_secs(1), now));
+    }
+
+    /// A note written on the same sheet is not reported as a different one.
+    #[test]
+    fn a_note_on_the_same_sheet_matches() {
+        let sheet = (794.0, 1123.0);
+
+        assert!(sheet_matches(sheet, sheet), "the same numbers");
+        assert!(
+            sheet_matches(sheet, (794.4, 1122.6)),
+            "a rounding step through JSON is not a different sheet"
+        );
+        assert!(!sheet_matches(sheet, (595.0, 842.0)), "A5 is not A4");
+        assert!(
+            !sheet_matches(sheet, (794.0, 1123.0 + 8.0)),
+            "a taller sheet is a different sheet"
+        );
+    }
+
+    /// A message about a file names the file, not its whole path.
+    #[test]
+    fn a_file_is_labelled_by_its_name() {
+        // `Path` is spelled out because the test module also has GPUI's own `Path` in scope.
+        assert_eq!(
+            file_label(std::path::Path::new(r"C:\notes\chapter-3.zip")),
+            "chapter-3.zip"
+        );
+        assert_eq!(file_label(std::path::Path::new("note.zip")), "note.zip");
     }
 
     /// A page is rasterised when the pen stops, not while it is writing.

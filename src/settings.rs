@@ -70,6 +70,13 @@ pub struct Settings {
     /// ends up showing colour pages after the toggle was switched.
     pub grayscale_pages: bool,
 
+    /// Where the note was last saved or opened, so `Save` can write over it instead of asking.
+    ///
+    /// Remembered across restarts: the file a person is working on is the file they come back to,
+    /// and being asked for it again on every save is the kind of small friction that makes an app
+    /// feel like a prototype.
+    pub bundle_path: Option<PathBuf>,
+
     /// Whether the top bar — tools, canvas controls and the live status line — is shown.
     ///
     /// The bar floats over the canvas, so hiding it gives the whole window to the sheet and
@@ -123,6 +130,7 @@ impl Default for Settings {
             canvas_size: CanvasSize::A4,
             canvas_style: CanvasStyle::Plain,
             grayscale_pages: false,
+            bundle_path: None,
             show_toolbar: true,
             show_status: true,
             // On by default: a digitizer's tilt is data the user paid for, and a cursor that shows

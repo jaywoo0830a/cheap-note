@@ -10,13 +10,15 @@
 //!   drawn;
 //! * the interface is built with GPUI Kit (theme tokens, components, a GPU-accelerated scene);
 //! * PDF pages are rasterised by Pdfium through `pdfium-render`;
-//! * the writing loop is paced against the display's refresh rate (60, 120, 180 or 240 Hz).
+//! * the writing loop is paced against the display's frame rate: the monitor's mode is read
+//!   (`EnumDisplaySettingsW`), the frames this app paints are measured, and the pump interval
+//!   follows whichever of the two describes what the eye sees.
 //!
 //! ## Module map
 //!
 //! | Module      | Responsibility                                             |
 //! | ----------- | ---------------------------------------------------------- |
-//! | [`refresh`] | supported refresh rates, detection, and frame pacing       |
+//! | [`refresh`] | supported refresh rates, the monitor's mode, and the measured frame rate |
 //! | [`pen`]     | the capture, its worker thread, and the hand-off queue     |
 //! | [`ink`]     | readings to strokes: edges, resampling, width, erasing     |
 //! | [`canvas`]  | the sheet's size, colour and ruling                        |

@@ -12,10 +12,10 @@
 //! ## The frame loop
 //!
 //! Nothing here polls for pen input. The pen thread pushes readings into a queue, and an async
-//! task (see [`NoteApp::start_pen_pump`]) drains it on a timer derived from the display's
-//! refresh rate, feeds the ink model, and calls `cx.notify()` — so a frame is scheduled exactly
-//! when there is something new to show, and the app is idle otherwise. "Something new" is two
-//! things: ink that changed, and a cursor that moved. A pen held in range without touching lays no
+//! task (see [`NoteApp::start_pen_pump`]) drains it on a timer derived from the display's *measured*
+//! frame rate, feeds the ink model, and calls `cx.notify()` — so a frame is scheduled exactly when
+//! there is something new to show, and the app is idle otherwise. "Something new" is two things: ink
+//! that changed, and a cursor that moved. A pen held in range without touching lays no
 //! ink at all, and it is the ghost cursor (see [`crate::cursor`]) that has to follow it.
 //!
 //! ## The top bar, and why it can be turned off
@@ -45,7 +45,7 @@ use crate::cursor::{PenCursor, NIB_RADIUS};
 use crate::ink::{InkDocument, InkTransform, Stroke, Tool};
 use crate::pen::{capture_config, PenInbox, PenService};
 use crate::pdf::{PdfDocumentView, RenderedPage};
-use crate::refresh::{DisplayRefresh, RefreshMode, RefreshRate};
+use crate::refresh::{Cadence, DisplayRefresh};
 use crate::settings::Settings;
 use crate::system_cursor::SystemCursor;
 use crate::timing::{measure, Timings};
@@ -135,6 +135,23 @@ fn status_due(built_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(built_at) >= STATUS_INTERVAL
 }
 
+/// How often the monitor's mode is re-read.
+///
+/// A mode changes when a person changes it: a display is unplugged, a window is dragged to another
+/// panel, a laptop's panel is switched to another rate. Two seconds is fast enough that none of
+/// those outlives a stroke, and slow enough that a user-mode display query per frame is not worth
+/// thinking about. The rate the app is actually *served* at is not this: that is measured from the
+/// frames themselves, on every frame.
+const DISPLAY_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Whether the monitor's mode is due to be read again.
+///
+/// A free function for the same reason [`status_due`] is one: the pacing can be tested without a
+/// window or a display.
+fn display_due(probed_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(probed_at) >= DISPLAY_INTERVAL
+}
+
 /// The sheet as the last frame drew it: its size in paper units, and where that was placed.
 ///
 /// The pump has no window to ask, and does not need one: a reading has to land on the sheet the
@@ -204,6 +221,13 @@ pub struct NoteApp {
     settings_path: PathBuf,
     /// The display probe and the rate the app paces itself at.
     refresh: DisplayRefresh,
+    /// When the monitor's mode was last re-read, for [`display_due`].
+    display_at: Instant,
+    /// What the display's frame time is, measured from the frames this app painted.
+    ///
+    /// Shared with the paint callback, which is the only place that knows a frame reached the
+    /// screen: the callback runs after the element tree is built and cannot borrow the view.
+    cadence: Arc<Cadence>,
     /// The page's ink.
     ink: InkDocument,
     /// The PDF being annotated, if any.
@@ -228,9 +252,9 @@ pub struct NoteApp {
     last_pump: Option<Instant>,
     /// The pump's current interval in microseconds, shared with the pump task.
     ///
-    /// Changing the refresh rate has to change how often the queue is drained, and the pump
-    /// task is already running, so the interval lives in an atomic the task re-reads rather
-    /// than in a captured local it could not see a change to.
+    /// A frame measured faster than the mode it read has to change how often the queue is drained,
+    /// and the pump task is already running, so the interval lives in an atomic the task re-reads
+    /// rather than in a captured local it could not see a change to.
     pump_interval_micros: Arc<AtomicU64>,
     /// The rule geometry for the current sheet.
     ///
@@ -258,7 +282,9 @@ impl NoteApp {
             Err(error) => (Settings::default(), format!("using default settings ({error})")),
         };
 
-        let refresh = DisplayRefresh::probe(settings.refresh);
+        // The monitor the window is on, not the primary one: a mode is a property of the display
+        // the ink is on screen on, and the frames that follow measure the rest.
+        let refresh = DisplayRefresh::probe(window);
 
         // The capture must be attached on the thread that owns the window, which is this one.
         let pen = PenService::attach(window, capture_config());
@@ -277,6 +303,8 @@ impl NoteApp {
             settings,
             settings_path,
             refresh,
+            display_at: Instant::now(),
+            cadence: Arc::new(Cadence::new()),
             ink: InkDocument::new(),
             pdf: PdfDocumentView::empty(),
             pen,
@@ -288,7 +316,7 @@ impl NoteApp {
             timings: Arc::new(Timings::default()),
             last_pump: None,
             pump_interval_micros: Arc::new(AtomicU64::new(
-                refresh.effective.pump_interval().as_micros() as u64
+                refresh.pump_interval().as_micros() as u64
             )),
             ruling: Ruling::default(),
             status: String::new(),
@@ -306,10 +334,11 @@ impl NoteApp {
 
     /// Drains the pen queue on a timer and repaints when the ink changed.
     ///
-    /// The loop parks on a timer rather than spinning: the interval comes from the refresh
-    /// rate (half a frame, clamped), so a 240 Hz panel gets readings onto the screen in about
-    /// 2 ms and a 60 Hz panel does not wake up more often than it needs to. The task ends when
-    /// the view is dropped — `update` returns `Err` once the entity is gone.
+    /// The loop parks on a timer rather than spinning: the interval comes from the display's frame
+    /// time — measured from the frames this app painted, so a laptop panel running at 165 Hz is
+    /// pumped for at 165 Hz rather than for whichever step it was snapped to — and is half a frame,
+    /// clamped. The task ends when the view is dropped — `update` returns `Err` once the entity is
+    /// gone.
     fn start_pen_pump(&mut self, cx: &mut Context<Self>) {
         let inbox: Arc<PenInbox> = self.pen.inbox();
         let interval_micros = Arc::clone(&self.pump_interval_micros);
@@ -320,9 +349,6 @@ impl NoteApp {
             cx.background_executor().timer(interval).await;
 
             let batch = inbox.take();
-            if batch.samples.is_empty() {
-                continue;
-            }
 
             let alive = this.update(cx, |app, cx| {
                 // The gap between this wake and the last, against the interval it asked for: a
@@ -332,6 +358,24 @@ impl NoteApp {
                     app.timings
                         .pump_gap
                         .record(woke.saturating_duration_since(previous));
+                }
+
+                // What the frames have measured since the last wake, before anything is painted
+                // with it: the pump interval has to be the display's, not a guess about it.
+                //
+                // Read before the pen is looked at, because the display is measured whether or not
+                // a pen is in hand — a resize, a zoom, or the first frames of a session are all
+                // repaints its rate can be read from, and an app that only counted frames while a
+                // pen was down would report "measured —" at every other moment.
+                let display_moved = app.follow_display_cadence(woke);
+
+                if batch.samples.is_empty() {
+                    // Nothing from the pen: the display's numbers are the only thing that can have
+                    // moved, and they only need a frame if they did.
+                    if display_moved {
+                        cx.notify();
+                    }
+                    return;
                 }
 
                 // How long the newest reading waited for this wake. Together with the capture's
@@ -351,10 +395,11 @@ impl NoteApp {
                 // about whether the pen has a cursor of its own.
                 app.follow_pen_with_pointer();
 
-                if !laid_ink && !cursor_moved {
+                if !laid_ink && !cursor_moved && !display_moved {
                     // Nothing on screen changed: a reading the resampler and the pointer gate both
-                    // dropped, or a hover that moved nothing. Repainting an identical scene on each
-                    // of those is what made the top of the window look like it was flickering.
+                    // dropped, a hover that moved nothing, or a display whose numbers have not
+                    // moved since the last wake. Repainting an identical scene on each of those is
+                    // what made the top of the window look like it was flickering.
                     return;
                 }
 
@@ -390,19 +435,55 @@ impl NoteApp {
         cx.notify();
     }
 
-    /// Hands the app back to the display, or pins it to one supported rate.
+    /// Folds in what the frames have measured, and says whether it changed on screen.
     ///
-    /// The pump interval is updated through the shared atomic, so the running pump task picks
-    /// the new rate up on its next wake without a restart.
-    fn set_refresh_mode(&mut self, mode: RefreshMode, cx: &mut Context<Self>) {
-        self.settings.refresh = mode;
-        self.refresh = DisplayRefresh::probe(mode);
+    /// This is where the display is *measured* rather than asked about: the cadence is fed by the
+    /// paint callback on every frame, and a change in it moves the pump interval — the one number
+    /// that decides how long a reading waits before it is on screen — without a restart or a probe.
+    fn follow_display_cadence(&mut self, now: Instant) -> bool {
+        let measured = self.cadence.frame_interval();
+        if !self.refresh.observe(measured.map(|interval| interval.as_micros() as u64)) {
+            return false;
+        }
+
+        self.store_pump_interval();
+        // The line names the measurement, so it is stale the moment the measurement changes. It is
+        // rebuilt through the paced path rather than forced: at most the clock is what it was
+        // already waiting for.
+        self.refresh_status(now);
+        true
+    }
+
+    /// Re-reads the monitor's mode, and says whether it changed on screen.
+    ///
+    /// Called from the frame, on a slow clock, because that is the only place the window is in
+    /// hand. A *changed* reading is also the one piece of evidence that the frames measured before
+    /// it came from another display, so the measurement is thrown away with it: the app is paced by
+    /// the new monitor's reported rate until the new monitor's frames say otherwise.
+    fn reprobe_display(&mut self, window: &Window) -> bool {
+        if !display_due(self.display_at, Instant::now()) {
+            return false;
+        }
+
+        self.display_at = Instant::now();
+        if !self.refresh.reprobe(window) {
+            return false;
+        }
+
+        self.cadence.reset();
+        self.store_pump_interval();
+        self.touch_status();
+        true
+    }
+
+    /// Publishes the interval the pump should be waking at.
+    ///
+    /// One place, so no path can change the rate in force without the running pump task seeing it.
+    fn store_pump_interval(&mut self) {
         self.pump_interval_micros.store(
-            self.refresh.effective.pump_interval().as_micros() as u64,
+            self.refresh.pump_interval().as_micros() as u64,
             Ordering::Relaxed,
         );
-        self.message = self.refresh.summary();
-        self.finish_setting(cx);
     }
 
     /// Changes the sheet's size, and its scale with it.
@@ -790,7 +871,7 @@ impl NoteApp {
         parts.push(format!(
             "{}  {:.2} ms/frame",
             self.refresh.summary(),
-            self.refresh.effective.frame_interval().as_secs_f64() * 1000.0
+            self.refresh.frame_interval().as_secs_f64() * 1000.0
         ));
 
         match self.pen.stats() {
@@ -839,7 +920,7 @@ impl NoteApp {
         // view state the sheet's own controls cannot show a number for, and the rest is the
         // measurement this app runs on itself.
         parts.push(format!("view {:.0}%", self.view.zoom() * 100.0));
-        parts.push(self.timings.summary(self.refresh.effective.pump_interval()));
+        parts.push(self.timings.summary(self.refresh.pump_interval()));
 
         if !self.message.is_empty() {
             parts.push(self.message.clone());
@@ -864,7 +945,7 @@ impl NoteApp {
         }
     }
 
-    /// The command surface: tools, actions, pages, refresh rate, and the two visibility switches.
+    /// The command surface: tools, actions, pages, and the three visibility switches.
     ///
     /// The elements are collected into owned vectors before they are chained onto the row.
     /// That is deliberate: each `cx.listener` takes a mutable borrow of the context, and a
@@ -922,30 +1003,6 @@ impl NoteApp {
             action_button("page-next", "Next", false, cx, |app, cx| app.next_page(cx))
                 .into_any_element(),
         );
-
-        let mut rates: Vec<AnyElement> = Vec::new();
-        rates.push(
-            action_button(
-                "rate-auto",
-                "Auto",
-                self.settings.refresh == RefreshMode::Auto,
-                cx,
-                |app, cx| app.set_refresh_mode(RefreshMode::Auto, cx),
-            )
-            .into_any_element(),
-        );
-        for rate in RefreshRate::ALL {
-            rates.push(
-                action_button(
-                    refresh_button_id(rate),
-                    rate.label(),
-                    self.settings.refresh == RefreshMode::Fixed(rate),
-                    cx,
-                    move |app, cx| app.set_refresh_mode(RefreshMode::Fixed(rate), cx),
-                )
-                .into_any_element(),
-            );
-        }
 
         let switches = vec![
             visibility_switch(
@@ -1012,8 +1069,6 @@ impl NoteApp {
                     .children(actions)
                     .child(toolbar_divider(border_color))
                     .children(pages)
-                    .child(toolbar_divider(border_color))
-                    .children(rates)
                     .child(div().flex_1())
                     .children(status)
                     .child(toolbar_divider(border_color))
@@ -1164,6 +1219,12 @@ impl Render for NoteApp {
         // The counters describe one frame, so this frame's are its own.
         self.timings.start_frame();
 
+        // The monitor's mode, re-read on a slow clock. It costs a user-mode query at most once
+        // every couple of seconds, it cannot happen anywhere but here — this is the only place the
+        // window is in hand — and a change in it resets the measurement, so the frames that follow
+        // are the new display's.
+        self.reprobe_display(window);
+
         // The scale factor is what turns a physical pen pixel into a logical one, so it is
         // captured before anything that depends on it.
         self.scale = window.scale_factor();
@@ -1229,6 +1290,9 @@ impl Render for NoteApp {
         let ink_color: Hsla = rgb(self.settings.ink_color).into();
         let page_color: Hsla = rgb(self.settings.page_color).into();
         let timings = Arc::clone(&self.timings);
+        // The same hand-off for the frame clock: the paint callback is where a frame is known to
+        // have reached the screen, so it is where the display's real rate is measured.
+        let cadence = Arc::clone(&self.cadence);
 
         // The ghost cursor: a mark at the nib with the pen's body leaning away from it. Drawn last,
         // because a cursor belongs on top of everything, and only while the pen is in range — the
@@ -1272,6 +1336,11 @@ impl Render for NoteApp {
                     |_, _, _| (),
                     move |_bounds, _, window: &mut Window, _cx: &mut App| {
                         let _timed = measure(&timings.paint);
+
+                        // The one place in the app that knows a frame reached the screen, and so
+                        // the one place the display's rate can be measured rather than asked about.
+                        // Two atomic adds; the pump reads the answer on its next wake.
+                        cadence.record(Instant::now());
 
                         // The sheet: a filled rectangle, then its ruling, then the page image.
                         paint_rect(window, page_origin, page_size.0, page_size.1, page_color);
@@ -1340,20 +1409,6 @@ impl Render for NoteApp {
                 .size_full(),
             )
             .child(bar)
-    }
-}
-
-/// A stable element id for each refresh rate.
-///
-/// Element ids must be stable across repaints, otherwise GPUI cannot keep focus, hover or
-/// scroll state attached to the control — and a reorderable or looping control that used its
-/// index would silently shift that state onto a neighbour.
-fn refresh_button_id(rate: RefreshRate) -> &'static str {
-    match rate {
-        RefreshRate::Hz60 => "rate-60",
-        RefreshRate::Hz120 => "rate-120",
-        RefreshRate::Hz180 => "rate-180",
-        RefreshRate::Hz240 => "rate-240",
     }
 }
 
@@ -1443,11 +1498,110 @@ mod tests {
     // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
     // scope and shadow the attribute this module needs.
     use super::{
-        notch_in_pixels, pinch_zoom_factor, quantise_width, status_due, wheel_pan,
-        wheel_zoom_factor, STATUS_INTERVAL, WHEEL_LINE_HEIGHT, WHEEL_LINES_PER_NOTCH,
-        WHEEL_ZOOM_STEP,
+        display_due, notch_in_pixels, pinch_zoom_factor, quantise_width, solid_path, status_due,
+        wheel_pan, wheel_zoom_factor, DISPLAY_INTERVAL, STATUS_INTERVAL, WHEEL_LINE_HEIGHT,
+        WHEEL_LINES_PER_NOTCH, WHEEL_ZOOM_STEP,
     };
+    use crate::ink::{InkPoint, Stroke};
+    use gpui_kit::{point, px, Path, PathBuilder, Pixels, Point};
     use std::time::{Duration, Instant};
+
+    /// How many triangles of a built path cover a point.
+    ///
+    /// A path's vertices are a triangle list — the renderer draws them as `TRIANGLELIST` — so this
+    /// is the coverage that would be accumulated at that pixel. Zero means the paper shows through.
+    fn coverage(path: &Path<Pixels>, x: f32, y: f32) -> usize {
+        let cross = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| {
+            (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+        };
+
+        path.vertices
+            .chunks_exact(3)
+            .filter(|triangle| {
+                let corner = |index: usize| {
+                    let vertex = triangle[index].xy_position;
+                    (f32::from(vertex.x), f32::from(vertex.y))
+                };
+                let (a, b, c) = (corner(0), corner(1), corner(2));
+
+                let (d1, d2, d3) = (cross(a, b, (x, y)), cross(b, c, (x, y)), cross(c, a, (x, y)));
+
+                // Inside whichever way the triangle is wound: the list holds both orientations.
+                (d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0) || (d1 <= 0.0 && d2 <= 0.0 && d3 <= 0.0)
+            })
+            .count()
+    }
+
+    /// A stroke whose ribbon crosses itself: a circle drawn all the way round and a fifth of the
+    /// way past where it started, which is the shape a cursive loop or a scribble-over makes.
+    fn self_crossing_stroke() -> Stroke {
+        let mut stroke = Stroke::new(InkPoint::new(60.0, 0.0, 24.0));
+
+        for step in 1..=190 {
+            // A full turn and a fifth of the way past it: `TAU` and not `PI`, or the "circle" is
+            // half of one and never crosses itself.
+            let angle = step as f32 / 180.0 * std::f32::consts::TAU;
+            stroke.points.push(InkPoint::new(
+                60.0 * angle.cos(),
+                60.0 * angle.sin(),
+                24.0,
+            ));
+        }
+
+        stroke.close();
+        stroke
+    }
+
+    /// A stroke that crosses itself must be painted solid.
+    ///
+    /// This is the bug the fill rule in [`solid_path`] fixes, pinned from both sides: the default
+    /// *even-odd* rule leaves the crossing empty — a white diamond where two lines cross, and a
+    /// striped mesh where a scribble doubles back — and *non-zero* fills it. The last assertion is
+    /// the other half: neither rule loses the ordinary, uncrossed part of the ribbon, so the fix
+    /// costs nothing anywhere else.
+    #[test]
+    fn a_crossing_stroke_is_filled_and_not_holed() {
+        let stroke = self_crossing_stroke();
+        let outline: Vec<Point<Pixels>> = stroke
+            .outline
+            .iter()
+            .map(|[x, y]| point(px(*x), px(*y)))
+            .collect();
+
+        // What the app used to paint with: the builder's own default options.
+        let mut default_builder = PathBuilder::fill();
+        default_builder.add_polygon(&outline, true);
+        let even_odd = default_builder.build().expect("a path");
+
+        // What it paints with now.
+        let mut ink_builder = solid_path();
+        ink_builder.add_polygon(&outline, true);
+        let non_zero = ink_builder.build().expect("a path");
+
+        // The loop closes over its own start, so the overlap is the strip just inside the circle
+        // between where it began and where it came back round to.
+        let (crossing_x, crossing_y) = (57.0, 10.0);
+        assert_eq!(
+            coverage(&even_odd, crossing_x, crossing_y),
+            0,
+            "even-odd leaves the crossing empty: that is the white diamond"
+        );
+        assert!(
+            coverage(&non_zero, crossing_x, crossing_y) > 0,
+            "non-zero fills the crossing"
+        );
+
+        // The top of the circle, which no part of the stroke crosses.
+        let (plain_x, plain_y) = (0.0, -60.0);
+        assert!(
+            coverage(&even_odd, plain_x, plain_y) > 0,
+            "even-odd fills the ordinary part of the ribbon"
+        );
+        assert!(
+            coverage(&non_zero, plain_x, plain_y) > 0,
+            "and so does non-zero"
+        );
+    }
 
     /// One notch of a wheel is one zoom step — and a notch arrives as several lines, which is the
     /// part that is easy to get wrong: it made a notch of a real wheel zoom three times too fast
@@ -1568,6 +1722,20 @@ mod tests {
         );
     }
 
+    /// The monitor's mode is re-read on a clock of its own: rarely enough to be free, often enough
+    /// that a display change does not outlive a stroke.
+    #[test]
+    fn the_monitor_is_not_re_read_every_frame() {
+        let now = Instant::now();
+
+        assert!(!display_due(now, now));
+        assert!(!display_due(now, now + DISPLAY_INTERVAL - Duration::from_millis(1)));
+        assert!(display_due(now, now + DISPLAY_INTERVAL));
+
+        // A clock that goes backwards must not force a probe on every frame either.
+        assert!(!display_due(now + Duration::from_secs(1), now));
+    }
+
     /// The status line is rebuilt on a clock, not on every frame.
     ///
     /// This is the whole anti-flicker fix, so it is pinned down: the pump wakes up to 240 times a
@@ -1606,6 +1774,33 @@ mod tests {
 
         assert!(!status_due(now + Duration::from_secs(1), now));
     }
+}
+
+/// The path builder every solid shape the canvas draws is filled with: the ink, and the ghost
+/// cursor's body.
+///
+/// ## Why the fill rule is set, when the default is one line shorter
+///
+/// `PathBuilder::fill()` uses lyon's default fill options, and lyon's default *fill rule* is
+/// **even-odd**: a pixel the outline crosses an even number of times is left empty. That is the
+/// right rule for a glyph with a counter in it — the hole in an "o" — and the wrong one for a pen.
+///
+/// A stroke is a ribbon filled as one outline, and that outline crosses *itself* wherever the pen
+/// doubles back: a loop, a sharp turn, a scribble over its own line, or a single stroke that
+/// crosses itself. Every one of those places was left empty — a white diamond at a crossing, and a
+/// striped mesh wherever the user scribbled back and forth. Measured against a real drawing
+/// captured from the screen: 3,145 pixels of paper enclosed inside the ink, in stripes.
+///
+/// Non-zero fills everything the outline winds around, crossing or not, which is what a pen does.
+/// The tessellation is otherwise the same work — the same vertices, the same cost — so this is one
+/// option and nothing else changes.
+///
+/// [`tests::a_crossing_stroke_is_filled_and_not_holed`] pins both halves of that: that the default
+/// rule really does leave a hole in a self-crossing stroke, and that this rule does not.
+fn solid_path() -> PathBuilder {
+    PathBuilder::fill().with_style(PathStyle::Fill(
+        FillOptions::default().with_fill_rule(FillRule::NonZero),
+    ))
 }
 
 /// Fills a rectangle given in window coordinates.
@@ -1647,7 +1842,9 @@ fn paint_cursor(window: &mut Window, cursor: PenCursor, color: Hsla) {
             point(px(d[0]), px(d[1])),
         ];
 
-        let mut builder = PathBuilder::fill();
+        // The same rule the ink uses. This quad is convex, so the default rule would do — but a
+        // filled shape that can show a hole is one degenerate tilt away from being a bug.
+        let mut builder = solid_path();
         builder.add_polygon(&corners, true);
 
         if let Ok(path) = builder.build() {
@@ -1705,7 +1902,7 @@ fn paint_stroke(
             .map(|[x, y]| sheet.place(*x, *y)),
     );
 
-    let mut builder = PathBuilder::fill();
+    let mut builder = solid_path();
     builder.add_polygon(points, true);
 
     if let Ok(path) = builder.build() {

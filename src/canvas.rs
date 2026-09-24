@@ -283,6 +283,9 @@ struct RulingKey {
     height: f32,
     style: CanvasStyle,
     paper: u32,
+    /// Part of the key, not derivable from the rectangle: the rule spacing depends on it, and two
+    /// different papers drawn at two different zooms can share a rectangle.
+    zoom: f32,
 }
 
 /// The rule geometry for the current sheet, reused until the sheet changes.
@@ -290,18 +293,34 @@ struct RulingKey {
 pub struct Ruling {
     built_for: Option<RulingKey>,
     quads: Arc<Vec<PaintQuad>>,
+    /// How many times the geometry has actually been built.
+    ///
+    /// Counted here rather than inferred by the caller: whether a request was served from the cache
+    /// is the one thing about this type that its caller cannot see, and it is exactly what the
+    /// frame's own measurements need to know.
+    rebuilds: u64,
 }
 
 impl Ruling {
+    /// How many times the geometry has been built since the app started.
+    pub fn rebuilds(&self) -> u64 {
+        self.rebuilds
+    }
     /// The rule quads for this sheet.
     ///
     /// Returns the cached set when the sheet has not changed, so a frame that only adds ink pays
     /// nothing for the ruling; otherwise rebuilds it once and caches that.
+    ///
+    /// `zoom` is separate from the sheet's rectangle because the ruling is *printed on the paper*:
+    /// the rules have to grow with it, or zooming in would make the grid relatively finer instead
+    /// of closer. It is part of the cache key for the same reason — two different papers at two
+    /// different zooms can share a rectangle.
     pub fn quads(
         &mut self,
         sheet: Bounds<Pixels>,
         style: CanvasStyle,
         paper: u32,
+        zoom: f32,
     ) -> Arc<Vec<PaintQuad>> {
         let key = RulingKey {
             x: sheet.origin.x.into(),
@@ -310,11 +329,13 @@ impl Ruling {
             height: sheet.size.height.into(),
             style,
             paper,
+            zoom,
         };
 
         if self.built_for != Some(key) {
-            self.quads = Arc::new(build_ruling(sheet, style, rgb(rule_color(paper)).into()));
+            self.quads = Arc::new(build_ruling(sheet, style, rgb(rule_color(paper)).into(), zoom));
             self.built_for = Some(key);
+            self.rebuilds += 1;
         }
 
         Arc::clone(&self.quads)
@@ -322,43 +343,64 @@ impl Ruling {
 }
 
 /// Builds the ruling for a sheet. Empty for a blank sheet.
-fn build_ruling(sheet: Bounds<Pixels>, style: CanvasStyle, color: Hsla) -> Vec<PaintQuad> {
+///
+/// Everything about it — how far apart the rules are, and how thick — is scaled by the zoom, so
+/// the ruling behaves like something printed on the paper rather than a screen overlay that happens
+/// to be the same colour.
+fn build_ruling(
+    sheet: Bounds<Pixels>,
+    style: CanvasStyle,
+    color: Hsla,
+    zoom: f32,
+) -> Vec<PaintQuad> {
     let Some(spacing) = style.spacing() else {
         return Vec::new();
     };
+
+    // A zoom of zero or NaN would make every rule land on top of every other one.
+    let zoom = if zoom.is_finite() && zoom > 0.0 {
+        zoom
+    } else {
+        1.0
+    };
+    let spacing = spacing * zoom;
 
     let x: f32 = sheet.origin.x.into();
     let y: f32 = sheet.origin.y.into();
     let width: f32 = sheet.size.width.into();
     let height: f32 = sheet.size.height.into();
+    let thick = RULE_THICKNESS * zoom;
 
     let mut quads = Vec::new();
     match style {
         CanvasStyle::Plain => {}
         CanvasStyle::Ruled => {
             for line in 1..=rules_that_fit(height, spacing) {
-                quads.push(rule_quad(x, y + line as f32 * spacing, width, color));
+                quads.push(rule_quad(x, y + line as f32 * spacing, width, thick, color));
             }
         }
         CanvasStyle::Grid => {
             for line in 1..=rules_that_fit(height, spacing) {
-                quads.push(rule_quad(x, y + line as f32 * spacing, width, color));
+                quads.push(rule_quad(x, y + line as f32 * spacing, width, thick, color));
             }
             for line in 1..=rules_that_fit(width, spacing) {
                 quads.push(vertical_rule_quad(
                     x + line as f32 * spacing,
                     y,
                     height,
+                    thick,
                     color,
                 ));
             }
         }
         CanvasStyle::Dots => {
+            let diameter = DOT_DIAMETER * zoom;
             for row in 1..=rules_that_fit(height, spacing) {
                 for column in 1..=rules_that_fit(width, spacing) {
                     quads.push(dot_quad(
                         x + column as f32 * spacing,
                         y + row as f32 * spacing,
+                        diameter,
                         color,
                     ));
                 }
@@ -385,11 +427,11 @@ fn rules_that_fit(extent: f32, spacing: f32) -> usize {
 }
 
 /// A horizontal rule filling the sheet's width.
-fn rule_quad(x: f32, y: f32, width: f32, color: Hsla) -> PaintQuad {
+fn rule_quad(x: f32, y: f32, width: f32, thickness: f32, color: Hsla) -> PaintQuad {
     fill(
         Bounds {
             origin: point(px(x), px(y)),
-            size: size(px(width), px(RULE_THICKNESS)),
+            size: size(px(width), px(thickness)),
         },
         color,
     )
@@ -400,25 +442,25 @@ fn rule_quad(x: f32, y: f32, width: f32, color: Hsla) -> PaintQuad {
 /// A separate function rather than a sign flip on [`rule_quad`]: a rule's two dimensions are not
 /// interchangeable, and passing a height into a width is exactly the mistake that puts a line
 /// off the side of the sheet.
-fn vertical_rule_quad(x: f32, y: f32, height: f32, color: Hsla) -> PaintQuad {
+fn vertical_rule_quad(x: f32, y: f32, height: f32, thickness: f32, color: Hsla) -> PaintQuad {
     fill(
         Bounds {
             origin: point(px(x), px(y)),
-            size: size(px(RULE_THICKNESS), px(height)),
+            size: size(px(thickness), px(height)),
         },
         color,
     )
 }
 
 /// One dot of a dot grid, centred on the given position.
-fn dot_quad(x: f32, y: f32, color: Hsla) -> PaintQuad {
-    let radius = DOT_DIAMETER / 2.0;
+fn dot_quad(x: f32, y: f32, diameter: f32, color: Hsla) -> PaintQuad {
+    let radius = diameter / 2.0;
     let corner = px(radius);
 
     fill(
         Bounds {
             origin: point(px(x - radius), px(y - radius)),
-            size: size(px(DOT_DIAMETER), px(DOT_DIAMETER)),
+            size: size(px(diameter), px(diameter)),
         },
         color,
     )
@@ -503,14 +545,14 @@ mod tests {
         let sheet = sheet(720.0, 1018.0);
         let color = rule_on_white();
 
-        assert!(build_ruling(sheet, CanvasStyle::Plain, color).is_empty());
+        assert!(build_ruling(sheet, CanvasStyle::Plain, color, 1.0).is_empty());
 
         for style in CanvasStyle::ALL {
             if style == CanvasStyle::Plain {
                 continue;
             }
             assert!(
-                !build_ruling(sheet, style, color).is_empty(),
+                !build_ruling(sheet, style, color, 1.0).is_empty(),
                 "{style:?} prints something"
             );
         }
@@ -522,7 +564,7 @@ mod tests {
         let sheet = sheet(720.0, 1018.0);
 
         for style in CanvasStyle::ALL {
-            for quad in build_ruling(sheet, style, rule_on_white()) {
+            for quad in build_ruling(sheet, style, rule_on_white(), 1.0) {
                 let (x, y, width, height) = quad_bounds(&quad);
                 assert!(
                     x >= 24.0 - 1e-3 && y >= 24.0 - 1e-3,
@@ -562,17 +604,17 @@ mod tests {
         let mut ruling = Ruling::default();
         let sheet = sheet(720.0, 1018.0);
 
-        let first = ruling.quads(sheet, CanvasStyle::Grid, 0xFF_FF_FF);
-        let again = ruling.quads(sheet, CanvasStyle::Grid, 0xFF_FF_FF);
+        let first = ruling.quads(sheet, CanvasStyle::Grid, 0xFF_FF_FF, 1.0);
+        let again = ruling.quads(sheet, CanvasStyle::Grid, 0xFF_FF_FF, 1.0);
         assert!(
             Arc::ptr_eq(&first, &again),
             "an unchanged sheet is not rebuilt"
         );
 
-        let restyled = ruling.quads(sheet, CanvasStyle::Dots, 0xFF_FF_FF);
+        let restyled = ruling.quads(sheet, CanvasStyle::Dots, 0xFF_FF_FF, 1.0);
         assert!(!Arc::ptr_eq(&first, &restyled), "a new style is rebuilt");
 
-        let repapered = ruling.quads(sheet, CanvasStyle::Dots, 0x14_16_1A);
+        let repapered = ruling.quads(sheet, CanvasStyle::Dots, 0x14_16_1A, 1.0);
         assert!(
             !Arc::ptr_eq(&restyled, &repapered),
             "new paper changes the rule's colour, so it is rebuilt"
@@ -646,5 +688,44 @@ mod tests {
             ids.len(),
             PAPER_COLORS.len() + INK_COLORS.len() + CanvasSize::ALL.len() + CanvasStyle::ALL.len()
         );
+    }
+
+    /// What building a sheet's ruling costs.
+    ///
+    /// A zoom rebuilds it — the ruling is printed on the paper, so it grows with the zoom — and
+    /// this is the price of the gesture steps that move it enough to matter. A dot grid is the
+    /// worst of the four styles: its quad count is the product of the rules on both axes rather
+    /// than their sum.
+    ///
+    /// Run `cargo test --release -- --nocapture measures_the_ruling_costs`.
+    #[test]
+    fn measures_the_ruling_costs() {
+        eprintln!("\n── ruling, measured ───────────────────────────────────────────");
+        for zoom in [1.0f32, 2.0, 4.0] {
+            let sheet = sheet(720.0 * zoom, 1_018.0 * zoom);
+
+            for style in CanvasStyle::ALL {
+                // Warm up, then measure what one zoom step pays.
+                for _ in 0..8 {
+                    std::hint::black_box(build_ruling(sheet, style, rule_on_white(), zoom));
+                }
+
+                let rounds = 20;
+                let started = std::time::Instant::now();
+                for _ in 0..rounds {
+                    std::hint::black_box(build_ruling(sheet, style, rule_on_white(), zoom));
+                }
+                let built = started.elapsed() / rounds;
+                let quads = build_ruling(sheet, style, rule_on_white(), zoom).len();
+
+                eprintln!(
+                    "  at {zoom:>3.0}x   {:<6} {:>5} quads   {:>8.1?}",
+                    style.label(),
+                    quads,
+                    built
+                );
+            }
+        }
+        eprintln!("───────────────────────────────────────────────────────────────\n");
     }
 }

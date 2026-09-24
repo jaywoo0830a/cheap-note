@@ -21,8 +21,9 @@
 //!
 //! GPUI's canvas paint callback is `FnOnce`, so each frame hands the renderer an owned
 //! snapshot of the ink. Cloning a `Vec<Stroke>` every frame would be O(strokes) per frame at
-//! the display's rate; cloning an `Arc` is a pointer copy. A new `Arc` is built only when the
-//! ink actually changes (a stroke ends, undo, clear), which happens once per stroke.
+//! the display's rate; cloning an `Arc` is a pointer copy. The strokes are behind an `Arc` of
+//! their own for the same reason one level down: a vector of pointers can be appended to,
+//! undone and filtered without touching the strokes themselves.
 
 use std::sync::Arc;
 
@@ -30,6 +31,67 @@ use pen_windows::{PenPhase, PenSample};
 use serde::{Deserialize, Serialize};
 
 use crate::settings::Settings;
+
+/// Where the pen is, in the sheet's own coordinates.
+///
+/// Three coordinate systems meet here, and this is the one place they are brought together:
+/// `pen-windows` reports **physical** client pixels, GPUI lays out and paints in **logical** ones,
+/// and the sheet is drawn inside the window at a zoom and an offset. Storing ink in window
+/// coordinates instead would tie the pen's line to the window rather than to the paper — zoom, and
+/// the note slides off the page it was written on.
+///
+/// The zoom is *not* applied to a point's width: widths stay in paper units, so a stroke keeps its
+/// weight relative to the page it was written on, and zooming in enlarges it along with everything
+/// else printed there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InkTransform {
+    /// Physical pixels to logical pixels: the window's DPI scale factor.
+    pub scale: f32,
+    /// How large the sheet is drawn, relative to its own size.
+    pub zoom: f32,
+    /// The sheet's top-left corner, in window logical pixels.
+    pub origin: (f32, f32),
+}
+
+impl Default for InkTransform {
+    fn default() -> Self {
+        InkTransform::identity()
+    }
+}
+
+impl InkTransform {
+    /// The reading's own coordinates: what a test with no window wants.
+    pub const fn identity() -> Self {
+        InkTransform {
+            scale: 1.0,
+            zoom: 1.0,
+            origin: (0.0, 0.0),
+        }
+    }
+
+    /// Where a reading in physical client pixels lands on the sheet.
+    pub fn sheet_point(&self, pixel: (f32, f32)) -> (f32, f32) {
+        // A window that reports a zero scale or a zero zoom would divide every point into a
+        // corner, and a NaN would poison every rectangle derived from it. Both mean "no
+        // transform", which draws the ink where the pen is.
+        let scale = finite_or_one(self.scale);
+        let zoom = finite_or_one(self.zoom);
+
+        (
+            (pixel.0 / scale - self.origin.0) / zoom,
+            (pixel.1 / scale - self.origin.1) / zoom,
+        )
+    }
+}
+
+/// `value` when it is a usable divisor, and `1.0` when it is not.
+fn finite_or_one(value: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        1.0
+    }
+}
 
 /// What a stroke does to the page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +206,25 @@ impl Stroke {
         self.points
             .windows(2)
             .any(|pair| distance_to_segment_squared(x, y, pair[0], pair[1]) <= radius_squared)
+    }
+
+    /// Whether any of this stroke falls inside a rectangle of the sheet, as `[min_x, min_y,
+    /// max_x, max_y]`.
+    ///
+    /// This is how a frame leaves the ink that is off screen out of the picture. The bounds are
+    /// already kept for hit-testing, so the test is four comparisons — against building a polygon
+    /// for every stroke on the page and letting the renderer discover that most of them are
+    /// outside the window, which is the most expensive thing an immediate-mode canvas can be
+    /// asked to do. It matters most when zoomed in, where most of a page is off screen.
+    pub fn visible_in(&self, rect: [f32; 4]) -> bool {
+        if self.points.is_empty() {
+            return false;
+        }
+
+        self.bounds[0] <= rect[2]
+            && self.bounds[2] >= rect[0]
+            && self.bounds[1] <= rect[3]
+            && self.bounds[3] >= rect[1]
     }
 }
 
@@ -274,7 +355,13 @@ impl InkStats {
 #[derive(Debug)]
 pub struct InkDocument {
     /// The strokes the pen has finished, behind an `Arc` so a frame can snapshot it cheaply.
-    finished: Arc<Vec<Stroke>>,
+    ///
+    /// The strokes are behind an `Arc` of their own, so that the vector can be *changed* without
+    /// copying the ink: appending a stroke, undoing one, or erasing one rebuilds a vector of
+    /// pointers rather than a vector of strokes. With the strokes inline, ending a stroke on a page
+    /// that already held a thousand of them deep-copied all thousand — and the eraser, which
+    /// touches this per reading, copied the page several hundred times a second.
+    finished: Arc<Vec<Arc<Stroke>>>,
     /// The stroke currently being drawn, if a pen nib is down.
     open: Option<Stroke>,
     /// The pointer that owns the turn: the pen or eraser that is currently down.
@@ -316,7 +403,7 @@ impl InkDocument {
     }
 
     /// The finished strokes, cheaply shareable with a frame.
-    pub fn finished(&self) -> &Arc<Vec<Stroke>> {
+    pub fn finished(&self) -> &Arc<Vec<Arc<Stroke>>> {
         &self.finished
     }
 
@@ -375,9 +462,8 @@ impl InkDocument {
             return false;
         }
 
-        let mut finished = (*self.finished).clone();
-        finished.pop();
-        self.finished = Arc::new(finished);
+        Arc::make_mut(&mut self.finished).pop();
+        self.last_erase = None;
         true
     }
 
@@ -391,21 +477,25 @@ impl InkDocument {
 
     /// Feeds a batch of pen readings to the model.
     ///
-    /// `scale` is the window's DPI scale factor: `pen-windows` reports **physical** client
-    /// pixels, while GPUI lays out and paints in **logical** ones, so the two must be brought
-    /// together exactly once, here.
+    /// `transform` is how a physical reading becomes a place on the sheet: the window's DPI scale,
+    /// the sheet's zoom and where the sheet is drawn. All three are applied here, once, so that
+    /// nothing downstream has to know about any of them — the ink, the eraser and the geometry all
+    /// work in the sheet's own coordinates.
     ///
     /// Returns whether anything changed, which is what the caller uses to decide whether a
     /// repaint is worth scheduling.
-    pub fn consume(&mut self, samples: &[PenSample], scale: f32, settings: &Settings) -> bool {
-        let scale = if scale > 0.0 { scale } else { 1.0 };
+    pub fn consume(
+        &mut self,
+        samples: &[PenSample],
+        transform: &InkTransform,
+        settings: &Settings,
+    ) -> bool {
         let mut changed = false;
 
         for sample in samples {
             self.stats.readings += 1;
 
-            let x = sample.pixel.x / scale;
-            let y = sample.pixel.y / scale;
+            let (x, y) = transform.sheet_point((sample.pixel.x, sample.pixel.y));
 
             match sample.phase {
                 PenPhase::Down => {
@@ -483,9 +573,9 @@ impl InkDocument {
         if let Some(mut stroke) = self.open.take() {
             if !stroke.is_empty() {
                 stroke.close();
-                let mut finished = (*self.finished).clone();
-                finished.push(stroke);
-                self.finished = Arc::new(finished);
+                // `make_mut` reuses the existing vector when no frame is holding a snapshot, and
+                // copies it when one is — and that copy is of pointers, not of ink.
+                Arc::make_mut(&mut self.finished).push(Arc::new(stroke));
             }
         }
         self.active_pointer = None;
@@ -566,6 +656,14 @@ impl InkDocument {
         };
 
         stroke.points.push(InkPoint::new(target_x, target_y, width));
+
+        // Kept up to date as the stroke grows, rather than only when it closes: a frame asks
+        // whether the stroke being drawn is on screen before it has ever been closed.
+        stroke.bounds[0] = stroke.bounds[0].min(target_x);
+        stroke.bounds[1] = stroke.bounds[1].min(target_y);
+        stroke.bounds[2] = stroke.bounds[2].max(target_x);
+        stroke.bounds[3] = stroke.bounds[3].max(target_y);
+
         self.stats.kept_points += 1;
     }
 
@@ -586,18 +684,22 @@ impl InkDocument {
         }
         self.last_erase = Some((x, y));
 
-        let before = self.finished.len();
-        let kept: Vec<Stroke> = self
+        // Two passes, and the order is the whole point of them. The first is a bounds test per
+        // stroke — a handful of comparisons — and it answers the question the drag asks most of the
+        // time: *nothing* is under the nib. Only when something is does the second pass run at all,
+        // so the common case costs no copying.
+        if !self
             .finished
             .iter()
-            .filter(|stroke| !stroke.hits(x, y, settings.erase_radius))
-            .cloned()
-            .collect();
-
-        if kept.len() != before {
-            self.stats.erased_strokes += (before - kept.len()) as u64;
-            self.finished = Arc::new(kept);
+            .any(|stroke| stroke.hits(x, y, settings.erase_radius))
+        {
+            return;
         }
+
+        let before = self.finished.len();
+        Arc::make_mut(&mut self.finished).retain(|stroke| !stroke.hits(x, y, settings.erase_radius));
+
+        self.stats.erased_strokes += (before - self.finished.len()) as u64;
     }
 }
 
@@ -625,15 +727,37 @@ mod tests {
         }
     }
 
+    /// The transform for a test with no window: the reading's own pixels.
+    fn id() -> InkTransform {
+        InkTransform::identity()
+    }
+
+    /// A transform with a DPI scale and no zoom, for the tests about the conversion.
+    fn scaled(scale: f32) -> InkTransform {
+        InkTransform {
+            scale,
+            ..InkTransform::identity()
+        }
+    }
+
+    /// A transform with a zoom and an offset: a sheet drawn inside a window.
+    fn zoomed(zoom: f32, origin: (f32, f32)) -> InkTransform {
+        InkTransform {
+            zoom,
+            origin,
+            ..InkTransform::identity()
+        }
+    }
+
     /// The edges are what make a stroke: a down, positions, and an up.
     #[test]
     fn a_down_and_up_make_one_stroke() {
         let mut ink = InkDocument::new();
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], 1.0, &s);
-        ink.consume(&[reading(7, PenPhase::Move, 14.0, 10.0, Some(0.5))], 1.0, &s);
-        ink.consume(&[reading(7, PenPhase::Up, 18.0, 10.0, None)], 1.0, &s);
+        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Move, 14.0, 10.0, Some(0.5))], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Up, 18.0, 10.0, None)], &id(), &s);
 
         assert_eq!(ink.stroke_count(), 1);
         assert!(ink.open().is_none(), "the lift closed the stroke");
@@ -648,9 +772,9 @@ mod tests {
         let mut ink = InkDocument::new();
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], 1.0, &s);
-        ink.consume(&[reading(7, PenPhase::Move, 20.0, 10.0, Some(0.5))], 1.0, &s);
-        ink.consume(&[reading(7, PenPhase::Cancel, 999.0, 999.0, None)], 1.0, &s);
+        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Move, 20.0, 10.0, Some(0.5))], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Cancel, 999.0, 999.0, None)], &id(), &s);
 
         assert_eq!(ink.stroke_count(), 1);
         assert_eq!(ink.finished()[0].points.len(), 2);
@@ -667,9 +791,9 @@ mod tests {
         let mut ink = InkDocument::new();
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], 1.0, &s);
-        ink.consume(&[reading(9, PenPhase::Move, 500.0, 10.0, Some(0.5))], 1.0, &s);
-        ink.consume(&[reading(7, PenPhase::Up, 20.0, 10.0, None)], 1.0, &s);
+        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+        ink.consume(&[reading(9, PenPhase::Move, 500.0, 10.0, Some(0.5))], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Up, 20.0, 10.0, None)], &id(), &s);
 
         assert_eq!(ink.stroke_count(), 1);
         let xs: Vec<f32> = ink.finished()[0].points.iter().map(|p| p.x).collect();
@@ -688,7 +812,7 @@ mod tests {
                 reading(7, PenPhase::Hover, 10.0, 0.0, None),
                 reading(7, PenPhase::Up, 20.0, 0.0, None),
             ],
-            1.0,
+            &id(),
             &s,
         );
 
@@ -702,9 +826,9 @@ mod tests {
         let mut ink = InkDocument::new();
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 0.0, 0.0, None)], 1.0, &s);
-        ink.consume(&[reading(7, PenPhase::Move, 20.0, 0.0, None)], 1.0, &s);
-        ink.consume(&[reading(7, PenPhase::Up, 40.0, 0.0, None)], 1.0, &s);
+        ink.consume(&[reading(7, PenPhase::Down, 0.0, 0.0, None)], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Move, 20.0, 0.0, None)], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Up, 40.0, 0.0, None)], &id(), &s);
 
         for point in &ink.finished()[0].points {
             assert_eq!(point.width, s.no_pressure_width);
@@ -721,16 +845,16 @@ mod tests {
             ..Settings::default()
         };
 
-        ink.consume(&[reading(7, PenPhase::Down, 0.0, 0.0, Some(0.5))], 1.0, &s);
+        ink.consume(&[reading(7, PenPhase::Down, 0.0, 0.0, Some(0.5))], &id(), &s);
         for step in 1..=9 {
             // Each reading is 1 px from the last: all of them are below the spacing.
             ink.consume(
                 &[reading(7, PenPhase::Move, step as f32, 0.0, Some(0.5))],
-                1.0,
+                &id(),
                 &s,
             );
         }
-        ink.consume(&[reading(7, PenPhase::Up, 9.5, 0.0, None)], 1.0, &s);
+        ink.consume(&[reading(7, PenPhase::Up, 9.5, 0.0, None)], &id(), &s);
 
         let stroke = &ink.finished()[0];
         assert_eq!(stroke.points.len(), 2, "the down and the lift");
@@ -752,8 +876,8 @@ mod tests {
 
         for index in 0..3 {
             let x = index as f32 * 100.0;
-            ink.consume(&[reading(7, PenPhase::Down, x, 0.0, Some(0.5))], 1.0, &s);
-            ink.consume(&[reading(7, PenPhase::Up, x + 10.0, 0.0, None)], 1.0, &s);
+            ink.consume(&[reading(7, PenPhase::Down, x, 0.0, Some(0.5))], &id(), &s);
+            ink.consume(&[reading(7, PenPhase::Up, x + 10.0, 0.0, None)], &id(), &s);
         }
         assert_eq!(ink.stroke_count(), 3);
 
@@ -771,8 +895,8 @@ mod tests {
         let mut ink = InkDocument::new();
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 150.0, 90.0, Some(0.5))], 1.5, &s);
-        ink.consume(&[reading(7, PenPhase::Up, 300.0, 180.0, None)], 1.5, &s);
+        ink.consume(&[reading(7, PenPhase::Down, 150.0, 90.0, Some(0.5))], &scaled(1.5), &s);
+        ink.consume(&[reading(7, PenPhase::Up, 300.0, 180.0, None)], &scaled(1.5), &s);
 
         assert_eq!(ink.finished()[0].points[0].x, 100.0);
         assert_eq!(ink.finished()[0].points[1].y, 120.0);
@@ -784,19 +908,355 @@ mod tests {
         let mut ink = InkDocument::new();
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 0.0, 0.0, Some(0.5))], 1.0, &s);
-        ink.consume(&[reading(7, PenPhase::Up, 40.0, 0.0, None)], 1.0, &s);
-        ink.consume(&[reading(7, PenPhase::Down, 500.0, 0.0, Some(0.5))], 1.0, &s);
-        ink.consume(&[reading(7, PenPhase::Up, 540.0, 0.0, None)], 1.0, &s);
+        ink.consume(&[reading(7, PenPhase::Down, 0.0, 0.0, Some(0.5))], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Up, 40.0, 0.0, None)], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Down, 500.0, 0.0, Some(0.5))], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Up, 540.0, 0.0, None)], &id(), &s);
         assert_eq!(ink.stroke_count(), 2);
 
         // The eraser nib touches the first stroke only.
         let mut eraser = reading(7, PenPhase::Down, 20.0, 0.0, None);
         eraser.eraser = true;
-        ink.consume(&[eraser], 1.0, &s);
+        ink.consume(&[eraser], &id(), &s);
 
         assert_eq!(ink.stroke_count(), 1);
         assert_eq!(ink.finished()[0].points[0].x, 500.0);
         assert_eq!(ink.stats().erased_strokes, 1);
+    }
+
+    /// Ink belongs to the paper, not to the window: a reading becomes the place on the sheet that
+    /// the reader sees the nib at, so zooming moves the ink with the page it was written on.
+    #[test]
+    fn ink_lands_where_the_sheet_is_drawn() {
+        let mut ink = InkDocument::new();
+        let s = settings();
+
+        // A sheet drawn at 2x, its top-left corner 100 px into the window.
+        let sheet = zoomed(2.0, (100.0, 60.0));
+        ink.consume(&[reading(7, PenPhase::Down, 300.0, 160.0, Some(0.5))], &sheet, &s);
+
+        let point = ink.open().expect("a stroke").points[0];
+        assert_eq!((point.x, point.y), (100.0, 50.0), "(300-100)/2, (160-60)/2");
+
+        // The same reading on a sheet at its own size, drawn at the origin, is the reading.
+        let mut flat = InkDocument::new();
+        flat.consume(&[reading(7, PenPhase::Down, 300.0, 160.0, Some(0.5))], &id(), &s);
+        let point = flat.open().expect("a stroke").points[0];
+        assert_eq!((point.x, point.y), (300.0, 160.0));
+    }
+
+    /// A transform that cannot divide draws the ink where the pen is rather than nowhere.
+    #[test]
+    fn a_broken_transform_is_the_identity() {
+        let broken = InkTransform {
+            scale: 0.0,
+            zoom: f32::NAN,
+            origin: (10.0, 10.0),
+        };
+
+        assert_eq!(broken.sheet_point((30.0, 30.0)), (20.0, 20.0));
+    }
+
+    /// A stroke's bounds follow it as it grows, so a frame can ask whether the stroke being drawn
+    /// is on screen before the stroke has ever been closed.
+    #[test]
+    fn a_growing_stroke_knows_where_it_is() {
+        let mut ink = InkDocument::new();
+        let s = settings();
+
+        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Move, 90.0, 70.0, Some(0.5))], &id(), &s);
+
+        let open = ink.open().expect("a stroke");
+        assert_eq!(open.bounds, [10.0, 10.0, 90.0, 70.0]);
+        assert!(open.visible_in([0.0, 0.0, 50.0, 50.0]), "the corner overlaps");
+        assert!(!open.visible_in([200.0, 200.0, 300.0, 300.0]), "and away does not");
+    }
+
+    /// Off-screen ink is rejected by four comparisons rather than turned into a polygon.
+    #[test]
+    fn a_stroke_outside_the_view_is_not_visible() {
+        let mut stroke = Stroke::new(InkPoint::new(500.0, 500.0, 2.0));
+        stroke.points.push(InkPoint::new(540.0, 520.0, 2.0));
+        stroke.close();
+
+        assert!(stroke.visible_in([400.0, 400.0, 600.0, 600.0]));
+        assert!(stroke.visible_in([520.0, 480.0, 700.0, 700.0]), "overlapping counts");
+        assert!(!stroke.visible_in([0.0, 0.0, 100.0, 100.0]));
+        assert!(!stroke.visible_in([600.0, 0.0, 700.0, 100.0]), "beside it");
+    }
+
+    /// Ending a stroke must not copy the page's ink.
+    ///
+    /// The strokes are behind their own `Arc`s precisely so that growing the vector of them is a
+    /// pointer copy; with the strokes inline, a page holding a thousand of them deep-copied all
+    /// thousand at every lift. The pointers are the assertion: a copy would move them.
+    #[test]
+    fn ending_a_stroke_does_not_copy_the_page() {
+        let mut ink = InkDocument::new();
+        let s = settings();
+
+        let mut pointers: Vec<*const Stroke> = Vec::new();
+        for index in 0..64 {
+            let x = index as f32 * 10.0;
+            ink.consume(&[reading(7, PenPhase::Down, x, 0.0, Some(0.5))], &id(), &s);
+            ink.consume(&[reading(7, PenPhase::Up, x + 4.0, 0.0, None)], &id(), &s);
+
+            if index < 63 {
+                pointers = ink.finished().iter().map(Arc::as_ptr).collect();
+            }
+        }
+
+        let after: Vec<*const Stroke> = ink.finished().iter().map(Arc::as_ptr).collect();
+        assert_eq!(after.len(), 64);
+        assert_eq!(
+            &after[..63],
+            &pointers[..],
+            "the first sixty-three strokes are the same allocations they were"
+        );
+    }
+
+    /// A reading that erases nothing must not copy the page — and it is the common one: a drag
+    /// spends most of its readings over blank paper.
+    #[test]
+    fn erasing_blank_paper_does_not_copy_the_page() {
+        let mut ink = page_with(200);
+        let s = settings();
+
+        // A frame holding a snapshot, exactly as the render path does.
+        let frame = Arc::clone(ink.finished());
+        assert_eq!(Arc::strong_count(&frame), 2);
+
+        let mut eraser = reading(7, PenPhase::Move, 0.0, 0.0, None);
+        eraser.eraser = true;
+        ink.consume(&[eraser], &id(), &s);
+
+        assert_eq!(
+            Arc::strong_count(&frame),
+            2,
+            "the page was copied for a reading that touched nothing"
+        );
+        assert_eq!(ink.finished().len(), 200);
+    }
+
+    /// A page of `count` two-point strokes, each 10 px apart.
+    fn page_with(count: usize) -> InkDocument {
+        let mut ink = InkDocument::new();
+        let s = settings();
+
+        for index in 0..count {
+            let x = (index % 40) as f32 * 10.0;
+            let y = (index / 40) as f32 * 10.0;
+            ink.consume(&[reading(7, PenPhase::Down, x, y, Some(0.5))], &id(), &s);
+            ink.consume(&[reading(7, PenPhase::Up, x + 4.0, y, None)], &id(), &s);
+        }
+
+        ink
+    }
+
+    /// A page of `count` strokes of 40 points each: enough ink to look like a written page.
+    fn written_page(count: usize) -> InkDocument {
+        let mut ink = InkDocument::new();
+
+        for index in 0..count {
+            let mut samples = Vec::with_capacity(41);
+            let x = (index % 20) as f32 * 40.0;
+            let y = (index / 20) as f32 * 60.0;
+            samples.push(reading(7, PenPhase::Down, x, y, Some(0.5)));
+
+            for step in 1..40 {
+                // Two pixels apart: above the resampler's spacing, so every one is kept.
+                samples.push(reading(
+                    7,
+                    PenPhase::Move,
+                    x + step as f32 * 2.0,
+                    y + (step % 7) as f32,
+                    Some(0.5),
+                ));
+            }
+            samples.push(reading(7, PenPhase::Up, x + 80.0, y, None));
+            ink.consume(&samples, &id(), &settings());
+        }
+
+        ink
+    }
+
+    /// `count` readings along a wave, 2 px apart, as one batch.
+    fn a_wave(count: usize) -> Vec<pen_windows::PenSample> {
+        let mut samples = Vec::with_capacity(count + 2);
+        samples.push(reading(7, PenPhase::Down, 0.0, 0.0, Some(0.5)));
+
+        for step in 1..count {
+            let angle = step as f32 * 0.05;
+            samples.push(reading(
+                7,
+                PenPhase::Move,
+                step as f32 * 2.0,
+                angle.sin() * 20.0,
+                Some(0.5),
+            ));
+        }
+
+        samples.push(reading(7, PenPhase::Up, count as f32 * 2.0, 0.0, None));
+        samples
+    }
+
+    /// What the ink model costs, measured rather than guessed.
+    ///
+    /// The budgets here are deliberately loose — an order of magnitude above what this machine
+    /// measures, and they have to hold in a debug build too. They are not a speed target; they
+    /// guard the *shape* of the hot paths. A copy that used to be a move, or a rebuild that used
+    /// to be a cache hit, changes the order of magnitude and fails here rather than in somebody's
+    /// hand.
+    ///
+    /// Run `cargo test --release -- --nocapture measures_the_ink_costs` for the numbers.
+    #[test]
+    fn measures_the_ink_costs() {
+        let s = settings();
+        let call = |elapsed: std::time::Duration, calls: u32| {
+            elapsed.as_secs_f64() * 1_000_000.0 / f64::from(calls)
+        };
+
+        // ── Reading a batch into ink: one pump wake of the writing loop ──────
+        let batch = a_wave(240);
+        let mut ink = InkDocument::new();
+        let rounds = 200;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            ink.clear();
+            ink.consume(&batch, &id(), &s);
+        }
+        let consumed = started.elapsed();
+
+        // ── Closing a stroke: the ribbon geometry ────────────────────────────
+        let mut closings = Vec::new();
+        for points in [100usize, 1_000, 3_000] {
+            let mut stroke = Stroke::new(InkPoint::new(0.0, 0.0, 2.0));
+            for step in 1..points {
+                stroke
+                    .points
+                    .push(InkPoint::new(step as f32 * 2.0, (step % 11) as f32, 2.0));
+            }
+
+            let rounds = 20;
+            let started = std::time::Instant::now();
+            for _ in 0..rounds {
+                stroke.close();
+            }
+            closings.push((points, started.elapsed() / rounds));
+        }
+
+        // ── Ending a stroke on a page that is already full ───────────────────
+        let mut page = written_page(2_000);
+        let rounds = 100;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            page.consume(&[reading(7, PenPhase::Down, 5.0, 5.0, Some(0.5))], &id(), &s);
+            page.consume(&[reading(7, PenPhase::Up, 9.0, 5.0, None)], &id(), &s);
+        }
+        let appended = started.elapsed() / rounds;
+
+        // ── An eraser reading that actually erases something ────────────────
+        let mut hit_page = written_page(2_000);
+        let mut eraser = reading(7, PenPhase::Move, 0.0, 0.0, None);
+        eraser.eraser = true;
+        let stroke_point = hit_page.finished()[1].points[0];
+        let hits = 100u32;
+        let started = std::time::Instant::now();
+        for _ in 0..hits {
+            eraser.pixel = pen_windows::Point::new(stroke_point.x, stroke_point.y);
+            hit_page.consume(&[eraser], &id(), &s);
+        }
+        let erased_hit = started.elapsed();
+
+        // ── What the eraser used to cost, kept as the reason it does not ─────
+        //
+        // Every reading — hit or miss — used to deep-copy the whole page: one `Stroke` clone per
+        // stroke on it, points and ribbon outline and all. Nothing calls this path any more; it is
+        // measured so that the reason the strokes are behind their own `Arc`s is a number rather
+        // than a memory.
+        let page = written_page(2_000);
+        let rounds = 50;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            let deep: Vec<Stroke> = page
+                .finished()
+                .iter()
+                .map(|stroke| (**stroke).clone())
+                .collect();
+            std::hint::black_box(deep);
+        }
+        let used_to_be = started.elapsed() / rounds;
+
+        // ── An eraser dragged over blank paper, which is most of a drag ──────
+        let mut page = written_page(2_000);
+        let mut eraser = reading(7, PenPhase::Move, 0.0, 0.0, None);
+        eraser.eraser = true;
+        let drags = 500u32;
+        let started = std::time::Instant::now();
+        for step in 0..drags {
+            eraser.pixel = pen_windows::Point::new(-500.0 - step as f32, -500.0);
+            page.consume(&[eraser], &id(), &s);
+        }
+        let erased = started.elapsed();
+
+        // ── Culling: asking a full page whether each stroke is on screen ─────
+        let rect = [0.0, 0.0, 800.0, 600.0];
+        let rounds = 200;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            for stroke in page.finished().iter() {
+                std::hint::black_box(stroke.visible_in(rect));
+            }
+        }
+        let culled = started.elapsed() / rounds;
+
+        eprintln!("\n── ink, measured ──────────────────────────────────────────────");
+        eprintln!(
+            "  240 readings, one pump wake          {:>9.1} us",
+            call(consumed / rounds, 1)
+        );
+        for (points, elapsed) in &closings {
+            eprintln!("  close a {points:>4}-point stroke         {elapsed:>9.1?}");
+        }
+        eprintln!("  end a stroke on a 2000-stroke page   {appended:>9.1?}");
+        eprintln!(
+            "  one erase reading, blank paper       {:>9.1} us",
+            call(erased, drags)
+        );
+        eprintln!("  cull a 2000-stroke page              {culled:>9.1?}");
+        eprintln!(
+            "  one erase reading, hitting ink       {:>9.1} us",
+            call(erased_hit, hits)
+        );
+        eprintln!(
+            "  ...the copy that used to happen      {used_to_be:>9.1?}   (per reading, hit or miss)"
+        );
+        eprintln!("───────────────────────────────────────────────────────────────\n");
+
+        // ── The budgets ──────────────────────────────────────────────────────
+        assert!(
+            call(consumed / rounds, 1) < 20_000.0,
+            "240 readings taking over 20 ms is not a real-time ink model"
+        );
+        for (points, elapsed) in &closings {
+            assert!(
+                elapsed.as_millis() < 200,
+                "closing a {points}-point stroke took {elapsed:?}"
+            );
+        }
+        assert!(
+            appended.as_millis() < 50,
+            "ending a stroke on a full page took {appended:?}"
+        );
+        assert!(
+            call(erased, drags) < 500.0,
+            "an erase reading that touched nothing took {:?}",
+            erased / drags
+        );
+        assert!(
+            culled.as_micros() < 2_000,
+            "culling a full page took {culled:?}"
+        );
     }
 }

@@ -20,10 +20,12 @@
 //! | [`pen`]     | the capture, its worker thread, and the hand-off queue     |
 //! | [`ink`]     | readings to strokes: edges, resampling, width, erasing     |
 //! | [`canvas`]  | the sheet's size, colour and ruling                        |
+//! | [`view`]    | zoom, fit, and where the sheet sits in the window          |
 //! | [`cursor`]  | the pen's ghost cursor: where it is and how it leans       |
 //! | [`system_cursor`] | hiding the system pointer while the pen is in range |
 //! | [`pdf`]     | the Pdfium document, page rendering, and the page cache    |
 //! | [`app`]     | the view: toolbar, canvas painting, and the pen pump       |
+//! | [`timing`]  | what every hot path costs, measured rather than guessed    |
 //! | [`settings`]| the user's tuning, serialised as JSON                      |
 //! | [`error`]   | the error type every fallible boundary returns             |
 //!
@@ -46,6 +48,8 @@ mod pen;
 mod refresh;
 mod settings;
 mod system_cursor;
+mod timing;
+mod view;
 
 use gpui_kit::component::Root;
 use gpui_kit::*;

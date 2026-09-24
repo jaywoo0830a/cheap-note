@@ -69,6 +69,8 @@ pub struct PdfDocumentView {
     cache: HashMap<usize, RenderedPage>,
     /// The bitmap width the cache was rendered at; a different width invalidates it.
     cached_pixel_width: u32,
+    /// How many pages have been rasterised since the document was opened.
+    rasterised: u64,
 }
 
 impl Default for PdfDocumentView {
@@ -78,6 +80,7 @@ impl Default for PdfDocumentView {
             path: None,
             cache: HashMap::new(),
             cached_pixel_width: 0,
+            rasterised: 0,
         }
     }
 }
@@ -101,6 +104,7 @@ impl PdfDocumentView {
             path: Some(path.to_path_buf()),
             cache: HashMap::new(),
             cached_pixel_width: render_pixel_width,
+            rasterised: 0,
         };
 
         // Render the first page now, so an open PDF shows something other than a blank page.
@@ -135,6 +139,10 @@ impl PdfDocumentView {
     /// A request at a different bitmap width than the cache was built at clears the cache: a
     /// page rendered for one zoom level is the wrong bitmap for another, and keeping both sets
     /// would trade memory for complexity this prototype does not need.
+    ///
+    /// The cache makes the width a *coarse* control rather than a continuous one, which matters
+    /// now that a gesture can change it: while the width stays the same the bitmap is reused, so a
+    /// pinch is free until the width actually moves.
     pub fn render_page(&mut self, index: usize, pixel_width: u32) -> Result<RenderedPage> {
         if self.cached_pixel_width != pixel_width {
             self.cache.clear();
@@ -146,8 +154,17 @@ impl PdfDocumentView {
         }
 
         let page = self.render(index, pixel_width.max(1))?;
+        self.rasterised += 1;
         self.cache.insert(index, page.clone());
         Ok(page)
+    }
+
+    /// How many pages have been rasterised since the document was opened.
+    ///
+    /// Rasterising runs on the calling thread — inside a frame — so this is what lets the frame
+    /// report the time it spent waiting on Pdfium rather than on itself.
+    pub fn rasterised(&self) -> u64 {
+        self.rasterised
     }
 
     /// Renders one page to a GPUI image.
@@ -306,6 +323,64 @@ mod tests {
             Arc::as_ptr(&cached.image),
             "the same bitmap comes back"
         );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// What rasterising a page costs, and what the cache saves.
+    ///
+    /// This is the only part of a frame that can take *milliseconds*, and it runs on the frame's
+    /// own thread: whenever the requested bitmap width changes — opening a document, turning a
+    /// page, zooming, resizing to a different DPI — the next frame waits for Pdfium. The cache is
+    /// what keeps it from being a per-frame cost: an unchanged width is a map lookup.
+    ///
+    /// Run `cargo test --release -- --nocapture measures_the_pdf_costs`.
+    #[test]
+    fn measures_the_pdf_costs() {
+        let Ok(pdfium) = bind_pdfium() else {
+            eprintln!("skipping: pdfium.dll is not available");
+            return;
+        };
+
+        let mut document = pdfium.create_new_pdf().expect("a new document");
+        document
+            .pages_mut()
+            .create_page_at_start(PdfPagePaperSize::a4())
+            .expect("a page is created");
+
+        let path = std::env::temp_dir().join("cheap-note-measured.pdf");
+        document.save_to_file(&path).expect("the document is saved");
+        drop(document);
+
+        eprintln!("\n── pdf, measured ──────────────────────────────────────────────");
+        for width in [720u32, 1_440, 2_880, 5_760] {
+            // Opened at a different width, so the request below is a genuine rasterisation rather
+            // than the cache hit that `open` has already left behind.
+            let mut view = PdfDocumentView::open(&path, 100).expect("the document reopens");
+
+            let started = std::time::Instant::now();
+            let page = view.render_page(0, width).expect("the page renders");
+            let rasterised = started.elapsed();
+
+            let started = std::time::Instant::now();
+            let rounds = 1_000;
+            for _ in 0..rounds {
+                std::hint::black_box(view.render_page(0, width).expect("the cached page"));
+            }
+            let cached = started.elapsed() / rounds;
+
+            let height = (width as f32 * page.point_height / page.point_width.max(1.0)) as u64;
+            let megabytes = (width as u64 * height * 4) / (1024 * 1024);
+            eprintln!(
+                "  a page {width:>4} px wide, {megabytes:>3} MB  rasterise {rasterised:>9.1?}   then {cached:>7.1?} per frame"
+            );
+
+            assert!(
+                cached.as_micros() < 500,
+                "a cached page cost {cached:?} per frame; it is meant to be a map lookup"
+            );
+        }
+        eprintln!("───────────────────────────────────────────────────────────────\n");
 
         let _ = std::fs::remove_file(&path);
     }

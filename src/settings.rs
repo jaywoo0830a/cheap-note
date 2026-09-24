@@ -90,6 +90,13 @@ pub struct Settings {
     /// keeps to itself. It is switchable because a second marker beside the system pointer is a
     /// matter of taste, not of correctness.
     pub show_tilt_cursor: bool,
+
+    /// How large the sheet is drawn: `1.0` is the size the paper asks for.
+    ///
+    /// Not a paper size — choosing A5 is *paper*, while this is how close the reader is standing to
+    /// it. Kept across runs because it is a deliberate choice, and re-derived by Fit Width and Fit
+    /// Height, which are the other two ways to make it.
+    pub zoom: f32,
 }
 
 impl Default for Settings {
@@ -117,6 +124,9 @@ impl Default for Settings {
             // On by default: a digitizer's tilt is data the user paid for, and a cursor that shows
             // it is the only place it is ever visible.
             show_tilt_cursor: true,
+            // As large as the paper says. A sheet that fills a 1280-pixel window at its own scale
+            // is the right place to start; Fit Width is one press away.
+            zoom: 1.0,
         }
     }
 }

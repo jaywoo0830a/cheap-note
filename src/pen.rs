@@ -30,16 +30,42 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pen_windows::{CaptureConfig, CaptureStats, PenCapture, PenSample, PenStream};
 use raw_window_handle::HasWindowHandle;
+
+/// What is waiting in the queue, and since when.
+#[derive(Debug, Default)]
+struct Queue {
+    /// Readings that have arrived but not been consumed yet.
+    samples: Vec<PenSample>,
+    /// When the newest reading in `samples` was queued.
+    ///
+    /// Kept because the age of a reading is the number that says whether writing feels immediate,
+    /// and it cannot be derived afterwards: the capture stamps its own readings, and its clock is
+    /// not one this crate can read.
+    newest_at: Option<Instant>,
+}
+
+/// A batch of readings, and how long the newest of them waited to be taken.
+#[derive(Debug, Default)]
+pub struct PenBatch {
+    /// The readings, oldest first.
+    pub samples: Vec<PenSample>,
+    /// How long the newest reading sat in the queue before this took it.
+    ///
+    /// This is the part of the pen's latency the application owns — the pump's interval, in
+    /// practice. The system's own delay, between the digitizer and the window, is measured by the
+    /// capture and reported separately, and the two together are the whole path from pen to frame.
+    pub waited: Duration,
+}
 
 /// The queue the pen thread fills and the UI thread drains.
 #[derive(Debug, Default)]
 pub struct PenInbox {
     /// Readings that have arrived but not been consumed yet.
-    queue: Mutex<Vec<PenSample>>,
+    queue: Mutex<Queue>,
 }
 
 impl PenInbox {
@@ -47,20 +73,28 @@ impl PenInbox {
     ///
     /// `mem::take` moves the existing allocation out and leaves an empty `Vec` behind, so the
     /// steady state allocates nothing on either side.
-    pub fn take(&self) -> Vec<PenSample> {
+    pub fn take(&self) -> PenBatch {
         let mut queue = self.lock();
-        std::mem::take(&mut *queue)
+        let samples = std::mem::take(&mut queue.samples);
+        let waited = queue
+            .newest_at
+            .take()
+            .map(|newest| Instant::now().saturating_duration_since(newest))
+            .unwrap_or_default();
+
+        PenBatch { samples, waited }
     }
 
     /// Appends a batch, called by the pen thread.
     fn push(&self, samples: &[PenSample]) {
         let mut queue = self.lock();
-        queue.extend_from_slice(samples);
+        queue.samples.extend_from_slice(samples);
+        queue.newest_at = Some(Instant::now());
     }
 
     /// Locks the queue, ignoring poisoning: the payload is plain numbers, so a panic elsewhere
     /// cannot leave it inconsistent.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<PenSample>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Queue> {
         self.queue
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -197,5 +231,49 @@ pub fn capture_config() -> CaptureConfig {
         max_batch: 64,
         capacity: 8,
         trace: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
+    // scope and shadow the attribute this module needs.
+    use super::PenInbox;
+    use pen_windows::PenSample;
+    use std::time::Duration;
+
+    /// A batch arrives with the readings in it, and an empty queue has not waited for anything.
+    #[test]
+    fn a_batch_reports_how_long_it_waited() {
+        let inbox = PenInbox::default();
+        inbox.push(&[PenSample::default(), PenSample::default()]);
+
+        let batch = inbox.take();
+        assert_eq!(batch.samples.len(), 2);
+        assert!(batch.waited < Duration::from_millis(50), "queued just now");
+
+        assert!(inbox.take().samples.is_empty(), "the queue is drained");
+        assert_eq!(
+            inbox.take().waited,
+            Duration::ZERO,
+            "nothing queued is nothing waited"
+        );
+    }
+
+    /// The wait is measured from the *newest* reading: that is the one whose ink the user is
+    /// waiting to see, and the older readings of a batch are already behind it.
+    #[test]
+    fn the_wait_is_measured_from_the_newest_reading() {
+        let inbox = PenInbox::default();
+
+        inbox.push(&[PenSample::default()]);
+        std::thread::sleep(Duration::from_millis(20));
+        inbox.push(&[PenSample::default()]);
+
+        let waited = inbox.take().waited;
+        assert!(
+            waited < Duration::from_millis(15),
+            "the newest reading arrived just now, not {waited:?} ago"
+        );
     }
 }

@@ -23,8 +23,11 @@ pub enum AppError {
     PdfiumLibrary(String),
 
     /// A PDF document could not be opened, or a page could not be rendered.
+    ///
+    /// The message, rather than a wrapped error type: the app talks to Pdfium through its own C
+    /// declarations (`src/pdfium.rs`), so what comes back is already a sentence about what failed.
     #[error("the PDF document could not be read: {0}")]
-    Pdf(#[from] pdfium_render::prelude::PdfiumError),
+    Pdf(String),
 
     /// The settings file could not be read from or written to disk.
     #[error("the settings file could not be accessed: {0}")]

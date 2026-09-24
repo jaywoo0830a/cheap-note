@@ -44,7 +44,7 @@ use crate::canvas::{contrast_color, CanvasSize, CanvasStyle, Ruling, Swatch, INK
 use crate::cursor::{PenCursor, NIB_RADIUS};
 use crate::ink::{InkTransform, Notes, Stroke, Tool};
 use crate::pen::{capture_config, PenInbox, PenService};
-use crate::pdf::{PageRequest, PdfDocumentView, RenderedPage};
+use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
 use crate::refresh::{Cadence, DisplayRefresh};
 use crate::settings::Settings;
 use crate::system_cursor::SystemCursor;
@@ -152,11 +152,11 @@ fn display_due(probed_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(probed_at) >= DISPLAY_INTERVAL
 }
 
-/// How long the pen has to be quiet before a page is rasterised for it.
+/// How long the pen has to be quiet before a page is rendered for it.
 ///
-/// A rasterisation blocks the thread that runs the pump, so while a stroke is being laid the rung
-/// already on screen is the right one; the sharp one can wait for the hand to stop. An eighth of a
-/// second is short enough that a person pausing to think sees it land, and long enough that the
+/// A slice of a render blocks the thread that runs the pump, so while a stroke is being laid the
+/// rung already on screen is the right one; the sharp one can wait for the hand to stop. An eighth
+/// of a second is short enough that a person pausing to think sees it land, and long enough that the
 /// pause between two letters of a word is not mistaken for one.
 const PDF_QUIET_INTERVAL: Duration = Duration::from_millis(120);
 
@@ -1113,10 +1113,10 @@ impl NoteApp {
 
     /// Records what the view is waiting for, and counts a request that was dropped for it.
     ///
-    /// This is the whole of the app's cancellation: a render is only ever started by the pump, so a
-    /// request that the view has moved on from is *never started* — the pending one is replaced
-    /// here, and the replacement is what the counter counts. The progressive path (a render that can
-    /// be interrupted mid-call) is the one that will need a token of its own.
+    /// This is one half of the app's cancellation: a request that the view has moved on from
+    /// *before* its render started is replaced here, and the replacement is what the counter counts.
+    /// The other half belongs to the pump, which abandons a render that was already in flight — see
+    /// [`Self::serve_pdf`].
     fn plan_pdf(&mut self, wanted: PageRequest) {
         if self.pending_pdf.is_some_and(|pending| pending != wanted) {
             self.pdf.count_cancelled();
@@ -1140,18 +1140,27 @@ impl NoteApp {
         Ok(page)
     }
 
-    /// Pays for the page the view is waiting for, when the pen is quiet enough to afford it.
+    /// Pays for the page the view is waiting for, one slice at a time.
     ///
     /// The render happens *here*, in the pump, and not in the frame: a rasterisation blocks this
     /// thread either way, but the pump is between frames rather than inside one, so the cost lands
-    /// on how soon the next reading is consumed instead of on whether a frame is drawn at all.
+    /// on how soon the next reading is consumed instead of on whether a frame is drawn at all. The
+    /// slice budget is what keeps even that small — Pdfium stops when the budget is spent, and the
+    /// next wake carries on where it left off.
     ///
     /// It waits for the pen to stop because that is the trade the user feels: while a stroke is
-    /// being laid the rung already on screen is the right one, and the sharp one is worth waiting
-    /// for until the hand stops. Nothing else competes for this work — there is one pending request,
-    /// it is always the current page, and it is always the *final* quality.
+    /// being laid the rung already on screen is the right one, and the sharp one can wait for the
+    /// hand to stop.
+    ///
+    /// Returns whether a page became available, which is what the caller turns into a frame.
     fn serve_pdf(&mut self, now: Instant) -> bool {
         let Some(request) = self.pending_pdf else {
+            // Nothing is owed. A job that is still in flight belongs to a request the view has
+            // moved past — `plan_pdf` replaces the pending request every frame — so it is dropped
+            // here rather than finished for nobody.
+            if self.pdf.rendering() {
+                self.pdf.abandon();
+            }
             return false;
         };
 
@@ -1159,11 +1168,37 @@ impl NoteApp {
             return false;
         }
 
-        self.pending_pdf = None;
-        match self.render_now(request) {
-            Ok(_) => true,
-            Err(error) => {
-                self.report(error.to_string());
+        // A job for another page or another rung is work for a view that is gone.
+        if self.pdf.rendering() && self.pdf.job_request() != Some(request) {
+            self.pdf.abandon();
+        }
+
+        if !self.pdf.rendering() {
+            match self.pdf.begin(request) {
+                // Started, and then left alone for this wake: starting a job allocates the bitmap
+                // and writes the paper into it, which is the one part of a render a budget cannot
+                // slice — so it gets a wake of its own and the rendering starts in the next one.
+                Ok(()) => return false,
+                Err(error) => {
+                    // A page that cannot even be started is not retried every wake: the request is
+                    // dropped, and the frame keeps the rung it has.
+                    self.pending_pdf = None;
+                    self.report(error.to_string());
+                    self.touch_status();
+                    return true;
+                }
+            }
+        }
+
+        match self.pdf.advance(crate::pdf::SLICE_BUDGET) {
+            Progress::Finished => {
+                self.pending_pdf = None;
+                true
+            }
+            Progress::Unfinished => false,
+            Progress::Failed(message) => {
+                self.pending_pdf = None;
+                self.report(message);
                 self.touch_status();
                 true
             }

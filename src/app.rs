@@ -47,6 +47,7 @@ use crate::pen::{capture_config, PenInbox, PenService};
 use crate::pdf::{PdfDocumentView, RenderedPage};
 use crate::refresh::{DisplayRefresh, RefreshMode, RefreshRate};
 use crate::settings::Settings;
+use crate::system_cursor::SystemCursor;
 
 /// The bitmap-width multiplier used when rendering a PDF page.
 ///
@@ -60,6 +61,15 @@ const PDF_RENDER_SCALE: f32 = 2.0;
 /// a little more. That is the price of the overlay: ink needs no offset arithmetic to be painted,
 /// and in exchange the top of the page sits under the bar until the bar is switched off.
 const PAGE_MARGIN: f32 = 24.0;
+
+/// How tall the top bar is, in logical pixels, as an estimate.
+///
+/// Used for exactly one decision: whether the pen is over the bar, where the ghost cursor is drawn
+/// behind the bar's opaque background and the system pointer therefore has to stay. The estimate
+/// errs upward deliberately — being wrong upward leaves a strip of sheet still showing the pointer
+/// (a small surprise), while being wrong downward would leave part of the toolbar with no cursor at
+/// all, and the pen is how those controls get clicked.
+const BAR_HEIGHT: f32 = 96.0;
 
 /// How often the status line is rebuilt at most.
 ///
@@ -90,6 +100,10 @@ pub struct NoteApp {
     pdf: PdfDocumentView,
     /// The pen capture and its queue.
     pen: PenService,
+    /// The hook that hides the system pointer while the pen has a cursor of its own.
+    ///
+    /// `None` when the platform would not give one, which costs nothing but a second cursor.
+    system_cursor: Option<SystemCursor>,
     /// The page being shown.
     page_index: usize,
     /// The window's DPI scale factor, captured each frame.
@@ -131,6 +145,10 @@ impl NoteApp {
         // The capture must be attached on the thread that owns the window, which is this one.
         let pen = PenService::attach(window, capture_config());
 
+        // Installed after the capture, so this hook runs first in the subclass chain and gets to
+        // answer `WM_SETCURSOR` before anything else can put a cursor back.
+        let system_cursor = SystemCursor::install(window);
+
         if message.is_empty() {
             message = pen.status().to_string();
         }
@@ -142,6 +160,7 @@ impl NoteApp {
             ink: InkDocument::new(),
             pdf: PdfDocumentView::empty(),
             pen,
+            system_cursor,
             page_index: 0,
             scale: window.scale_factor(),
             pump_interval_micros: Arc::new(AtomicU64::new(
@@ -188,8 +207,13 @@ impl NoteApp {
                 // when either of them moved.
                 let cursor = app.pen_cursor();
                 let laid_ink = app.ink.consume(&samples, app.scale, &app.settings);
+                let cursor_moved = app.pen_cursor() != cursor;
 
-                if !laid_ink && app.pen_cursor() == cursor {
+                // The system pointer follows the ghost on every read, so the two can never disagree
+                // about whether the pen has a cursor of its own.
+                app.follow_pen_with_pointer();
+
+                if !laid_ink && !cursor_moved {
                     // Nothing on screen changed: a reading the resampler and the pointer gate both
                     // dropped, or a hover that moved nothing. Repainting an identical scene on each
                     // of those is what made the top of the window look like it was flickering.
@@ -298,6 +322,30 @@ impl NoteApp {
         self.last_cursor()
     }
 
+    /// Whether the pen has a cursor of its own where it is, so the system pointer should be out of
+    /// the way.
+    ///
+    /// True only *below the bar*: over the bar the ghost is drawn behind an opaque background,
+    /// where it cannot be seen.
+    fn pen_has_its_own_cursor(&self) -> bool {
+        self.pen_cursor()
+            .is_some_and(|cursor| cursor.position()[1] > BAR_HEIGHT)
+    }
+
+    /// Keeps the system pointer in step with the ghost cursor, hiding it exactly while the ghost
+    /// replaces it.
+    ///
+    /// Driven from the ghost and not from the pen's range, because the two states have to be
+    /// impossible to separate: a hidden pointer with nothing drawn in its place is a window with no
+    /// cursor at all.
+    fn follow_pen_with_pointer(&mut self) {
+        let has_its_own = self.pen_has_its_own_cursor();
+
+        if let Some(system_cursor) = &mut self.system_cursor {
+            system_cursor.follow(has_its_own);
+        }
+    }
+
     /// Persists and repaints after a setting changed.
     ///
     /// The ruling is keyed on the sheet's rectangle, its style and its paper colour, so it
@@ -307,6 +355,10 @@ impl NoteApp {
     fn finish_setting(&mut self, cx: &mut Context<Self>) {
         self.save_settings();
         self.touch_status();
+        // A setting can change whether the pen has a cursor of its own — the Tilt switch does — and
+        // the pump may not wake for a while if the pen is away. Handing the pointer back here means
+        // the switch takes effect the moment it is flipped.
+        self.follow_pen_with_pointer();
         cx.notify();
     }
 
@@ -486,6 +538,13 @@ impl NoteApp {
                 ));
             }
             None => parts.push(self.pen.status().to_string()),
+        }
+
+        // Worth saying only when it is missing. A window whose pointer could not be hooked still
+        // works — it simply shows two cursors — and this line is the only way to know which of the
+        // two is happening.
+        if self.system_cursor.is_none() {
+            parts.push(String::from("no pointer hook"));
         }
 
         // The live lean, when the pen is here to have one. This is the number the ghost cursor is

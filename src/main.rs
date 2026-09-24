@@ -6,7 +6,8 @@
 //!
 //! * pen input comes from `pen-windows` (WM_POINTER: pressure, tilt, coalesced batches);
 //! * the pen's tilt is drawn as a ghost cursor — a nib mark with the pen's body leaning away from
-//!   it — because a system cursor cannot be rotated;
+//!   it — because a system cursor cannot be rotated, and the system pointer is hidden while it is
+//!   drawn;
 //! * the interface is built with GPUI Kit (theme tokens, components, a GPU-accelerated scene);
 //! * PDF pages are rasterised by Pdfium through `pdfium-render`;
 //! * the writing loop is paced against the display's refresh rate (60, 120, 180 or 240 Hz).
@@ -20,6 +21,7 @@
 //! | [`ink`]     | readings to strokes: edges, resampling, width, erasing     |
 //! | [`canvas`]  | the sheet's size, colour and ruling                        |
 //! | [`cursor`]  | the pen's ghost cursor: where it is and how it leans       |
+//! | [`system_cursor`] | hiding the system pointer while the pen is in range |
 //! | [`pdf`]     | the Pdfium document, page rendering, and the page cache    |
 //! | [`app`]     | the view: toolbar, canvas painting, and the pen pump       |
 //! | [`settings`]| the user's tuning, serialised as JSON                      |
@@ -43,6 +45,7 @@ mod pdf;
 mod pen;
 mod refresh;
 mod settings;
+mod system_cursor;
 
 use gpui_kit::component::Root;
 use gpui_kit::*;

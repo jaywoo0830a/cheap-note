@@ -34,6 +34,13 @@ image = { version = "0.25", default-features = false }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # WM_SETCURSOR, SetCursor, HTCLIENT, IDC_ARROW, LoadCursorW: hiding the system pointer over
+    # the client area while the pen is in range.
+    "Win32_UI_WindowsAndMessaging",
+    # SetWindowSubclass / DefSubclassProc / RemoveWindowSubclass: answering WM_SETCURSOR before
+    # GPUI's own window procedure does. This is the comctl32 chain pen-windows already hooks on
+    # that same window, so the two procedures coexist without either knowing about the other.
+    "Win32_UI_Shell",
 ] }
 # Named types for the raw window handle GPUI hands out (used to bind the pen capture).
 raw-window-handle = "0.6"

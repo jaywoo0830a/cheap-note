@@ -57,6 +57,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::error::{AppError, Result};
 use crate::ink::{InkDocument, Stroke};
+use crate::pages::Page;
 
 /// The PDF inside a bundle.
 const DOCUMENT_ENTRY: &str = "document.pdf";
@@ -68,7 +69,13 @@ const NOTES_ENTRY: &str = "notes.json";
 ///
 /// Read back, a *newer* version is refused rather than guessed at: the fields it added are ones
 /// this build does not know, and guessing is how a note gets silently rewritten without its ink.
-const FORMAT: u32 = 1;
+///
+/// * 1: the ink and the page that was open.
+/// * 2: the page *list* as well — see [`crate::pages`] — which is what a note needs once pages can
+///   be inserted and deleted, because a page index alone no longer says what that page shows. A 1
+///   is read, not refused: its page indices were document pages, and [`Pages::restore`] is what
+///   makes that true again.
+const FORMAT: u32 = 2;
 
 /// A note ready to be written, or one that has just been read.
 #[derive(Debug)]
@@ -81,6 +88,12 @@ pub struct Bundle {
     pub page: usize,
     /// The sheet the ink was written on, in logical pixels, when it is known.
     pub sheet: Option<(f32, f32)>,
+    /// What each page shows, in reading order.
+    ///
+    /// Empty means *no list* rather than *no pages*: a note always has at least one page, so an
+    /// empty list is the note format that predates the list, and reading it back means working the
+    /// pages out from the document and the ink.
+    pub layout: Vec<Page>,
 }
 
 /// A PDF held in memory, with the name it was saved under.
@@ -111,6 +124,7 @@ pub fn write(path: &Path, bundle: &Bundle) -> Result<()> {
             .document
             .as_ref()
             .map(|document| document.name.clone()),
+        layout: bundle.layout.clone(),
         pages: bundle
             .pages
             .iter()
@@ -231,6 +245,7 @@ pub fn read(path: &Path) -> Result<Bundle> {
             .collect(),
         page: notes.page,
         sheet: notes.sheet,
+        layout: notes.layout,
     })
 }
 
@@ -248,6 +263,9 @@ struct NotesFile {
     /// The file name the document had when the note was saved.
     #[serde(default)]
     document: Option<String>,
+    /// What each page shows, in reading order. Absent in notes written before the list existed.
+    #[serde(default)]
+    layout: Vec<Page>,
     /// The pages that hold ink.
     #[serde(default)]
     pages: Vec<PageFile>,
@@ -273,7 +291,7 @@ mod tests {
         let strokes = (0..count)
             .map(|index| {
                 let x = index as f32 * 10.0;
-                Stroke::new(InkPoint::new(x, x, 3.0))
+                Stroke::new(InkPoint::new(x, x, 3.0), Stroke::DEFAULT_COLOR)
             })
             .collect();
 
@@ -300,6 +318,7 @@ mod tests {
             pages: vec![(0, page_of(3)), (4, page_of(2))],
             page: 4,
             sheet: Some((794.0, 1123.0)),
+            layout: vec![Page::Document(0), Page::Blank, Page::Document(1), Page::Blank],
         };
 
         write(&path, &bundle).expect("the note is written");
@@ -307,6 +326,11 @@ mod tests {
 
         assert_eq!(read_back.page, 4, "the page that was open");
         assert_eq!(read_back.sheet, Some((794.0, 1123.0)));
+        assert_eq!(
+            read_back.layout,
+            vec![Page::Document(0), Page::Blank, Page::Document(1), Page::Blank],
+            "the page list comes back in reading order, inserted pages and all"
+        );
         assert_eq!(read_back.pages.len(), 2, "two pages were written on");
         assert_eq!(read_back.pages[0].0, 0);
         assert_eq!(read_back.pages[0].1.stroke_count(), 3);
@@ -327,6 +351,20 @@ mod tests {
         }
     }
 
+    /// A note written before the page list existed still reads.
+    ///
+    /// Its layout comes back empty, which is how the reader knows to work the pages out from the
+    /// document rather than to draw a note with no pages at all.
+    #[test]
+    fn a_note_from_before_the_page_list_still_reads() {
+        let old = r#"{"format":1,"page":1,"pages":[{"page":1,"strokes":[]}]}"#;
+        let notes: NotesFile = serde_json::from_str(old).expect("a version 1 note parses");
+
+        assert_eq!(notes.format, 1);
+        assert!(notes.layout.is_empty(), "there was no list to read");
+        assert_eq!(notes.page, 1);
+    }
+
     /// A loaded stroke can be erased: its caches are rebuilt on the way in.
     ///
     /// Bounds and outlines are `#[serde(skip)]` because they derive from the points — and they are
@@ -340,6 +378,7 @@ mod tests {
             document: None,
             pages: vec![(0, page_of(1))],
             page: 0,
+            layout: vec![Page::Blank],
             sheet: Some((794.0, 1123.0)),
         };
 
@@ -369,6 +408,7 @@ mod tests {
                 pages: vec![(0, page_of(1))],
                 page: 0,
                 sheet: Some((595.0, 842.0)),
+                layout: vec![Page::Blank],
             },
         )
         .expect("the note is written");

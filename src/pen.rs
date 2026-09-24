@@ -29,6 +29,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -46,6 +47,12 @@ struct Queue {
     /// and it cannot be derived afterwards: the capture stamps its own readings, and its clock is
     /// not one this crate can read.
     newest_at: Option<Instant>,
+    /// The task parked on an empty queue, if there is one.
+    ///
+    /// One waker is enough because there is one reader. It is stored rather than signalled through a
+    /// channel because that is the whole of what a channel would be for: the queue itself is the
+    /// message, and a waker is the doorbell.
+    waker: Option<Waker>,
 }
 
 /// A batch of readings, and how long the newest of them waited to be taken.
@@ -90,6 +97,50 @@ impl PenInbox {
         let mut queue = self.lock();
         queue.samples.extend_from_slice(samples);
         queue.newest_at = Some(Instant::now());
+
+        // The doorbell. It is rung *after* the readings are in the queue and while the queue is
+        // locked, so a reader woken by it cannot look and find nothing there.
+        if let Some(waker) = queue.waker.take() {
+            waker.wake();
+        }
+    }
+
+    /// Parks until something is queued.
+    ///
+    /// This is what makes the frames the pen's own rate. The pump used to poll on a timer derived
+    /// from the display's frame rate, which put a ceiling on how often a reading could reach the
+    /// screen: a pen reporting at 200 Hz behind a 60 Hz panel was drained 120 times a second, so two
+    /// readings in three waited for a frame that was never going to be drawn any sooner. Waiting on
+    /// the queue instead takes every batch the instant it lands — as many frames as the pen has
+    /// readings — and costs nothing at all while the pen is away.
+    pub fn wait(&self) -> impl std::future::Future<Output = ()> + '_ {
+        std::future::poll_fn(move |context| self.poll_ready(context.waker()))
+    }
+
+    /// Wakes whoever is parked, if anyone is.
+    ///
+    /// For shutdown: a task parked on a queue that will never be filled again is a task the executor
+    /// cannot release, so the service rings the bell once on its way out and the parked task finds
+    /// its view gone.
+    pub fn wake(&self) {
+        if let Some(waker) = self.lock().waker.take() {
+            waker.wake();
+        }
+    }
+
+    /// One poll of [`Self::wait`]: ready when there is something to take.
+    fn poll_ready(&self, waker: &Waker) -> Poll<()> {
+        let mut queue = self.lock();
+
+        if !queue.samples.is_empty() {
+            return Poll::Ready(());
+        }
+
+        // The waker is *replaced* rather than kept if it already matches: it belongs to whichever
+        // task is parked now, and a task that was dropped and started again must not be woken in
+        // place of the one that is waiting.
+        queue.waker = Some(waker.clone());
+        Poll::Pending
     }
 
     /// Locks the queue, ignoring poisoning: the payload is plain numbers, so a panic elsewhere
@@ -191,6 +242,10 @@ impl Drop for PenService {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+
+        // No more readings will ever be queued, so a reader parked on the queue has to be let go:
+        // the parked task wakes, finds its view gone, and ends.
+        self.inbox.wake();
     }
 }
 
@@ -241,6 +296,57 @@ mod tests {
     use super::PenInbox;
     use pen_windows::PenSample;
     use std::time::Duration;
+
+    /// A reader parked on an empty queue is woken by the next batch, and nothing wakes it while the
+    /// queue stays empty.
+    ///
+    /// This is the whole of "unlimited frames": the pump is not polled on a clock, it is woken by
+    /// the readings themselves, so a frame is drawn per batch rather than per timer tick.
+    #[test]
+    fn a_batch_wakes_the_task_parked_on_the_queue() {
+        use super::Waker;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Wake};
+
+        /// A waker that counts how many times it was woken.
+        #[derive(Default)]
+        struct Counting(AtomicUsize);
+
+        impl Wake for Counting {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let inbox = PenInbox::default();
+        let counting = Arc::new(Counting::default());
+        let waker = Waker::from(Arc::clone(&counting));
+        let context = Context::from_waker(&waker);
+        let woken = || counting.0.load(Ordering::Relaxed);
+
+        assert!(
+            inbox.poll_ready(context.waker()).is_pending(),
+            "an empty queue parks the reader"
+        );
+        assert_eq!(woken(), 0);
+
+        inbox.push(&[PenSample::default()]);
+        assert_eq!(woken(), 1, "the reading rang the bell");
+        assert!(
+            inbox.poll_ready(context.waker()).is_ready(),
+            "and there is something to take"
+        );
+
+        let _ = inbox.take();
+        assert!(inbox.poll_ready(context.waker()).is_pending());
+        assert_eq!(woken(), 1, "nothing woke it in the meantime");
+
+        // Shutdown: the queue will never be filled again, so the reader is let go by hand.
+        let _ = inbox.poll_ready(context.waker());
+        inbox.wake();
+        assert_eq!(woken(), 2, "the parked reader was released");
+    }
 
     /// A batch arrives with the readings in it, and an empty queue has not waited for anything.
     #[test]

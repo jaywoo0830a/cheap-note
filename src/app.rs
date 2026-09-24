@@ -11,12 +11,20 @@
 //!
 //! ## The frame loop
 //!
-//! Nothing here polls for pen input. The pen thread pushes readings into a queue, and an async
-//! task (see [`NoteApp::start_pen_pump`]) drains it on a timer derived from the display's *measured*
-//! frame rate, feeds the ink model, and calls `cx.notify()` — so a frame is scheduled exactly when
-//! there is something new to show, and the app is idle otherwise. "Something new" is two things: ink
-//! that changed, and a cursor that moved. A pen held in range without touching lays no
-//! ink at all, and it is the ghost cursor (see [`crate::cursor`]) that has to follow it.
+//! Nothing here polls for pen input. The pen thread pushes readings into a queue, and an async task
+//! (see [`NoteApp::start_pen_pump`]) *waits on that queue* — not on a timer — takes every batch the
+//! instant it lands, feeds the ink model, and calls `cx.notify()`. A frame is therefore scheduled
+//! exactly when there is something new to show, and at the rate the pen reports it: 133 Hz, 240 Hz,
+//! whatever the digitizer sends, with no ceiling taken from the display's refresh rate. The app is
+//! idle, and spends nothing, otherwise.
+//!
+//! "Something new" is two things: ink that changed, and a cursor that moved. A pen held in range
+//! without touching lays no ink at all, and it is the ghost cursor (see [`crate::cursor`]) that has
+//! to follow it.
+//!
+//! A second task ([`NoteApp::start_display_pump`]) runs on the display's clock and does the work
+//! that is not the ink — re-reading the monitor, measuring the frames this app painted, rasterising
+//! the page, rebuilding the counters — so that a rasterisation can never delay a stroke.
 //!
 //! ## The top bar, and why it can be turned off
 //!
@@ -38,8 +46,9 @@ use std::time::{Duration, Instant};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _};
 use gpui_kit::*;
 
 use crate::canvas::{
@@ -48,6 +57,7 @@ use crate::canvas::{
 };
 use crate::cursor::{PenCursor, NIB_RADIUS};
 use crate::ink::{InkTransform, Notes, Stroke, Tool};
+use crate::pages::Pages;
 use crate::pen::{capture_config, PenInbox, PenService};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
 use crate::refresh::{Cadence, DisplayRefresh};
@@ -274,8 +284,14 @@ pub struct NoteApp {
     /// Shared with the paint callback, which is the only place that knows a frame reached the
     /// screen: the callback runs after the element tree is built and cannot borrow the view.
     cadence: Arc<Cadence>,
-    /// The page's ink.
+    /// The ink.
     ink: Notes,
+    /// What each page of the note shows, in reading order.
+    ///
+    /// The page the reader is on is [`NoteApp::page_index`], which indexes *this* list rather than
+    /// any document's pages: a page can be inserted or deleted, and after that the two are not the
+    /// same thing. See [`crate::pages`].
+    pages: Pages,
     /// The PDF being annotated, if any.
     pdf: PdfDocumentView,
     /// The pen capture and its queue.
@@ -303,11 +319,12 @@ pub struct NoteApp {
     pending_pdf: Option<PageRequest>,
     /// When the pen last laid ink, for [`pdf_render_due`].
     last_ink_at: Instant,
-    /// The pump's current interval in microseconds, shared with the pump task.
+    /// The pump's current interval in microseconds, shared with the housekeeping pump.
     ///
-    /// A frame measured faster than the mode it read has to change how often the queue is drained,
+    /// A frame measured faster than the mode it read has to change how often the display is polled,
     /// and the pump task is already running, so the interval lives in an atomic the task re-reads
-    /// rather than in a captured local it could not see a change to.
+    /// rather than in a captured local it could not see a change to. The *ink* pump takes no
+    /// interval at all: it waits for the pen (see [`NoteApp::start_pen_pump`]).
     pump_interval_micros: Arc<AtomicU64>,
     /// The rule geometry for the current sheet.
     ///
@@ -323,6 +340,14 @@ pub struct NoteApp {
     status_at: Instant,
     /// The last thing worth telling the user.
     message: String,
+    /// The bar's paper-size chooser.
+    ///
+    /// A `Select` rather than a row of buttons, and it is the *only* thing that changes
+    /// [`Settings::canvas_size`]: the choice comes back as the label that was showing, which
+    /// [`CanvasSize::from_label`] turns into a size, so the box and the setting cannot drift apart.
+    sheet_select: Entity<SelectState<Vec<&'static str>>>,
+    /// The bar's ruling chooser. Held for the same reason as [`NoteApp::sheet_select`].
+    rule_select: Entity<SelectState<Vec<&'static str>>>,
 }
 
 impl NoteApp {
@@ -352,6 +377,26 @@ impl NoteApp {
 
         let view = Viewport::new(settings.zoom);
 
+        // The two choosers are built from the settings the app starts on, and — because they are
+        // the control the settings come from — nothing else ever has to move them: a choice made in
+        // them is the change, so the first frame already shows the right one.
+        let sheet_select = choice(
+            &CanvasSize::ALL.map(CanvasSize::label),
+            CanvasSize::ALL
+                .iter()
+                .position(|size| *size == settings.canvas_size),
+            window,
+            cx,
+        );
+        let rule_select = choice(
+            &CanvasStyle::ALL.map(CanvasStyle::label),
+            CanvasStyle::ALL
+                .iter()
+                .position(|style| *style == settings.canvas_style),
+            window,
+            cx,
+        );
+
         let mut app = NoteApp {
             settings,
             settings_path,
@@ -359,6 +404,7 @@ impl NoteApp {
             display_at: Instant::now(),
             cadence: Arc::new(Cadence::new()),
             ink: Notes::new(),
+            pages: Pages::default(),
             pdf: PdfDocumentView::empty(),
             pen,
             system_cursor,
@@ -377,37 +423,86 @@ impl NoteApp {
             status: String::new(),
             status_at: Instant::now(),
             message,
+            sheet_select,
+            rule_select,
         };
+
+        // What a chooser reports is the label that was showing, so a label is what has to become a
+        // setting again. A `Confirm` with no choice behind it — the box has been cleaned — is not
+        // one, and is ignored: a sheet always has a size and something printed on it.
+        cx.subscribe(
+            &app.sheet_select,
+            |app, _, event: &SelectEvent<Vec<&'static str>>, cx| {
+                if let SelectEvent::Confirm(Some(label)) = event {
+                    if let Some(size) = CanvasSize::from_label(label) {
+                        app.set_canvas_size(size, cx);
+                    }
+                }
+            },
+        )
+        .detach();
+
+        cx.subscribe(
+            &app.rule_select,
+            |app, _, event: &SelectEvent<Vec<&'static str>>, cx| {
+                if let SelectEvent::Confirm(Some(label)) = event {
+                    if let Some(style) = CanvasStyle::from_label(label) {
+                        app.set_canvas_style(style, cx);
+                    }
+                }
+            },
+        )
+        .detach();
 
         // The first status line is composed here, so the first frame already has it and no frame
         // has to render text that is about to be replaced.
         app.touch_status();
 
-        app.start_pen_pump(cx);
+        app.start_pumps(cx);
         app
     }
 
-    /// Drains the pen queue on a timer and repaints when the ink changed.
+    /// Starts the two loops that turn readings into frames.
     ///
-    /// The loop parks on a timer rather than spinning: the interval comes from the display's frame
-    /// time — measured from the frames this app painted, so a laptop panel running at 165 Hz is
-    /// pumped for at 165 Hz rather than for whichever step it was snapped to — and is half a frame,
-    /// clamped. The task ends when the view is dropped — `update` returns `Err` once the entity is
-    /// gone.
+    /// ## Why two
+    ///
+    /// They answer different questions at different rates, and separating them is what takes the
+    /// ceiling off the first:
+    ///
+    /// * the **ink pump** parks on the pen's queue and wakes the instant a batch lands, so there is a
+    ///   frame per batch — the pen's own rate, 133 or 240 Hz or whatever it reports — and nothing at
+    ///   all is spent while the pen is away. This is the loop the hand feels: its wake is where a
+    ///   reading becomes a frame, and it is what "unlimited" means here.
+    /// * the **housekeeping pump** runs on the display's clock and does everything that is *not* the
+    ///   ink: re-reading the monitor, measuring the frames this app painted, rasterising the page the
+    ///   view is waiting for, and rebuilding the counters. A rasterisation blocks whichever thread
+    ///   runs it, and running it here rather than in the ink pump is what keeps a sharp page from
+    ///   ever delaying a stroke.
+    ///
+    /// Both end when the view is dropped — `update` returns `Err` once the entity is gone.
+    fn start_pumps(&mut self, cx: &mut Context<Self>) {
+        self.start_pen_pump(cx);
+        self.start_display_pump(cx);
+    }
+
+    /// Drains the pen queue whenever it has something in it, and repaints when the ink changed.
+    ///
+    /// There is no timer: `PenInbox::wait` parks this task on the queue itself, so the pump is woken
+    /// by readings rather than by a clock. A display-paced pump put a ceiling on how often a reading
+    /// could reach the screen, and the ceiling was invisible from the outside — it looked like the
+    /// pen's own rate — so it is gone rather than made configurable.
     fn start_pen_pump(&mut self, cx: &mut Context<Self>) {
         let inbox: Arc<PenInbox> = self.pen.inbox();
-        let interval_micros = Arc::clone(&self.pump_interval_micros);
 
         cx.spawn(async move |this, cx| loop {
-            let interval =
-                Duration::from_micros(interval_micros.load(Ordering::Relaxed).max(500));
-            cx.background_executor().timer(interval).await;
+            inbox.wait().await;
 
             let batch = inbox.take();
 
             let alive = this.update(cx, |app, cx| {
-                // The gap between this wake and the last, against the interval it asked for: a
-                // timer that oversleeps puts a floor under the latency of everything else.
+                // The gap between this wake and the last, recorded against the interval a
+                // display-paced pump would have used: the number that says whether a stroke is
+                // reaching the screen at the rate the pen reports it.
                 let woke = Instant::now();
                 if let Some(previous) = app.last_pump.replace(woke) {
                     app.timings
@@ -415,27 +510,7 @@ impl NoteApp {
                         .record(woke.saturating_duration_since(previous));
                 }
 
-                // What the frames have measured since the last wake, before anything is painted
-                // with it: the pump interval has to be the display's, not a guess about it.
-                //
-                // Read before the pen is looked at, because the display is measured whether or not
-                // a pen is in hand — a resize, a zoom, or the first frames of a session are all
-                // repaints its rate can be read from, and an app that only counted frames while a
-                // pen was down would report "measured —" at every other moment.
-                let display_moved = app.follow_display_cadence(woke);
-
-                // The page the view is waiting for, paid for here rather than inside a frame. It
-                // is skipped while the pen is laying ink, so the queue keeps draining at the pace
-                // the display has.
-                let page_rendered = app.serve_pdf(woke);
-
                 if batch.samples.is_empty() {
-                    // Nothing from the pen: the display's numbers and the page are the only things
-                    // that can have moved, and the page only needs a frame once it has landed.
-                    if display_moved || page_rendered {
-                        app.refresh_status(woke);
-                        cx.notify();
-                    }
                     return;
                 }
 
@@ -460,18 +535,16 @@ impl NoteApp {
                 // about whether the pen has a cursor of its own.
                 app.follow_pen_with_pointer();
 
-                if !laid_ink && !cursor_moved && !display_moved {
+                if !laid_ink && !cursor_moved {
                     // Nothing on screen changed: a reading the resampler and the pointer gate both
-                    // dropped, a hover that moved nothing, or a display whose numbers have not
-                    // moved since the last wake. Repainting an identical scene on each of those is
-                    // what made the top of the window look like it was flickering.
+                    // dropped, or a hover that moved nothing. Repainting an identical scene on each
+                    // of those is what made the top of the window look like it was flickering.
                     return;
                 }
 
-                // The status counters have moved, but the line is rebuilt only when it is due:
-                // rebuilding it here would re-shape the text on every frame, which is the other
-                // half of the same problem.
-                app.refresh_status(Instant::now());
+                // The counters have moved too, but the line is rebuilt on a slow clock by the
+                // housekeeping pump: re-shaping text is the reader-visible half of the same problem,
+                // and a frame drawn to show ink does not have to carry it.
                 cx.notify();
             });
 
@@ -482,6 +555,55 @@ impl NoteApp {
         })
         .detach();
     }
+
+    /// Keeps the monitor's numbers, the counters and the page being rasterised up to date.
+    ///
+    /// It runs on the *display's* clock — measured from the frames this app paints, so a panel
+    /// running at 165 Hz is served at 165 Hz rather than at whichever step its mode was snapped to —
+    /// and repaints only when one of the three things it watches actually moved: a frame of its own
+    /// is cheap, a frame that draws an identical scene is not.
+    fn start_display_pump(&mut self, cx: &mut Context<Self>) {
+        let interval_micros = Arc::clone(&self.pump_interval_micros);
+
+        cx.spawn(async move |this, cx| loop {
+            let interval =
+                Duration::from_micros(interval_micros.load(Ordering::Relaxed).max(500));
+            cx.background_executor().timer(interval).await;
+
+            let alive = this.update(cx, |app, cx| {
+                let now = Instant::now();
+
+                // What the frames have measured since the last wake, before anything is painted
+                // with it: the interval this pump waits for has to be the display's, not a guess
+                // about it.
+                //
+                // Read first, because the display is measured whether or not a pen is in hand — a
+                // resize, a zoom, or the first frames of a session are all repaints its rate can be
+                // read from, and an app that only counted frames while a pen was down would report
+                // "measured —" at every other moment.
+                let display_moved = app.follow_display_cadence(now);
+
+                // The page the view is waiting for, paid for here rather than inside a frame: it is
+                // skipped while the pen is laying ink, so the ink pump keeps taking readings.
+                let page_rendered = app.serve_pdf(now);
+
+                // The status counters have moved; the *line* is rebuilt only when it is due, and
+                // the answer says whether it was.
+                let status_rebuilt = app.refresh_status(now);
+
+                if display_moved || page_rendered || status_rebuilt {
+                    cx.notify();
+                }
+            });
+
+            if alive.is_err() {
+                // The view is gone; the app is closing.
+                break;
+            }
+        })
+        .detach();
+    }
+
 
     /// Reads a batch of readings into the ink model, timed.
     ///
@@ -791,9 +913,9 @@ impl NoteApp {
 
     /// Shows the next page.
     ///
-    /// The page count is the document's when there is one, and the note's otherwise: a note written
-    /// on blank sheets has pages of its own, and without this the sheet it was written on beyond the
-    /// first could never be reached again.
+    /// The page count is the note's own list — see [`crate::pages`] — which for a note written on a
+    /// document is the document's pages and for one written on blank sheets is as many as have been
+    /// made. Either way an inserted page is a page like any other.
     fn next_page(&mut self, cx: &mut Context<Self>) {
         if self.page_index + 1 < self.page_total() {
             self.page_index += 1;
@@ -803,9 +925,56 @@ impl NoteApp {
         }
     }
 
+    /// Adds a blank page before or after the one being read, and turns to it.
+    ///
+    /// A blank page rather than a copy of the neighbouring one: an inserted page is paper to write
+    /// on, and duplicating a page is a different command (which this app does not have). Turning to
+    /// it is not a courtesy — a page that was just made is the page that is about to be written on,
+    /// and leaving the reader on the old one would make the button look like it did nothing.
+    fn add_page(&mut self, before: bool, cx: &mut Context<Self>) {
+        let at = self.pages.insert(self.page_index, before);
+        self.ink.insert_at(at);
+        self.page_index = at;
+        self.ink.go_to(at);
+
+        self.report(format!(
+            "added a page {} this one ({} of {})",
+            if before { "before" } else { "after" },
+            self.page_index + 1,
+            self.page_total()
+        ));
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// Deletes the page being read, and the ink written on it.
+    ///
+    /// The ink goes with the page: there is nowhere to show it afterwards, and keeping it would
+    /// mean keeping an identity for "the page that used to be here" that no later page could be
+    /// confused with. On a note about a document the page leaves the *note*, not the file — this app
+    /// has no PDF writer — and that is stated in [`crate::pages`] rather than left to be discovered.
+    fn delete_page(&mut self, cx: &mut Context<Self>) {
+        let Some(show) = self.pages.remove(self.page_index) else {
+            self.report(String::from("a note keeps at least one page"));
+            cx.notify();
+            return;
+        };
+
+        self.ink.remove_at(self.page_index);
+        self.page_index = show;
+        self.ink.go_to(show);
+
+        self.report(format!(
+            "deleted a page ({} left)",
+            self.page_total().saturating_sub(1).max(1)
+        ));
+        self.touch_status();
+        cx.notify();
+    }
+
     /// How many pages there are to move between.
     fn page_total(&self) -> usize {
-        self.pdf.page_count().max(self.ink.page_count())
+        self.pages.len()
     }
 
     /// Asks the platform for a PDF, or for a saved note, and opens it.
@@ -891,7 +1060,13 @@ impl NoteApp {
 
         let strokes: usize = bundle.pages.iter().map(|(_, ink)| ink.stroke_count()).sum();
         self.ink.replace(bundle.pages, bundle.page);
-        self.page_index = bundle.page;
+
+        // The note's pages come from the file when it has a list of its own, and are worked out from
+        // the document and the ink when it does not: see `Pages::restore`.
+        let layout = (!bundle.layout.is_empty()).then_some(bundle.layout);
+        self.pages = Pages::restore(layout, self.pdf.page_count(), self.ink.page_count());
+        self.page_index = self.pages.clamp(bundle.page);
+        self.ink.go_to(self.page_index);
         self.settings.bundle_path = Some(path.clone());
         self.save_settings();
 
@@ -926,8 +1101,9 @@ impl NoteApp {
                 self.page_index = 0;
                 // A new document is a new note: the ink that was on screen belonged to the sheet
                 // that is no longer there, and keeping it would put one document's writing on
-                // another's page.
+                // another's page. The note's pages become the document's, in the document's order.
                 self.ink = Notes::new();
+                self.pages = Pages::of_document(self.pdf.page_count());
                 self.message = format!("opened {}", self.pdf.file_name());
             }
             Err(error) => {
@@ -1022,6 +1198,9 @@ impl NoteApp {
             pages,
             page: self.page_index,
             sheet: Some(self.sheet_size()),
+            // The note's own pages, in reading order: what the note is, as opposed to what its
+            // document is.
+            layout: self.pages.layout().to_vec(),
         };
 
         match crate::bundle::write(&path, &bundle) {
@@ -1096,11 +1275,21 @@ impl NoteApp {
     /// What the zoom actually asked for, and could not have, becomes [`Self::pending_pdf`]: the
     /// pump pays for it when the pen is quiet.
     fn current_page(&mut self) -> Option<RenderedPage> {
+        // The page being read is a page of the *note*; the picture, if it has one, belongs to a page
+        // of the document. A blank page has no picture at all, whatever else is open.
+        let Some(document_page) = self.pages.document_page(self.page_index) else {
+            if self.pdf.rendering() {
+                self.pdf.abandon();
+            }
+            self.pending_pdf = None;
+            return None;
+        };
+
         if !self.pdf.is_loaded() {
             return None;
         }
 
-        let wanted = PageRequest::new(self.page_index, self.pdf_render_pixel_width())
+        let wanted = PageRequest::new(document_page, self.pdf_render_pixel_width())
             .grayscale(self.settings.grayscale_pages);
 
         if let Some(page) = self.pdf.page_for_frame(wanted) {
@@ -1110,7 +1299,7 @@ impl NoteApp {
 
         // Nothing for this page at any rung: pay for the cheapest one now, so the frame has
         // something to draw, then leave the rung the zoom wanted to the pump.
-        let preview = PageRequest::new(self.page_index, PDF_PIXEL_WIDTHS[0])
+        let preview = PageRequest::new(document_page, PDF_PIXEL_WIDTHS[0])
             .grayscale(self.settings.grayscale_pages);
         let page = match self.render_now(preview) {
             Ok(page) => Some(page),
@@ -1350,14 +1539,18 @@ impl NoteApp {
         self.status_at = Instant::now();
     }
 
-    /// Rebuilds the status line if enough time has passed.
+    /// Rebuilds the status line if enough time has passed, and says whether it did.
     ///
-    /// Called on every wake of the pump, which is up to 240 times a second while writing. The
-    /// clock is what keeps the text identical across those frames.
-    fn refresh_status(&mut self, now: Instant) {
+    /// Called on every wake of the housekeeping pump, which is up to 240 times a second. The clock is
+    /// what keeps the text identical across those wakes, and the answer is what keeps the *frames*
+    /// off them: a wake that rebuilt nothing has nothing new for a frame to draw.
+    fn refresh_status(&mut self, now: Instant) -> bool {
         if status_due(self.status_at, now) {
             self.touch_status();
+            return true;
         }
+
+        false
     }
 
     /// The bar: floating, rounded, over the sheet.
@@ -1371,25 +1564,34 @@ impl NoteApp {
         let theme = cx.theme();
         let (surface, hairline) = (theme.title_bar, theme.title_bar_border);
 
+        // The width comes from a full-width box with a margin's worth of padding, not from setting
+        // both insets on the bar itself: an absolutely positioned element with a left *and* a right
+        // inset is laid out at its content's size here rather than stretched between the two, and a
+        // bar at its content's size never wraps its second row — it runs off the edge of the window.
         div()
             .absolute()
             .top(px(BAR_MARGIN))
-            .left(px(BAR_MARGIN))
-            .right(px(BAR_MARGIN))
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p(px(8.0))
-            .rounded(theme.radius_lg)
-            .bg(surface)
-            .border_1()
-            .border_color(hairline)
-            // The one place in the interface that casts a renderer shadow: a bar is a *layer* over
-            // the desk. The sheet's shadow is painted with the sheet instead — it is a path in a
-            // paint callback, and a callback cannot put a layer behind itself.
-            .shadow_md()
-            .child(self.command_row(cx))
-            .child(self.sheet_row(cx))
+            .left_0()
+            .w_full()
+            .px(px(BAR_MARGIN))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p(px(8.0))
+                    .w_full()
+                    .rounded(theme.radius_lg)
+                    .bg(surface)
+                    .border_1()
+                    .border_color(hairline)
+                    // The one place in the interface that casts a renderer shadow: a bar is a *layer*
+                    // over the desk. The sheet's shadow is painted with the sheet instead — it is a
+                    // path in a paint callback, and a callback cannot put a layer behind itself.
+                    .shadow_md()
+                    .child(self.command_row(cx))
+                    .child(self.sheet_row(cx)),
+            )
     }
 
     /// The bar's first row: where the document is, what the nib does, and what acts on the note.
@@ -1526,12 +1728,21 @@ impl NoteApp {
             )
     }
 
-    /// The bar's second row: the sheet's size, what is printed on it, and its two colours.
+    /// The bar's second row: the page's commands, the sheet's size, what is printed on it, and its
+    /// two colours.
     ///
-    /// This row wraps and the first does not. Four paper sizes, the ruling and twelve colours are
-    /// more than a narrow window holds, and a control that moves onto a second line is still a
-    /// control, while one pushed off the edge is not. Each group is captioned because without the
-    /// words it would be a guess which of the two runs of squares is the paper and which the ink.
+    /// This row wraps and the first does not. The size and the ruling are *choosers* — each one a
+    /// single box showing what is in use, with the alternatives in a list under it — while the twelve
+    /// colours stay a row of swatches, which is what a palette is. Six sizes and four rulings as
+    /// buttons was more than a narrow window holds, and the one that was current had to be found
+    /// among its neighbours rather than read off the control.
+    ///
+    /// Each group is captioned because without the words it would be a guess which of the two runs
+    /// of squares is the paper and which the ink, and which of the two boxes is the size and which
+    /// the ruling. The page's three commands lead the row because a page *is* the sheet — they are
+    /// the only controls here that change how much of it there is — and the zoom they traded places
+    /// with is at the bottom of the desk, on the pill beside the page it acts on (see
+    /// [`NoteApp::zoom_pill`]).
     fn sheet_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (hairline, muted, accent) = (
@@ -1539,78 +1750,6 @@ impl NoteApp {
             theme.muted_foreground,
             theme.primary,
         );
-
-        // Zoom: the two steps and the number they are at. The number is a readout rather than a
-        // button — a percentage is the only thing that says whether Fit Width has already been
-        // pressed — and it is given a fixed width so that stepping through 99% to 100% to 101% does
-        // not shuffle the buttons either side of it.
-        let mut zooms: Vec<AnyElement> = Vec::new();
-        zooms.push(
-            icon_button(
-                "zoom-out",
-                IconName::Minus,
-                "Zoom out",
-                cx,
-                |app, cx| app.zoom_out(cx),
-            )
-            .into_any_element(),
-        );
-        zooms.push(
-            div()
-                .text_size(px(12.0))
-                .text_color(accent)
-                .whitespace_nowrap()
-                .min_w(px(42.0))
-                .text_center()
-                .child(format!("{:.0}%", self.view.zoom() * 100.0))
-                .into_any_element(),
-        );
-        zooms.push(
-            icon_button("zoom-in", IconName::Plus, "Zoom in", cx, |app, cx| app.zoom_in(cx))
-                .into_any_element(),
-        );
-        for fit in Fit::ALL {
-            // A double arrow, pointing the way the sheet is made to fit: the axis a fit is against
-            // is the direction its arrow points.
-            let icon = match fit {
-                Fit::Width => IconName::MoveHorizontal,
-                Fit::Height => IconName::MoveVertical,
-            };
-            zooms.push(
-                icon_button(fit.button_id(), icon, fit.label(), cx, move |app, cx| {
-                    app.fit_sheet(fit, cx)
-                })
-                .into_any_element(),
-            );
-        }
-
-        let mut sizes: Vec<AnyElement> = Vec::new();
-        for size in CanvasSize::ALL {
-            sizes.push(
-                action_button(
-                    size.button_id(),
-                    size.label(),
-                    self.settings.canvas_size == size,
-                    cx,
-                    move |app, cx| app.set_canvas_size(size, cx),
-                )
-                .into_any_element(),
-            );
-        }
-
-        let mut styles: Vec<AnyElement> = Vec::new();
-        for style in CanvasStyle::ALL {
-            styles.push(
-                action_button(
-                    style.button_id(),
-                    style.label(),
-                    self.settings.canvas_style == style,
-                    cx,
-                    move |app, cx| app.set_canvas_style(style, cx),
-                )
-                .into_any_element(),
-            );
-        }
 
         // Paper is a square — a page has corners — and ink is a circle, which is what a pen's
         // colour looks like on every writing app there is. Two shapes, one table of colours.
@@ -1654,14 +1793,14 @@ impl NoteApp {
             .pt_2()
             .border_t_1()
             .border_color(hairline)
-            .child(control_label("Zoom", muted))
-            .children(zooms)
+            .child(control_label("Page", muted))
+            .child(self.page_controls(cx))
             .child(toolbar_divider(hairline))
             .child(control_label("Sheet", muted))
-            .children(sizes)
+            .child(self.chooser(&self.sheet_select))
             .child(toolbar_divider(hairline))
             .child(control_label("Style", muted))
-            .children(styles)
+            .child(self.chooser(&self.rule_select))
             .child(toolbar_divider(hairline))
             .child(control_label("Paper", muted))
             .children(paper)
@@ -1682,21 +1821,35 @@ impl NoteApp {
             ))
     }
 
-    /// The desk's own row: the counters at the left, the page in the middle.
+    /// One of the row's choosers, at the width the bar gives it.
     ///
-    /// Two floating things rather than one bar, because they are read at different distances: the
-    /// page number is reached for constantly and sits in the middle of the desk where the hand
-    /// already is, while the counters are glanced at and stay out of the way at the edge.
+    /// The width is set here rather than on the select itself: a `Select` fills its parent by design
+    /// — it is a form field, and a form field is as wide as the field it is on — so in a row it would
+    /// take the whole bar. Wide enough for its longest label (`Square`, `Letter`) so that the box does
+    /// not resize as the choice changes, which would move the controls beside it.
+    fn chooser(&self, state: &Entity<SelectState<Vec<&'static str>>>) -> impl IntoElement {
+        div().w(px(112.0)).child(Select::new(state).small())
+    }
+
+    /// The desk's own row: the counters at one edge, the page in the middle, the zoom at the other.
     ///
-    /// The page is centred by *this* row and the counters are taken out of the flow, so a counter
-    /// growing by a digit cannot shove the page off centre — a page number that moved whenever a
-    /// number changed would be worse than no page number.
+    /// Floating pills rather than one bar, because they are read at different distances: the page
+    /// number is reached for constantly and sits in the middle of the desk where the hand already is,
+    /// the zoom is reached for when the page's own shape is in the way and sits at the edge that hand
+    /// falls to, and the counters are glanced at and stay out of the way at the other edge.
+    ///
+    /// The page is centred by *this* row and the rest are taken out of the flow, so a counter growing
+    /// by a digit cannot shove the page off centre — a page number that moved whenever a number
+    /// changed would be worse than no page number.
     fn bottom_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Full width with a margin's worth of padding, for the reason the bar gives: the width has to
+        // come from somewhere, and it cannot come from two insets on the same element.
         let mut row = div()
             .absolute()
             .bottom(px(BAR_MARGIN))
-            .left(px(BAR_MARGIN))
-            .right(px(BAR_MARGIN))
+            .left_0()
+            .w_full()
+            .px(px(BAR_MARGIN))
             .flex()
             .flex_row()
             .items_center()
@@ -1712,6 +1865,19 @@ impl NoteApp {
                     .left_0()
                     .bottom_0()
                     .child(self.status_pill(cx)),
+            );
+        }
+
+        // The zoom is a command like the ones in the bar, and it hides with them: a clean sheet is a
+        // sheet with no controls on it. The page pill and the counters stay, because they are how the
+        // desk is read rather than what it is set to.
+        if self.settings.show_toolbar {
+            row = row.child(
+                div()
+                    .absolute()
+                    .right_0()
+                    .bottom_0()
+                    .child(self.zoom_pill(cx)),
             );
         }
 
@@ -1768,6 +1934,135 @@ impl NoteApp {
                 cx,
                 |app, cx| app.next_page(cx),
             ))
+    }
+
+    /// The way the sheet is looked at: two steps, the number they are at, and the two fits.
+    ///
+    /// In the pill the page commands left behind, and deliberately in their place: zoom is *reading*,
+    /// not writing — it changes nothing about the note — so it belongs on the desk beside the page
+    /// number rather than up on the bar with the controls that change the sheet.
+    ///
+    /// The percentage sits between the two steps and is a readout rather than a button: it is the one
+    /// thing that says whether Fit Width has already been pressed. It is given a fixed width so that
+    /// stepping from 99% to 100% to 101% does not shuffle the buttons either side of it.
+    ///
+    /// It hides with the bar, because it is the same kind of thing as the controls that are still up
+    /// there: a clean sheet is a sheet with no controls on it. The page pill and the counters stay —
+    /// they are how the desk is read, not what it is set to.
+    fn zoom_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (surface, hairline, accent, radius) = (
+            theme.title_bar,
+            theme.title_bar_border,
+            theme.primary,
+            theme.radius_lg,
+        );
+
+        // Collected before they are chained, for the reason the page commands give.
+        let mut controls: Vec<AnyElement> = Vec::new();
+        controls.push(
+            icon_button(
+                "zoom-out",
+                IconName::Minus,
+                "Zoom out",
+                cx,
+                |app, cx| app.zoom_out(cx),
+            )
+            .into_any_element(),
+        );
+        controls.push(
+            div()
+                .text_size(px(12.0))
+                .text_color(accent)
+                .whitespace_nowrap()
+                .min_w(px(42.0))
+                .text_center()
+                .child(format!("{:.0}%", self.view.zoom() * 100.0))
+                .into_any_element(),
+        );
+        controls.push(
+            icon_button("zoom-in", IconName::Plus, "Zoom in", cx, |app, cx| app.zoom_in(cx))
+                .into_any_element(),
+        );
+        // A hairline between stepping and fitting: one changes the number, the other works it out
+        // from the window, and a run of four arrows with no punctuation reads as four steps.
+        controls.push(toolbar_divider(hairline).into_any_element());
+        for fit in Fit::ALL {
+            // A double arrow, pointing the way the sheet is made to fit: the axis a fit is against
+            // is the direction its arrow points.
+            let icon = match fit {
+                Fit::Width => IconName::MoveHorizontal,
+                Fit::Height => IconName::MoveVertical,
+            };
+            controls.push(
+                icon_button(fit.button_id(), icon, fit.label(), cx, move |app, cx| {
+                    app.fit_sheet(fit, cx)
+                })
+                .into_any_element(),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px(px(4.0))
+            .py(px(4.0))
+            .rounded(radius)
+            .bg(surface)
+            .border_1()
+            .border_color(hairline)
+            .shadow_sm()
+            .children(controls)
+    }
+
+    /// The page commands: insert a page before or after this one, or delete this one.
+    ///
+    /// The first group in the bar's second row, because a page *is* the sheet and these are the only
+    /// controls in the app that change how much of it there is. They stand bare on the bar rather
+    /// than in a pill: in the bar, every group does. The pill they used to sit in is still there —
+    /// the zoom has it now (see [`NoteApp::zoom_pill`]).
+    fn page_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let hairline = theme.title_bar_border;
+
+        // Collected before they are chained: each `cx.listener` takes a mutable borrow of the
+        // context, and one long builder chain would hold them all at once.
+        let controls = vec![
+            icon_button(
+                "page-before",
+                IconName::BetweenVerticalStart,
+                "Add a page before this one",
+                cx,
+                |app, cx| app.add_page(true, cx),
+            )
+            .into_any_element(),
+            icon_button(
+                "page-after",
+                IconName::BetweenVerticalEnd,
+                "Add a page after this one",
+                cx,
+                |app, cx| app.add_page(false, cx),
+            )
+            .into_any_element(),
+            toolbar_divider(hairline).into_any_element(),
+            icon_button(
+                "page-delete",
+                IconName::FileX,
+                "Delete this page",
+                cx,
+                |app, cx| app.delete_page(cx),
+            )
+            .into_any_element(),
+        ];
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0))
+            .children(controls)
     }
 
     /// The counters, in a translucent pill on the desk.
@@ -1901,7 +2196,6 @@ impl Render for NoteApp {
             stroke
         });
         let page_image = page.as_ref().map(|page| Arc::clone(&page.image));
-        let ink_color: Hsla = rgb(self.settings.ink_color).into();
         let page_color: Hsla = rgb(self.settings.page_color).into();
         let timings = Arc::clone(&self.timings);
         // The same hand-off for the frame clock: the paint callback is where a frame is known to
@@ -2001,7 +2295,7 @@ impl Render for NoteApp {
 
                             painted += 1;
                             vertices += stroke.outline.len() as u64;
-                            paint_stroke(window, stroke, &sheet, ink_color, &mut scratch);
+                            paint_stroke(window, stroke, &sheet, &mut scratch);
                         }
 
                         // The stroke being drawn is never culled: it is by definition under the
@@ -2009,7 +2303,7 @@ impl Render for NoteApp {
                         if let Some(stroke) = &open {
                             painted += 1;
                             vertices += stroke.outline.len() as u64;
-                            paint_stroke(window, stroke, &sheet, ink_color, &mut scratch);
+                            paint_stroke(window, stroke, &sheet, &mut scratch);
                         }
 
                         timings.count_painted(painted, vertices, culled);
@@ -2028,26 +2322,24 @@ impl Render for NoteApp {
     }
 }
 
-/// A compact toolbar button with a text label.
+/// One of the bar's choosers: a list of options, and the one it starts on.
 ///
-/// The label is the command's name as well as its face. These are the controls whose words are worth
-/// the room — a paper size, a ruling — and there are few enough of them that naming them costs the
-/// row nothing. `active` is set twice on purpose: `.selected` is what the component library paints
-/// with, and `.toggled` is what a screen reader is told. Setting only the second is what a toolbar
-/// looks like when the tool in hand cannot be seen.
-fn action_button(
-    id: &'static str,
-    label: &'static str,
-    active: bool,
+/// A component rather than a row of buttons, because these are *choosers* and not toggles: six paper
+/// sizes and four rulings do not fit across a narrow window, and the set that is current is read off
+/// one control instead of being picked out of a row that wraps. The items are the labels and nothing
+/// else — a `Select` reports its choice as the text it was showing — which is why
+/// [`CanvasSize::from_label`] exists to turn that text back into a setting.
+///
+/// `None` leaves the box empty, and is only reachable for a value the labels cannot name; the size
+/// and the ruling always have one.
+fn choice(
+    labels: &[&'static str],
+    selected: Option<usize>,
+    window: &mut Window,
     cx: &mut Context<NoteApp>,
-    handler: impl Fn(&mut NoteApp, &mut Context<NoteApp>) + 'static,
-) -> Button {
-    Button::new(id)
-        .label(label)
-        .compact()
-        .selected(active)
-        .toggled(active)
-        .on_click(cx.listener(move |app, _, _, cx| handler(app, cx)))
+) -> Entity<SelectState<Vec<&'static str>>> {
+    let items: Vec<&'static str> = labels.to_vec();
+    cx.new(|cx| SelectState::new(items, selected.map(IndexPath::new), window, cx))
 }
 
 /// An icon button that puts a tool in hand.
@@ -2263,7 +2555,7 @@ mod tests {
     /// A stroke whose ribbon crosses itself: a circle drawn all the way round and a fifth of the
     /// way past where it started, which is the shape a cursive loop or a scribble-over makes.
     fn self_crossing_stroke() -> Stroke {
-        let mut stroke = Stroke::new(InkPoint::new(60.0, 0.0, 24.0));
+        let mut stroke = Stroke::new(InkPoint::new(60.0, 0.0, 24.0), Stroke::DEFAULT_COLOR);
 
         for step in 1..=190 {
             // A full turn and a fifth of the way past it: `TAU` and not `PI`, or the "circle" is
@@ -2693,6 +2985,9 @@ fn paint_cursor(window: &mut Window, cursor: PenCursor, color: Hsla) {
 /// that can carry a width that changes along the line: the pen's force is baked into the
 /// outline's two edges, and a single stroke-width would flatten it.
 ///
+/// The colour comes from the stroke itself and not from the palette: a page can hold ink written
+/// with several pens, and a frame has no business knowing which one is in hand.
+///
 /// The outline is in the sheet's coordinates, so it is scaled and placed on the way out, and the
 /// `points` scratch buffer is handed in rather than allocated per stroke: a frame with three
 /// hundred strokes on it would otherwise make — and free — three hundred vectors.
@@ -2700,7 +2995,6 @@ fn paint_stroke(
     window: &mut Window,
     stroke: &Stroke,
     sheet: &Sheet,
-    color: Hsla,
     points: &mut Vec<Point<Pixels>>,
 ) {
     // Fewer than three points cannot enclose an area.
@@ -2720,6 +3014,7 @@ fn paint_stroke(
     builder.add_polygon(points, true);
 
     if let Ok(path) = builder.build() {
+        let color: Hsla = rgb(stroke.color).into();
         window.paint_path(path, color);
     }
 }

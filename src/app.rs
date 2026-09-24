@@ -42,18 +42,67 @@ use gpui_kit::*;
 
 use crate::canvas::{contrast_color, CanvasSize, CanvasStyle, Ruling, Swatch, INK_COLORS, PAPER_COLORS};
 use crate::cursor::{PenCursor, NIB_RADIUS};
-use crate::ink::{InkDocument, Stroke, Tool};
+use crate::ink::{InkDocument, InkTransform, Stroke, Tool};
 use crate::pen::{capture_config, PenInbox, PenService};
 use crate::pdf::{PdfDocumentView, RenderedPage};
 use crate::refresh::{DisplayRefresh, RefreshMode, RefreshRate};
 use crate::settings::Settings;
 use crate::system_cursor::SystemCursor;
+use crate::timing::{measure, Timings};
+use crate::view::{Fit, Viewport};
 
 /// The bitmap-width multiplier used when rendering a PDF page.
 ///
 /// Rendering at twice the logical width keeps page text crisp when the window is scaled and on
 /// a high-DPI panel, and the cost is paid once per page rather than once per frame.
 const PDF_RENDER_SCALE: f32 = 2.0;
+
+/// The ladder of bitmap widths a page may be rendered at.
+///
+/// ## Why the width is quantised instead of exact
+///
+/// A page is rasterised whenever the requested width *changes*, and rasterising is the one part of
+/// a frame that costs milliseconds — measured on a blank A4 page: 1.0 ms at 720 pixels wide,
+/// 3.4 ms at 1440, 13.4 ms at 2880 and 54.5 ms at 5760, with the bitmap itself reaching 178 MB at
+/// the last of those. A zoom gesture asks for a new width on *every event*, sixty times a second,
+/// so an exact width means a pinch across a PDF re-rasterises the page hundreds of times and never
+/// finishes a frame.
+///
+/// Quantising the request onto a ladder turns that into a handful of rasterisations per gesture.
+/// Nothing needs to be exact: GPUI scales the bitmap to the bounds it is painted into, so a page
+/// rendered at a width the reader is not quite at is simply slightly softer than it could be.
+///
+/// ## Why the rungs grow geometrically
+///
+/// Because the cost is quadratic in the width: each rung is half again as wide as the last, so the
+/// memory and the time each grow by a factor of about two and a quarter. Four rungs cover 5% to
+/// 1600% of zoom — every zoom this app allows — with the worst rung at 67 MB and about 27 ms, and
+/// the top rung is where it stops growing: past it a page is magnified rather than resolved, which
+/// is the same trade-off any viewer makes when it stops rendering at the image's own resolution.
+const PDF_PIXEL_WIDTHS: [u32; 4] = [1_024, 1_536, 2_304, 3_456];
+
+/// How much of the sheet's size one notch of a wheel adds.
+///
+/// The same step as the toolbar's own zoom buttons, because both are asking the same question and
+/// should answer it at the same rate.
+const WHEEL_ZOOM_STEP: f32 = 1.25;
+
+/// How many *lines* the platform reports for one notch of a wheel.
+///
+/// GPUI scales a wheel notch by the system's "lines to scroll per notch" setting — three on a
+/// machine at its defaults — so one notch of a real wheel reaches this app as three lines. Assuming
+/// that here is what makes one notch zoom like one press of the toolbar's button. A machine set to
+/// scroll a different number of lines per notch zooms proportionally faster or slower per notch,
+/// which is a small, self-consistent difference; measuring it would mean reading a system setting
+/// this app has no API for. A trackpad reports pixels and never uses this.
+const WHEEL_LINES_PER_NOTCH: f32 = 3.0;
+
+/// How many logical pixels one *line* of a scroll is worth, for panning.
+///
+/// The platform does not say; Windows' own notion of a line is a fraction of a "page" whose size
+/// comes from the mouse settings, and 32 logical pixels lands within a few pixels of it on a
+/// machine at its defaults. A trackpad reports pixels rather than lines and never uses this.
+const WHEEL_LINE_HEIGHT: f32 = 32.0;
 
 /// The margin, in logical pixels, between a sheet and the window's edges.
 ///
@@ -86,6 +135,67 @@ fn status_due(built_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(built_at) >= STATUS_INTERVAL
 }
 
+/// The sheet as the last frame drew it: its size in paper units, and where that was placed.
+///
+/// The pump has no window to ask, and does not need one: a reading has to land on the sheet the
+/// user was *looking at*, which is the last frame's — not one computed from a window that may have
+/// been resized, zoomed or panned since the reading was produced. Cached here rather than read back
+/// out of a layout callback, because the app computes this geometry itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Sheet {
+    /// The size the paper asks for, in logical pixels at 1:1.
+    paper: (f32, f32),
+    /// Where the sheet's top-left corner was drawn, in window logical pixels.
+    origin: (f32, f32),
+    /// The window it was drawn into.
+    window: (f32, f32),
+    /// The zoom it was drawn at.
+    zoom: f32,
+}
+
+impl Sheet {
+    /// The size it was drawn at, after the zoom.
+    fn drawn(&self) -> (f32, f32) {
+        (self.paper.0 * self.zoom, self.paper.1 * self.zoom)
+    }
+
+    /// Where a reading in physical client pixels lands on the sheet.
+    fn transform(&self, scale: f32) -> InkTransform {
+        InkTransform {
+            scale,
+            zoom: self.zoom,
+            origin: self.origin,
+        }
+    }
+
+    /// Where a point on the sheet is drawn, in window logical pixels.
+    fn place(&self, x: f32, y: f32) -> Point<Pixels> {
+        point(
+            px(self.origin.0 + x * self.zoom),
+            px(self.origin.1 + y * self.zoom),
+        )
+    }
+
+    /// The part of the sheet that is on screen, in the sheet's own coordinates.
+    ///
+    /// This is what a frame culls against: ink outside it costs nothing to skip and a great deal
+    /// to draw, and the difference is the whole point of zooming in.
+    fn visible(&self) -> [f32; 4] {
+        let zoom = if self.zoom.is_finite() && self.zoom > 0.0 {
+            self.zoom
+        } else {
+            1.0
+        };
+
+        [
+            (0.0 - self.origin.0) / zoom,
+            (0.0 - self.origin.1) / zoom,
+            (self.window.0 - self.origin.0) / zoom,
+            (self.window.1 - self.origin.1) / zoom,
+        ]
+    }
+}
+
 /// The application view.
 pub struct NoteApp {
     /// The user's tuning, persisted between runs.
@@ -108,6 +218,14 @@ pub struct NoteApp {
     page_index: usize,
     /// The window's DPI scale factor, captured each frame.
     scale: f32,
+    /// How large the sheet is drawn, and where it sits in the window.
+    view: Viewport,
+    /// The sheet as the last frame drew it.
+    sheet: Sheet,
+    /// What every hot path costs, shared with the paint callback.
+    timings: Arc<Timings>,
+    /// When the pump last woke, for the gap it reports against its own interval.
+    last_pump: Option<Instant>,
     /// The pump's current interval in microseconds, shared with the pump task.
     ///
     /// Changing the refresh rate has to change how often the queue is drained, and the pump
@@ -153,6 +271,8 @@ impl NoteApp {
             message = pen.status().to_string();
         }
 
+        let view = Viewport::new(settings.zoom);
+
         let mut app = NoteApp {
             settings,
             settings_path,
@@ -163,6 +283,10 @@ impl NoteApp {
             system_cursor,
             page_index: 0,
             scale: window.scale_factor(),
+            view,
+            sheet: Sheet::default(),
+            timings: Arc::new(Timings::default()),
+            last_pump: None,
             pump_interval_micros: Arc::new(AtomicU64::new(
                 refresh.effective.pump_interval().as_micros() as u64
             )),
@@ -195,18 +319,32 @@ impl NoteApp {
                 Duration::from_micros(interval_micros.load(Ordering::Relaxed).max(500));
             cx.background_executor().timer(interval).await;
 
-            let samples = inbox.take();
-            if samples.is_empty() {
+            let batch = inbox.take();
+            if batch.samples.is_empty() {
                 continue;
             }
 
             let alive = this.update(cx, |app, cx| {
+                // The gap between this wake and the last, against the interval it asked for: a
+                // timer that oversleeps puts a floor under the latency of everything else.
+                let woke = Instant::now();
+                if let Some(previous) = app.last_pump.replace(woke) {
+                    app.timings
+                        .pump_gap
+                        .record(woke.saturating_duration_since(previous));
+                }
+
+                // How long the newest reading waited for this wake. Together with the capture's
+                // own delay — the digitizer to the window, which nothing here can change — this
+                // is the whole path from the pen to the frame that shows it.
+                app.timings.pen_latency.record(batch.waited);
+
                 // The cursor is read on both sides of the batch because a pen in range but not
                 // touching lays no ink and still has to be followed around the window: `consume`
                 // reports the ink, and the comparison reports the cursor. A frame is scheduled
                 // when either of them moved.
                 let cursor = app.pen_cursor();
-                let laid_ink = app.ink.consume(&samples, app.scale, &app.settings);
+                let laid_ink = app.consume_ink(&batch.samples);
                 let cursor_moved = app.pen_cursor() != cursor;
 
                 // The system pointer follows the ghost on every read, so the two can never disagree
@@ -233,6 +371,17 @@ impl NoteApp {
             }
         })
         .detach();
+    }
+
+    /// Reads a batch of readings into the ink model, timed.
+    ///
+    /// The transform comes from the last frame's sheet rather than from the window: a reading
+    /// belongs on the sheet the user was looking at when the nib moved.
+    fn consume_ink(&mut self, samples: &[pen_windows::PenSample]) -> bool {
+        let transform = self.sheet.transform(self.scale);
+        let _timed = measure(&self.timings.ink);
+
+        self.ink.consume(samples, &transform, &self.settings)
     }
 
     /// Selects the tool an ordinary nib uses.
@@ -270,6 +419,98 @@ impl NoteApp {
     fn set_canvas_style(&mut self, style: CanvasStyle, cx: &mut Context<Self>) {
         self.settings.canvas_style = style;
         self.finish_setting(cx);
+    }
+
+    /// One step closer.
+    fn zoom_in(&mut self, cx: &mut Context<Self>) {
+        if self.view.zoom_in() {
+            self.finish_zoom(cx);
+        }
+    }
+
+    /// One step further away.
+    fn zoom_out(&mut self, cx: &mut Context<Self>) {
+        if self.view.zoom_out() {
+            self.finish_zoom(cx);
+        }
+    }
+
+    /// Makes the sheet fill the window on one axis.
+    ///
+    /// The sheet it is fitting is the one the last frame drew, so the answer is about the window
+    /// the user is looking at rather than one that has been resized since.
+    fn fit_sheet(&mut self, which: Fit, cx: &mut Context<Self>) {
+        let sheet = self.sheet;
+
+        if self
+            .view
+            .fit(which, sheet.paper, sheet.window, PAGE_MARGIN)
+        {
+            self.finish_zoom(cx);
+        }
+    }
+
+    /// Keeps the settings and the status line in step with a zoom the view already accepted.
+    fn finish_zoom(&mut self, cx: &mut Context<Self>) {
+        self.settings.zoom = self.view.zoom();
+        self.finish_setting(cx);
+    }
+
+    /// Zooms or pans with the wheel — which is also where a trackpad's two-finger gesture arrives.
+    ///
+    /// With `Ctrl` held it zooms about the pointer, which is what every viewer does and what a
+    /// trackpad's pinch is delivered as when the platform sends it as a wheel rather than as a
+    /// gesture. Without it, a scroll pans the sheet, which is what a two-finger drag is asking for.
+    fn on_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let pointer = (event.position.x.into(), event.position.y.into());
+
+        if event.modifiers.control {
+            let (amount, in_pixels) = match event.delta {
+                ScrollDelta::Lines(delta) => (delta.y, false),
+                ScrollDelta::Pixels(delta) => (delta.y.into(), true),
+            };
+            let factor = wheel_zoom_factor(amount, in_pixels);
+            let sheet = self.sheet;
+
+            if self.view.zoom_around(
+                factor,
+                pointer,
+                sheet.paper,
+                sheet.window,
+                PAGE_MARGIN,
+            ) {
+                self.finish_zoom(cx);
+            }
+            return;
+        }
+
+        let (dx, dy) = match event.delta {
+            ScrollDelta::Lines(delta) => (delta.x, delta.y),
+            ScrollDelta::Pixels(delta) => (delta.x.into(), delta.y.into()),
+        };
+        let in_pixels = matches!(event.delta, ScrollDelta::Pixels(_));
+
+        if self.view.pan_by(wheel_pan((dx, dy), in_pixels)) {
+            cx.notify();
+        }
+    }
+
+    /// Zooms with a trackpad's pinch, about the point between the fingers.
+    ///
+    /// The delta is already a fraction — `0.1` is ten percent — so the factor is simply one more
+    /// than it. A pinch also cancels any pan that has just been applied by the same gesture being
+    /// reported as a wheel as well, by replacing the offset with the anchor rather than adding to it.
+    fn on_pinch(&mut self, event: &PinchEvent, cx: &mut Context<Self>) {
+        let pointer = (event.position.x.into(), event.position.y.into());
+        let factor = pinch_zoom_factor(event.delta);
+        let sheet = self.sheet;
+
+        if self
+            .view
+            .zoom_around(factor, pointer, sheet.paper, sheet.window, PAGE_MARGIN)
+        {
+            self.finish_zoom(cx);
+        }
     }
 
     /// Changes the sheet's colour.
@@ -445,21 +686,37 @@ impl NoteApp {
     }
 
     /// The bitmap width a page is rendered at, in device pixels.
+    ///
+    /// The displayed width is the paper's own width times the zoom, in logical pixels; device
+    /// pixels add the window's scale factor, and [`PDF_RENDER_SCALE`] adds the crispness. The
+    /// result is then quantised onto [`PDF_PIXEL_WIDTHS`], which is what keeps a zoom gesture from
+    /// re-rasterising the page on every event.
     fn pdf_render_pixel_width(&self) -> u32 {
-        (self.settings.page_display_width * self.scale.max(1.0) * PDF_RENDER_SCALE).round() as u32
+        let logical = self.settings.page_display_width * self.view.zoom();
+        let wanted = logical * self.scale.max(1.0) * PDF_RENDER_SCALE;
+
+        quantise_width(wanted)
     }
 
     /// The rendered page for the current index, when a PDF is open.
     ///
     /// [`PdfDocumentView`] caches rendered pages, so on the common path this is a map lookup
-    /// and an `Arc` clone — no rasterisation in the frame.
+    /// and an `Arc` clone — no rasterisation in the frame. Rasterising is timed, because it runs
+    /// here, on this thread, inside the frame that asked for it.
     fn current_page(&mut self) -> Option<RenderedPage> {
         if !self.pdf.is_loaded() {
             return None;
         }
 
         let pixel_width = self.pdf_render_pixel_width();
-        match self.pdf.render_page(self.page_index, pixel_width) {
+
+        // Rasterising happens here, on this thread, inside the frame — so it is measured where the
+        // time is actually spent, rather than amortised into the frame's total. A cache hit is not
+        // recorded at all: its cost is a map lookup and it would otherwise dilute the mean.
+        let started = Instant::now();
+        let before = self.pdf.rasterised();
+
+        let page = match self.pdf.render_page(self.page_index, pixel_width) {
             Ok(page) => Some(page),
             Err(error) => {
                 let message = error.to_string();
@@ -472,16 +729,27 @@ impl NoteApp {
                 }
                 None
             }
+        };
+
+        self.timings.count_rasterised(self.pdf.rasterised() - before);
+        if self.pdf.rasterised() != before {
+            self.timings.pdf.record(started.elapsed());
         }
+
+        page
     }
 
-    /// Where the sheet is drawn: its size in logical pixels and its top-left corner.
+    /// Where the sheet is drawn, in the window the frame is painting.
+    ///
+    /// The *paper* size is what the size setting says; the zoom and the pan belong to the view, and
+    /// the two are combined here and nowhere else. The result is stored on the way past, because the
+    /// pump needs it and has no window to ask.
     fn page_layout(
         &self,
-        window_width: f32,
+        window: (f32, f32),
         page: Option<&RenderedPage>,
-    ) -> ([f32; 2], Point<Pixels>) {
-        let (width, height) = match page {
+    ) -> Sheet {
+        let paper = match page {
             // A PDF brings its own shape; only how wide it is drawn is the app's choice.
             Some(page) => page.display_size(self.settings.page_display_width),
             // The blank sheet takes both its shape and its scale from the chosen canvas size.
@@ -491,8 +759,12 @@ impl NoteApp {
                 .display_size(self.settings.page_display_width),
         };
 
-        let x = ((window_width - width) / 2.0).max(PAGE_MARGIN);
-        ([width, height], point(px(x), px(PAGE_MARGIN)))
+        Sheet {
+            paper,
+            origin: self.view.origin(paper, window, PAGE_MARGIN),
+            window,
+            zoom: self.view.zoom(),
+        }
     }
 
     /// The one line that says what the app is doing.
@@ -562,6 +834,12 @@ impl NoteApp {
             ink.resampled,
             ink.resample_ratio() * 100.0
         ));
+
+        // Where the reading goes and what it costs to put it there. The zoom is the one piece of
+        // view state the sheet's own controls cannot show a number for, and the rest is the
+        // measurement this app runs on itself.
+        parts.push(format!("view {:.0}%", self.view.zoom() * 100.0));
+        parts.push(self.timings.summary(self.refresh.effective.pump_interval()));
 
         if !self.message.is_empty() {
             parts.push(self.message.clone());
@@ -754,6 +1032,22 @@ impl NoteApp {
         let (border_color, muted_foreground, accent) =
             (theme.title_bar_border, theme.muted_foreground, theme.primary);
 
+        let mut zooms: Vec<AnyElement> = Vec::new();
+        zooms.push(
+            action_button("zoom-out", "−", false, cx, |app, cx| app.zoom_out(cx)).into_any_element(),
+        );
+        zooms.push(
+            action_button("zoom-in", "+", false, cx, |app, cx| app.zoom_in(cx)).into_any_element(),
+        );
+        for fit in Fit::ALL {
+            zooms.push(
+                action_button(fit.button_id(), fit.label(), false, cx, move |app, cx| {
+                    app.fit_sheet(fit, cx)
+                })
+                .into_any_element(),
+            );
+        }
+
         let mut sizes: Vec<AnyElement> = Vec::new();
         for size in CanvasSize::ALL {
             sizes.push(
@@ -819,6 +1113,18 @@ impl NoteApp {
             .w_full()
             .px_3()
             .pb_2()
+            .child(control_label("Zoom", muted_foreground))
+            .children(zooms)
+            // What the zoom *is*, next to the controls that change it: a percentage is the only
+            // thing that says whether Fit Width has already been pressed.
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(accent)
+                    .whitespace_nowrap()
+                    .child(format!("{:.0}%", self.view.zoom() * 100.0)),
+            )
+            .child(toolbar_divider(border_color))
             .child(control_label("Sheet", muted_foreground))
             .children(sizes)
             .child(toolbar_divider(border_color))
@@ -850,6 +1156,14 @@ impl NoteApp {
 
 impl Render for NoteApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Timed in a scope of its own, and *not* through `self.timings`: this guard holds a borrow
+        // of what it measures, and the rest of this function needs the view mutably. It ends when
+        // the element tree is built — the paint callback, which runs later, is measured separately.
+        let for_render = Arc::clone(&self.timings);
+        let _render_timed = measure(&for_render.render);
+        // The counters describe one frame, so this frame's are its own.
+        self.timings.start_frame();
+
         // The scale factor is what turns a physical pen pixel into a logical one, so it is
         // captured before anything that depends on it.
         self.scale = window.scale_factor();
@@ -857,22 +1171,49 @@ impl Render for NoteApp {
         let theme = cx.theme();
         let (background, foreground) = (theme.background, theme.foreground);
 
-        let window_width: f32 = window.bounds().size.width.into();
+        let window_size = (
+            window.bounds().size.width.into(),
+            window.bounds().size.height.into(),
+        );
         let page = self.current_page();
-        let (page_size, page_origin) = self.page_layout(window_width, page.as_ref());
+        let sheet = self.page_layout(window_size, page.as_ref());
+        // Stored for the pump, which has no window to ask: a reading has to land on the sheet the
+        // user was looking at, and that is this one.
+        self.sheet = sheet;
 
-        let sheet = Bounds {
+        let (page_size, page_origin) = (
+            sheet.drawn(),
+            point(px(sheet.origin.0), px(sheet.origin.1)),
+        );
+
+        let sheet_bounds = Bounds {
             origin: page_origin,
-            size: size(px(page_size[0]), px(page_size[1])),
+            size: size(px(page_size.0), px(page_size.1)),
         };
         // Built here rather than in the paint callback: the callback runs once per frame, and a
         // full page of grid lines is several hundred quads. `Ruling` hands back the same set
-        // until the sheet itself changes.
+        // until the sheet itself changes — which now includes its zoom, because the ruling is
+        // printed on the paper and grows with it.
         //
         // A PDF page is its own paper, so a blank sheet's ruling has nothing to sit on.
         let ruling = page.is_none().then(|| {
-            self.ruling
-                .quads(sheet, self.settings.canvas_style, self.settings.page_color)
+            let started = Instant::now();
+            let before = self.ruling.rebuilds();
+            let quads = self.ruling.quads(
+                sheet_bounds,
+                self.settings.canvas_style,
+                self.settings.page_color,
+                sheet.zoom,
+            );
+
+            // A cache hit is not a build, and recording one as a build would hide the cost of the
+            // builds that do happen behind the many frames that do not.
+            if self.ruling.rebuilds() != before {
+                self.timings.ruling.record(started.elapsed());
+                self.timings.count_ruling();
+            }
+
+            quads
         });
 
         // Everything the paint callback needs is owned by the time the callback is built: it
@@ -887,6 +1228,7 @@ impl Render for NoteApp {
         let page_image = page.as_ref().map(|page| Arc::clone(&page.image));
         let ink_color: Hsla = rgb(self.settings.ink_color).into();
         let page_color: Hsla = rgb(self.settings.page_color).into();
+        let timings = Arc::clone(&self.timings);
 
         // The ghost cursor: a mark at the nib with the pen's body leaning away from it. Drawn last,
         // because a cursor belongs on top of everything, and only while the pen is in range — the
@@ -919,12 +1261,20 @@ impl Render for NoteApp {
             .size_full()
             .bg(background)
             .text_color(foreground)
+            // A trackpad's pinch, and a wheel with `Ctrl` held, both arrive here: the canvas is the
+            // whole window's only interactive element, so it is what the gestures hit.
+            .on_scroll_wheel(
+                cx.listener(|app, event: &ScrollWheelEvent, _, cx| app.on_wheel(event, cx)),
+            )
+            .on_pinch(cx.listener(|app, event: &PinchEvent, _, cx| app.on_pinch(event, cx)))
             .child(
                 canvas(
                     |_, _, _| (),
                     move |_bounds, _, window: &mut Window, _cx: &mut App| {
+                        let _timed = measure(&timings.paint);
+
                         // The sheet: a filled rectangle, then its ruling, then the page image.
-                        paint_rect(window, page_origin, page_size[0], page_size[1], page_color);
+                        paint_rect(window, page_origin, page_size.0, page_size.1, page_color);
 
                         // Quad by quad, cloned: a `PaintQuad` is a handful of plain old data, so
                         // this is a memcpy per rule and needs no geometry work at all.
@@ -937,7 +1287,7 @@ impl Render for NoteApp {
                         if let Some(image) = page_image {
                             let image_bounds = Bounds {
                                 origin: page_origin,
-                                size: size(px(page_size[0]), px(page_size[1])),
+                                size: size(px(page_size.0), px(page_size.1)),
                             };
                             window
                                 .paint_image(
@@ -951,12 +1301,36 @@ impl Render for NoteApp {
                                 .ok();
                         }
 
+                        // Ink that is off the sheet is skipped before a polygon is built for it.
+                        // This is where zooming in pays for itself: a page and a half of ink can
+                        // be off screen, and building a path per stroke only to have the renderer
+                        // discard it is the most expensive thing an immediate-mode canvas does.
+                        let visible = sheet.visible();
+                        let mut scratch: Vec<Point<Pixels>> = Vec::new();
+                        let mut painted = 0u64;
+                        let mut vertices = 0u64;
+                        let mut culled = 0u64;
+
                         for stroke in finished.iter() {
-                            paint_stroke(window, stroke, ink_color);
+                            if !stroke.visible_in(visible) {
+                                culled += 1;
+                                continue;
+                            }
+
+                            painted += 1;
+                            vertices += stroke.outline.len() as u64;
+                            paint_stroke(window, stroke, &sheet, ink_color, &mut scratch);
                         }
+
+                        // The stroke being drawn is never culled: it is by definition under the
+                        // pen, and a stroke that vanished for a frame would read as a glitch.
                         if let Some(stroke) = &open {
-                            paint_stroke(window, stroke, ink_color);
+                            painted += 1;
+                            vertices += stroke.outline.len() as u64;
+                            paint_stroke(window, stroke, &sheet, ink_color, &mut scratch);
                         }
+
+                        timings.count_painted(painted, vertices, culled);
 
                         if let Some(cursor) = cursor {
                             paint_cursor(window, cursor, cursor_color);
@@ -1068,8 +1442,131 @@ fn swatch_button(
 mod tests {
     // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
     // scope and shadow the attribute this module needs.
-    use super::{status_due, STATUS_INTERVAL};
+    use super::{
+        notch_in_pixels, pinch_zoom_factor, quantise_width, status_due, wheel_pan,
+        wheel_zoom_factor, STATUS_INTERVAL, WHEEL_LINE_HEIGHT, WHEEL_LINES_PER_NOTCH,
+        WHEEL_ZOOM_STEP,
+    };
     use std::time::{Duration, Instant};
+
+    /// One notch of a wheel is one zoom step — and a notch arrives as several lines, which is the
+    /// part that is easy to get wrong: it made a notch of a real wheel zoom three times too fast
+    /// the first time this was written.
+    #[test]
+    fn one_wheel_notch_is_one_zoom_step() {
+        assert_eq!(
+            wheel_zoom_factor(WHEEL_LINES_PER_NOTCH, false),
+            WHEEL_ZOOM_STEP,
+            "a notch is what a notch of a wheel reports"
+        );
+        assert_eq!(wheel_zoom_factor(0.0, false), 1.0);
+        assert!(wheel_zoom_factor(-WHEEL_LINES_PER_NOTCH, false) < 1.0);
+        assert!(
+            (wheel_zoom_factor(-WHEEL_LINES_PER_NOTCH, false) * WHEEL_ZOOM_STEP - 1.0).abs() < 1e-6,
+            "and undoes a notch of the other way"
+        );
+    }
+
+    /// Two notches are the step applied twice rather than twice the step: a fast roll has to zoom
+    /// smoothly instead of in jumps.
+    #[test]
+    fn two_notches_are_two_steps_and_not_a_doubled_one() {
+        let twice = wheel_zoom_factor(WHEEL_LINES_PER_NOTCH * 2.0, false);
+
+        assert!((twice - WHEEL_ZOOM_STEP * WHEEL_ZOOM_STEP).abs() < 1e-6);
+        assert!(twice < WHEEL_ZOOM_STEP * 2.0, "a roll is not a multiplication");
+    }
+
+    /// A trackpad reports pixels, and the same distance zooms the same either way it is reported:
+    /// a notch of lines and a notch's worth of pixels are one gesture.
+    #[test]
+    fn a_scroll_of_pixels_matches_a_scroll_of_lines() {
+        let by_lines = wheel_zoom_factor(WHEEL_LINES_PER_NOTCH, false);
+        let by_pixels = wheel_zoom_factor(notch_in_pixels(), true);
+
+        assert!(
+            (by_lines - by_pixels).abs() < 1e-6,
+            "a notch of lines and a notch of pixels are the same gesture: {by_lines} vs {by_pixels}"
+        );
+        assert_eq!(by_lines, WHEEL_ZOOM_STEP, "and both are one step");
+    }
+
+    /// One enormous delta from a driver must not take the sheet from 100% to 1600%.
+    #[test]
+    fn a_wild_delta_is_clamped() {
+        assert_eq!(wheel_zoom_factor(10_000.0, false), 5.0);
+        assert_eq!(wheel_zoom_factor(-10_000.0, false), 0.2);
+        assert_eq!(wheel_zoom_factor(f32::NAN, false), 1.0);
+        assert_eq!(wheel_zoom_factor(f32::INFINITY, true), 1.0);
+    }
+
+    /// Panning is a distance in logical pixels, in the direction of the scroll: up is earlier in
+    /// the page, which puts the sheet lower in the window.
+    #[test]
+    fn a_scroll_pans_in_the_direction_it_points() {
+        assert_eq!(wheel_pan((0.0, 1.0), false), (0.0, WHEEL_LINE_HEIGHT));
+        assert_eq!(
+            wheel_pan((0.0, 3.0), true),
+            (0.0, 3.0),
+            "pixels are already pixels"
+        );
+        assert_eq!(wheel_pan((-1.0, 0.0), true), (-1.0, 0.0));
+    }
+
+    /// A pinch reports a fraction of the current size, and a nonsense one is refused.
+    #[test]
+    fn a_pinch_reports_a_fraction_of_the_size() {
+        assert!((pinch_zoom_factor(0.1) - 1.1).abs() < 1e-6, "ten percent closer");
+        assert!((pinch_zoom_factor(-0.1) - 0.9).abs() < 1e-6, "and ten percent back");
+        assert_eq!(pinch_zoom_factor(0.0), 1.0, "three fingers held still");
+        assert_eq!(pinch_zoom_factor(100.0), 5.0, "clamped");
+        assert_eq!(pinch_zoom_factor(f32::NAN), 1.0, "refused");
+    }
+
+    /// A page's bitmap width is quantised onto the ladder, so that a zoom which changes the width
+    /// by a pixel does not invalidate a bitmap that cost milliseconds to make.
+    #[test]
+    fn a_page_is_rendered_on_the_ladder() {
+        // The rungs themselves, and everything between them rounded up to the next one.
+        assert_eq!(quantise_width(100.0), 1_024);
+        assert_eq!(quantise_width(1_024.0), 1_024);
+        assert_eq!(quantise_width(1_025.0), 1_536, "just past a rung is the next rung");
+        assert_eq!(quantise_width(1_500.0), 1_536);
+        assert_eq!(quantise_width(2_000.0), 2_304);
+        assert_eq!(quantise_width(3_000.0), 3_456);
+
+        // Past the top rung it stops growing: the page is magnified rather than resolved.
+        assert_eq!(quantise_width(9_999.0), 3_456);
+
+        // A window that reports nonsense still asks for something renderable.
+        assert_eq!(quantise_width(0.0), 1_024);
+        assert_eq!(quantise_width(-10.0), 1_024);
+        assert_eq!(quantise_width(f32::NAN), 1_024);
+    }
+
+    /// The whole zoom range is covered by a handful of rasterisations, which is the point of the
+    /// ladder: a pinch across a PDF must not re-render the page on every event.
+    #[test]
+    fn a_whole_pinch_needs_only_a_few_rasterisations() {
+        let paper_width = 720.0;
+        let mut widths = Vec::new();
+
+        // 5% to 1600%, in the steps a gesture would actually produce.
+        let mut zoom = 0.05f32;
+        while zoom <= 16.0 {
+            let width = quantise_width(paper_width * zoom * 2.0);
+            if widths.last() != Some(&width) {
+                widths.push(width);
+            }
+            zoom *= 1.25f32.powf(0.1);
+        }
+
+        assert_eq!(
+            widths,
+            vec![1_024, 1_536, 2_304, 3_456],
+            "one rasterisation per rung, and no more"
+        );
+    }
 
     /// The status line is rebuilt on a clock, not on every frame.
     ///
@@ -1184,22 +1681,105 @@ fn paint_cursor(window: &mut Window, cursor: PenCursor, color: Hsla) {
 /// A stroke is a filled polygon rather than a stroked polyline, because that is the only shape
 /// that can carry a width that changes along the line: the pen's force is baked into the
 /// outline's two edges, and a single stroke-width would flatten it.
-fn paint_stroke(window: &mut Window, stroke: &Stroke, color: Hsla) {
+///
+/// The outline is in the sheet's coordinates, so it is scaled and placed on the way out, and the
+/// `points` scratch buffer is handed in rather than allocated per stroke: a frame with three
+/// hundred strokes on it would otherwise make — and free — three hundred vectors.
+fn paint_stroke(
+    window: &mut Window,
+    stroke: &Stroke,
+    sheet: &Sheet,
+    color: Hsla,
+    points: &mut Vec<Point<Pixels>>,
+) {
     // Fewer than three points cannot enclose an area.
     if stroke.outline.len() < 3 {
         return;
     }
 
-    let points: Vec<Point<Pixels>> = stroke
-        .outline
-        .iter()
-        .map(|[x, y]| point(px(*x), px(*y)))
-        .collect();
+    points.clear();
+    points.extend(
+        stroke
+            .outline
+            .iter()
+            .map(|[x, y]| sheet.place(*x, *y)),
+    );
 
     let mut builder = PathBuilder::fill();
-    builder.add_polygon(&points, true);
+    builder.add_polygon(points, true);
 
     if let Ok(path) = builder.build() {
         window.paint_path(path, color);
     }
+}
+
+/// How much a scroll zooms, as a factor to multiply the current zoom by.
+///
+/// A wheel reports notches in *lines* and a trackpad reports pixels, and both become notches here.
+/// One notch is [`WHEEL_ZOOM_STEP`] of the size and two are its square, so a fast roll zooms
+/// smoothly rather than in jumps. The result is clamped, because one enormous delta from a driver
+/// should not take the sheet from 100% to 1600% in a single event.
+fn wheel_zoom_factor(delta: f32, in_pixels: bool) -> f32 {
+    if !delta.is_finite() {
+        return 1.0;
+    }
+
+    let notches = if in_pixels {
+        delta / notch_in_pixels()
+    } else {
+        delta / WHEEL_LINES_PER_NOTCH
+    };
+
+    WHEEL_ZOOM_STEP.powf(notches).clamp(0.2, 5.0)
+}
+
+/// How far a trackpad reports a scroll for one notch's worth of zoom.
+///
+/// Derived from the wheel's own two measurements rather than picked: a notch is
+/// [`WHEEL_LINES_PER_NOTCH`] lines and a line is [`WHEEL_LINE_HEIGHT`] pixels, so a trackpad that
+/// has moved that many pixels has asked for the same thing a wheel's notch does. Without this the
+/// pixel path would zoom three times faster per gesture than the line path.
+fn notch_in_pixels() -> f32 {
+    WHEEL_LINE_HEIGHT * WHEEL_LINES_PER_NOTCH
+}
+
+/// How much a scroll pans, in logical pixels.
+///
+/// Up is earlier in the page, so a wheel turned away from the user moves the sheet *down*: the
+/// same rule a document viewer follows, applied to both axes.
+fn wheel_pan(delta: (f32, f32), in_pixels: bool) -> (f32, f32) {
+    let scale = if in_pixels { 1.0 } else { WHEEL_LINE_HEIGHT };
+
+    (delta.0 * scale, delta.1 * scale)
+}
+
+/// How much a pinch zooms, as a factor to multiply the current zoom by.
+///
+/// A pinch's delta is already a fraction of the current size, so the factor is one more than it —
+/// and it is clamped to a factor rather than to a fraction, so a nonsense delta cannot invert the
+/// sheet.
+fn pinch_zoom_factor(delta: f32) -> f32 {
+    if !delta.is_finite() {
+        return 1.0;
+    }
+
+    (1.0 + delta).clamp(0.2, 5.0)
+}
+
+/// The smallest width on [`PDF_PIXEL_WIDTHS`] that is at least `wanted`, or the largest one.
+///
+/// The *smallest* rung that covers the request, rather than the nearest: a page rendered a little
+/// too large is sharp, and one rendered a little too small is soft, and only one of those is
+/// visible.
+fn quantise_width(wanted: f32) -> u32 {
+    if !wanted.is_finite() || wanted <= 0.0 {
+        return PDF_PIXEL_WIDTHS[0];
+    }
+
+    let wanted = wanted.round() as u32;
+    PDF_PIXEL_WIDTHS
+        .iter()
+        .copied()
+        .find(|width| *width >= wanted)
+        .unwrap_or(PDF_PIXEL_WIDTHS[PDF_PIXEL_WIDTHS.len() - 1])
 }

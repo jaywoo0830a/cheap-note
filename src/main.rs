@@ -16,6 +16,7 @@
 //! | [`refresh`] | supported refresh rates, detection, and frame pacing       |
 //! | [`pen`]     | the capture, its worker thread, and the hand-off queue     |
 //! | [`ink`]     | readings to strokes: edges, resampling, width, erasing     |
+//! | [`canvas`]  | the sheet's size, colour and ruling                        |
 //! | [`pdf`]     | the Pdfium document, page rendering, and the page cache    |
 //! | [`app`]     | the view: toolbar, canvas painting, and the pen pump       |
 //! | [`settings`]| the user's tuning, serialised as JSON                      |
@@ -31,6 +32,7 @@
 //! app starts and draws without it; only opening a PDF needs it.
 
 mod app;
+mod canvas;
 mod error;
 mod ink;
 mod pdf;

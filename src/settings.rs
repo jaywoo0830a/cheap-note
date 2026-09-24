@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::canvas::{CanvasSize, CanvasStyle};
-use crate::refresh::RefreshMode;
 
 /// The file the settings are persisted to, relative to the working directory.
 pub const SETTINGS_FILE: &str = "cheap-note.settings.json";
@@ -21,9 +20,6 @@ pub const SETTINGS_FILE: &str = "cheap-note.settings.json";
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// How the app paces itself against the display: automatic or pinned to one rate.
-    pub refresh: RefreshMode,
-
     /// The least distance, in logical pixels, between two ink points that are kept.
     ///
     /// A digitizer reports far more positions than a stroke needs (a slow hand produces points
@@ -102,7 +98,6 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            refresh: RefreshMode::Auto,
             // 0.75 logical px: below the eye's ability to see a missing point at 1:1 zoom,
             // and it removes the majority of a slow stroke's readings.
             resample_spacing: 0.75,
@@ -188,7 +183,6 @@ mod tests {
     #[test]
     fn settings_round_trip_through_json() {
         let mut settings = Settings::default();
-        settings.refresh = RefreshMode::Fixed(crate::refresh::RefreshRate::Hz240);
         settings.max_width = 7.25;
 
         let text = serde_json::to_string(&settings).expect("settings serialise");
@@ -227,7 +221,9 @@ mod tests {
     /// answers it already holds.
     ///
     /// Adding a field must not throw a file away, and renaming one must not quietly discard what
-    /// the user chose — so the old name is still read, and the new fields take their defaults.
+    /// the user chose — so the old name is still read, and the new fields take their defaults. A
+    /// field that has been *removed* is ignored, which is what the `refresh` key in this file is
+    /// now: the rate is measured rather than chosen, so there is nothing left for it to say.
     #[test]
     fn an_older_settings_file_still_loads() {
         let older = r#"{

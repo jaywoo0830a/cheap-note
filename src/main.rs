@@ -13,16 +13,14 @@
 //! * PDF pages are rasterised by Pdfium, which the app drives through its own C entry points so
 //!   that a render can be sliced across frames and the budget can bound it (see [`pdfium`]);
 //! * the writing loop is *not* paced against the display: the pump parks on the pen's queue and
-//!   draws a frame per batch, so the ink reaches the screen at the rate the pen reports it. The
-//!   monitor's mode is still read (`EnumDisplaySettingsW`) and the frames this app paints are still
-//!   measured, and both now pace the *housekeeping* loop — the monitor probe, the counters, and the
-//!   PDF page being rasterised — rather than the writing itself.
+//!   draws a frame per batch, so the ink reaches the screen at the rate the pen reports it. Nothing
+//!   else is limited by the display either — the housekeeping loop that rasterises pages and
+//!   rebuilds the counters runs on a fixed interval of its own.
 //!
 //! ## Module map
 //!
 //! | Module      | Responsibility                                                     |
 //! | ----------- | ------------------------------------------------------------------ |
-//! | [`refresh`] | supported refresh rates, the monitor's mode, and the measured frame rate |
 //! | [`pen`]     | the capture, its worker thread, and the hand-off queue             |
 //! | [`ink`]     | readings to strokes: edges, resampling, width, erasing             |
 //! | [`canvas`]  | the sheet's size, colour and ruling                                |
@@ -74,7 +72,6 @@ mod pdfium;
 mod pen;
 mod pages;
 mod recent;
-mod refresh;
 mod settings;
 mod store;
 mod system_cursor;

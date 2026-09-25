@@ -3,7 +3,7 @@ name = "cheap-note"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"
-description = "Minimal, high-performance handwriting note-taking prototype (pen input + PDF pages + 60/120/180/240 Hz)."
+description = "Minimal, high-performance handwriting note-taking prototype (pen input + PDF pages)."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -54,11 +54,10 @@ anyhow = "=1.0.104"
 # Raw pixel buffers, used to hand a rendered PDF page to GPUI's image pipeline.
 image = { version = "0.25", default-features = false }
 
-# Windows-only: display refresh-rate detection for 60/120/180/240 Hz support.
+# Windows-only: the pen capture's window hook and Pdfium's own entry points.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",
-    "Win32_Graphics_Gdi",
     # WM_SETCURSOR, SetCursor, HTCLIENT, IDC_ARROW, LoadCursorW: hiding the system pointer over
     # the client area while the pen is in range.
     "Win32_UI_WindowsAndMessaging",

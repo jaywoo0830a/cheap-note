@@ -11,7 +11,7 @@
 //!   window thread (GPUI)          pen thread                UI thread (GPUI)
 //!   ────────────────────          ──────────                ────────────────
 //!   WM_POINTER -> capture ──ring──> stream.read ──queue──> take_samples()
-//!   (~2-5 us/message)              (parks on data)          (pump on a timer)
+//!   (~2-5 us/message)              (parks on data)          (woken by the queue)
 //! ```
 //!
 //! ## Why a worker thread at all

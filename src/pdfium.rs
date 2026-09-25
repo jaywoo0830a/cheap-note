@@ -380,8 +380,12 @@ pub struct Document {
     handle: FpdfDocument,
     /// The name to show for it.
     name: String,
-    /// The bytes the document was opened from.
-    bytes: Vec<u8>,
+    /// The bytes the document was opened from, held for as long as the handle lives.
+    ///
+    /// Underscored because nothing in this crate *reads* it: it is not a cache, it is the storage
+    /// Pdfium reads from in place. Dropping it while the document is open would leave Pdfium
+    /// reading freed memory, which is why it is a field of the document rather than a local.
+    _buffer: Vec<u8>,
 }
 
 impl Document {
@@ -403,18 +407,13 @@ impl Document {
         Ok(Document {
             handle,
             name,
-            bytes,
+            _buffer: bytes,
         })
     }
 
     /// The name to show for the document.
     pub fn name(&self) -> &str {
         &self.name
-    }
-
-    /// The bytes the document was opened from.
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
     }
 
     /// How many pages the document has.

@@ -37,11 +37,26 @@
 //!
 //! What the user writes on is described by [`crate::canvas`]: its size, its colour, and what is
 //! printed on it. A PDF page overrides all three, because a PDF page is its own paper.
+//!
+//! ## Where the ink goes
+//!
+//! Nothing waits for a *Save*. A note is a folder with a SQLite file in it — see [`crate::note`] and
+//! [`crate::store`] — and ink is written into it in batches while the pen is moving: 200 strokes or
+//! half a second, whichever comes first, on a thread of its own, so a commit never delays a stroke
+//! and a crash costs at most the last half-second of ink. The first stroke of a session makes the
+//! note if one is not open; the page being turned away from is folded into compressed chunks as it
+//! closes; the write-ahead log is folded back into the file when the pen has been still for a while;
+//! and `Save` writes out the single file a person carries to another machine.
+//!
+//! Reading is the other half of the same arrangement. A note is opened *without* being read: the app
+//! loads the page that was open and the note's page list, and every other page is read the moment it
+//! is turned to. A thousand-page note opens as fast as a one-page note.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{Disableable as _, Selectable as _};
@@ -60,6 +75,7 @@ use crate::cursor::{
     NIB_BLOOM_RADIUS, NIB_RADIUS,
 };
 use crate::ink::{InkTransform, Notes, Stroke, Tool};
+use crate::note::{self, Note, NoteWriter, Report};
 use crate::pages::Pages;
 use crate::pen::{capture_config, PenInbox, PenService};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
@@ -198,6 +214,32 @@ fn display_due(probed_at: Instant, now: Instant) -> bool {
 /// pause between two letters of a word is not mistaken for one.
 const PDF_QUIET_INTERVAL: Duration = Duration::from_millis(120);
 
+/// How long ink may wait in memory before it is handed to the note.
+///
+/// This is the design note's clock: the pen's path never writes a file, it *batches*, and half a
+/// second is both the most ink a crash can cost and short enough that a person who closes the lid
+/// has lost nothing they would notice.
+const BATCH_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How much ink may wait in memory before it is handed over early.
+///
+/// The other half of the same rule: a fast hand lays more than a page's worth of ink in half a
+/// second, and a batch that grew without a bound would be a transaction that takes longer to commit
+/// than the moment it was meant to save.
+const BATCH_STROKES: usize = 200;
+
+/// How long the pen has to be still before the write-ahead log is folded back into the note.
+///
+/// A checkpoint is a write of its own, and the one moment a log must not be truncated is while the
+/// pen is moving: that log *is* the ink that has not reached the file yet.
+const CHECKPOINT_QUIET_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The least time between two checkpoints, however quiet the pen has been.
+///
+/// The design note's five minutes: long enough that a session's worth of strokes is folded back in
+/// one write, short enough that a note does not sit next to a log of itself for a whole day.
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(300);
+
 /// Whether a note was written on the sheet in use.
 ///
 /// Compared with a tolerance rather than exactly: the numbers travel through JSON as `f32`, and a
@@ -301,6 +343,33 @@ pub struct NoteApp {
     cadence: Arc<Cadence>,
     /// The ink.
     ink: Notes,
+    /// The note being written: its folder, its database, and the document it was written on.
+    ///
+    /// `None` until something is opened or made: the app starts on a blank sheet, which is a note
+    /// that does not exist until it is saved.
+    note: Option<Note>,
+    /// The note's writer: its own connection, on its own thread.
+    ///
+    /// Held beside [`Self::note`] rather than inside it, because the two are two connections to one
+    /// file — a reader and a writer, which is what WAL is for (see [`crate::note`]).
+    writer: Option<NoteWriter>,
+    /// How many strokes of each page have been handed to the writer as *appends*.
+    ///
+    /// This is what makes a save incremental: the ink not yet sent is `finished()[sent..]`, and a
+    /// count that went *down* means the page was undone, erased or cleared — a rewrite, not an
+    /// append.
+    saved: BTreeMap<u64, usize>,
+    /// Pages whose stored ink no longer matches the page in memory, waiting to be written again.
+    rewritten: BTreeSet<u64>,
+    /// When a batch was last handed over, for the 500 ms rule.
+    saved_at: Instant,
+    /// When the write-ahead log was last folded back into the note file.
+    checkpointed_at: Instant,
+    /// The pages whose ink is in memory, or known to be empty.
+    ///
+    /// What keeps a page from being read from the note twice, and what makes it safe for a turn to
+    /// drop a blank page: a page that is blank in memory is blank in the note.
+    loaded: BTreeSet<usize>,
     /// What each page of the note shows, in reading order.
     ///
     /// The page the reader is on is [`NoteApp::page_index`], which indexes *this* list rather than
@@ -419,6 +488,13 @@ impl NoteApp {
             display_at: Instant::now(),
             cadence: Arc::new(Cadence::new()),
             ink: Notes::new(),
+            note: None,
+            writer: None,
+            saved: BTreeMap::new(),
+            rewritten: BTreeSet::new(),
+            saved_at: Instant::now(),
+            checkpointed_at: Instant::now(),
+            loaded: BTreeSet::new(),
             pages: Pages::default(),
             pdf: PdfDocumentView::empty(),
             pen,
@@ -558,6 +634,9 @@ impl NoteApp {
                 if laid_ink {
                     // The clock the page render waits on: see `serve_pdf`.
                     app.last_ink_at = woke;
+                    // And the note: the ink is handed to the writer in batches rather than written
+                    // per stroke, on the clock the design note sets. Nothing waits for it.
+                    app.persist(woke, false);
                 }
 
                 // The system pointer follows the ghost on every read, so the two can never disagree
@@ -620,7 +699,14 @@ impl NoteApp {
                 // the answer says whether it was.
                 let status_rebuilt = app.refresh_status(now);
 
-                if display_moved || page_rendered || status_rebuilt {
+                // The note's own housekeeping, on the same clock: ink still in memory is handed
+                // over when the pen has stopped (see `persist`), and whatever the writer has to say
+                // — an export finished, or a write that failed — reaches the status line here.
+                app.persist(now, false);
+                let reported = app.drain_writer_reports();
+                app.checkpoint_if_idle(now);
+
+                if display_moved || page_rendered || status_rebuilt || reported {
                     cx.notify();
                 }
             });
@@ -643,6 +729,183 @@ impl NoteApp {
         let _timed = measure(&self.timings.ink);
 
         self.ink.consume(samples, &transform, &self.settings)
+    }
+
+    /// Hands the ink the pen laid to the note, on the design note's clock.
+    ///
+    /// Three rules, and each of them is a page of the design note:
+    ///
+    /// * **A batch, not a write per stroke.** The ink goes out when [`BATCH_STROKES`] strokes are
+    ///   waiting or [`BATCH_INTERVAL`] has passed, whichever comes first — one transaction, one BLOB
+    ///   a stroke, and nothing that already written is rewritten.
+    /// * **A page whose ink went *down* is written again, not appended to.** An undo, the eraser and
+    ///   `clear` all shorten a page, and an append can only describe ink being *added*: those pages
+    ///   are marked and written whole instead.
+    /// * **Nothing waits.** The write happens on the writer's thread (see [`NoteWriter`]), so a
+    ///   half-second batch commit is invisible while the pen is moving.
+    ///
+    /// `worth_flushing` is for the moments the ink has to be in the note *now* rather than on the
+    /// clock: a page being closed, or a note being written out as a file.
+    fn persist(&mut self, now: Instant, worth_flushing: bool) {
+        if self.writer.is_none() {
+            // Nothing is open, so the ink on screen has nowhere to go — unless it is not the first
+            // stroke of a note this app has not made yet. See `ensure_note`: the ink makes the note,
+            // rather than being held in memory until someone opens one.
+            if self.ink.is_blank() {
+                return;
+            }
+
+            if let Err(error) = self.ensure_note() {
+                self.report(error.to_string());
+                return;
+            }
+        }
+
+        let page = self.page_index as u64;
+        let count = self.ink.finished().len();
+        let sent = self.saved.get(&page).copied().unwrap_or(0);
+
+        if count < sent {
+            // The page is no longer a longer version of what the note holds.
+            self.rewritten.insert(page);
+        }
+
+        let waiting = count.saturating_sub(sent);
+        let rewrite = self.rewritten.contains(&page);
+        let stale = now.saturating_duration_since(self.saved_at) >= BATCH_INTERVAL;
+        let due = waiting >= BATCH_STROKES
+            || (waiting > 0 && stale)
+            || (rewrite && (worth_flushing || stale));
+
+        if !due {
+            return;
+        }
+
+        if rewrite {
+            let ink: Vec<Stroke> = self
+                .ink
+                .finished()
+                .iter()
+                .map(|stroke| (**stroke).clone())
+                .collect();
+
+            if let Some(writer) = &self.writer {
+                writer.rewrite(page, ink);
+            }
+            self.rewritten.remove(&page);
+        } else {
+            let ink: Vec<Stroke> = self
+                .ink
+                .finished()
+                .iter()
+                .skip(sent)
+                .map(|stroke| (**stroke).clone())
+                .collect();
+
+            if ink.is_empty() {
+                return;
+            }
+
+            if let Some(writer) = &self.writer {
+                writer.append(page, ink);
+            }
+        }
+
+        self.saved.insert(page, count);
+        self.saved_at = now;
+    }
+
+    /// Makes a note for ink that has nowhere to go.
+    ///
+    /// The app starts on a blank sheet, which is not a note yet — a note is a folder with a database
+    /// in it, and there is no reason to make one for a session that never writes anything. The first
+    /// stroke is what makes one, and from then on the ink is written as it is laid, so nothing is
+    /// ever held *only* in memory: `Save` writes out a file that has been the note all along.
+    ///
+    /// The note has no document, which is what a note written on a blank sheet is, and its folder is
+    /// named after the moment it was made so that two blank-sheet notes in one session — a note that
+    /// was cleared and written on again, say — are two notes and not one that overwrites the other.
+    fn ensure_note(&mut self) -> Result<()> {
+        if self.writer.is_some() {
+            return Ok(());
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or(0);
+
+        let mut note = Note::open(&note::root().join(format!("blank-{stamp}")))?;
+
+        // What the note remembers about its own pages: the list, the sheet they were written on, and
+        // which one is open — the same three facts a note with a document carries.
+        let layout = self.pages.layout().to_vec();
+        note.store_mut().set_layout(&layout)?;
+        note.store_mut().set_sheet(Some(self.sheet_size()))?;
+        note.store_mut().set_open_page(self.page_index as u64)?;
+
+        // The writer's connection opens before its thread, as it does for a note that is opened, so a
+        // note that cannot be written is reported now rather than discovered later.
+        let writer = NoteWriter::spawn(note.dir())?;
+
+        self.note = Some(note);
+        self.writer = Some(writer);
+        self.loaded.insert(self.page_index);
+        self.saved_at = Instant::now();
+
+        self.report(String::from("a new note on a blank sheet — Save writes it out as one file"));
+        Ok(())
+    }
+
+    /// Folds the write-ahead log back into the note file, when the time is right.
+    ///
+    /// The design note's periodic `wal_checkpoint(TRUNCATE)`. WAL is what keeps a write from blocking
+    /// a read, at the cost of a log beside the note, and the log is worth folding back when nothing
+    /// is happening — never while the pen is moving, because that log *is* the ink that has not
+    /// reached the file yet. The job goes to the writer's thread like any other, so even this write
+    /// happens off the UI thread.
+    fn checkpoint_if_idle(&mut self, now: Instant) {
+        let quiet = now.saturating_duration_since(self.last_ink_at) >= CHECKPOINT_QUIET_INTERVAL;
+        let due = now.saturating_duration_since(self.checkpointed_at) >= CHECKPOINT_INTERVAL;
+        if !quiet || !due {
+            return;
+        }
+
+        if let Some(writer) = &self.writer {
+            writer.checkpoint();
+            self.checkpointed_at = now;
+        }
+    }
+
+    /// Takes what the writer has to say, and puts it in the status line.
+    ///
+    /// Drained on every wake of the housekeeping pump rather than waited for: the writer reports an
+    /// export when it has finished one, and a failure whenever it has one — and a writer that failed
+    /// silently would be the worst of both worlds, ink that is not being saved and an app that looks
+    /// like it is.
+    fn drain_writer_reports(&mut self) -> bool {
+        let Some(writer) = &self.writer else {
+            return false;
+        };
+
+        let reports = writer.drain();
+        if reports.is_empty() {
+            return false;
+        }
+
+        for report in reports {
+            match report {
+                Report::Written(path) => {
+                    self.settings.export_dir = path.parent().map(|parent| parent.to_path_buf());
+                    self.save_settings();
+                    self.message = format!("wrote {}", file_label(&path));
+                }
+                Report::Failed(message) => self.message = message,
+            }
+        }
+
+        self.touch_status();
+        true
     }
 
     /// Selects the tool an ordinary nib uses.
@@ -902,6 +1165,10 @@ impl NoteApp {
     /// the change they just made.
     fn finish_setting(&mut self, cx: &mut Context<Self>) {
         self.save_settings();
+        // The sheet the ink is written on is a property of the *note* rather than of the app: the
+        // paper size is what a later session reads back to say whether a note was written on
+        // different paper than the one in use.
+        self.save_layout_and_sheet();
         self.touch_status();
         // A setting can change whether the pen has a cursor of its own — the Tilt switch does — and
         // the pump may not wake for a while if the pen is away. Handing the pointer back here means
@@ -914,9 +1181,12 @@ impl NoteApp {
     ///
     /// The page's history is what decides whether there is anything to take back — see
     /// [`crate::ink::InkDocument::undo`] — and the bar asks the same question before it offers the
-    /// button, so a stroke is only ever taken back by a command that said it could.
+    /// button, so a stroke is only ever taken back by a command that said it could. The note is told
+    /// at once rather than on the batch clock: an undo is a deliberate act, and leaving it in memory
+    /// for half a second is how it is lost if the app is closed in that half-second.
     fn undo(&mut self, cx: &mut Context<Self>) {
         if self.ink.undo() {
+            self.persist(Instant::now(), true);
             cx.notify();
         }
     }
@@ -924,6 +1194,7 @@ impl NoteApp {
     /// Puts back the stroke the last undo took away.
     fn redo(&mut self, cx: &mut Context<Self>) {
         if self.ink.redo() {
+            self.persist(Instant::now(), true);
             cx.notify();
         }
     }
@@ -932,21 +1203,19 @@ impl NoteApp {
     fn clear(&mut self, cx: &mut Context<Self>) {
         if !self.ink.is_blank() {
             self.ink.clear();
+            self.persist(Instant::now(), true);
             cx.notify();
         }
     }
 
     /// Shows the previous page.
     ///
-    /// The ink moves with the page — `go_to` takes the page being left behind with it — which is
-    /// what keeps a note on the sheet it was written on rather than on whichever sheet is shown
-    /// next.
+    /// The ink moves with the page — `go_to` takes the page being left behind with it, and the page
+    /// being turned to is read out of the note if it is not in memory yet — which is what keeps a
+    /// note on the sheet it was written on rather than on whichever sheet is shown next.
     fn previous_page(&mut self, cx: &mut Context<Self>) {
         if self.page_index > 0 {
-            self.page_index -= 1;
-            self.ink.go_to(self.page_index);
-            // The status line names the page, so it is stale as soon as the page changes.
-            self.touch_status();
+            self.turn_to(self.page_index - 1);
             cx.notify();
         }
     }
@@ -958,10 +1227,47 @@ impl NoteApp {
     /// made. Either way an inserted page is a page like any other.
     fn next_page(&mut self, cx: &mut Context<Self>) {
         if self.page_index + 1 < self.page_total() {
-            self.page_index += 1;
-            self.ink.go_to(self.page_index);
-            self.touch_status();
+            self.turn_to(self.page_index + 1);
             cx.notify();
+        }
+    }
+
+    /// Turns to a page: what is being left is written out, and what is being turned to is read in.
+    ///
+    /// The order is the whole of it. The page being left is closed first — its outstanding ink is
+    /// handed to the writer and folded into chunks, which is the design note's "compaction at page
+    /// close" — and only then is the page being turned to read, so a page's ink is never in two
+    /// places at once.
+    fn turn_to(&mut self, page: usize) {
+        self.close_page();
+
+        self.page_index = page;
+        self.ink.go_to(page);
+
+        if let Err(error) = self.load_page_ink(page) {
+            self.report(error.to_string());
+        }
+
+        self.remember_page();
+        // The status line names the page, so it is stale as soon as the page changes.
+        self.touch_status();
+    }
+
+    /// Writes what a page still owes the note, and folds its ink into chunks: the page is closing.
+    ///
+    /// Nothing waits for any of it. The batch is handed to the writer's thread and the compaction is
+    /// queued behind it, in that order, so the ink is in the note before the chunks that follow it.
+    fn close_page(&mut self) {
+        self.persist(Instant::now(), true);
+
+        let page = self.page_index as u64;
+        let touched = self.rewritten.remove(&page)
+            || self.saved.get(&page).copied().unwrap_or(0) > 0;
+
+        if touched {
+            if let Some(writer) = &self.writer {
+                writer.compact(page);
+            }
         }
     }
 
@@ -972,10 +1278,25 @@ impl NoteApp {
     /// it is not a courtesy — a page that was just made is the page that is about to be written on,
     /// and leaving the reader on the old one would make the button look like it did nothing.
     fn add_page(&mut self, before: bool, cx: &mut Context<Self>) {
+        self.close_page();
+
         let at = self.pages.insert(self.page_index, before);
         self.ink.insert_at(at);
+
+        // The note's ink is renamed with its pages: `insert_page` moves every page after the
+        // insertion along, and the ink moves with the sheet it was written on. What has been handed
+        // to the writer is renamed with them, so the next append is still measured against the right
+        // page.
+        if let Some(note) = &mut self.note {
+            if let Err(error) = note.store_mut().insert_page(at as u64) {
+                self.report(error.to_string());
+            }
+        }
+        self.rename_pages(at as u64, 1);
+
         self.page_index = at;
-        self.ink.go_to(at);
+        self.turn_to(at);
+        self.save_layout_and_sheet();
 
         self.report(format!(
             "added a page {} this one ({} of {})",
@@ -983,7 +1304,6 @@ impl NoteApp {
             self.page_index + 1,
             self.page_total()
         ));
-        self.touch_status();
         cx.notify();
     }
 
@@ -994,22 +1314,79 @@ impl NoteApp {
     /// confused with. On a note about a document the page leaves the *note*, not the file — this app
     /// has no PDF writer — and that is stated in [`crate::pages`] rather than left to be discovered.
     fn delete_page(&mut self, cx: &mut Context<Self>) {
+        // What the page holds is dropped rather than written: it has nowhere to be shown, and
+        // writing it would leave ink in the note that no page is about. Everything the page *did*
+        // owe — ink still in memory — is handed over first, so the deletion cannot race a batch.
+        self.close_page();
+
         let Some(show) = self.pages.remove(self.page_index) else {
             self.report(String::from("a note keeps at least one page"));
             cx.notify();
             return;
         };
 
+        if let Some(note) = &mut self.note {
+            if let Err(error) = note.store_mut().delete_page(self.page_index as u64) {
+                self.report(error.to_string());
+            }
+        }
+        self.loaded.remove(&self.page_index);
+        self.saved.remove(&(self.page_index as u64));
+        self.rewritten.remove(&(self.page_index as u64));
+        self.rename_pages(self.page_index as u64 + 1, -1);
+
         self.ink.remove_at(self.page_index);
         self.page_index = show;
-        self.ink.go_to(show);
+        self.turn_to(show);
+        self.save_layout_and_sheet();
 
         self.report(format!(
             "deleted a page ({} left)",
             self.page_total().saturating_sub(1).max(1)
         ));
-        self.touch_status();
         cx.notify();
+    }
+
+    /// Renames the pages from `from` on by `by`, in what the app remembers about the note.
+    ///
+    /// The note's own database does this itself (see [`crate::store::NoteStore::insert_page`]); what
+    /// is mirrored here is the app's side of the same bookkeeping — which pages have been read, and
+    /// how much of each has been written — because a page that was read before an insertion is no
+    /// longer the page it was read as.
+    fn rename_pages(&mut self, from: u64, by: i64) {
+        let rename = |page: u64| -> u64 {
+            if page >= from {
+                (page as i64 + by).max(0) as u64
+            } else {
+                page
+            }
+        };
+
+        self.loaded = self.loaded.iter().map(|page| rename(*page as u64) as usize).collect();
+        self.saved = std::mem::take(&mut self.saved)
+            .into_iter()
+            .map(|(page, count)| (rename(page), count))
+            .collect();
+        self.rewritten = std::mem::take(&mut self.rewritten)
+            .into_iter()
+            .map(rename)
+            .collect();
+    }
+
+    /// Stores the page list and the sheet size: what a note remembers about its own pages.
+    ///
+    /// Written on the commands that change either — an insert, a delete, a paper choice — rather
+    /// than on a clock: these are the answers the next session reads back, and they change at the
+    /// speed of a hand.
+    fn save_layout_and_sheet(&mut self) {
+        let layout = self.pages.layout().to_vec();
+        let sheet = self.sheet_size();
+
+        if let Some(note) = &mut self.note {
+            let _ = note.store_mut().set_layout(&layout);
+            let _ = note.store_mut().set_sheet(Some(sheet));
+            let _ = note.store_mut().set_open_page(self.page_index as u64);
+        }
     }
 
     /// How many pages there are to move between.
@@ -1041,215 +1418,187 @@ impl NoteApp {
 
     /// Opens whatever the user chose: a saved note, or a bare PDF to write on.
     ///
-    /// Told apart by the file rather than by a menu of two commands: a note *is* a zip, and making
-    /// the user remember which of two dialogs to pick would be asking them to keep track of this
-    /// app's internals for it.
+    /// Told apart by the file rather than by a menu of two commands: a note is a zip, and making the
+    /// user remember which of two dialogs to pick would be asking them to keep track of this app's
+    /// internals for it. A folder is opened where it stands.
     fn open_any(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let is_note = path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"));
-
-        if is_note {
-            self.open_bundle(path, cx);
-        } else {
-            self.open_pdf(path, cx);
+        match self.place_note(&path) {
+            Ok(message) => self.message = message,
+            Err(error) => self.report(error.to_string()),
         }
+
+        self.touch_status();
+        cx.notify();
     }
 
-    /// Opens a saved note: the document it holds, and the ink over it.
+    /// Places and opens the note at `path`, and answers the line the status bar should show.
     ///
-    /// A note without a document was written on a blank sheet, and reopening it puts the app back
-    /// on a blank sheet — leaving whatever document happened to be open behind it would be putting
-    /// one sheet's writing on another's.
-    fn open_bundle(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let bundle = match crate::bundle::read(&path) {
-            Ok(bundle) => bundle,
-            Err(error) => {
-                self.report(error.to_string());
-                cx.notify();
-                return;
-            }
+    /// The ink is deliberately *not* all read here. A note is opened by reading the page that was
+    /// open and the note's own page list; every other page is read when it is turned to, which is
+    /// what the chunked store is for — see [`crate::store`]. A thousand-page note opens as fast as a
+    /// one-page note.
+    fn place_note(&mut self, path: &Path) -> Result<String> {
+        let folder = if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            note::root().join(note::folder_name(path))
         };
 
-        let pixel_width = self.pdf_render_pixel_width();
-        let mut failed = false;
+        let note = Note::placed_from(path, &folder)?;
 
-        self.pdf = match bundle.document {
-            Some(document) => match PdfDocumentView::open_bytes(
-                document.name.clone(),
-                document.bytes,
-                pixel_width,
-            ) {
-                Ok(view) => view,
-                Err(error) => {
-                    self.report(format!(
-                        "the document in {} could not be opened: {error}",
-                        file_label(&path)
-                    ));
-                    failed = true;
-                    PdfDocumentView::empty()
-                }
-            },
+        // The writer's connection is opened here, before its thread runs, so that a note that cannot
+        // be written is something the user is told about rather than something they discover the next
+        // time they look for their ink.
+        let writer = NoteWriter::spawn(note.dir())?;
+
+        let pdf = match note.document()? {
+            Some((name, bytes)) => {
+                PdfDocumentView::open_bytes(name, bytes, self.pdf_render_pixel_width())?
+            }
+            // A note without a document was written on a blank sheet, and reopening it puts the app
+            // back on a blank sheet: leaving whatever document happened to be open behind it would
+            // be putting one sheet's writing on another's.
             None => PdfDocumentView::empty(),
         };
 
-        if failed {
-            cx.notify();
-            return;
+        let layout = note.store().layout()?;
+        let written = note.store().pages()?;
+        let ink_pages = written.last().map_or(1, |page| *page as usize + 1);
+        let mut strokes = 0usize;
+        for page in &written {
+            strokes += note.store().stroke_count(*page)?;
         }
+        let sheet = note.store().sheet()?;
+        let open_page = note.store().open_page()?.unwrap_or(0) as usize;
 
-        let strokes: usize = bundle.pages.iter().map(|(_, ink)| ink.stroke_count()).sum();
-        self.ink.replace(bundle.pages, bundle.page);
+        self.pdf = pdf;
+        self.pages = Pages::restore(
+            (!layout.is_empty()).then_some(layout),
+            self.pdf.page_count(),
+            ink_pages,
+        );
+        self.page_index = self.pages.clamp(open_page);
 
-        // The note's pages come from the file when it has a list of its own, and are worked out from
-        // the document and the ink when it does not: see `Pages::restore`.
-        let layout = (!bundle.layout.is_empty()).then_some(bundle.layout);
-        self.pages = Pages::restore(layout, self.pdf.page_count(), self.ink.page_count());
-        self.page_index = self.pages.clamp(bundle.page);
+        // Everything the page turn keeps in memory is reset: the ink that was there belonged to the
+        // note that is no longer open.
+        self.ink = Notes::new();
+        self.loaded.clear();
+        self.saved.clear();
+        self.rewritten.clear();
         self.ink.go_to(self.page_index);
-        self.settings.bundle_path = Some(path.clone());
-        self.save_settings();
 
-        // A note written on a different sheet than the one in use would be drawn at the wrong
-        // scale, so that is said out loud rather than silently rescaled.
-        let sheet = self.sheet_size();
-        self.message = match bundle.sheet {
-            Some((width, height)) if !sheet_matches((width, height), sheet) => format!(
+        self.note = Some(note);
+        self.writer = Some(writer);
+        self.load_page_ink(self.page_index)?;
+        self.remember_page();
+
+        // A note written on a different sheet than the one in use would be drawn at the wrong scale,
+        // so that is said out loud rather than silently rescaled.
+        let here = self.sheet_size();
+        Ok(match sheet {
+            Some((width, height)) if !sheet_matches((width, height), here) => format!(
                 "opened {} — written on a {width:.0}×{height:.0} sheet, this one is {:.0}×{:.0}",
-                file_label(&path),
-                sheet.0,
-                sheet.1
+                file_label(path),
+                here.0,
+                here.1
             ),
             _ => format!(
                 "opened {} ({strokes} strokes on {} pages)",
-                file_label(&path),
-                self.ink.written_pages().len()
+                file_label(path),
+                written.len()
             ),
-        };
-
-        self.touch_status();
-        cx.notify();
+        })
     }
 
-    /// Opens a PDF and renders its first page.
-    fn open_pdf(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let pixel_width = self.pdf_render_pixel_width();
-
-        match PdfDocumentView::open(&path, pixel_width) {
-            Ok(view) => {
-                self.pdf = view;
-                self.page_index = 0;
-                // A new document is a new note: the ink that was on screen belonged to the sheet
-                // that is no longer there, and keeping it would put one document's writing on
-                // another's page. The note's pages become the document's, in the document's order.
-                self.ink = Notes::new();
-                self.pages = Pages::of_document(self.pdf.page_count());
-                self.message = format!("opened {}", self.pdf.file_name());
-            }
-            Err(error) => {
-                self.message = format!("could not open {}: {error}", path.display());
-            }
+    /// Reads a page out of the note, unless it is already in memory.
+    ///
+    /// The page is put where the model keeps a page — the current one if it is the current one, in
+    /// the map otherwise — and marked loaded, so turning back to it is free. A page that is blank in
+    /// memory is blank in the note, which is what makes it safe for a page turn to drop one.
+    fn load_page_ink(&mut self, page: usize) -> Result<()> {
+        if self.loaded.contains(&page) {
+            return Ok(());
         }
 
-        self.touch_status();
-        cx.notify();
+        let stored = match &self.note {
+            Some(note) => note.page_strokes(page as u64)?,
+            // Nothing is open: the page in front of the user is a blank sheet, and what is drawn on
+            // it belongs to a note that does not exist yet.
+            None => Vec::new(),
+        };
+
+        // What the note already holds is what has been written as far as the writer is concerned,
+        // and it is the number a later append is measured against.
+        let written = match &self.note {
+            Some(note) => note.store().stroke_count(page as u64)?,
+            None => 0,
+        };
+
+        self.ink
+            .put_page(page, crate::ink::InkDocument::from_strokes(stored));
+        self.saved.insert(page as u64, written);
+        self.loaded.insert(page);
+        Ok(())
     }
 
-    /// Asks the platform where to write the note, then writes it.
-    fn prompt_to_save(&mut self, cx: &mut Context<Self>) {
-        if !self.pdf.is_loaded() && self.ink.is_blank() {
-            self.report(String::from("there is nothing to save yet"));
+    /// Records which page is open, so reopening the note comes back to it.
+    ///
+    /// Written through the reader's connection rather than the writer's: this is one small update on
+    /// a page turn, not a stream of ink, and WAL is what makes two connections to one note safe.
+    fn remember_page(&mut self) {
+        if let Some(note) = &mut self.note {
+            let _ = note.store_mut().set_open_page(self.page_index as u64);
+        }
+    }
+
+    /// Writes the note out as one file, asking where it should go.
+    ///
+    /// The note is already saved — it is a folder the app writes into as the pen moves — so this is
+    /// the *export*: the single file a person carries to another machine. That is why it asks, every
+    /// time, and why the suggestion is the document's name with `.zip` on it: the file is the note's
+    /// public shape, and the working copy in the app's own directory is not something anyone should
+    /// have to find.
+    fn save(&mut self, cx: &mut Context<Self>) {
+        if self.note.is_none() {
+            self.report(String::from("there is nothing to write out yet"));
             cx.notify();
             return;
         }
 
-        // The suggestion is the document's name with the extension changed: a note about
-        // `chapter-3.pdf` is one the user will look for as `chapter-3`.
         let suggested = format!("{}.zip", self.note_stem());
         let directory = self
             .settings
-            .bundle_path
-            .as_ref()
-            .and_then(|path| path.parent())
-            .map(|parent| parent.to_path_buf())
+            .export_dir
+            .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
         let receiver = cx.prompt_for_new_path(&directory, Some(&suggested));
 
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = receiver.await {
-                this.update(cx, |app, cx| app.save_bundle(path, cx)).ok();
+                this.update(cx, |app, cx| app.write_transfer(path, cx)).ok();
             }
         })
         .detach();
     }
 
-    /// Writes the note back to where it came from, asking for a place the first time.
-    fn save(&mut self, cx: &mut Context<Self>) {
-        match self.settings.bundle_path.clone() {
-            Some(path) => self.save_bundle(path, cx),
-            None => self.prompt_to_save(cx),
-        }
-    }
+    /// Asks the writer for the file, and says so when it has it.
+    ///
+    /// Everything the pen has laid goes first, and the page being closed is folded into chunks
+    /// before the export is queued: the writer works in order, so the file that is written holds the
+    /// ink that is on screen. The answer comes back through the writer's reports — see
+    /// [`Self::drain_writer_reports`] — because the export happens on the writer's thread.
+    fn write_transfer(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        self.persist(now, true);
+        self.close_page();
 
-    /// Writes the note now: the document, and every page that was written on.
-    fn save_bundle(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        // The document is optional: a blank sheet can be written on with nothing open, and what is
-        // written then has to be saveable too.
-        let document = if self.pdf.is_loaded() {
-            match self.pdf.document_bytes() {
-                Ok(bytes) => Some(crate::bundle::Document {
-                    name: self.pdf.file_name(),
-                    bytes,
-                }),
-                Err(error) => {
-                    self.report(error.to_string());
-                    cx.notify();
-                    return;
-                }
+        match &self.writer {
+            Some(writer) => {
+                writer.export(path.clone());
+                self.message = format!("writing {}", file_label(&path));
             }
-        } else {
-            None
-        };
-
-        // Each page's ink is copied out of the model, because the model keeps only one page *hot*
-        // and the bundle is written from the map: this is the page-turn code path run in reverse,
-        // and it happens once per save.
-        let pages: Vec<(usize, crate::ink::InkDocument)> = self
-            .ink
-            .written_pages()
-            .into_iter()
-            .filter_map(|page| {
-                let strokes = self
-                    .ink
-                    .page_ink(page)?
-                    .finished()
-                    .iter()
-                    .map(|stroke| (**stroke).clone())
-                    .collect();
-
-                Some((page, crate::ink::InkDocument::from_strokes(strokes)))
-            })
-            .collect();
-
-        let strokes: usize = pages.iter().map(|(_, ink)| ink.stroke_count()).sum();
-        let bundle = crate::bundle::Bundle {
-            document,
-            pages,
-            page: self.page_index,
-            sheet: Some(self.sheet_size()),
-            // The note's own pages, in reading order: what the note is, as opposed to what its
-            // document is.
-            layout: self.pages.layout().to_vec(),
-        };
-
-        match crate::bundle::write(&path, &bundle) {
-            Ok(()) => {
-                self.settings.bundle_path = Some(path.clone());
-                self.save_settings();
-                self.message = format!("saved {} ({strokes} strokes)", file_label(&path));
-            }
-            Err(error) => self.message = error.to_string(),
+            None => self.report(String::from("there is nothing to write out yet")),
         }
 
         self.touch_status();

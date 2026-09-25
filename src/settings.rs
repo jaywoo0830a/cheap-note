@@ -70,12 +70,13 @@ pub struct Settings {
     /// ends up showing colour pages after the toggle was switched.
     pub grayscale_pages: bool,
 
-    /// Where the note was last saved or opened, so `Save` can write over it instead of asking.
+    /// Where the note was last written out, so the next export is offered in the same place.
     ///
-    /// Remembered across restarts: the file a person is working on is the file they come back to,
-    /// and being asked for it again on every save is the kind of small friction that makes an app
-    /// feel like a prototype.
-    pub bundle_path: Option<PathBuf>,
+    /// The note itself is saved continuously — it is a folder the app owns, see [`crate::note`] —
+    /// so what a person chooses a place for is the *file* they carry to another machine. Remembering
+    /// the directory is the whole of the convenience: the file is written where they say, every time,
+    /// because silently replacing a file they chose once is how an export becomes a surprise.
+    pub export_dir: Option<PathBuf>,
 
     /// Whether the top bar — tools, canvas controls and the live status line — is shown.
     ///
@@ -133,7 +134,7 @@ impl Default for Settings {
             canvas_size: CanvasSize::A4,
             canvas_style: CanvasStyle::Plain,
             grayscale_pages: false,
-            bundle_path: None,
+            export_dir: None,
             show_toolbar: true,
             show_status: true,
             // On by default: a digitizer's tilt is data the user paid for, and a cursor that shows

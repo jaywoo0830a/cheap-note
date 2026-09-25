@@ -68,7 +68,7 @@ impl Pages {
     pub fn restore(layout: Option<Vec<Page>>, document_pages: usize, ink_pages: usize) -> Self {
         let mut pages = layout.unwrap_or_else(|| {
             if document_pages > 0 {
-                (0..document_pages).map(Page::Document).collect()
+                Pages::of_document(document_pages).pages
             } else {
                 Vec::new()
             }

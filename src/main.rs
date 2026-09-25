@@ -32,7 +32,10 @@
 //! | [`pdf`]     | the Pdfium document, page rendering, and the page cache            |
 //! | [`pages`]   | what a note's pages are, and what each one shows                   |
 //! | [`pdfium`]  | Pdfium's own C API: documents, pages, and the sliced render        |
-//! | [`bundle`]  | a saved note: the original PDF and the ink, in one zip             |
+//! | [`store`]   | the note's SQLite file: the schema, the batch write, the read path |
+//! | [`chunk`]   | a page of ink as one blob: SoA, varints, zstd, CRC32               |
+//! | [`note`]    | a note as a folder, the writer thread, and the file it is carried in |
+//! | [`legacy`]  | the zip-of-JSON a note used to be, read once to migrate one        |
 //! | [`app`]     | the view: the bar and the pills, canvas painting, the two pumps     |
 //! | [`timing`]  | what every hot path costs, measured rather than guessed            |
 //! | [`settings`]| the user's tuning, serialised as JSON                              |
@@ -47,19 +50,27 @@
 //!
 //! Pdfium is loaded at run time from `vendor/lib/pdfium.dll` (or next to the executable). The
 //! app starts and draws without it; only opening a PDF needs it.
+//!
+//! A note is a folder under `%LOCALAPPDATA%\cheap-note\notes` — a SQLite file, the document, and
+//! anything attached to it — and it is written as the pen moves; `Save` writes the single file a
+//! person carries to another machine. `BUNDLE.md` is the design note that arrangement implements,
+//! and the section at its end records how this build follows it.
 
 mod app;
-mod bundle;
 mod canvas;
+mod chunk;
 mod cursor;
 mod error;
 mod ink;
+mod legacy;
+mod note;
 mod pdf;
 mod pdfium;
 mod pen;
 mod pages;
 mod refresh;
 mod settings;
+mod store;
 mod system_cursor;
 mod theme;
 mod timing;

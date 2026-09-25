@@ -35,6 +35,8 @@
 //! | [`store`]   | the note's SQLite file: the schema, the batch write, the read path |
 //! | [`chunk`]   | a page of ink as one blob: SoA, varints, zstd, CRC32               |
 //! | [`note`]    | a note as a folder, the writer thread, and the file it is carried in |
+//! | [`recent`]  | what has been opened, and the index of it the app keeps             |
+//! | [`home`]    | the screen that offers what was opened, and what it does            |
 //! | [`legacy`]  | the zip-of-JSON a note used to be, read once to migrate one        |
 //! | [`app`]     | the view: the bar and the pills, canvas painting, the two pumps     |
 //! | [`timing`]  | what every hot path costs, measured rather than guessed            |
@@ -55,12 +57,18 @@
 //! anything attached to it — and it is written as the pen moves; `Save` writes the single file a
 //! person carries to another machine. **`doc/STORE.md` explains that arrangement in full**; the
 //! Korean design note it grew out of is `BUNDLE.md`, which is not part of the program.
+//!
+//! The window opens on a list of what has already been written in — the [`home`] screen — and one
+//! Escape from any note returns to it. The list is built from `%LOCALAPPDATA%\cheap-note\recent.json`
+//! (see [`recent`]): a *cache* beside the notes, which a launch reads with a `stat` per note rather
+//! than a database read. A path on the command line opens that instead, and skips the list.
 
 mod app;
 mod canvas;
 mod chunk;
 mod cursor;
 mod error;
+mod home;
 mod ink;
 mod legacy;
 mod note;
@@ -68,6 +76,7 @@ mod pdf;
 mod pdfium;
 mod pen;
 mod pages;
+mod recent;
 mod refresh;
 mod settings;
 mod store;
@@ -78,6 +87,8 @@ mod view;
 
 use gpui_kit::component::Root;
 use gpui_kit::*;
+
+use std::path::PathBuf;
 
 use crate::app::{Redo, Undo};
 
@@ -101,6 +112,11 @@ fn main() {
         // applications reach redo with `Ctrl+Y` while everything else reaches it with `Ctrl+Shift+Z`,
         // and there is no text field anywhere in this app for either to collide with.
         //
+        // Everything else a key does — the home screen's list, Escape, `Ctrl+N`, `Ctrl+O`, `Ctrl+S` —
+        // is handled by the screen that is showing, as a listener the painted element registers. That
+        // is what lets a key reach a window with nothing focused, and lets a *character* reach the
+        // list's filter without a text field to type it into. See [`home`].
+        //
         // Registered on the application rather than on the view: a binding belongs to the window
         // that will receive the keystroke, and the view does not exist yet at this point.
         cx.bind_keys([
@@ -108,6 +124,11 @@ fn main() {
             KeyBinding::new("ctrl-y", Redo, None),
             KeyBinding::new("ctrl-shift-z", Redo, None),
         ]);
+
+        // What the app was asked to open: a path on the command line, which is what a file
+        // association, a shortcut, or a drag onto the executable becomes. With one, the home screen
+        // is never seen — the note itself is the first frame.
+        let start = std::env::args_os().nth(1).map(PathBuf::from);
 
         cx.spawn(async move |cx| {
             let options = WindowOptions {
@@ -124,7 +145,7 @@ fn main() {
             };
 
             cx.open_window(options, |window, cx| {
-                let view = cx.new(|cx| app::NoteApp::new(window, cx));
+                let view = cx.new(|cx| app::NoteApp::new(window, start, cx));
                 // The first element in a window must be a `Root`: it owns the overlay layers
                 // the styled components draw into.
                 cx.new(|cx| Root::new(view, window, cx))

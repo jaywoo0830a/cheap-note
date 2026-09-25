@@ -114,6 +114,41 @@ pub fn folder_name(source: &Path) -> String {
     format!("{}-{:08x}", cleaned.trim_matches('-'), digest as u32)
 }
 
+/// Every note in a given folder: the same listing, for a test or another location.
+///
+/// A folder without a `note.db` in it is not a note — an attachments folder, or a directory someone
+/// put there — and is left out rather than offered as something to open. A `root` that does not
+/// exist yet is *no notes*, not an error: that is what a first run looks like.
+pub fn notes_in(root: &Path) -> Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(AppError::Note(format!(
+                "{} could not be read: {error}",
+                root.display()
+            )))
+        }
+    };
+
+    let mut found = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|error| {
+                AppError::Note(format!("{} could not be listed: {error}", root.display()))
+            })?
+            .path();
+
+        if path.join(NOTE_DB).is_file() {
+            found.push(path);
+        }
+    }
+
+    // By name, so that two scans of an unchanged folder agree about the order they found things in.
+    found.sort();
+    Ok(found)
+}
+
 /// A note: a folder, and the store inside it.
 #[derive(Debug)]
 pub struct Note {
@@ -153,6 +188,11 @@ impl Note {
     ///
     /// A folder is opened where it stands rather than copied, which is what makes a note in the app's
     /// own directory reachable from a file manager.
+    ///
+    /// **A PDF whose note already exists is not re-placed by this function.** Placing one starts a
+    /// note on its document, which is a *new* note — so a caller that means "open the note about
+    /// this PDF" opens the folder instead ([`Note::open`]). See [`crate::app::NoteApp::open_any`],
+    /// which asks the difference out loud rather than choosing for the user.
     pub fn placed_from(source: &Path, dir: &Path) -> Result<Self> {
         if source.is_dir() {
             return Note::open(source);
@@ -171,7 +211,12 @@ impl Note {
             ))),
         }?;
 
-        Note::open(dir)
+        // Which file a note was made from is recorded *in* the note, so a list can say which PDF a
+        // note is about and so that a note carried to another machine still knows where it came
+        // from. It is a convenience rather than a dependency: the document itself is in the folder.
+        let mut note = Note::open(dir)?;
+        note.store_mut().set_source(Some(source))?;
+        Ok(note)
     }
 
     /// The folder the note lives in.
@@ -675,6 +720,35 @@ mod tests {
         assert_eq!(name, "chapter-3.pdf");
         assert_eq!(bytes, a_pdf());
         assert!(note.store().pages().expect("pages").is_empty());
+        assert_eq!(
+            note.store().source().expect("a source").as_deref(),
+            Some(document.to_string_lossy().as_ref()),
+            "the note knows which file it was made from"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// A listing finds the folders that are notes, and nothing else that happens to be a folder.
+    #[test]
+    fn a_listing_finds_the_notes_and_only_the_notes() {
+        let scratch = scratch("listing");
+
+        assert!(
+            notes_in(&scratch.join("nowhere")).expect("a listing").is_empty(),
+            "a notes folder that does not exist yet is no notes, not an error"
+        );
+
+        let document = scratch.join("chapter-3.pdf");
+        std::fs::write(&document, a_pdf()).expect("the document is written");
+        let note = Note::placed_from(&document, &scratch.join("placed")).expect("a note");
+
+        // Not notes: an attachments folder, and a stray file beside them.
+        std::fs::create_dir_all(scratch.join("attachments")).expect("a folder");
+        std::fs::write(scratch.join("notes.txt"), b"not a note").expect("a file");
+
+        let found = notes_in(&scratch).expect("a listing");
+        assert_eq!(found, vec![note.dir().to_path_buf()]);
 
         let _ = std::fs::remove_dir_all(&scratch);
     }

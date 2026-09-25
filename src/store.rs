@@ -67,6 +67,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
 use rusqlite::{params, Connection, OptionalExtension as _};
+use serde::{Deserialize, Serialize};
 
 use crate::chunk::{self, Codec};
 use crate::error::{AppError, Result};
@@ -88,6 +89,28 @@ pub const META_SHEET: &str = "sheet";
 pub const META_LAYOUT: &str = "layout";
 /// The name the document had when the note was made, as UTF-8.
 pub const META_DOCUMENT: &str = "document";
+/// The file the note was placed from, as it was given, as UTF-8.
+///
+/// What it is *for*: the home screen's list can say which PDF a note is about, and a note carried to
+/// another machine still knows where it came from. Nothing about the ink depends on it — a note
+/// carries its own copy of the document — so a note whose original file has gone is still whole.
+pub const META_SOURCE: &str = "source";
+
+/// What a note holds, without reading any of its ink.
+///
+/// Three numbers the home screen's list needs and can afford: the counts are answered by the
+/// database, and the sheet by one small `meta` read. Reading a page of ink to answer "how long is
+/// this note" would be the one thing a list of forty notes cannot do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Summary {
+    /// Pages the note's own list holds: what a reader can turn to.
+    pub pages: usize,
+    /// Strokes in the note, chunks and dirty strokes together.
+    pub strokes: usize,
+    /// The sheet the ink was written on, when the note remembers one.
+    pub sheet: Option<(f32, f32)>,
+}
 
 /// One note's ink, in one SQLite file.
 #[derive(Debug)]
@@ -722,6 +745,54 @@ impl NoteStore {
             .meta(META_DOCUMENT)?
             .and_then(|bytes| String::from_utf8(bytes).ok()))
     }
+
+    /// Records the file the note was placed from, or that there was none.
+    pub fn set_source(&mut self, path: Option<&Path>) -> Result<()> {
+        match path {
+            Some(path) => self.set_meta(META_SOURCE, path.to_string_lossy().as_bytes()),
+            None => self.set_meta(META_SOURCE, &[]),
+        }
+    }
+
+    /// The file the note was placed from, if it remembers one.
+    pub fn source(&self) -> Result<Option<String>> {
+        Ok(self
+            .meta(META_SOURCE)?
+            .filter(|bytes| !bytes.is_empty())
+            .and_then(|bytes| String::from_utf8(bytes).ok()))
+    }
+
+    /// What the note holds: its pages, its strokes, and the sheet they were written on.
+    ///
+    /// Two counts and one small read, and no blob is touched — which is what lets a list of forty
+    /// notes be drawn without opening forty pages of ink (see [`crate::recent`]). The page count is
+    /// the note's own *list* when it has one, because that is what a reader can turn to; a note
+    /// written before the list existed has only the pages that hold ink.
+    pub fn summary(&self) -> Result<Summary> {
+        let (strokes, ink_pages): (i64, i64) = self
+            .conn
+            .query_row(
+                "SELECT COALESCE((SELECT SUM(stroke_count) FROM pages), 0)
+                      + (SELECT COUNT(*) FROM dirty_strokes),
+                        (SELECT COUNT(*) FROM pages)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(sql)?;
+
+        let listed = self.layout()?.len();
+        let pages = if listed > 0 {
+            listed
+        } else {
+            (ink_pages.max(1)) as usize
+        };
+
+        Ok(Summary {
+            pages,
+            strokes: strokes as usize,
+            sheet: self.sheet()?,
+        })
+    }
 }
 
 /// The row id of the page at `ord`, making the row if it is asked for and is not there yet.
@@ -1229,6 +1300,73 @@ mod tests {
         assert_eq!(
             store.document().expect("a name").as_deref(),
             Some("chapter-3.pdf")
+        );
+
+        cleanup(&path);
+    }
+
+    /// A note says what it holds without reading any of its ink: the counts, the pages it lists, and
+    /// the sheet, and where it came from.
+    #[test]
+    fn a_note_summarises_itself() {
+        let (mut store, path) = store_for("summary");
+
+        assert_eq!(
+            store.summary().expect("a summary"),
+            Summary {
+                pages: 1,
+                strokes: 0,
+                sheet: None
+            },
+            "a new note is one blank page with nothing on it"
+        );
+
+        // Ink that has not been compacted counts too: a note read the moment it is written in must
+        // not look emptier than it is.
+        store
+            .append(0, &[stroke(4, 0.0, 0), stroke(4, 40.0, 0)])
+            .expect("ink");
+        store.append(1, &[stroke(4, 80.0, 0)]).expect("ink");
+
+        let dirty = store.summary().expect("a summary");
+        assert_eq!(dirty.strokes, 3, "dirty rows are strokes as well");
+        assert_eq!(dirty.pages, 2, "two pages hold ink");
+
+        // A note's own page list is what a reader can turn to, and it is what a summary reports.
+        store
+            .set_layout(&[Page::Blank, Page::Blank, Page::Document(0), Page::Blank])
+            .expect("a list");
+        store.set_sheet(Some((794.0, 1123.0))).expect("a sheet");
+        store.compact(0).expect("a compaction");
+
+        let listed = store.summary().expect("a summary");
+        assert_eq!(listed.pages, 4, "the list, not the pages that happen to hold ink");
+        assert_eq!(listed.strokes, 3, "compaction moved the ink, it did not lose it");
+        assert_eq!(listed.sheet, Some((794.0, 1123.0)));
+
+        cleanup(&path);
+    }
+
+    /// A note remembers the file it was placed from, and says so when there was none.
+    #[test]
+    fn a_note_remembers_the_file_it_came_from() {
+        let (mut store, path) = store_for("source");
+
+        assert_eq!(store.source().expect("a source"), None);
+
+        store
+            .set_source(Some(Path::new("C:/docs/chapter-3.pdf")))
+            .expect("a source");
+        assert_eq!(
+            store.source().expect("a source").as_deref(),
+            Some("C:/docs/chapter-3.pdf")
+        );
+
+        store.set_source(None).expect("no source");
+        assert_eq!(
+            store.source().expect("a source"),
+            None,
+            "a blank sheet's note came from nowhere, and says so rather than naming an empty path"
         );
 
         cleanup(&path);

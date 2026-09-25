@@ -74,11 +74,13 @@ use crate::cursor::{
     PenCursor, BODY_ALPHA, BODY_HALO_ALPHA, BODY_HALO_GROW, NIB_ALPHA, NIB_BLOOM_ALPHA,
     NIB_BLOOM_RADIUS, NIB_RADIUS,
 };
+use crate::home::Home;
 use crate::ink::{InkTransform, Notes, Stroke, Tool};
 use crate::note::{self, Note, NoteWriter, Report};
 use crate::pages::Pages;
 use crate::pen::{capture_config, PenInbox, PenService};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
+use crate::recent::{self, Recent};
 use crate::refresh::{Cadence, DisplayRefresh};
 use crate::settings::Settings;
 use crate::system_cursor::SystemCursor;
@@ -432,11 +434,21 @@ pub struct NoteApp {
     sheet_select: Entity<SelectState<Vec<&'static str>>>,
     /// The bar's ruling chooser. Held for the same reason as [`NoteApp::sheet_select`].
     rule_select: Entity<SelectState<Vec<&'static str>>>,
+    /// The screen that offers what was opened recently, and the app starts on.
+    ///
+    /// Held here rather than as a view of its own because the window *is* the app: a second screen
+    /// is a state of this one, and swapping a whole root entity out of a window would take the pen
+    /// capture and the pumps with it. See [`crate::home`].
+    home: Home,
 }
 
 impl NoteApp {
     /// Builds the view, attaches the pen, and starts the frame loop.
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    ///
+    /// `start` is a path the app was asked to open — a file argument, which is what a file
+    /// association or a drag onto the executable becomes. Opening it here rather than on the first
+    /// frame means the very first frame already shows it, and the home screen is never seen.
+    pub fn new(window: &mut Window, start: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let settings_path = Settings::default_path();
 
         let (settings, mut message) = match Settings::load(&settings_path) {
@@ -516,7 +528,17 @@ impl NoteApp {
             message,
             sheet_select,
             rule_select,
+            home: Home::open(window, cx),
         };
+
+        // What the app was asked to open on the command line, if anything: an argument is a
+        // *request*, and a request that fails is reported like any other.
+        if let Some(path) = start {
+            match app.open_or_place(&path) {
+                Ok(opened) => app.message = opened,
+                Err(error) => app.message = error.to_string(),
+            }
+        }
 
         // What a chooser reports is the label that was showing, so a label is what has to become a
         // setting again. A `Confirm` with no choice behind it — the box has been cleaned — is not
@@ -562,6 +584,12 @@ impl NoteApp {
         // The first status line is composed here, so the first frame already has it and no frame
         // has to render text that is about to be replaced.
         app.touch_status();
+
+        // The scan: what the notes folder holds, and the counts of whatever has changed since the
+        // index was written. Off the UI thread, so the first frame is on screen while it runs.
+        if app.home_is_open() {
+            app.start_scan(cx);
+        }
 
         app.start_pumps(cx);
         app
@@ -616,6 +644,15 @@ impl NoteApp {
                 }
 
                 if batch.samples.is_empty() {
+                    return;
+                }
+
+                // The home screen is in front of the sheet, and the pen is captured by the
+                // *window* rather than by anything on it: a reading that reached the ink while a list
+                // of notes was showing would be ink written on a page nobody is looking at. The
+                // capture itself is left alone — nothing else can own the pen while the app runs —
+                // and the readings are dropped here, where they would otherwise become strokes.
+                if app.home_is_open() {
                     return;
                 }
 
@@ -852,6 +889,8 @@ impl NoteApp {
         self.writer = Some(writer);
         self.loaded.insert(self.page_index);
         self.saved_at = Instant::now();
+        self.home.hide();
+        self.remember_opened(None);
 
         self.report(String::from("a new note on a blank sheet — Save writes it out as one file"));
         Ok(())
@@ -1137,8 +1176,14 @@ impl NoteApp {
     /// the way.
     ///
     /// True only *below the bar*: over the bar the ghost is drawn behind an opaque background,
-    /// where it cannot be seen.
+    /// where it cannot be seen. Never on the home screen, which has no sheet to point at and is
+    /// meant to be tapped: a hidden system pointer with nothing drawn in its place is a list no
+    /// pen can click.
     fn pen_has_its_own_cursor(&self) -> bool {
+        if self.home_is_open() {
+            return false;
+        }
+
         self.pen_cursor()
             .is_some_and(|cursor| cursor.position()[1] > BAR_HEIGHT)
     }
@@ -1395,7 +1440,7 @@ impl NoteApp {
     }
 
     /// Asks the platform for a PDF, or for a saved note, and opens it.
-    fn prompt_for_pdf(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn prompt_for_pdf(&mut self, cx: &mut Context<Self>) {
         let options = PathPromptOptions {
             files: true,
             directories: false,
@@ -1422,7 +1467,7 @@ impl NoteApp {
     /// user remember which of two dialogs to pick would be asking them to keep track of this app's
     /// internals for it. A folder is opened where it stands.
     fn open_any(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        match self.place_note(&path) {
+        match self.open_or_place(&path) {
             Ok(message) => self.message = message,
             Err(error) => self.report(error.to_string()),
         }
@@ -1431,7 +1476,28 @@ impl NoteApp {
         cx.notify();
     }
 
-    /// Places and opens the note at `path`, and answers the line the status bar should show.
+    /// Opens what was chosen, preferring the note that already exists over placing a new one.
+    ///
+    /// **This is the difference between opening a PDF again and losing a note.** Placing a PDF starts
+    /// a note on that document — a *new* one, written over the working copy of the same name (see
+    /// [`Note::placed_from`]) — so someone who opens the PDF they have been writing on twice would,
+    /// without this, find their ink gone the second time. A file whose note is already there opens
+    /// *that note*, and the document inside it is the one it was made from.
+    ///
+    /// The other half of that choice — writing a second, fresh note on the same document — is not
+    /// offered yet: the message says which note was opened, so it is not a silent substitution.
+    fn open_or_place(&mut self, path: &Path) -> Result<String> {
+        if path.is_file() {
+            let folder = note::root().join(note::folder_name(path));
+            if folder.join(note::NOTE_DB).is_file() {
+                return self.open_folder(&folder, Some(path));
+            }
+        }
+
+        self.place_note(path)
+    }
+
+    /// Places a note in the app's own directory and opens it: the import path.
     ///
     /// The ink is deliberately *not* all read here. A note is opened by reading the page that was
     /// open and the note's own page list; every other page is read when it is turned to, which is
@@ -1445,6 +1511,25 @@ impl NoteApp {
         };
 
         let note = Note::placed_from(path, &folder)?;
+        self.adopt(note, path.is_file().then_some(path))
+    }
+
+    /// Opens the note that is already in `folder`, without placing anything.
+    ///
+    /// `source` is the file the note was made from, when the caller knows it: it is what the app
+    /// says this note is, and what is remembered about where it came from. Nothing about the ink
+    /// depends on it — the document is inside the folder.
+    fn open_folder(&mut self, folder: &Path, source: Option<&Path>) -> Result<String> {
+        let note = Note::open(folder)?;
+        self.adopt(note, source)
+    }
+
+    /// Takes over an open note: its writer, its document, its pages, and the page that was open.
+    fn adopt(&mut self, note: Note, source: Option<&Path>) -> Result<String> {
+        let folder = note.dir().to_path_buf();
+        let label = source
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| folder.clone());
 
         // The writer's connection is opened here, before its thread runs, so that a note that cannot
         // be written is something the user is told about rather than something they discover the next
@@ -1489,8 +1574,10 @@ impl NoteApp {
 
         self.note = Some(note);
         self.writer = Some(writer);
+        self.home.hide();
         self.load_page_ink(self.page_index)?;
         self.remember_page();
+        self.remember_opened(source);
 
         // A note written on a different sheet than the one in use would be drawn at the wrong scale,
         // so that is said out loud rather than silently rescaled.
@@ -1498,13 +1585,13 @@ impl NoteApp {
         Ok(match sheet {
             Some((width, height)) if !sheet_matches((width, height), here) => format!(
                 "opened {} — written on a {width:.0}×{height:.0} sheet, this one is {:.0}×{:.0}",
-                file_label(path),
+                file_label(&label),
                 here.0,
                 here.1
             ),
             _ => format!(
                 "opened {} ({strokes} strokes on {} pages)",
-                file_label(path),
+                file_label(&label),
                 written.len()
             ),
         })
@@ -1548,6 +1635,244 @@ impl NoteApp {
     fn remember_page(&mut self) {
         if let Some(note) = &mut self.note {
             let _ = note.store_mut().set_open_page(self.page_index as u64);
+        }
+    }
+
+    /// Whether the home screen is in front of the sheet.
+    fn home_is_open(&self) -> bool {
+        self.home.is_open()
+    }
+
+    /// Shows the home screen: where the app starts, and where Esc goes from a note.
+    ///
+    /// Nothing can be lost by leaving a note — the ink is in it as it is laid (see [`crate::store`])
+    /// — so this is a page close and nothing more: the outstanding ink goes to the writer, the page
+    /// is folded into chunks, and the sheet stays where it is behind the list. The note being left is
+    /// where the list starts: the way back to what was open is the first thing a person looks for.
+    fn show_home(&mut self, cx: &mut Context<Self>) {
+        if self.home.is_open() {
+            return;
+        }
+
+        self.close_page();
+
+        if let Some(note) = &self.note {
+            let folder = note.dir().to_path_buf();
+            self.home.reveal(&folder);
+        }
+
+        self.home.show();
+        self.start_scan(cx);
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// Reads what the notes in the list hold, off the UI thread.
+    ///
+    /// A scan costs a `stat` per note and a database read only for the notes that have changed since
+    /// the list was written (see [`crate::home::scan`]) — and it runs on a worker thread, so the
+    /// first frame is on screen while it happens.
+    fn start_scan(&mut self, cx: &mut Context<Self>) {
+        if self.home.is_scanning() {
+            return;
+        }
+
+        self.home.begin_scan();
+
+        let root = note::root();
+        let known: Vec<(PathBuf, Option<recent::Stamp>)> = self
+            .home
+            .entries()
+            .iter()
+            .map(|entry| (entry.folder.clone(), entry.stamp))
+            .collect();
+
+        cx.spawn(async move |this, cx| {
+            let (found, articles) = cx
+                .background_executor()
+                .spawn(async move { crate::home::scan(&root, &known) })
+                .await;
+
+            this.update(cx, |app, cx| {
+                let changed = app.home.scanned(&found, &articles);
+                if changed {
+                    if let Err(error) = app.home.save() {
+                        app.message =
+                            format!("the list of recent notes could not be written: {error}");
+                    }
+                }
+
+                // A scan that *adopted* notes — folders it had never been told about — has their
+                // counts one pass away, because a scan only reads what the index already lists. One
+                // more pass learns them; that pass adopts nothing, so it is the last one.
+                if changed && articles.is_empty() {
+                    app.start_scan(cx);
+                }
+
+                app.touch_status();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The home screen's keyboard: the chords that are the app's, and nothing else.
+    ///
+    /// The list is this screen's keyboard — arrows, Enter, Escape, and typing into its search box —
+    /// and it has the focus, which [`Home::settle`] gives it on the frame after the screen appears.
+    /// What is left here is what the list cannot know: the commands that belong to the app wherever
+    /// it is.
+    pub(crate) fn home_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        if !keystroke.modifiers.control {
+            return;
+        }
+
+        match keystroke.key.as_str() {
+            "n" => self.new_blank_sheet(cx),
+            "o" => self.prompt_for_pdf(cx),
+            "s" => self.save(cx),
+            _ => {}
+        }
+    }
+
+    /// Takes an entry out of the list. The note is *not* deleted.
+    ///
+    /// The message says where the note still is, because the words "forgot" and "deleted" are one
+    /// keystroke apart in meaning and the app means the first: the entry is a line in a list, and the
+    /// note is a folder with the writing in it.
+    pub(crate) fn forget_entry(&mut self, entry: Recent, cx: &mut Context<Self>) {
+        match self.home.forget(&entry.folder) {
+            Ok(()) => {
+                self.message = format!(
+                    "forgot {} — the note is still in {}",
+                    entry.title,
+                    entry.folder.display()
+                );
+            }
+            Err(error) => self.report(error.to_string()),
+        }
+
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// Opens what the list confirmed.
+    ///
+    /// The *folder* is opened when it is there, never the source file: placing a file again is how a
+    /// note is lost (see [`Self::open_or_place`]). A note whose folder has gone but whose file is
+    /// still there is placed afresh — which is what the row says out loud, because what was written
+    /// in the old note is not in the file.
+    pub(crate) fn open_entry(&mut self, entry: Recent, cx: &mut Context<Self>) {
+        let opened = if entry.folder.is_dir() {
+            self.open_folder(&entry.folder, entry.source.as_deref())
+        } else if let Some(source) = &entry.source {
+            if source.is_file() {
+                self.place_note(source)
+            } else {
+                Err(anyhow::anyhow!(
+                    "{} is gone, and so is the note it was written on",
+                    file_label(source)
+                ))
+            }
+        } else {
+            Err(anyhow::anyhow!(
+                "the note in {} is gone",
+                entry.folder.display()
+            ))
+        };
+
+        match opened {
+            Ok(message) => self.message = message,
+            Err(error) => self.report(error.to_string()),
+        }
+
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// Starts a blank sheet: a note that does not exist until the first stroke.
+    ///
+    /// This is the state the app used to start in, and it is still the state a note that was cleared
+    /// and left alone should end in — see [`Self::ensure_note`], which makes the note the moment
+    /// there is ink to put in it.
+    pub(crate) fn new_blank_sheet(&mut self, cx: &mut Context<Self>) {
+        self.close_page();
+
+        self.note = None;
+        self.writer = None;
+        self.pdf = PdfDocumentView::empty();
+        self.pages = Pages::default();
+        self.page_index = 0;
+        self.ink = Notes::new();
+        self.loaded.clear();
+        self.saved.clear();
+        self.rewritten.clear();
+        self.ink.go_to(0);
+        self.loaded.insert(0);
+        self.home.hide();
+        self.remember_page();
+
+        self.message =
+            String::from("a blank sheet — the first stroke makes a note, and Save writes it out");
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// The note screen's keyboard: the way into the home screen, and Save.
+    ///
+    /// `Escape` leaves the note rather than the window: nothing can be lost by walking away from a
+    /// note — the ink is in it as it is laid — and a screen that lists what you were writing is the
+    /// one thing an app like this should be one keystroke away from.
+    fn note_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+
+        if !keystroke.modifiers.control {
+            if keystroke.key == "escape" {
+                self.show_home(cx);
+            }
+            return;
+        }
+
+        match keystroke.key.as_str() {
+            "n" => self.new_blank_sheet(cx),
+            "o" => self.prompt_for_pdf(cx),
+            "s" => self.save(cx),
+            _ => {}
+        }
+    }
+
+    /// Remembers what was just opened, so the home screen offers it next time.
+    ///
+    /// The title is the document's own name, or the note's folder turned back into words — a note
+    /// made on a blank sheet is named after the moment it was made. The *folder* is what an entry
+    /// opens; the source path is a convenience, and no ink depends on it. See [`crate::recent`].
+    fn remember_opened(&mut self, source: Option<&Path>) {
+        let Some(note) = &self.note else {
+            return;
+        };
+
+        let folder = note.dir().to_path_buf();
+        let document = note.store().document().ok().flatten();
+        // A note remembers the file it was made from (see [`crate::store::META_SOURCE`]), so an entry
+        // opened by its folder — an adopted one, or one whose list was lost — still says where it came
+        // from rather than losing that fact along with the list.
+        let source = source
+            .map(Path::to_path_buf)
+            .or_else(|| note.store().source().ok().flatten().map(PathBuf::from));
+        let title = document
+            .as_deref()
+            .map(|name| match name.rsplit_once('.') {
+                Some((stem, _)) if !stem.is_empty() => stem.to_string(),
+                _ => name.to_string(),
+            })
+            .unwrap_or_else(|| Recent::title_for(&folder));
+
+        let entry = Recent::note(folder, source, title, document, recent::now_ms());
+
+        if let Err(error) = self.home.record(entry) {
+            self.message = format!("the list of recent notes could not be written: {error}");
         }
     }
 
@@ -2019,6 +2344,18 @@ impl NoteApp {
         // tell apart from a broken command, and this app has no way to say "nothing to undo" other
         // than by looking like it.
         let actions = vec![
+            // The way back to the list, first, because it is the way *out* of everything else: what
+            // was opened is where a person starts, and Escape is the keyboard's way to the same
+            // place.
+            icon_button(
+                "home",
+                IconName::NotebookPen,
+                "What you have been writing (Esc)",
+                true,
+                cx,
+                |app, cx| app.show_home(cx),
+            )
+            .into_any_element(),
             icon_button(
                 "undo",
                 IconName::Undo2,
@@ -2581,6 +2918,25 @@ impl Render for NoteApp {
             window.bounds().size.width.into(),
             window.bounds().size.height.into(),
         );
+
+        // The home screen is the whole window while it is up — no sheet, no bar, no counters: a list
+        // of what was written is not something to draw ink behind. The sheet's state is left exactly
+        // as it is, so a note that is still open is behind the list and one Esc away.
+        if self.home_is_open() {
+            // Once per frame: the list is handed what the index holds, given the keyboard when the
+            // screen has just appeared, and scrolled to the note the app came from.
+            self.home.settle(window, cx);
+            let home = self.home.view(&self.message, cx);
+
+            return div()
+                .relative()
+                .size_full()
+                .bg(background)
+                .text_color(foreground)
+                .child(home)
+                .into_any_element();
+        }
+
         let page = self.current_page();
         let sheet = self.page_layout(window_size, page.as_ref());
         // Stored for the pump, which has no window to ask: a reading has to land on the sheet the
@@ -2669,6 +3025,13 @@ impl Render for NoteApp {
                 cx.listener(|app, event: &ScrollWheelEvent, _, cx| app.on_wheel(event, cx)),
             )
             .on_pinch(cx.listener(|app, event: &PinchEvent, _, cx| app.on_pinch(event, cx)))
+            // The note's keyboard, on the screen being painted: Esc for the home screen, and the
+            // three commands a person expects to reach without letting go of the pen. Registered
+            // here rather than as bindings because a screen with nothing focused is a screen whose
+            // keys have to be caught as they are painted — see [`crate::home`].
+            .on_key_down(
+                cx.listener(|app, event: &KeyDownEvent, _, cx| app.note_key_down(event, cx)),
+            )
             .child(
                 canvas(
                     |_, _, _| (),
@@ -2755,6 +3118,7 @@ impl Render for NoteApp {
             // The desk's own row: the page in the middle, the counters at the edge. Last, so it
             // paints over the sheet — a page pill *under* the paper would be no pill at all.
             .child(self.bottom_row(cx))
+            .into_any_element()
     }
 }
 

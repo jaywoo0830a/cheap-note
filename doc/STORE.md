@@ -53,6 +53,38 @@ is the whole of the rule: open locally, move by exporting.
 Whereas a *folder* you point the app at is opened where it stands, for someone who wants their notes
 in their own directory and promises not to sync it.
 
+### What the app remembers about what you opened
+
+Beside the notes folder there is one small file, and it is what the app starts on:
+
+```text
+%LOCALAPPDATA%\cheap-note\recent.json      what you have opened, newest first
+```
+
+It holds one entry per note the app has been asked to open: the note's *folder* — which is what an
+entry opens — the file it was made from, its name, the sheet, how much is in it, and when it was last
+opened. The file it came from is a *convenience* and nothing more: a note carries its own copy of the
+document, so an entry whose original file has moved is still a whole note.
+
+It is a **cache, not a note**, and it is treated like one:
+
+* deleting it costs the order of a list and nothing else — every note it names is still a folder under
+  `notes\`;
+* a folder it has never heard of — a note carried in from another machine — is *adopted* by simply
+  being there, so the list heals itself;
+* an entry whose folder has gone is marked rather than removed, because the note may be one directory
+  away (and the list says "not on disk" instead of quietly forgetting).
+
+The counts are cached together with a **stamp** of the note's database — its size and its modification
+time — so drawing the list normally costs one `stat` per note rather than one database read. Only a
+note whose database has changed since its stamp is read again, on a worker thread, and its row fills in
+when the answer arrives. That is what makes the list cheap however many notes there are: §5's numbers
+are a note's *size*, and the size is in its pages, not in its ink.
+
+The index is deliberately *not* kept in `cheap-note.settings.json` (§ the settings module), because
+that file is looked up relative to the directory the program is started in: a list of what you last
+wrote in must not depend on where you were standing.
+
 ## 2. Where the ink goes, end to end
 
 ```text
@@ -415,6 +447,8 @@ listed so a reader can go and read the code that proves the thing they just took
 | `src/note.rs` | the note folder, the writer thread and its job queue, the zip container, migration |
 | `src/legacy.rs` | the old zip of JSON, read-only |
 | `src/ink.rs` | strokes in memory: what a stroke is, and where each page's ink is kept |
+| `src/recent.rs` | the index of what has been opened: the file beside the notes, and its rules |
+| `src/home.rs` | the start screen: the list of recent notes, and what a confirmation opens |
 | `src/app.rs` | when to write: the batch clock, page close, the checkpoint rule, and the UI |
 
 The handful of functions worth knowing by name:
@@ -427,11 +461,14 @@ The handful of functions worth knowing by name:
 | `NoteStore::compact` | dirty rows → chunks, in one transaction |
 | `NoteStore::rewrite` | a page written again from scratch |
 | `NoteStore::load` | one page's ink, in order |
+| `NoteStore::summary` | what a note holds, without reading a blob |
 | `NoteStore::export` | `VACUUM INTO` |
 | `Note::placed_from` | import: a zip, a PDF, or a folder → a working copy |
 | `NoteWriter::spawn` | the writing thread and its queue |
 | `NoteApp::persist` | the rule that decides *when* ink is handed over |
 | `NoteApp::load_page_ink` | the read that happens when you turn a page |
+| `home::scan` | what a launch costs: one `stat` per note, and a read only for the ones that changed |
+| `recent::Recents::reconcile` | the list healing itself around the notes folder |
 
 ---
 

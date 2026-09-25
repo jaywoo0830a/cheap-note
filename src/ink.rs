@@ -127,7 +127,10 @@ pub enum Tool {
 ///
 /// The width is baked in when the point is created, so changing the stroke-width setting does
 /// not retroactively redraw the ink the user already laid down.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// `Serialize` and no `Deserialize`: the only reader of ink is [`crate::chunk`], which has its own
+/// encoding, and the one thing that ever *parsed* a stroke was the reader for the old note format.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct InkPoint {
     /// Horizontal position, in logical (DPI-independent) pixels.
     pub x: f32,
@@ -145,34 +148,36 @@ impl InkPoint {
 }
 
 /// A finished or in-progress line of ink.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// Written out only by tests, which measure the chunk encoding against JSON (see [`crate::chunk`]);
+/// nothing in the app serialises a stroke, and nothing reads one back as anything but a chunk.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Stroke {
     /// The positions, oldest first.
     pub points: Vec<InkPoint>,
     /// The colour this stroke was written in, as `0xRRGGBB`.
     ///
     /// Per stroke, not per page: the palette is a set of pens, and picking up a different one must
-    /// not repaint what the others wrote. A note written before this field existed loads as
-    /// [`Stroke::DEFAULT_COLOR`] — the ink colour those notes were drawn in, since there was only
-    /// ever one.
-    #[serde(default = "Stroke::default_color")]
+    /// not repaint what the others wrote.
     pub color: u32,
     /// The ribbon outline, in logical pixels, cached when the stroke is closed.
     ///
     /// Recomputing the outline every frame is pure waste: the points never change once the
     /// stroke is finished. Not serialised, because it is derivable from `points`.
-    #[serde(skip, default)]
+    #[serde(skip)]
     pub outline: Vec<[f32; 2]>,
     /// The axis-aligned bounds as `[min_x, min_y, max_x, max_y]`, for culling and hit-testing.
-    #[serde(skip, default)]
+    #[serde(skip)]
     pub bounds: [f32; 4],
 }
 
 impl Stroke {
-    /// The colour strokes from a note without one are given.
+    /// The near-black the app drew everything in before a stroke could carry a colour of its own.
     ///
-    /// The near-black the app drew everything in before a stroke could carry its own colour: an old
-    /// note therefore opens looking exactly as it did.
+    /// Test-only, and named here rather than repeated in every test module: the app's own paths write
+    /// ink in [`crate::settings::Settings::ink_color`], and a page of ink in a test still has to be
+    /// written in *some* colour.
+    #[cfg(test)]
     pub const DEFAULT_COLOR: u32 = 0x1B_1B_1F;
 
     /// The colour a stroke beginning at one point is written in.
@@ -183,11 +188,6 @@ impl Stroke {
             outline: Vec::new(),
             bounds: [point.x, point.y, point.x, point.y],
         }
-    }
-
-    /// The default for the field's `serde` attribute, which wants a path it can call.
-    fn default_color() -> u32 {
-        Self::DEFAULT_COLOR
     }
 
     /// Whether this stroke has nothing to draw.
@@ -1045,17 +1045,6 @@ mod tests {
         assert_eq!(ink.finished().len(), 2);
         assert_eq!(ink.finished()[0].color, 0xDC_26_26, "the red line stays red");
         assert_eq!(ink.finished()[1].color, 0x1D_4E_D8, "the blue line is blue");
-    }
-
-    /// A note written before a stroke carried a colour of its own loads as the colour it was drawn
-    /// in: there was only ever one, and it was this.
-    #[test]
-    fn a_stroke_without_a_colour_loads_as_the_one_ink_used_to_be() {
-        let old = r#"{"points":[{"x":1.0,"y":2.0,"width":3.0}]}"#;
-        let stroke: Stroke = serde_json::from_str(old).expect("an older stroke still parses");
-
-        assert_eq!(stroke.color, Stroke::DEFAULT_COLOR);
-        assert_eq!(stroke.points.len(), 1);
     }
 
     /// A cancel ends the stroke but does not add the position it carries.

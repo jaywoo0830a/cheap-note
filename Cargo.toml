@@ -29,8 +29,8 @@ pen-windows = { git = "https://github.com/jaywoo0830a/pen-windows", tag = "0.2.0
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "1"
 # The note store: SQLite, statically compiled into the binary — `bundled` builds the amalgamation
-# with `cc`, so the user never installs anything. See `src/store.rs` for the schema, and BUNDLE.md
-# for why this replaced a zip of JSON.
+# with `cc`, so the user never installs anything. See `src/store.rs` for the schema, and
+# `doc/STORE.md` for why this replaced a zip of JSON.
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 # Chunk codec. A page's strokes are encoded as a structure-of-arrays blob (see `src/chunk.rs`),
 # compressed, and sealed with a CRC32; `codec` in the `chunks` table names which compressor was

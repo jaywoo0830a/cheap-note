@@ -5,10 +5,10 @@
 //! The first version wrote a note as a zip with `notes.json` in it: the whole note re-serialised,
 //! re-deflated and rewritten on every save. That is fine for a page and hopeless for a notebook —
 //! a save is O(everything), a crash in the middle leaves a half-written file, and nothing is
-//! incremental. `BUNDLE.md` is the design note this module implements: **SQLite as the container**,
-//! with the strokes as compressed BLOBs rather than as rows of text.
+//! incremental. What replaced it: **SQLite as the container**, with the strokes as compressed BLOBs
+//! rather than as rows of text.
 //!
-//! What that buys, in the terms the design note uses:
+//! What that buys:
 //!
 //! * **A save is a batch, not a rewrite.** Ink arrives as `dirty_strokes` rows in one transaction;
 //!   the page is compacted into chunks when it is closed. Nothing rewrites what is already stored.
@@ -23,8 +23,8 @@
 //!
 //! ## The schema
 //!
-//! As specified in the design note, plus a `meta` table (the note's page list and what belongs to
-//! the note rather than to the app — see [`META_LAYOUT`]) and an ordering column on `pages`:
+//! Three tables for the ink, plus a `meta` table (the note's page list and what belongs to the note
+//! rather than to the app — see [`META_LAYOUT`]) and an ordering column on `pages`:
 //!
 //! ```sql
 //! pages(id, ord, created_at, updated_at, bbox_*, stroke_count)
@@ -77,8 +77,7 @@ use crate::ink::Stroke;
 ///
 /// A *newer* file is refused rather than read: the tables it added are ones this build does not
 /// know, and guessing is how a note gets rewritten without the ink that was in them. An older one
-/// is read as it stands — the format has not changed yet, and when it does the migration belongs
-/// here, keyed on this number.
+/// is read as it stands, and its stamp is brought up to this number when it is opened.
 pub const SCHEMA_VERSION: i32 = 3;
 
 /// The page the note was last on, as a `u64` little-endian.

@@ -3206,14 +3206,15 @@ impl NoteApp {
     ///
     /// A bar that can be hidden must never be hidden *permanently*: the switch that brings it back
     /// lives inside the bar, so hiding the bar would take the way back with it. This handle is drawn
-    /// over the desk whenever the bar is away — the same pill the page is in, with one button in it.
+    /// over the desk whenever the bar is away — the same pill the page is in, with one button in it,
+    /// at the top right of the window.
     fn bar_handle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
         div()
             .absolute()
             .top(px(BAR_MARGIN))
-            .left(px(BAR_MARGIN))
+            .right(px(BAR_MARGIN))
             .flex()
             .flex_row()
             .items_center()

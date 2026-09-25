@@ -22,18 +22,18 @@
 //!
 //! ## Why the working copy is not where the user's files are
 //!
-//! The design note is explicit about it: an open SQLite file must not live in a synchronising folder
-//! (Dropbox, iCloud, OneDrive), because those tools copy and merge files under an open handle and
-//! corrupt them. So a note is *placed* — imported into the app's own directory — and moved between
-//! machines by exporting a file. That is also why [`Note::placed_from`] takes a destination: an
-//! import is a copy, and the original is never opened for writing.
+//! An open SQLite file must not live in a synchronising folder (Dropbox, iCloud, OneDrive), because
+//! those tools copy and merge files under an open handle and corrupt them. So a note is *placed* —
+//! imported into the app's own directory — and moved between machines by exporting a file. That is
+//! also why [`Note::placed_from`] takes a destination: an import is a copy, and the original is never
+//! opened for writing.
 //!
 //! ## Writing, on another thread
 //!
 //! [`NoteWriter`] owns its own connection and runs in a thread of its own: the pen's path only ever
 //! *sends* a batch, and WAL means the reader — the app loading the page it is about to show — is
-//! never blocked by the writer. This is the design note's "one connection per thread" with a job
-//! queue in front of the writer, and it is what makes a 500 ms batch commit invisible while writing.
+//! never blocked by the writer. One connection per thread, with a job queue in front of the writer,
+//! is what makes a 500 ms batch commit invisible while writing.
 //!
 //! Errors do not vanish on that thread: they come back through [`NoteWriter::drain`], which the app
 //! empties on every frame tick and shows in its status line. A writer that failed silently would be
@@ -195,10 +195,9 @@ impl Note {
 
     /// Places a note at `dir` out of whatever `source` is, and opens it.
     ///
-    /// Three things can be placed, decided by what the file *is* rather than by a menu of commands:
+    /// Two things can be placed, decided by what the file *is* rather than by a menu of commands:
     ///
     /// * a **note zip** — this app's transfer file — is unpacked over the working copy;
-    /// * an **old note** (a zip of JSON, see [`crate::legacy`]) is migrated into a store;
     /// * a **PDF** starts a new note written on that document.
     ///
     /// A folder is opened where it stands rather than copied, which is what makes a note in the app's
@@ -221,7 +220,7 @@ impl Note {
             Some("zip") => unpack(source, dir),
             Some("pdf") => start_on_document(source, dir),
             _ => Err(AppError::Note(format!(
-                "{} is neither a note, a note zip, nor a PDF",
+                "{} is neither a note zip nor a PDF",
                 source.display()
             ))),
         }?;
@@ -245,7 +244,7 @@ impl Note {
     }
 
     /// The app's connection, mutably: what the app records about the note when it changes — a page
-    /// turned, a page inserted, a note being migrated.
+    /// turned, a page inserted, a page deleted.
     pub fn store_mut(&mut self) -> &mut NoteStore {
         &mut self.store
     }
@@ -323,7 +322,11 @@ pub fn export(store: &NoteStore, dir: &Path, target: &Path) -> Result<()> {
     result
 }
 
-/// Unpacks a zip into a working copy, migrating an old note if that is what it is.
+/// Unpacks a note zip into a working copy.
+///
+/// A zip with no [`NOTE_DB`] in it is not a note this app can open, and it is refused *before*
+/// anything is written: unpacking first would leave a folder of someone else's files under the notes
+/// folder, and a half-imported note is a worse thing to explain than a refusal.
 fn unpack(source: &Path, dir: &Path) -> Result<()> {
     let file = std::fs::File::open(source).map_err(|error| {
         AppError::Note(format!("{} could not be read: {error}", source.display()))
@@ -336,10 +339,13 @@ fn unpack(source: &Path, dir: &Path) -> Result<()> {
         ))
     })?;
 
-    // The old shape is a zip with `notes.json` in it and no database; the new one always has the
-    // database, because the database *is* the note.
+    // The database *is* the note: a zip without one holds nothing this build can open, whatever else
+    // is in it.
     if archive.by_name(NOTE_DB).is_err() {
-        return migrate(source, dir);
+        return Err(AppError::Note(format!(
+            "{} is not a note: it holds no {NOTE_DB}",
+            source.display()
+        )));
     }
 
     let _ = std::fs::remove_dir_all(dir);
@@ -391,37 +397,6 @@ fn unpack(source: &Path, dir: &Path) -> Result<()> {
             ))
         })?;
     }
-
-    Ok(())
-}
-
-/// Turns an old note — a zip of JSON — into a store.
-///
-/// Every page is written as a chunk and every note-level fact into `meta`, so the migration is the
-/// shape of a save with the "later" taken out: a migration has no later, so it compacts immediately
-/// instead of leaving the ink in the write-ahead area.
-fn migrate(source: &Path, dir: &Path) -> Result<()> {
-    let old = crate::legacy::read(source)?;
-
-    let _ = std::fs::remove_dir_all(dir);
-    std::fs::create_dir_all(dir).map_err(|error| {
-        AppError::Note(format!("{} could not be made: {error}", dir.display()))
-    })?;
-
-    let mut note = Note::open(dir)?;
-
-    for (page, strokes) in &old.pages {
-        note.store_mut().rewrite(*page as u64, strokes)?;
-    }
-
-    if let Some((name, bytes)) = &old.document {
-        note.put_document(name, bytes)?;
-    }
-
-    note.store_mut().set_sheet(old.sheet)?;
-    note.store_mut().set_layout(&old.layout)?;
-    note.store_mut().set_open_page(old.page as u64)?;
-    note.store().checkpoint()?;
 
     Ok(())
 }
@@ -869,57 +844,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    /// A note written by the old build is migrated rather than lost.
-    #[test]
-    fn an_old_note_is_migrated_into_a_store() {
-        let scratch = scratch("legacy");
-        let old = scratch.join("old.zip");
-
-        let notes = serde_json::json!({
-            "format": 2,
-            "page": 1,
-            "sheet": [595.0, 842.0],
-            "document": "old.pdf",
-            "layout": ["blank"],
-            "pages": [{
-                "page": 0,
-                "strokes": [{
-                    "points": [
-                        {"x": 1.0, "y": 2.0, "width": 3.0},
-                        {"x": 4.0, "y": 5.0, "width": 6.0}
-                    ],
-                    "color": 1776415
-                }]
-            }]
-        })
-        .to_string();
-
-        {
-            let file = std::fs::File::create(&old).expect("a file");
-            let mut zip = ZipWriter::new(file);
-            zip.start_file("notes.json", SimpleFileOptions::default())
-                .expect("an entry");
-            zip.write_all(notes.as_bytes()).expect("the ink");
-            zip.start_file("document.pdf", SimpleFileOptions::default())
-                .expect("an entry");
-            zip.write_all(&a_pdf()).expect("the document");
-            zip.finish().expect("a finished zip");
-        }
-
-        let placed = scratch.join("placed");
-        let note = Note::placed_from(&old, &placed).expect("the old note is migrated");
-
-        assert_eq!(note.store().load(0).expect("a page").len(), 1);
-        assert_eq!(note.store().open_page().expect("a page"), Some(1));
-        assert_eq!(note.store().sheet().expect("a sheet"), Some((595.0, 842.0)));
-        assert_eq!(note.store().layout().expect("a list"), vec![Page::Blank]);
-        let (name, bytes) = note.document().expect("the document").expect("it is there");
-        assert_eq!(name, "old.pdf");
-        assert_eq!(bytes, a_pdf());
-
-        let _ = std::fs::remove_dir_all(&scratch);
-    }
-
     /// The writer thread writes what it is given, and says when an export is done.
     #[test]
     fn the_writer_writes_on_its_own_thread() {
@@ -961,12 +885,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    /// A zip that is not a note is refused.
+    /// A zip that is not a note is refused — including one in the shape a note used to have.
+    ///
+    /// A note *was* a zip holding `document.pdf` and a `notes.json`, and this build has no reader for
+    /// that shape any more (see §9 of `doc/STORE.md`), so an old note is now the same case as any
+    /// other foreign zip: refused by name, with nothing written. The refusal is part of the deletion
+    /// rather than an accident of it — a zip unpacked "in case" would put a stranger's files in the
+    /// notes folder.
     #[test]
     fn a_foreign_zip_is_refused() {
         let scratch = scratch("foreign");
-        let other = scratch.join("other.zip");
+        let placed = scratch.join("placed");
 
+        let other = scratch.join("other.zip");
         {
             let file = std::fs::File::create(&other).expect("a file");
             let mut zip = ZipWriter::new(file);
@@ -976,9 +907,28 @@ mod tests {
             zip.finish().expect("a finished zip");
         }
 
-        let placed = scratch.join("placed");
         let error = Note::placed_from(&other, &placed).expect_err("a foreign zip is refused");
-        assert!(error.to_string().contains("notes.json"), "{error}");
+        assert!(error.to_string().contains(NOTE_DB), "{error}");
+
+        // The old shape: `document.pdf` and a `notes.json`, and no database, because there was not a
+        // database to have. It is not a note this app can open, and it is refused as such.
+        let old = scratch.join("old.zip");
+        {
+            let file = std::fs::File::create(&old).expect("a file");
+            let mut zip = ZipWriter::new(file);
+            zip.start_file("notes.json", SimpleFileOptions::default())
+                .expect("an entry");
+            zip.write_all(br#"{"format":2,"page":0,"pages":[]}"#)
+                .expect("the ink");
+            zip.start_file("document.pdf", SimpleFileOptions::default())
+                .expect("an entry");
+            zip.write_all(&a_pdf()).expect("the document");
+            zip.finish().expect("a finished zip");
+        }
+
+        let error = Note::placed_from(&old, &placed).expect_err("an old note is refused");
+        assert!(error.to_string().contains(NOTE_DB), "{error}");
+        assert!(!placed.exists(), "a refusal writes nothing");
 
         let _ = std::fs::remove_dir_all(&scratch);
     }

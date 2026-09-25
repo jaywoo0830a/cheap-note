@@ -68,6 +68,8 @@ mod view;
 use gpui_kit::component::Root;
 use gpui_kit::*;
 
+use crate::app::{Redo, Undo};
+
 fn main() {
     // The icons: the toolbar draws pen, eraser, page and zoom marks, and the *full* Lucide catalog
     // is what carries those. The default bundle is the component library's own set — a hundred or so
@@ -82,6 +84,19 @@ fn main() {
         // After `init`, because that is what creates the theme this writes into, and before the
         // window, because the first frame is laid out with the font.
         theme::install(cx);
+
+        // The keyboard's way to undo and redo, which the bar's buttons are the other way to reach
+        // (see the `actions!` declaration in `app`). Three bindings for two commands, because Windows
+        // applications reach redo with `Ctrl+Y` while everything else reaches it with `Ctrl+Shift+Z`,
+        // and there is no text field anywhere in this app for either to collide with.
+        //
+        // Registered on the application rather than on the view: a binding belongs to the window
+        // that will receive the keystroke, and the view does not exist yet at this point.
+        cx.bind_keys([
+            KeyBinding::new("ctrl-z", Undo, None),
+            KeyBinding::new("ctrl-y", Redo, None),
+            KeyBinding::new("ctrl-shift-z", Redo, None),
+        ]);
 
         cx.spawn(async move |cx| {
             let options = WindowOptions {

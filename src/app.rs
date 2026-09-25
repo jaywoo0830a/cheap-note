@@ -44,7 +44,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::base::Selectable as _;
+use gpui_kit::base::{Disableable as _, Selectable as _};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::switch::Switch;
@@ -68,6 +68,18 @@ use crate::settings::Settings;
 use crate::system_cursor::SystemCursor;
 use crate::timing::{measure, Timings};
 use crate::view::{Fit, Viewport};
+
+// The two commands a keyboard reaches that the bar also carries.
+//
+// They are actions — GPUI's unit of a keyboard command — rather than key listeners, because a
+// *binding* is then what decides which keys mean them (see the `KeyBinding`s in `main`) and this app
+// never has to parse a keystroke itself. The bar's buttons and the keyboard both end in the same two
+// methods, so there is one implementation of undo and one of redo and no way for the two paths to
+// disagree.
+//
+// This matters more here than it would in a text editor: the bar can be hidden, and without a
+// keyboard command an app with the bar off would have no way to take a stroke back at all.
+actions!(cheap_note, [Undo, Redo]);
 
 /// The bitmap-width multiplier used when rendering a PDF page.
 ///
@@ -456,6 +468,20 @@ impl NoteApp {
             },
         )
         .detach();
+
+        // The keyboard's way to the same two commands the bar's buttons run. Registered as *global*
+        // action handlers, which GPUI runs after the focused element's own handlers: the app has no
+        // focusable canvas and no text field, so a keystroke has no other node to go to, and a
+        // binding that only worked while some element happened to hold focus would be a command that
+        // works on some days.
+        let view = cx.weak_entity();
+        let undo_view = view.clone();
+        App::on_action(cx, move |_: &Undo, cx| {
+            undo_view.update(cx, |app, cx| app.undo(cx)).ok();
+        });
+        App::on_action(cx, move |_: &Redo, cx| {
+            view.update(cx, |app, cx| app.redo(cx)).ok();
+        });
 
         // The first status line is composed here, so the first frame already has it and no frame
         // has to render text that is about to be replaced.
@@ -885,8 +911,19 @@ impl NoteApp {
     }
 
     /// Removes the most recent stroke.
+    ///
+    /// The page's history is what decides whether there is anything to take back — see
+    /// [`crate::ink::InkDocument::undo`] — and the bar asks the same question before it offers the
+    /// button, so a stroke is only ever taken back by a command that said it could.
     fn undo(&mut self, cx: &mut Context<Self>) {
         if self.ink.undo() {
+            cx.notify();
+        }
+    }
+
+    /// Puts back the stroke the last undo took away.
+    fn redo(&mut self, cx: &mut Context<Self>) {
+        if self.ink.redo() {
             cx.notify();
         }
     }
@@ -1625,25 +1662,58 @@ impl NoteApp {
         ];
 
         // Reading order is left to right, so the commands sit in the order they are reached for:
-        // take the last stroke back, take everything back, open something else, write it out.
+        // take the last stroke back, put it forward again, take everything back, open something
+        // else, write it out.
+        //
+        // Undo and redo are offered only when the page's history says they would do something. A
+        // button that is always there and sometimes does nothing is the one thing a user cannot
+        // tell apart from a broken command, and this app has no way to say "nothing to undo" other
+        // than by looking like it.
         let actions = vec![
-            icon_button("undo", IconName::Undo2, "Undo", cx, |app, cx| app.undo(cx))
-                .into_any_element(),
-            icon_button("clear", IconName::Trash, "Clear the ink", cx, |app, cx| {
-                app.clear(cx)
-            })
+            icon_button(
+                "undo",
+                IconName::Undo2,
+                "Undo (Ctrl+Z)",
+                self.ink.can_undo(),
+                cx,
+                |app, cx| app.undo(cx),
+            )
+            .into_any_element(),
+            icon_button(
+                "redo",
+                IconName::Redo2,
+                "Redo (Ctrl+Y)",
+                self.ink.can_redo(),
+                cx,
+                |app, cx| app.redo(cx),
+            )
+            .into_any_element(),
+            icon_button(
+                "clear",
+                IconName::Trash,
+                "Clear the ink",
+                true,
+                cx,
+                |app, cx| app.clear(cx),
+            )
             .into_any_element(),
             icon_button(
                 "open-note",
                 IconName::FolderOpen,
                 "Open a note or a PDF",
+                true,
                 cx,
                 |app, cx| app.prompt_for_pdf(cx),
             )
             .into_any_element(),
-            icon_button("save-note", IconName::Save, "Save the note", cx, |app, cx| {
-                app.save(cx)
-            })
+            icon_button(
+                "save-note",
+                IconName::Save,
+                "Save the note",
+                true,
+                cx,
+                |app, cx| app.save(cx),
+            )
             .into_any_element(),
         ];
 
@@ -1919,6 +1989,7 @@ impl NoteApp {
                 "page-prev",
                 IconName::ChevronLeft,
                 "Previous page",
+                true,
                 cx,
                 |app, cx| app.previous_page(cx),
             ))
@@ -1934,6 +2005,7 @@ impl NoteApp {
                 "page-next",
                 IconName::ChevronRight,
                 "Next page",
+                true,
                 cx,
                 |app, cx| app.next_page(cx),
             ))
@@ -1968,6 +2040,7 @@ impl NoteApp {
                 "zoom-out",
                 IconName::Minus,
                 "Zoom out",
+                true,
                 cx,
                 |app, cx| app.zoom_out(cx),
             )
@@ -1984,8 +2057,15 @@ impl NoteApp {
                 .into_any_element(),
         );
         controls.push(
-            icon_button("zoom-in", IconName::Plus, "Zoom in", cx, |app, cx| app.zoom_in(cx))
-                .into_any_element(),
+            icon_button(
+                "zoom-in",
+                IconName::Plus,
+                "Zoom in",
+                true,
+                cx,
+                |app, cx| app.zoom_in(cx),
+            )
+            .into_any_element(),
         );
         // A hairline between stepping and fitting: one changes the number, the other works it out
         // from the window, and a run of four arrows with no punctuation reads as four steps.
@@ -1998,7 +2078,7 @@ impl NoteApp {
                 Fit::Height => IconName::MoveVertical,
             };
             controls.push(
-                icon_button(fit.button_id(), icon, fit.label(), cx, move |app, cx| {
+                icon_button(fit.button_id(), icon, fit.label(), true, cx, move |app, cx| {
                     app.fit_sheet(fit, cx)
                 })
                 .into_any_element(),
@@ -2037,6 +2117,7 @@ impl NoteApp {
                 "page-before",
                 IconName::BetweenVerticalStart,
                 "Add a page before this one",
+                true,
                 cx,
                 |app, cx| app.add_page(true, cx),
             )
@@ -2045,6 +2126,7 @@ impl NoteApp {
                 "page-after",
                 IconName::BetweenVerticalEnd,
                 "Add a page after this one",
+                true,
                 cx,
                 |app, cx| app.add_page(false, cx),
             )
@@ -2054,6 +2136,7 @@ impl NoteApp {
                 "page-delete",
                 IconName::FileX,
                 "Delete this page",
+                true,
                 cx,
                 |app, cx| app.delete_page(cx),
             )
@@ -2115,6 +2198,7 @@ impl NoteApp {
                 "show-bar-again",
                 IconName::PanelTopOpen,
                 "Show the bar",
+                true,
                 cx,
                 |app, cx| app.set_toolbar_shown(true, cx),
             ))
@@ -2395,16 +2479,21 @@ fn tool_button(
         .on_click(cx.listener(move |app, _, _, cx| handler(app, cx)))
 }
 
-/// An icon button for a command: a page, a zoom step, a file.
+/// An icon button for a command: undo, redo, a file, a zoom step.
 ///
 /// No visible label, so the words that name it are still set — as the tooltip a person reads and as
 /// the name a screen reader is given. The variant is a ghost: nothing at rest, a small tint under
 /// the pointer, and the icon in the foreground colour, which is what keeps a dozen of these from
 /// reading as a form.
+///
+/// `enabled` is passed in rather than assumed, because a command that cannot act has to *say* so:
+/// a button drawn disabled refuses the click, and so cannot be mistaken for a command that is
+/// broken. The bar is rebuilt whenever the view renders, so the answer is never stale.
 fn icon_button(
     id: &'static str,
     icon: IconName,
     label: &'static str,
+    enabled: bool,
     cx: &mut Context<NoteApp>,
     handler: impl Fn(&mut NoteApp, &mut Context<NoteApp>) + 'static,
 ) -> Button {
@@ -2413,6 +2502,7 @@ fn icon_button(
         .ghost()
         .rounded(px(999.0))
         .compact()
+        .disabled(!enabled)
         .accessibility_label(label)
         .tooltip(label)
         .on_click(cx.listener(move |app, _, _, cx| handler(app, cx)))

@@ -24,6 +24,26 @@
 //! the display's rate; cloning an `Arc` is a pointer copy. The strokes are behind an `Arc` of
 //! their own for the same reason one level down: a vector of pointers can be appended to,
 //! undone and filtered without touching the strokes themselves.
+//!
+//! ## What undo is, and what it is not
+//!
+//! Undo is one *finished* stroke at a time, per page, and redo is that same list walked the other
+//! way. The rules are the ones a hand expects, and they are written down because the exceptions are
+//! what a user notices:
+//!
+//! * **The stroke under the nib is not history.** It has no closed geometry and the pen is still on
+//!   the paper, so undo leaves it exactly where it is: taking it away would remove a line that was
+//!   never finished, and would leave the model thinking the pen was up while it is down.
+//! * **Any new ink ends the redo branch.** A stroke finished after an undo — or an erase that
+//!   removed something — is a new drawing, so what was taken back is no longer something to put
+//!   forward. This is the rule every editor has, and the reason redo can be trusted.
+//! * **Erasing is not undoable.** The eraser removes whole strokes as its nib passes over them (see
+//!   [`InkDocument::erase_at`]), so undo afterwards takes the most recent *surviving* stroke of the
+//!   page, which need not be one the eraser touched.
+//! * **Clearing is not undoable either.** It is the one command that says "none of this page", and
+//!   it ends both directions rather than leaving a way back that the command itself did not mean.
+//! * **A page keeps its history while it can still be redone**, even with nothing drawn on it, so
+//!   turning the page and turning back does not quietly throw the redo away.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -383,6 +403,13 @@ pub struct InkDocument {
     /// that already held a thousand of them deep-copied all thousand — and the eraser, which
     /// touches this per reading, copied the page several hundred times a second.
     finished: Arc<Vec<Arc<Stroke>>>,
+    /// The strokes taken back by [`Self::undo`], newest last, waiting for [`Self::redo`].
+    ///
+    /// It holds strokes by pointer, like [`Self::finished`] does, so the two lists are one ink
+    /// between them and undoing a page of a thousand strokes copies no strokes at all. It is emptied
+    /// by anything that makes the drawing a *new* one rather than a shortened one: a finished
+    /// stroke, an erase that removed something, and a clear.
+    undone: Vec<Arc<Stroke>>,
     /// The stroke currently being drawn, if a pen nib is down.
     open: Option<Stroke>,
     /// The pointer that owns the turn: the pen or eraser that is currently down.
@@ -406,6 +433,7 @@ impl Default for InkDocument {
     fn default() -> Self {
         InkDocument {
             finished: Arc::new(Vec::new()),
+            undone: Vec::new(),
             open: None,
             active_pointer: None,
             active_tool: Tool::Pen,
@@ -471,26 +499,62 @@ impl InkDocument {
         self.finished.len() + usize::from(self.open.is_some())
     }
 
-    /// Removes the most recent stroke.
+    /// Removes the most recent finished stroke, and nothing else.
+    ///
+    /// The stroke the pen is still drawing is deliberately **not** touched: it is not history yet —
+    /// it has no closed geometry and it is not what a save would write — and the pen is still on the
+    /// paper, so taking it away would both lose a line the user meant to draw and leave the model
+    /// believing the pen was lifted. It is finished, or lifted, on its own.
+    ///
+    /// Returns whether there was a stroke to take back. A caller uses that to decide whether to
+    /// repaint, and the interface uses [`Self::can_undo`] to say so *before* it is asked.
     pub fn undo(&mut self) -> bool {
-        if let Some(open) = self.open.take() {
-            // An in-progress stroke is the most recent thing the user drew.
-            self.active_pointer = None;
-            return !open.is_empty();
-        }
-
-        if self.finished.is_empty() {
+        let Some(stroke) = Arc::make_mut(&mut self.finished).pop() else {
             return false;
-        }
+        };
 
-        Arc::make_mut(&mut self.finished).pop();
+        self.undone.push(stroke);
+        // The eraser's cheap path skips a rescan when the nib has barely moved, and the strokes
+        // under it have just changed. Forgetting the last position costs one rescan.
         self.last_erase = None;
         true
     }
 
+    /// Puts back the stroke the most recent [`Self::undo`] took away.
+    ///
+    /// Nothing is undone by undoing: the stroke comes back exactly as it was drawn, because undo
+    /// moved a pointer rather than copying ink. The redo list is emptied by any new ink, so this can
+    /// never put a stroke back into a drawing it does not belong to.
+    pub fn redo(&mut self) -> bool {
+        let Some(stroke) = self.undone.pop() else {
+            return false;
+        };
+
+        Arc::make_mut(&mut self.finished).push(stroke);
+        self.last_erase = None;
+        true
+    }
+
+    /// Whether [`Self::undo`] would do anything.
+    ///
+    /// The interface asks this rather than pressing the button to find out: a command that is
+    /// offered and then does nothing is indistinguishable from one that is broken.
+    pub fn can_undo(&self) -> bool {
+        !self.finished.is_empty()
+    }
+
+    /// Whether [`Self::redo`] would do anything.
+    pub fn can_redo(&self) -> bool {
+        !self.undone.is_empty()
+    }
+
     /// Removes every stroke.
+    ///
+    /// Both directions are cleared: this is the command that says the page holds nothing, and a redo
+    /// list left behind it would be able to put ink back onto a page that was just emptied.
     pub fn clear(&mut self) {
         self.finished = Arc::new(Vec::new());
+        self.undone.clear();
         self.open = None;
         self.active_pointer = None;
         self.last_erase = None;
@@ -621,6 +685,12 @@ impl InkDocument {
                 // `make_mut` reuses the existing vector when no frame is holding a snapshot, and
                 // copies it when one is — and that copy is of pointers, not of ink.
                 Arc::make_mut(&mut self.finished).push(Arc::new(stroke));
+
+                // A stroke drawn after an undo makes the drawing a new one rather than a shortened
+                // one, so what was taken back is no longer something to put forward. Emptied here
+                // rather than when the pen went down: a `Down` whose stroke never became a line is
+                // not an edit at all.
+                self.undone.clear();
             }
         }
         self.active_pointer = None;
@@ -743,8 +813,14 @@ impl InkDocument {
 
         let before = self.finished.len();
         Arc::make_mut(&mut self.finished).retain(|stroke| !stroke.hits(x, y, settings.erase_radius));
+        let erased = before - self.finished.len();
 
-        self.stats.erased_strokes += (before - self.finished.len()) as u64;
+        if erased > 0 {
+            self.stats.erased_strokes += erased as u64;
+            // Erasing is a change of its own — the page it leaves is not the page undo takes back
+            // to — so it ends the redo branch exactly as new ink does.
+            self.undone.clear();
+        }
     }
 }
 /// Every page's ink, and which page is being written on.
@@ -805,7 +881,11 @@ impl Notes {
         }
 
         let leaving = std::mem::take(&mut self.current);
-        if !leaving.is_blank() {
+        // A page left with nothing on it is normally dropped — an empty document costs nothing to
+        // make again — but one that can still be *redone* is not empty in the sense that matters
+        // here: the strokes are gone from the page and still in the model, and a page turn is not an
+        // edit. Keeping it is what makes undo, turn the page, turn back, redo work.
+        if !leaving.is_blank() || leaving.can_redo() {
             self.taken.insert(self.page, leaving);
         }
 
@@ -1111,22 +1191,173 @@ mod tests {
     /// Undo removes the most recent stroke and nothing else.
     #[test]
     fn undo_removes_the_most_recent_stroke() {
-        let mut ink = InkDocument::new();
-        let s = settings();
-
-        for index in 0..3 {
-            let x = index as f32 * 100.0;
-            ink.consume(&[reading(7, PenPhase::Down, x, 0.0, Some(0.5))], &id(), &s);
-            ink.consume(&[reading(7, PenPhase::Up, x + 10.0, 0.0, None)], &id(), &s);
-        }
+        let mut ink = page_with(3);
         assert_eq!(ink.stroke_count(), 3);
 
+        assert!(ink.can_undo(), "there is something to take back");
         assert!(ink.undo());
         assert_eq!(ink.stroke_count(), 2);
         assert!(ink.undo());
         assert!(ink.undo());
         assert!(!ink.undo(), "there is nothing left to undo");
         assert!(ink.is_blank());
+        assert!(!ink.can_undo(), "and the interface can say so beforehand");
+    }
+
+    /// Redo puts back exactly what undo took away, in the order they went, and never doubles back
+    /// further than the undos reached.
+    #[test]
+    fn redo_puts_back_what_undo_took_away() {
+        let mut ink = page_with(3);
+        assert!(!ink.can_redo(), "nothing has been taken back yet");
+
+        ink.undo();
+        ink.undo();
+        assert_eq!(ink.stroke_count(), 1);
+        assert!(ink.can_redo());
+
+        assert!(ink.redo());
+        assert_eq!(ink.stroke_count(), 2);
+        assert_eq!(
+            ink.finished()[1].points[0].x,
+            10.0,
+            "the stroke that came back is the one that went"
+        );
+
+        assert!(ink.redo());
+        assert_eq!(ink.stroke_count(), 3);
+        assert!(!ink.redo(), "and there is nothing left to put forward");
+        assert!(!ink.can_redo());
+    }
+
+    /// A stroke drawn after an undo is a new drawing: what was taken back is not put forward again.
+    #[test]
+    fn a_stroke_drawn_after_an_undo_ends_the_branch() {
+        let mut ink = page_with(2);
+        let s = settings();
+
+        ink.undo();
+        assert!(ink.can_redo());
+
+        ink.consume(&[reading(7, PenPhase::Down, 900.0, 0.0, Some(0.5))], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Up, 940.0, 0.0, None)], &id(), &s);
+
+        assert!(
+            !ink.can_redo(),
+            "the new stroke ended the branch the undo left"
+        );
+        assert!(!ink.redo(), "and there is nothing to put forward");
+        assert_eq!(ink.stroke_count(), 2, "the page is what was drawn on it");
+    }
+
+    /// The stroke under the nib is not history: undo takes the stroke before it and leaves the
+    /// pen's own line — and the pen — exactly as they were.
+    #[test]
+    fn undo_leaves_the_line_under_the_nib_alone() {
+        let mut ink = page_with(1);
+        let s = settings();
+
+        ink.consume(&[reading(7, PenPhase::Down, 500.0, 0.0, Some(0.5))], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Move, 600.0, 0.0, Some(0.5))], &id(), &s);
+        assert!(ink.open().is_some(), "the pen is drawing");
+
+        assert!(ink.undo());
+        assert_eq!(ink.stroke_count(), 1, "the finished stroke was taken back");
+        assert_eq!(
+            ink.open().map(|open| open.points.len()),
+            Some(2),
+            "the line being drawn was not touched"
+        );
+
+        // The stroke keeps growing: an undo must not leave the model thinking the pen was lifted.
+        ink.consume(&[reading(7, PenPhase::Move, 700.0, 0.0, Some(0.5))], &id(), &s);
+        assert_eq!(
+            ink.open().map(|open| open.points.len()),
+            Some(3),
+            "the pen went on drawing"
+        );
+
+        ink.consume(&[reading(7, PenPhase::Up, 700.0, 0.0, None)], &id(), &s);
+        assert_eq!(
+            ink.stroke_count(),
+            1,
+            "the stroke the pen was drawing was finished on the page"
+        );
+        assert!(ink.open().is_none());
+    }
+
+    /// With nothing finished on the page there is nothing to take back, even while the pen is down.
+    #[test]
+    fn a_page_with_no_finished_stroke_has_nothing_to_undo() {
+        let mut ink = InkDocument::new();
+        let s = settings();
+
+        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+
+        assert!(!ink.can_undo());
+        assert!(!ink.undo(), "the pen's own line is not history");
+        assert!(ink.open().is_some(), "and it is still there");
+    }
+
+    /// Erasing is a change of its own, so it ends the branch an undo left open.
+    #[test]
+    fn erasing_ends_the_branch() {
+        let mut ink = page_with(2);
+        let s = settings();
+
+        ink.undo();
+        assert!(ink.can_redo());
+        assert_eq!(ink.stroke_count(), 1);
+
+        // The eraser nib passes over the stroke that is still there.
+        let mut eraser = reading(7, PenPhase::Down, 0.0, 0.0, None);
+        eraser.eraser = true;
+        ink.consume(&[eraser], &id(), &s);
+
+        assert_eq!(ink.stroke_count(), 0, "the stroke the eraser touched is gone");
+        assert!(!ink.can_redo(), "and the eraser ended the branch");
+    }
+
+    /// Clearing says the page holds nothing, in both directions.
+    #[test]
+    fn clearing_ends_both_directions() {
+        let mut ink = page_with(3);
+
+        ink.undo();
+        assert!(ink.can_undo() && ink.can_redo());
+
+        ink.clear();
+        assert!(ink.is_blank());
+        assert!(!ink.can_undo());
+        assert!(
+            !ink.can_redo(),
+            "nothing can be put back onto an emptied page"
+        );
+    }
+
+    /// Turning the page and turning back keeps a page's redo, even though the page itself is empty:
+    /// a page turn is not an edit.
+    #[test]
+    fn a_page_turn_keeps_what_can_be_redone() {
+        let mut notes = Notes::new();
+        let s = settings();
+
+        notes.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+        notes.consume(&[reading(7, PenPhase::Up, 30.0, 30.0, None)], &id(), &s);
+        notes.undo();
+        assert!(notes.is_blank(), "the page it was drawn on is empty again");
+
+        notes.go_to(1);
+        notes.go_to(0);
+
+        assert!(notes.can_redo(), "the way back survived the page turn");
+        assert!(notes.redo());
+        assert_eq!(notes.stroke_count(), 1);
+        assert_eq!(
+            notes.written_pages(),
+            vec![0],
+            "and the page counts as written on again"
+        );
     }
 
     /// Physical pixels are divided by the window's scale exactly once.

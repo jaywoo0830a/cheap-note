@@ -55,7 +55,10 @@ use crate::canvas::{
     contrast_color, relative_luminance, CanvasSize, CanvasStyle, Ruling, Swatch, INK_COLORS,
     PAPER_COLORS,
 };
-use crate::cursor::{PenCursor, NIB_RADIUS};
+use crate::cursor::{
+    PenCursor, BODY_ALPHA, BODY_HALO_ALPHA, BODY_HALO_GROW, NIB_ALPHA, NIB_BLOOM_ALPHA,
+    NIB_BLOOM_RADIUS, NIB_RADIUS,
+};
 use crate::ink::{InkTransform, Notes, Stroke, Tool};
 use crate::pages::Pages;
 use crate::pen::{capture_config, PenInbox, PenService};
@@ -2930,51 +2933,81 @@ fn paint_rect(window: &mut Window, origin: Point<Pixels>, width: f32, height: f3
     }
 }
 
-/// Draws the pen's ghost cursor: the nib, and the pen's body leaning away from it.
+/// Draws the pen's ghost cursor: a soft mark at the nib, and the pen's body leaning away from it.
 ///
-/// The body is a filled polygon rather than a quad, because a quad cannot be rotated and pointing
-/// somewhere is the entire point of the shape. It is built fresh on every frame the pen moves —
-/// there is no way to draw something whose position and angle are both new each frame — which is
-/// affordable because it is four points, not a stroke.
+/// The body is curves rather than a quad — a quad cannot be rotated, and pointing somewhere is the
+/// entire point of the shape, but a quad *drawn as* straight edges is a wedge. Three quadratic
+/// curves swell its flanks and round its far end, which is what makes it read as a body seen at an
+/// angle rather than as an arrowhead painted over the page.
+///
+/// Each shape is painted twice: a copy pushed out by a pixel or two, faint, and the shape itself
+/// over it. That is the trick the page's shadow uses, in one step rather than three, and it is what
+/// stops the cursor reading as a sticker on the sheet. The nib mark is the exception to how faint
+/// it all is, because it is the one part that says where the ink will land.
+///
+/// It is rebuilt whenever the pen moves — there is no way to draw something whose position and
+/// angle are both new each frame — which is affordable because it is three curves, not a stroke.
 fn paint_cursor(window: &mut Window, cursor: PenCursor, color: Hsla) {
     let [x, y] = cursor.position();
+    let here = |p: [f32; 2]| point(px(p[0]), px(p[1]));
 
-    // The body is absent for a pen with no tilt sensor, and for one held straight up.
-    if let Some([a, b, c, d]) = cursor.body_outline() {
-        let corners = [
-            point(px(a[0]), px(a[1])),
-            point(px(b[0]), px(b[1])),
-            point(px(c[0]), px(c[1])),
-            point(px(d[0]), px(d[1])),
-        ];
+    // The body is absent for a pen with no tilt sensor, and for one held straight up. It fades in
+    // as the lean grows, so the threshold is not a shape appearing out of nothing.
+    if let Some(body) = cursor.body_shape() {
+        let fade = cursor.body_fade();
 
-        // The same rule the ink uses. This quad is convex, so the default rule would do — but a
-        // filled shape that can show a hole is one degenerate tilt away from being a bug.
-        let mut builder = solid_path();
-        builder.add_polygon(&corners, true);
+        // The soft edge first, then the body over it: widest and faintest first, which is the order
+        // the page's shadow is painted in.
+        for (grow, alpha) in [
+            (BODY_HALO_GROW, BODY_HALO_ALPHA * fade),
+            (0.0, BODY_ALPHA * fade),
+        ] {
+            let [nib_left, flank_left, far_left, cap, far_right, flank_right, nib_right] =
+                body.outline(grow);
 
-        if let Ok(path) = builder.build() {
-            window.paint_path(path, color);
+            // The same rule the ink uses. This outline is convex, so the default rule would do —
+            // but a filled shape that can show a hole is one degenerate tilt away from being a bug.
+            let mut builder = solid_path();
+            builder.move_to(here(nib_left));
+            builder.curve_to(here(far_left), here(flank_left));
+            builder.curve_to(here(far_right), here(cap));
+            builder.curve_to(here(nib_right), here(flank_right));
+            builder.close();
+
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, color.opacity(alpha));
+            }
         }
     }
 
     // The nib: a small circle, always, so there is a fixed point that says exactly where the ink
-    // will land. A square rounded by half its own side is a circle.
-    let radius = NIB_RADIUS;
-    let corner = px(radius);
+    // will land. The faint bloom around it is what lets it sit in the page rather than on it.
+    for (radius, alpha) in [(NIB_BLOOM_RADIUS, NIB_BLOOM_ALPHA), (NIB_RADIUS, NIB_ALPHA)] {
+        paint_dot(window, point(px(x), px(y)), radius, color.opacity(alpha));
+    }
+}
+
+/// Fills a circle centred on a point: a square rounded by half its own side.
+///
+/// A quad rather than a path, because a quad is a handful of numbers the renderer places directly —
+/// there is nothing here to build and nothing to curve.
+fn paint_dot(window: &mut Window, centre: Point<Pixels>, radius: f32, color: Hsla) {
+    let radius = px(radius);
+    let corner = point(centre.x - radius, centre.y - radius);
+
     window.paint_quad(
         fill(
             Bounds {
-                origin: point(px(x - radius), px(y - radius)),
-                size: size(px(radius * 2.0), px(radius * 2.0)),
+                origin: corner,
+                size: size(radius * 2.0, radius * 2.0),
             },
             color,
         )
         .corner_radii(Corners {
-            top_left: corner,
-            top_right: corner,
-            bottom_right: corner,
-            bottom_left: corner,
+            top_left: radius,
+            top_right: radius,
+            bottom_right: radius,
+            bottom_left: radius,
         }),
     );
 }

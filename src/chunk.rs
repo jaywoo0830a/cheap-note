@@ -595,6 +595,92 @@ mod tests {
         }
     }
 
+    /// A single-stroke blob is usually stored *uncompressed*: a compressor's header is bigger than
+    /// the stroke.
+    ///
+    /// This is why the codec is measured rather than chosen once for the whole build. A dirty row is
+    /// one stroke — usually 20-80 points, 100-300 bytes — and at that size zstd earns nothing
+    /// (measured: raw wins at 20, 45 and 70 points, and zstd only takes over somewhere past a
+    /// hundred). It is the `chunks` rows, which are a page at a time, that compress.
+    #[test]
+    fn a_single_stroke_blob_usually_skips_the_compressor() {
+        let short = encode(&[hand_stroke(11, 45)]).expect("the stroke encodes");
+        assert_eq!(
+            short.codec,
+            Codec::Raw,
+            "{} bytes of one stroke were left as they were",
+            short.raw_len
+        );
+
+        let long = encode(&[hand_stroke(11, 120)]).expect("the stroke encodes");
+        assert_eq!(long.codec, Codec::Zstd, "a long stroke is worth compressing");
+    }
+
+    /// A hand-written page is many times smaller than the JSON it used to be.
+    ///
+    /// The fixture is deliberately *irregular* — 1-2 px steps, a slowly turning heading, a different
+    /// shape for every stroke — because a page of identical strokes compresses to almost nothing and
+    /// would flatter the format. These are the numbers `doc/STORE.md` quotes, and this test is what
+    /// keeps them true:
+    ///
+    /// ```text
+    ///  10 strokes   445 points    1.9 KB of arrays   1.7 KB of chunk    21 KB of JSON
+    /// 100 strokes  5.4 KB points 23.2 KB of arrays  18.9 KB of chunk   258 KB of JSON
+    /// 1000 strokes 54.9 KB points 235 KB of arrays  184 KB of chunk   2.6 MB of JSON
+    /// ```
+    #[test]
+    fn a_hand_written_page_is_much_smaller_than_json() {
+        let strokes: Vec<Stroke> = (0..200)
+            .map(|index| hand_stroke(index as u64 + 7, 40 + index % 31))
+            .collect();
+
+        let raw = arrays(&strokes);
+        let encoded = encode(&strokes).expect("the page encodes");
+        let json = serde_json::to_vec(&strokes).expect("the strokes serialise");
+
+        assert!(
+            encoded.data.len() * 8 < json.len(),
+            "{} bytes of chunk against {} bytes of JSON",
+            encoded.data.len(),
+            json.len()
+        );
+        assert!(
+            encoded.data.len() < raw.len(),
+            "and the compressor still earns its header"
+        );
+    }
+
+    /// A stroke that walks like a hand: small steps, a heading that turns slowly, and a shape of its
+    /// own.
+    fn hand_stroke(seed: u64, points: usize) -> Stroke {
+        let mut state = seed.wrapping_mul(2_654_435_761) | 1;
+        let mut random = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / (1u64 << 24) as f32
+        };
+
+        let mut heading = random() * std::f32::consts::TAU;
+        let mut x = random() * 640.0;
+        let mut y = random() * 860.0;
+        let mut stroke = Stroke::new(
+            InkPoint::new(x, y, 1.25 + random() * 1.5),
+            Stroke::DEFAULT_COLOR,
+        );
+
+        for _ in 1..points {
+            heading += (random() - 0.5) * 0.35;
+            let step = 1.0 + random();
+            x += heading.cos() * step;
+            y += heading.sin() * step;
+            stroke.points.push(InkPoint::new(x, y, 1.25 + random() * 1.5));
+        }
+
+        stroke.close();
+        stroke
+    }
+
     /// A dot survives: one point is a stroke, and it is the case a delta-only format gets wrong.
     #[test]
     fn a_single_point_stroke_round_trips() {

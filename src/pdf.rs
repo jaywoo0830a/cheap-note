@@ -23,7 +23,6 @@
 //! to GPUI untouched — no per-pixel conversion on the way to the screen.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -296,29 +295,11 @@ impl PdfDocumentView {
         PdfDocumentView::default()
     }
 
-    /// Opens a PDF from a file and renders its first page.
+    /// Opens a PDF that is already in memory — what a note carries — and renders its first page.
     ///
-    /// `render_pixel_width` is the bitmap width the first page is rendered at; it should be the
-    /// page width in logical pixels multiplied by the display's scale factor.
-    ///
-    /// The file is read here and handed to Pdfium as bytes: Pdfium's own file handling takes a path
-    /// it interprets itself, and a note carries the document as bytes anyway — so there is one way
-    /// in, and it is the one that does not care what the path is spelled like.
-    pub fn open(path: &Path, render_pixel_width: u32) -> Result<Self> {
-        let bytes = std::fs::read(path).map_err(|error| {
-            AppError::Other(format!("{} could not be read: {error}", path.display()))
-        })?;
-
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| String::from("document.pdf"));
-
-        PdfDocumentView::open_bytes(name, bytes, render_pixel_width)
-    }
-
-    /// Opens a PDF that is already in memory — what a saved note carries — and renders its first
-    /// page.
+    /// This is the only way in. A note keeps its document *inside* itself and remembers what the
+    /// document was called, so the app opens bytes with a name rather than a path: there is no file
+    /// to open, and no second copy of the document to hold.
     ///
     /// Nothing is written to a temporary file, so a note opens from anywhere the app can read, and
     /// opening one leaves nothing behind on disk.
@@ -365,17 +346,6 @@ impl PdfDocumentView {
     /// any page, which is what the app needs to describe the sheet it is writing on.
     pub fn page_point_size(&self, index: usize) -> Option<(f32, f32)> {
         self.document.as_ref()?.page_point_size(index)
-    }
-
-    /// The bytes of the open document, for saving it into a note.
-    ///
-    /// The bytes Pdfium is reading from, which is why they are kept: what a note carries is the
-    /// document as it was opened, byte for byte, and saving needs no second read of the file.
-    pub fn document_bytes(&self) -> Result<Vec<u8>> {
-        self.document
-            .as_ref()
-            .map(|document| document.bytes().to_vec())
-            .ok_or_else(|| AppError::Other(String::from("no PDF is open")))
     }
 
     /// The best bitmap available *now* for a request, without rasterising anything.
@@ -712,6 +682,24 @@ impl PdfDocumentView {
 mod tests {
     use std::path::PathBuf;
 
+    /// Opens a fixture document the way the app does: the file's bytes, with the file's name.
+    ///
+    /// The app has no "open a path" call — see [`PdfDocumentView::open_bytes`] — so the tests go in
+    /// through the same door, which is also what keeps this helper honest: if opening from bytes ever
+    /// stops working, every test here fails rather than the one test that remembered to cover it.
+    fn open_fixture(path: &std::path::Path, width: u32) -> Result<PdfDocumentView> {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from("fixture.pdf"));
+
+        let bytes = std::fs::read(path).map_err(|error| {
+            AppError::Other(format!("{} could not be read: {error}", path.display()))
+        })?;
+
+        PdfDocumentView::open_bytes(name, bytes, width)
+    }
+
     /// A one-page A4 PDF with a grid of black rectangles on it, built object by object.
     ///
     /// Built here rather than taken from a library so the tests can assert on *content*: a blank
@@ -843,14 +831,6 @@ mod tests {
         let page = view.render_page(0, 200).expect("the page renders");
         assert_eq!(page.pixels, 200, "the rung it was asked for");
         assert!(page.point_height > page.point_width, "A4 is portrait");
-
-        // And its bytes come back out, which is what saving a note needs.
-        assert_eq!(
-            view.document_bytes().expect("the bytes are kept").len(),
-            std::fs::metadata(&path).expect("the fixture is there").len() as usize,
-            "a document opened from memory can be saved again without the file"
-        );
-
     }
 
     /// Every field of the cache key is in it, because every field changes the pixels.
@@ -909,7 +889,7 @@ mod tests {
             return;
         };
 
-        let mut view = PdfDocumentView::open(&path, 1_024).expect("the document opens");
+        let mut view = open_fixture(&path, 1_024).expect("the document opens");
         view.render_page(0, 1_536).expect("the second rung");
         let rendered = view.stats().rendered;
 
@@ -936,7 +916,7 @@ mod tests {
             return;
         };
 
-        let mut view = PdfDocumentView::open(&path, 1_024).expect("the document opens");
+        let mut view = open_fixture(&path, 1_024).expect("the document opens");
         let rendered = view.stats().rendered;
 
         // A rung nobody has rendered: the frame gets the one that is there, and what it asked for
@@ -962,7 +942,7 @@ mod tests {
             return;
         };
 
-        let mut view = PdfDocumentView::open(&path, 200).expect("the document opens");
+        let mut view = open_fixture(&path, 200).expect("the document opens");
 
         // Room for about two of these bitmaps, rather than the 128 MB the app allows.
         let rung = weight(&view.render_page(0, 200).expect("a rung"));
@@ -1009,7 +989,7 @@ mod tests {
             return;
         };
 
-        let mut view = PdfDocumentView::open(&path, 300).expect("the document opens");
+        let mut view = open_fixture(&path, 300).expect("the document opens");
         assert_eq!(view.page_count(), 1);
         assert_eq!(
             view.file_name(),
@@ -1072,11 +1052,11 @@ mod tests {
         };
 
         let whole = {
-            let mut view = PdfDocumentView::open(&path, 1_200).expect("the document opens");
+            let mut view = open_fixture(&path, 1_200).expect("the document opens");
             view.render_page(0, 1_200).expect("the page renders")
         };
 
-        let mut view = PdfDocumentView::open(&path, 1_200).expect("the document opens");
+        let mut view = open_fixture(&path, 1_200).expect("the document opens");
         view.begin(PageRequest::new(0, 1_200)).expect("the render starts");
 
         // Four milliseconds at a time: several slices for a page this size, and the same budget the
@@ -1122,7 +1102,7 @@ mod tests {
             return;
         };
 
-        let mut view = PdfDocumentView::open(&path, 1_200).expect("the document opens");
+        let mut view = open_fixture(&path, 1_200).expect("the document opens");
         view.begin(PageRequest::new(0, 3_456))
             .expect("a bigger render starts");
         assert!(view.rendering(), "and it is in flight");
@@ -1152,7 +1132,7 @@ mod tests {
             return;
         };
 
-        let mut view = PdfDocumentView::open(&path, 1_200).expect("the document opens");
+        let mut view = open_fixture(&path, 1_200).expect("the document opens");
         let before = view.stats();
 
         view.begin(PageRequest::new(0, 3_456))
@@ -1195,7 +1175,7 @@ mod tests {
         for width in [720u32, 1_440, 2_880, 5_760] {
             // Opened at a different width, so the request below is a genuine rasterisation rather
             // than the cache hit that `open` has already left behind.
-            let mut view = PdfDocumentView::open(&path, 100).expect("the document reopens");
+            let mut view = open_fixture(&path, 100).expect("the document reopens");
 
             let started = std::time::Instant::now();
             let page = view.render_page(0, width).expect("the page renders");
@@ -1257,7 +1237,7 @@ mod tests {
         // What the cache did with all of that, and what the first frame of a page costs when the
         // only thing on offer is the cheapest rung — the number that decides whether a page turn
         // is a stall or a soft page for a frame or two.
-        let mut view = PdfDocumentView::open(&path, 100).expect("the document reopens");
+        let mut view = open_fixture(&path, 100).expect("the document reopens");
         let started = std::time::Instant::now();
         let preview = view
             .render_page(0, 1_024)

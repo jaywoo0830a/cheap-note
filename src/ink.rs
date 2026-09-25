@@ -447,7 +447,10 @@ impl Default for InkDocument {
 
 impl InkDocument {
     /// An empty page.
-    pub fn new() -> Self {
+    ///
+    /// Named rather than derived because reading a page that is not in the note yet is a *blank*
+    /// page, and saying `default()` at that call site says nothing about why.
+    pub fn blank() -> Self {
         InkDocument::default()
     }
 
@@ -889,61 +892,27 @@ impl Notes {
             self.taken.insert(self.page, leaving);
         }
 
-        self.current = self.taken.remove(&page).unwrap_or_default();
+        self.current = self.taken.remove(&page).unwrap_or_else(InkDocument::blank);
         self.page = page;
     }
 
-    /// The ink of any page, whether or not it has been written on.
-    pub fn page_ink(&self, page: usize) -> Option<&InkDocument> {
-        if page == self.page {
-            return Some(&self.current);
-        }
-
-        self.taken.get(&page).filter(|ink| !ink.is_blank())
-    }
-
-    /// The pages that hold ink, in page order: what a save writes out.
-    pub fn written_pages(&self) -> Vec<usize> {
-        let mut pages: Vec<usize> = self
-            .taken
-            .iter()
-            .filter(|(_, ink)| !ink.is_blank())
-            .map(|(page, _)| *page)
-            .collect();
-
-        if !self.current.is_blank() {
-            pages.push(self.page);
-        }
-
-        pages.sort_unstable();
-        pages.dedup();
-        pages
-    }
-
-    /// How many pages this note has, for turning between them.
+    /// Puts one page's ink into the note: what reading a page out of the file gives.
     ///
-    /// A note written on a blank sheet has no document to ask, so its own pages are the count:
-    /// the last page written on, plus one. It never reports zero, because there is always the page
-    /// in front of the user.
-    pub fn page_count(&self) -> usize {
-        self.written_pages().last().map_or(1, |page| page + 1)
-    }
-
-    /// Replaces every page's ink, moving to `page` — what opening a saved note does.
-    pub fn replace(&mut self, pages: Vec<(usize, InkDocument)>, page: usize) {
-        self.taken.clear();
-        self.page = page;
-
-        let mut current = InkDocument::new();
-        for (index, ink) in pages {
-            if index == page {
-                current = ink;
-            } else if !ink.is_blank() {
-                self.taken.insert(index, ink);
-            }
+    /// A page read from the store is the page the pen is about to write on or one it has just turned
+    /// to, so this is the counterpart of [`Self::go_to`]: that one takes a page out, this one puts a
+    /// page back. A page with nothing on it is not kept, for the reason `go_to` does not keep one —
+    /// an empty document costs nothing to make again, and a map of them would only be holes.
+    pub fn put_page(&mut self, page: usize, ink: InkDocument) {
+        if page == self.page {
+            self.current = ink;
+            return;
         }
 
-        self.current = current;
+        if ink.is_blank() {
+            self.taken.remove(&page);
+        } else {
+            self.taken.insert(page, ink);
+        }
     }
 
     /// Makes room at `page` for a page being inserted there: every page from it onwards becomes the
@@ -975,7 +944,10 @@ impl Notes {
         if page == self.page {
             // The page in front of the reader is the one that followed the deleted page, or a blank
             // sheet when it was the last.
-            self.current = self.taken.remove(&(page + 1)).unwrap_or_default();
+            self.current = self
+                .taken
+                .remove(&(page + 1))
+                .unwrap_or_else(InkDocument::blank);
         } else if page < self.page {
             self.page -= 1;
         }
@@ -1038,7 +1010,7 @@ mod tests {
     /// The edges are what make a stroke: a down, positions, and an up.
     #[test]
     fn a_down_and_up_make_one_stroke() {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let s = settings();
 
         ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
@@ -1059,7 +1031,7 @@ mod tests {
     /// into the stroke when the nib goes down.
     #[test]
     fn a_stroke_keeps_the_colour_it_was_written_in() {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let mut s = settings();
 
         s.ink_color = 0xDC_26_26;
@@ -1089,7 +1061,7 @@ mod tests {
     /// A cancel ends the stroke but does not add the position it carries.
     #[test]
     fn a_cancel_ends_the_stroke_without_its_position() {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let s = settings();
 
         ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
@@ -1108,7 +1080,7 @@ mod tests {
     /// A reading from another pointer does not extend the open stroke.
     #[test]
     fn a_second_pointer_does_not_extend_the_open_stroke() {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let s = settings();
 
         ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
@@ -1123,7 +1095,7 @@ mod tests {
     /// Hover readings move a cursor but never lay ink, and a stray lift closes nothing.
     #[test]
     fn hovering_lays_no_ink() {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let s = settings();
 
         ink.consume(
@@ -1143,7 +1115,7 @@ mod tests {
     /// A pen with no pressure sensor draws at the constant width, not at zero.
     #[test]
     fn a_pen_with_no_sensor_draws_a_constant_width() {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let s = settings();
 
         ink.consume(&[reading(7, PenPhase::Down, 0.0, 0.0, None)], &id(), &s);
@@ -1158,7 +1130,7 @@ mod tests {
     /// The resampler drops points that are too close, but never the lift.
     #[test]
     fn the_resampler_keeps_the_lift_and_drops_the_clutter() {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let s = Settings {
             resample_spacing: 10.0,
             smoothing_ms: 0.0,
@@ -1289,7 +1261,7 @@ mod tests {
     /// With nothing finished on the page there is nothing to take back, even while the pen is down.
     #[test]
     fn a_page_with_no_finished_stroke_has_nothing_to_undo() {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let s = settings();
 
         ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
@@ -1354,7 +1326,7 @@ mod tests {
         assert!(notes.redo());
         assert_eq!(notes.stroke_count(), 1);
         assert_eq!(
-            notes.written_pages(),
+            inked(&notes),
             vec![0],
             "and the page counts as written on again"
         );
@@ -1363,7 +1335,7 @@ mod tests {
     /// Physical pixels are divided by the window's scale exactly once.
     #[test]
     fn the_dpi_scale_is_applied_once() {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let s = settings();
 
         ink.consume(&[reading(7, PenPhase::Down, 150.0, 90.0, Some(0.5))], &scaled(1.5), &s);
@@ -1376,7 +1348,7 @@ mod tests {
     /// The eraser removes the strokes it passes over and leaves the rest alone.
     #[test]
     fn the_eraser_removes_only_what_it_touches() {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let s = settings();
 
         ink.consume(&[reading(7, PenPhase::Down, 0.0, 0.0, Some(0.5))], &id(), &s);
@@ -1399,7 +1371,7 @@ mod tests {
     /// the reader sees the nib at, so zooming moves the ink with the page it was written on.
     #[test]
     fn ink_lands_where_the_sheet_is_drawn() {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let s = settings();
 
         // A sheet drawn at 2x, its top-left corner 100 px into the window.
@@ -1410,7 +1382,7 @@ mod tests {
         assert_eq!((point.x, point.y), (100.0, 50.0), "(300-100)/2, (160-60)/2");
 
         // The same reading on a sheet at its own size, drawn at the origin, is the reading.
-        let mut flat = InkDocument::new();
+        let mut flat = InkDocument::default();
         flat.consume(&[reading(7, PenPhase::Down, 300.0, 160.0, Some(0.5))], &id(), &s);
         let point = flat.open().expect("a stroke").points[0];
         assert_eq!((point.x, point.y), (300.0, 160.0));
@@ -1432,7 +1404,7 @@ mod tests {
     /// is on screen before the stroke has ever been closed.
     #[test]
     fn a_growing_stroke_knows_where_it_is() {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let s = settings();
 
         ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
@@ -1464,7 +1436,7 @@ mod tests {
     /// thousand at every lift. The pointers are the assertion: a copy would move them.
     #[test]
     fn ending_a_stroke_does_not_copy_the_page() {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let s = settings();
 
         let mut pointers: Vec<*const Stroke> = Vec::new();
@@ -1535,7 +1507,7 @@ mod tests {
 
         notes.go_to(0);
         assert_eq!(notes.stroke_count(), 1, "page one still has exactly its own");
-        assert_eq!(notes.written_pages(), vec![0, 1], "and both pages are written on");
+        assert_eq!(inked(&notes), vec![0, 1], "and both pages are written on");
 
         // The stroke on page two is the one that starts at (50, 50): erasing where page one's ink
         // is must leave page two alone, and vice versa.
@@ -1559,9 +1531,13 @@ mod tests {
         notes.go_to(1);
         notes.go_to(2);
         notes.go_to(3);
-        assert_eq!(notes.written_pages(), vec![3], "only the page with ink");
+        assert_eq!(inked(&notes), vec![3], "only the page with ink");
         assert_eq!(notes.stroke_count(), 1, "and its ink came back with it");
-        assert_eq!(notes.page_count(), 4, "pages 0..=3 exist for turning");
+        assert_eq!(
+            inked(&notes).last().map_or(1, |page| page + 1),
+            4,
+            "pages 0..=3 exist for turning"
+        );
     }
 
     /// One stroke written on the page the notes are on, starting at `x`: how a test says which page
@@ -1581,7 +1557,7 @@ mod tests {
         write(&mut notes, &s, 1.0);
         notes.go_to(2);
         write(&mut notes, &s, 50.0);
-        assert_eq!(notes.written_pages(), vec![0, 2]);
+        assert_eq!(inked(&notes), vec![0, 2]);
 
         // A page is inserted where page 1 was, and the reader turns to it.
         notes.insert_at(1);
@@ -1589,7 +1565,7 @@ mod tests {
 
         assert!(notes.is_blank(), "the inserted page has no ink");
         assert_eq!(
-            notes.written_pages(),
+            inked(&notes),
             vec![0, 3],
             "the page that was at 2 is now at 3"
         );
@@ -1610,12 +1586,12 @@ mod tests {
         write(&mut notes, &s, 20.0);
         notes.go_to(2);
         write(&mut notes, &s, 40.0);
-        assert_eq!(notes.written_pages(), vec![0, 1, 2]);
+        assert_eq!(inked(&notes), vec![0, 1, 2]);
 
         // The page being shown is the one deleted: the reader lands on what followed it.
         notes.remove_at(1);
 
-        assert_eq!(notes.written_pages(), vec![0, 1]);
+        assert_eq!(inked(&notes), vec![0, 1]);
         assert_eq!(notes.stroke_count(), 1, "the page that followed is on screen");
         assert_eq!(
             notes.finished()[0].points[0].x,
@@ -1630,26 +1606,61 @@ mod tests {
         assert_eq!(notes.finished()[0].points[0].x, 40.0);
     }
 
-    /// Opening a note puts the ink where it was written, on the page that was open.
+    /// Reading a note back puts each page's ink where it was written, and the page that was open is
+    /// the page on screen.
+    ///
+    /// This is what the app does when it opens a note: pages are *put* into the model one at a time
+    /// as they are turned to, rather than the whole note being loaded at once — see
+    /// `NoteApp::load_page_ink` — so the model has to put a page where a page belongs.
     #[test]
-    fn replacing_a_note_restores_its_pages() {
+    fn putting_pages_back_restores_a_note() {
         let mut notes = Notes::new();
-        let s = settings();
-        notes.consume(&[reading(7, PenPhase::Down, 1.0, 1.0, Some(0.5))], &id(), &s);
-        notes.consume(&[reading(7, PenPhase::Up, 2.0, 2.0, None)], &id(), &s);
 
-        let pages = vec![(2, page_with(3)), (5, page_with(4))];
-        notes.replace(pages, 5);
+        // Two pages read out of the note, and the pen is turned to the second of them.
+        notes.go_to(5);
+        notes.put_page(5, page_with(4));
+        notes.put_page(2, page_with(3));
 
-        assert_eq!(notes.stroke_count(), 4, "the page that was open is the one on screen");
-        assert_eq!(notes.written_pages(), vec![2, 5]);
+        assert_eq!(
+            notes.stroke_count(),
+            4,
+            "the page that was open is the one on screen"
+        );
+        assert_eq!(inked(&notes), vec![2, 5]);
+
         notes.go_to(2);
-        assert_eq!(notes.stroke_count(), 3, "and the other page is where it was saved");
+        assert_eq!(
+            notes.stroke_count(),
+            3,
+            "and the other page is where it was read from"
+        );
+    }
+
+    /// The pages that hold ink, in page order: what a save would write out.
+    ///
+    /// The model used to answer this itself — `Notes::written_pages` — and the *note* answers it now,
+    /// out of its database (see [`crate::store::NoteStore::pages`]), so the tests read the model's own
+    /// map directly: this module is the model, and what it is holding is what is being tested.
+    fn inked(notes: &Notes) -> Vec<usize> {
+        let mut pages: Vec<usize> = notes
+            .taken
+            .iter()
+            .filter(|(_, ink)| !ink.is_blank())
+            .map(|(page, _)| *page)
+            .collect();
+
+        if !notes.current.is_blank() {
+            pages.push(notes.page);
+        }
+
+        pages.sort_unstable();
+        pages.dedup();
+        pages
     }
 
     /// A page of `count` two-point strokes, each 10 px apart, for the tests above.
     fn page_with(count: usize) -> InkDocument {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let s = settings();
 
         for index in 0..count {
@@ -1664,7 +1675,7 @@ mod tests {
 
     /// A page of `count` strokes of 40 points each: enough ink to look like a written page.
     fn written_page(count: usize) -> InkDocument {
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
 
         for index in 0..count {
             let mut samples = Vec::with_capacity(41);
@@ -1727,7 +1738,7 @@ mod tests {
 
         // ── Reading a batch into ink: one pump wake of the writing loop ──────
         let batch = a_wave(240);
-        let mut ink = InkDocument::new();
+        let mut ink = InkDocument::default();
         let rounds = 200;
         let started = std::time::Instant::now();
         for _ in 0..rounds {

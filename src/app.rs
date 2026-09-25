@@ -15,16 +15,16 @@
 //! (see [`NoteApp::start_pen_pump`]) *waits on that queue* — not on a timer — takes every batch the
 //! instant it lands, feeds the ink model, and calls `cx.notify()`. A frame is therefore scheduled
 //! exactly when there is something new to show, and at the rate the pen reports it: 133 Hz, 240 Hz,
-//! whatever the digitizer sends, with no ceiling taken from the display's refresh rate. The app is
-//! idle, and spends nothing, otherwise.
+//! whatever the digitizer sends, with no ceiling taken from any display. The app is idle, and
+//! spends nothing, otherwise.
 //!
 //! "Something new" is two things: ink that changed, and a cursor that moved. A pen held in range
 //! without touching lays no ink at all, and it is the ghost cursor (see [`crate::cursor`]) that has
 //! to follow it.
 //!
-//! A second task ([`NoteApp::start_display_pump`]) runs on the display's clock and does the work
-//! that is not the ink — re-reading the monitor, measuring the frames this app painted, rasterising
-//! the page, rebuilding the counters — so that a rasterisation can never delay a stroke.
+//! A second task ([`NoteApp::start_display_pump`]) does the work that is not the ink — rasterising
+//! the page, rebuilding the counters — on a fixed [`HOUSEKEEPING_INTERVAL`] that owes nothing to
+//! the display, so that a rasterisation can never delay a stroke.
 //!
 //! ## The top bar, and why it can be turned off
 //!
@@ -54,7 +54,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -83,7 +82,6 @@ use crate::pages::Pages;
 use crate::pen::{capture_config, PenInbox, PenService};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
 use crate::recent::{self, Recent};
-use crate::refresh::{Cadence, DisplayRefresh};
 use crate::settings::Settings;
 use crate::system_cursor::SystemCursor;
 use crate::timing::{measure, Timings};
@@ -193,22 +191,14 @@ fn status_due(built_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(built_at) >= STATUS_INTERVAL
 }
 
-/// How often the monitor's mode is re-read.
+/// How often the housekeeping pump wakes.
 ///
-/// A mode changes when a person changes it: a display is unplugged, a window is dragged to another
-/// panel, a laptop's panel is switched to another rate. Two seconds is fast enough that none of
-/// those outlives a stroke, and slow enough that a user-mode display query per frame is not worth
-/// thinking about. The rate the app is actually *served* at is not this: that is measured from the
-/// frames themselves, on every frame.
-const DISPLAY_INTERVAL: Duration = Duration::from_secs(2);
-
-/// Whether the monitor's mode is due to be read again.
-///
-/// A free function for the same reason [`status_due`] is one: the pacing can be tested without a
-/// window or a display.
-fn display_due(probed_at: Instant, now: Instant) -> bool {
-    now.saturating_duration_since(probed_at) >= DISPLAY_INTERVAL
-}
+/// A fixed floor rather than a rate taken from the display: nothing in the loop reads the monitor or
+/// paces the ink any more, so there is no clock to follow and no reason for the interval to move.
+/// One millisecond is the shortest wait that still parks the task rather than spinning it, and the
+/// work the loop does is skipped while the pen is laying ink, so waking this often costs a timer and
+/// a comparison when there is nothing to do.
+const HOUSEKEEPING_INTERVAL: Duration = Duration::from_millis(1);
 
 /// How long the pen has to be quiet before a page is rendered for it.
 ///
@@ -304,8 +294,8 @@ fn file_stem(title: &str) -> String {
 
 /// Whether the pen has been quiet long enough to spend a rasterisation on it.
 ///
-/// A free function for the same reason [`status_due`] and [`display_due`] are: it is a decision,
-/// and decisions that can be tested without a window are worth testing without one.
+/// A free function for the same reason [`status_due`] is: it is a decision, and decisions that can
+/// be tested without a window are worth testing without one.
 fn pdf_render_due(last_ink_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(last_ink_at) >= PDF_QUIET_INTERVAL
 }
@@ -381,15 +371,6 @@ pub struct NoteApp {
     settings: Settings,
     /// Where [`Self::settings`] is written.
     settings_path: PathBuf,
-    /// The display probe and the rate the app paces itself at.
-    refresh: DisplayRefresh,
-    /// When the monitor's mode was last re-read, for [`display_due`].
-    display_at: Instant,
-    /// What the display's frame time is, measured from the frames this app painted.
-    ///
-    /// Shared with the paint callback, which is the only place that knows a frame reached the
-    /// screen: the callback runs after the element tree is built and cannot borrow the view.
-    cadence: Arc<Cadence>,
     /// The ink.
     ink: Notes,
     /// The note being written: its folder, its database, and the document it was written on.
@@ -452,13 +433,6 @@ pub struct NoteApp {
     pending_pdf: Option<PageRequest>,
     /// When the pen last laid ink, for [`pdf_render_due`].
     last_ink_at: Instant,
-    /// The pump's current interval in microseconds, shared with the housekeeping pump.
-    ///
-    /// A frame measured faster than the mode it read has to change how often the display is polled,
-    /// and the pump task is already running, so the interval lives in an atomic the task re-reads
-    /// rather than in a captured local it could not see a change to. The *ink* pump takes no
-    /// interval at all: it waits for the pen (see [`NoteApp::start_pen_pump`]).
-    pump_interval_micros: Arc<AtomicU64>,
     /// The rule geometry for the current sheet.
     ///
     /// Held here rather than rebuilt in the paint callback: the callback runs once per frame and
@@ -533,10 +507,6 @@ impl NoteApp {
             Err(error) => (Settings::default(), format!("using default settings ({error})")),
         };
 
-        // The monitor the window is on, not the primary one: a mode is a property of the display
-        // the ink is on screen on, and the frames that follow measure the rest.
-        let refresh = DisplayRefresh::probe(window);
-
         // The capture must be attached on the thread that owns the window, which is this one.
         let pen = PenService::attach(window, capture_config());
 
@@ -583,9 +553,6 @@ impl NoteApp {
         let mut app = NoteApp {
             settings,
             settings_path,
-            refresh,
-            display_at: Instant::now(),
-            cadence: Arc::new(Cadence::new()),
             ink: Notes::new(),
             note: None,
             writer: None,
@@ -606,9 +573,6 @@ impl NoteApp {
             last_pump: None,
             pending_pdf: None,
             last_ink_at: Instant::now(),
-            pump_interval_micros: Arc::new(AtomicU64::new(
-                refresh.pump_interval().as_micros() as u64
-            )),
             ruling: Ruling::default(),
             status: String::new(),
             status_at: Instant::now(),
@@ -700,11 +664,10 @@ impl NoteApp {
     ///   frame per batch — the pen's own rate, 133 or 240 Hz or whatever it reports — and nothing at
     ///   all is spent while the pen is away. This is the loop the hand feels: its wake is where a
     ///   reading becomes a frame, and it is what "unlimited" means here.
-    /// * the **housekeeping pump** runs on the display's clock and does everything that is *not* the
-    ///   ink: re-reading the monitor, measuring the frames this app painted, rasterising the page the
-    ///   view is waiting for, and rebuilding the counters. A rasterisation blocks whichever thread
-    ///   runs it, and running it here rather than in the ink pump is what keeps a sharp page from
-    ///   ever delaying a stroke.
+    /// * the **housekeeping pump** runs on a fixed [`HOUSEKEEPING_INTERVAL`] and does everything that
+    ///   is *not* the ink: rasterising the page the view is waiting for, and rebuilding the counters.
+    ///   A rasterisation blocks whichever thread runs it, and running it here rather than in the ink
+    ///   pump is what keeps a sharp page from ever delaying a stroke.
     ///
     /// Both end when the view is dropped — `update` returns `Err` once the entity is gone.
     fn start_pumps(&mut self, cx: &mut Context<Self>) {
@@ -795,32 +758,18 @@ impl NoteApp {
         .detach();
     }
 
-    /// Keeps the monitor's numbers, the counters and the page being rasterised up to date.
+    /// Keeps the counters and the page being rasterised up to date.
     ///
-    /// It runs on the *display's* clock — measured from the frames this app paints, so a panel
-    /// running at 165 Hz is served at 165 Hz rather than at whichever step its mode was snapped to —
-    /// and repaints only when one of the three things it watches actually moved: a frame of its own
-    /// is cheap, a frame that draws an identical scene is not.
+    /// It runs on a fixed [`HOUSEKEEPING_INTERVAL`] rather than on the display's clock: nothing here
+    /// reads the monitor or paces the ink, so the interval is a constant that never moves. It
+    /// repaints only when one of the things it watches actually changed — a frame of its own is
+    /// cheap, a frame that draws an identical scene is not.
     fn start_display_pump(&mut self, cx: &mut Context<Self>) {
-        let interval_micros = Arc::clone(&self.pump_interval_micros);
-
         cx.spawn(async move |this, cx| loop {
-            let interval =
-                Duration::from_micros(interval_micros.load(Ordering::Relaxed).max(500));
-            cx.background_executor().timer(interval).await;
+            cx.background_executor().timer(HOUSEKEEPING_INTERVAL).await;
 
             let alive = this.update(cx, |app, cx| {
                 let now = Instant::now();
-
-                // What the frames have measured since the last wake, before anything is painted
-                // with it: the interval this pump waits for has to be the display's, not a guess
-                // about it.
-                //
-                // Read first, because the display is measured whether or not a pen is in hand — a
-                // resize, a zoom, or the first frames of a session are all repaints its rate can be
-                // read from, and an app that only counted frames while a pen was down would report
-                // "measured —" at every other moment.
-                let display_moved = app.follow_display_cadence(now);
 
                 // The page the view is waiting for, paid for here rather than inside a frame: it is
                 // skipped while the pen is laying ink, so the ink pump keeps taking readings.
@@ -837,7 +786,7 @@ impl NoteApp {
                 let reported = app.drain_writer_reports();
                 app.checkpoint_if_idle(now);
 
-                if display_moved || page_rendered || status_rebuilt || reported {
+                if page_rendered || status_rebuilt || reported {
                     cx.notify();
                 }
             });
@@ -1052,57 +1001,6 @@ impl NoteApp {
     fn set_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
         self.ink.set_mode(tool);
         cx.notify();
-    }
-
-    /// Folds in what the frames have measured, and says whether it changed on screen.
-    ///
-    /// This is where the display is *measured* rather than asked about: the cadence is fed by the
-    /// paint callback on every frame, and a change in it moves the pump interval — the one number
-    /// that decides how long a reading waits before it is on screen — without a restart or a probe.
-    fn follow_display_cadence(&mut self, now: Instant) -> bool {
-        let measured = self.cadence.frame_interval();
-        if !self.refresh.observe(measured.map(|interval| interval.as_micros() as u64)) {
-            return false;
-        }
-
-        self.store_pump_interval();
-        // The line names the measurement, so it is stale the moment the measurement changes. It is
-        // rebuilt through the paced path rather than forced: at most the clock is what it was
-        // already waiting for.
-        self.refresh_status(now);
-        true
-    }
-
-    /// Re-reads the monitor's mode, and says whether it changed on screen.
-    ///
-    /// Called from the frame, on a slow clock, because that is the only place the window is in
-    /// hand. A *changed* reading is also the one piece of evidence that the frames measured before
-    /// it came from another display, so the measurement is thrown away with it: the app is paced by
-    /// the new monitor's reported rate until the new monitor's frames say otherwise.
-    fn reprobe_display(&mut self, window: &Window) -> bool {
-        if !display_due(self.display_at, Instant::now()) {
-            return false;
-        }
-
-        self.display_at = Instant::now();
-        if !self.refresh.reprobe(window) {
-            return false;
-        }
-
-        self.cadence.reset();
-        self.store_pump_interval();
-        self.touch_status();
-        true
-    }
-
-    /// Publishes the interval the pump should be waking at.
-    ///
-    /// One place, so no path can change the rate in force without the running pump task seeing it.
-    fn store_pump_interval(&mut self) {
-        self.pump_interval_micros.store(
-            self.refresh.pump_interval().as_micros() as u64,
-            Ordering::Relaxed,
-        );
     }
 
     /// Changes the sheet's size, and its scale with it.
@@ -2516,12 +2414,6 @@ impl NoteApp {
             self.page_index + 1,
             self.page_total().max(1)
         ));
-        parts.push(format!(
-            "{}  {:.2} ms/frame",
-            self.refresh.summary(),
-            self.refresh.frame_interval().as_secs_f64() * 1000.0
-        ));
-
         match self.pen.stats() {
             Some(stats) => {
                 parts.push(format!("{stats}  {:.1} readings/message", stats.mean_batch()));
@@ -2581,7 +2473,7 @@ impl NoteApp {
         // view state the sheet's own controls cannot show a number for, and the rest is the
         // measurement this app runs on itself.
         parts.push(format!("view {:.0}%", self.view.zoom() * 100.0));
-        parts.push(self.timings.summary(self.refresh.pump_interval()));
+        parts.push(self.timings.summary(HOUSEKEEPING_INTERVAL));
 
         if !self.message.is_empty() {
             parts.push(self.message.clone());
@@ -3271,12 +3163,6 @@ impl Render for NoteApp {
             self.start_note_name(window, cx);
         }
 
-        // The monitor's mode, re-read on a slow clock. It costs a user-mode query at most once
-        // every couple of seconds, it cannot happen anywhere but here — this is the only place the
-        // window is in hand — and a change in it resets the measurement, so the frames that follow
-        // are the new display's.
-        self.reprobe_display(window);
-
         // The window's own title bar is the one place a person can see, from outside the app, which
         // note they are in — and it is set when it *changes*, not every frame.
         let wanted = if self.home_is_open() || self.note_title.is_empty() {
@@ -3373,9 +3259,6 @@ impl Render for NoteApp {
         let page_image = page.as_ref().map(|page| Arc::clone(&page.image));
         let page_color: Hsla = rgb(self.settings.page_color).into();
         let timings = Arc::clone(&self.timings);
-        // The same hand-off for the frame clock: the paint callback is where a frame is known to
-        // have reached the screen, so it is where the display's real rate is measured.
-        let cadence = Arc::clone(&self.cadence);
 
         // The ghost cursor: a mark at the nib with the pen's body leaning away from it. Drawn last,
         // because a cursor belongs on top of everything, and only while the pen is in range — the
@@ -3427,11 +3310,6 @@ impl Render for NoteApp {
                     |_, _, _| (),
                     move |_bounds, _, window: &mut Window, _cx: &mut App| {
                         let _timed = measure(&timings.paint);
-
-                        // The one place in the app that knows a frame reached the screen, and so
-                        // the one place the display's rate can be measured rather than asked about.
-                        // Two atomic adds; the pump reads the answer on its next wake.
-                        cadence.record(Instant::now());
 
                         // The sheet's shadow first, on the desk, then the sheet over it: a paint
                         // callback cannot put a layer behind what it draws, so the shadow is a few
@@ -3725,11 +3603,9 @@ mod tests {
     // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
     // scope and shadow the attribute this module needs.
     use super::{
-        display_due, file_label, file_stem, notch_in_pixels, pdf_render_due, pinch_zoom_factor,
-        quantise_width,
-        sheet_matches, solid_path, status_due, wheel_pan, wheel_zoom_factor, DISPLAY_INTERVAL,
-        PDF_QUIET_INTERVAL, STATUS_INTERVAL, WHEEL_LINE_HEIGHT, WHEEL_LINES_PER_NOTCH,
-        WHEEL_ZOOM_STEP,
+        file_label, file_stem, notch_in_pixels, pdf_render_due, pinch_zoom_factor, quantise_width,
+        sheet_matches, solid_path, status_due, wheel_pan, wheel_zoom_factor, PDF_QUIET_INTERVAL,
+        STATUS_INTERVAL, WHEEL_LINE_HEIGHT, WHEEL_LINES_PER_NOTCH, WHEEL_ZOOM_STEP,
     };
     use crate::ink::{InkPoint, Stroke};
     use gpui_kit::{point, px, Path, PathBuilder, Pixels, Point};
@@ -3949,20 +3825,6 @@ mod tests {
             vec![1_024, 1_536, 2_304, 3_456],
             "one rasterisation per rung, and no more"
         );
-    }
-
-    /// The monitor's mode is re-read on a clock of its own: rarely enough to be free, often enough
-    /// that a display change does not outlive a stroke.
-    #[test]
-    fn the_monitor_is_not_re_read_every_frame() {
-        let now = Instant::now();
-
-        assert!(!display_due(now, now));
-        assert!(!display_due(now, now + DISPLAY_INTERVAL - Duration::from_millis(1)));
-        assert!(display_due(now, now + DISPLAY_INTERVAL));
-
-        // A clock that goes backwards must not force a probe on every frame either.
-        assert!(!display_due(now + Duration::from_secs(1), now));
     }
 
     /// A note written on the same sheet is not reported as a different one.

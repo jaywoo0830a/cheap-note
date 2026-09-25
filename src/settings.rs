@@ -89,10 +89,6 @@ pub struct Settings {
     /// That line carries counters that change on every reading, and text that changes is text
     /// that has to be re-shaped and re-laid-out. It is the part of the interface a person is
     /// most likely to want gone while writing, so it has its own switch.
-    ///
-    /// The name this field used to have is still accepted, so an older settings file keeps the
-    /// answer the user gave rather than silently reverting to the default.
-    #[serde(alias = "show_pen_stats")]
     pub show_status: bool,
 
     /// Whether the pen's ghost cursor is drawn.
@@ -238,13 +234,12 @@ mod tests {
         assert_eq!(settings.width_for_pressure(Some(2.0)), settings.max_width);
     }
 
-    /// A settings file written before the canvas controls existed still loads, and keeps the
-    /// answers it already holds.
+    /// A settings file that does not have every field the app has still loads, and keeps the answers
+    /// it does hold.
     ///
-    /// Adding a field must not throw a file away, and renaming one must not quietly discard what
-    /// the user chose — so the old name is still read, and the new fields take their defaults. A
-    /// field that has been *removed* is ignored, which is what the `refresh` key in this file is
-    /// now: the rate is measured rather than chosen, so there is nothing left for it to say.
+    /// A short file is not thrown away, and a key that is no longer a field — like the `refresh` and
+    /// `show_pen_stats` keys here — is ignored rather than fatal: the alternative is an app that
+    /// silently resets a person's tuning because a name changed.
     #[test]
     fn an_older_settings_file_still_loads() {
         let older = r#"{
@@ -264,13 +259,17 @@ mod tests {
         let loaded: Settings = serde_json::from_str(older).expect("an older file still parses");
 
         assert_eq!(loaded.page_display_width, 720.0, "a value in the file is kept");
-        assert!(
-            !loaded.show_status,
-            "the renamed field keeps the answer the old file gave"
+        assert_eq!(
+            loaded.canvas_size,
+            CanvasSize::A4,
+            "a field the file does not have takes its default"
         );
-        assert_eq!(loaded.canvas_size, CanvasSize::A4, "a new field takes its default");
         assert_eq!(loaded.canvas_style, CanvasStyle::Plain);
         assert!(loaded.show_toolbar, "the bar is shown unless it is turned off");
         assert!(loaded.show_tilt_cursor, "so is the ghost cursor");
+        assert!(
+            loaded.show_status,
+            "and a key that is no longer a name of anything is ignored rather than honoured"
+        );
     }
 }

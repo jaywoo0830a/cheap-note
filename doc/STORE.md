@@ -411,22 +411,14 @@ twenty years. What is *this app's* is the chunk encoding, and its version travel
 
 ## 9. Notes written by older versions
 
-Before this, a note was a zip holding `document.pdf` and a `notes.json` — every point of every stroke
-as text. That reader still exists, read-only, for one purpose: so that opening an old note **migrates**
-it instead of losing it.
+**Nothing reads them any more.** A note used to be a zip holding `document.pdf` and a `notes.json` —
+every point of every stroke as text — and both the reader for that shape and the migration that turned
+one into a store have been deleted. An old note is now the same case as any other zip that is not a
+note: there is no `note.db` in it, so it is refused by name rather than unpacked (§10).
 
-*Open* an old zip and the app notices there is no `note.db` inside, reads the JSON, and writes a new
-working copy: every page becomes a chunk, the document is copied in as `source.pdf`, and the page
-list, paper size, the page that was open, and the document's name go into `meta`. From then on it is a
-normal note. Nothing writes the old format — there is no reason to, and a format with two writers
-would be a format with two behaviours.
-
-The migrated ink is quantised to 1/64 of a pixel on the way in, because that is what the new encoding
-stores. The difference is invisible (it is a sixtieth of a pixel) and it never accumulates: the
-conversion happens once, not on every save.
-
-An old note that claims a *newer* format version than this build knows is refused rather than guessed
-at — reading a file whose fields you do not know is how a note gets rewritten without its ink.
+The refusal is part of the deletion rather than an accident of it. A zip unpacked "in case" would leave
+a folder of someone else's files in the notes folder, and a note half-imported is a worse thing to
+explain than one that was refused.
 
 ## 10. Versioning and integrity
 
@@ -477,9 +469,7 @@ listed so a reader can go and read the code that proves the thing they just took
 | Attachments travel with the note | `note::tests::attachments_travel_with_the_note` |
 | The writer thread writes what it is given and reports its export | `note::tests::the_writer_writes_on_its_own_thread` |
 | A PDF becomes a note with that document | `note::tests::a_note_starts_on_a_document` |
-| A zip that is not a note is refused | `note::tests::a_foreign_zip_is_refused` |
-| An old zip of JSON is migrated into a database | `note::tests::an_old_note_is_migrated_into_a_store` |
-| A migrated stroke knows where it is (so the eraser works on it) | `legacy::tests::an_old_note_is_read_for_migration` |
+| A zip that is not a note is refused — an old note zip among them | `note::tests::a_foreign_zip_is_refused` |
 
 ## 12. Where the code is
 
@@ -487,8 +477,7 @@ listed so a reader can go and read the code that proves the thing they just took
 |---|---|
 | `src/store.rs` | the database: schema, PRAGMAs, the batch write, compaction, the read path, checkpoint, `VACUUM INTO` |
 | `src/chunk.rs` | the blob format: encode, decode, integrity, chunk boundaries |
-| `src/note.rs` | the note folder, the writer thread and its job queue, the zip container, migration |
-| `src/legacy.rs` | the old zip of JSON, read-only |
+| `src/note.rs` | the note folder, the writer thread and its job queue, the zip container |
 | `src/ink.rs` | strokes in memory: what a stroke is, and where each page's ink is kept |
 | `src/recent.rs` | the index of what has been opened: the file beside the notes, and its rules |
 | `src/home.rs` | the start screen: the list of recent notes, and what a confirmation opens |

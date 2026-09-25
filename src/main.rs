@@ -37,7 +37,6 @@
 //! | [`note`]    | a note as a folder, the writer thread, and the file it is carried in |
 //! | [`recent`]  | what has been opened, and the index of it the app keeps             |
 //! | [`home`]    | the screen that offers what was opened, and what it does            |
-//! | [`legacy`]  | the zip-of-JSON a note used to be, read once to migrate one        |
 //! | [`app`]     | the view: the bar and the pills, canvas painting, the two pumps     |
 //! | [`timing`]  | what every hot path costs, measured rather than guessed            |
 //! | [`settings`]| the user's tuning, serialised as JSON                              |
@@ -55,8 +54,7 @@
 //!
 //! A note is a folder under `%LOCALAPPDATA%\cheap-note\notes` — a SQLite file, the document, and
 //! anything attached to it — and it is written as the pen moves; `Save` writes the single file a
-//! person carries to another machine. **`doc/STORE.md` explains that arrangement in full**; the
-//! Korean design note it grew out of is `BUNDLE.md`, which is not part of the program.
+//! person carries to another machine. **`doc/STORE.md` explains that arrangement in full.**
 //!
 //! The window opens on a list of what has already been written in — the [`home`] screen — and one
 //! Escape from any note returns to it. The list is built from `%LOCALAPPDATA%\cheap-note\recent.json`
@@ -70,7 +68,6 @@ mod cursor;
 mod error;
 mod home;
 mod ink;
-mod legacy;
 mod note;
 mod pdf;
 mod pdfium;

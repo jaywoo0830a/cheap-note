@@ -217,7 +217,7 @@ impl Stroke {
     /// The near-black the app drew everything in before a stroke could carry a colour of its own.
     ///
     /// Test-only, and named here rather than repeated in every test module: the app's own paths write
-    /// ink in [`crate::settings::Settings::ink_color`], and a page of ink in a test still has to be
+    /// ink in [`crate::settings::NoteStyle::ink_color`], and a page of ink in a test still has to be
     /// written in *some* colour.
     #[cfg(test)]
     pub const DEFAULT_COLOR: u32 = 0x1B_1B_1F;
@@ -693,7 +693,7 @@ impl InkDocument {
                                 // moment the nib goes down, and it stays with that line for good.
                                 self.open = Some(Stroke::new(
                                     InkPoint::new(x, y, width),
-                                    settings.ink_color,
+                                    settings.style.ink_color,
                                 ));
                             }
                         }
@@ -1114,11 +1114,11 @@ mod tests {
         let mut ink = InkDocument::default();
         let mut s = settings();
 
-        s.ink_color = 0xDC_26_26;
+        s.style.ink_color = 0xDC_26_26;
         ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
         ink.consume(&[reading(7, PenPhase::Up, 18.0, 10.0, None)], &id(), &s);
 
-        s.ink_color = 0x1D_4E_D8;
+        s.style.ink_color = 0x1D_4E_D8;
         ink.consume(&[reading(7, PenPhase::Down, 10.0, 40.0, Some(0.5))], &id(), &s);
         ink.consume(&[reading(7, PenPhase::Up, 18.0, 40.0, None)], &id(), &s);
 

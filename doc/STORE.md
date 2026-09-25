@@ -172,7 +172,7 @@ There are only two things to remember about this pipeline:
 | `pages` | one page of the note | the page's position, its timestamps, its bounding box, and how many strokes its chunks hold |
 | `chunks` | up to 512 strokes, compressed | the *stored* ink: this is what a page is made of once it is closed |
 | `dirty_strokes` | exactly one stroke, compressed | freshly drawn ink waiting to become a chunk |
-| `meta` | one key and its value | the note's own facts: which page was open, the page list, the paper size, the document's name, and the name a person gave the note (§1) |
+| `meta` | one key and its value | the note's own facts: which page was open, the page list, the sheet the ink was written on, how that sheet is set up, the document's name, and the name a person gave the note (§1) |
 | `page_strokes` *(view)* | one chunk **or** one dirty stroke | a page's ink, whole, in the order it was drawn — what a read runs against |
 
 A page with nothing on it has **no row** in `pages`. "The pages that hold ink" is therefore a query,
@@ -216,6 +216,45 @@ CREATE VIEW page_strokes AS
 The dirty strokes are given an `ord` *after* the chunked ones, because that is where they belong:
 dirty ink is always newer than compacted ink. So a read is `ORDER BY ord, seq` and the page comes back
 in the order it was drawn. `is_dirty` says how each row has to be decoded — see §4.
+
+### What the note's `meta` holds
+
+`meta` is where everything that is *about the note* is filed, one row per key. The ink paths never
+touch it: the app reads it when a note is opened and writes it when something about the note changes.
+
+| Key | What it is | Encoding |
+|---|---|---|
+| `open_page` | the page that was open, so reopening comes back to it | `u64` little-endian |
+| `sheet` | the sheet the ink's coordinates are in | two `f32`s little-endian |
+| `layout` | what each page shows, in reading order | `postcard` |
+| `style` | how the note is written on: its paper, its ruling, its colours, its zoom | `postcard` |
+| `document` | the name the PDF had when the note was made | UTF-8 |
+| `source` | the file the note was placed from | UTF-8 |
+| `title` | what the note is called (§1) | UTF-8 |
+
+**How the note is written on** is the newest of them, and the one worth explaining, because it used to
+be the opposite. The paper, the ruling, the paper's colour, the pen's colour, whether a document is
+shown in grayscale and the zoom were once the *app's*: one answer for every note, in
+`cheap-note.settings.json`, so opening a second note handed it the first one's paper. They belong to
+the note now, and this row is where they live:
+
+```text
+note.db → meta('style') = the sheet this note is on, and the pen it is written with
+```
+
+* a note that has never been told keeps whatever the app is set up as, and is told at once — which is
+  how a blank page, or a PDF just placed, continues the sheet in hand instead of snapping back to the
+  shipped one. A blank sheet that is *closed* on has no note to write the answer to, so the choice goes
+  with the session: that is the cost of there being no global answer, and it is the cheaper of the two,
+  because the alternative is a note being handed a sheet it was not written on;
+* the *same* row is written whenever any part of it changes, so there is only ever one thing to read
+  back when the note is opened;
+* `settings.style` in the app is that row in memory, and `#[serde(skip)]` is what keeps it out of the
+  settings file: a note's state cannot be written down globally, by construction rather than by care.
+
+What is left in `cheap-note.settings.json` is what is about **the person and this machine** and
+nothing else: how the pen feels (the widths, the resampling, the smoothing, the eraser's reach), how
+the program looks (the bar, the status line, the ghost cursor), and where the last export was written.
 
 ## 4. How a stroke becomes bytes
 
@@ -362,8 +401,8 @@ avoid that risk — the risk is already bounded to a fraction of a second by the
 
 Opening does *not* read the note. It reads:
 
-* the note's own facts from `meta` — the page list, which page was open, the paper size, the
-  document's name;
+* the note's own facts from `meta` — the page list, which page was open, the sheet the ink was written
+  on, how that sheet is set up, and the document's name;
 * the document, from `source.pdf`;
 * **one page**: the one that was open.
 
@@ -424,7 +463,7 @@ explain than one that was refused.
 
 | Mechanism | What it protects against |
 |---|---|
-| `PRAGMA user_version` (this build writes `3`) | a note written by a newer build: refused, with a message that says so |
+| `PRAGMA user_version` (this build writes `4`) | a note written by *any* other build — newer or older: refused, with a message that says which way round the difference is |
 | the zip's entry list | a file that is not a note at all: named as such rather than half-read |
 | the CRC32 of every blob | a damaged disk or a truncated file: reported as damaged |
 | the uncompressed length of every blob | a blob that decompresses to the wrong size |
@@ -432,8 +471,15 @@ explain than one that was refused.
 | an unknown `codec` id | a compressor a newer build knows and this one does not |
 
 The version number continues the note format's own history rather than starting over: `1` was the
-first zip of JSON, `2` added the page list to it, and `3` is the database. So one number orders every
-note file this app has ever written, whichever shape it is in.
+first zip of JSON, `2` added the page list to it, `3` is the database, and `4` moved the paper, the
+ruling, the colours and the zoom out of the app's settings and into the note (§3). So one number
+orders every note file this app has ever written, whichever shape it is in.
+
+**Only the current number is read.** A note is opened by the build whose schema wrote it and by no
+other: an older note is refused exactly as a newer one is, because this build would write its own
+shape back over a shape it does not know. Refused means *left alone* — the stamp is not brought
+forward — so the build that wrote the note can still open it afterwards. The message names the number,
+so that "open it with the build that wrote it" is advice a person can act on rather than a guess.
 
 ---
 
@@ -462,9 +508,13 @@ listed so a reader can go and read the code that proves the thing they just took
 | A page left empty stops counting as a page with ink | `store::tests::an_emptied_page_stops_counting_as_a_page` |
 | A damaged chunk in a note is reported when the page is read | `store::tests::a_damaged_chunk_is_reported` |
 | An export is a note of its own, complete and standalone | `store::tests::an_export_is_a_note_of_its_own` |
-| The note remembers its page list, open page and paper size | `store::tests::a_note_remembers_its_own_page_list` |
+| The note remembers its page list, open page, sheet and how it is written on | `store::tests::a_note_remembers_its_own_page_list` |
+| Two notes on two different sheets keep their own answers | `store::tests::two_notes_keep_their_own_sheets` |
+| The note's style survives being written down and read back | `settings::tests::the_note_style_round_trips_through_the_note` |
+| The settings file holds the person's tuning and no note state | `settings::tests::settings_round_trip_through_json` |
 | Checkpointing folds the log back and the ink is still there | `store::tests::checkpointing_folds_the_log_back` |
 | A note from a newer build is refused | `store::tests::a_newer_note_is_refused` |
+| A note from an older build is refused, and left as it was found | `store::tests::an_older_note_is_refused` |
 | A note travels as one file and comes back whole | `note::tests::a_note_travels_as_one_file` |
 | Attachments travel with the note | `note::tests::attachments_travel_with_the_note` |
 | The writer thread writes what it is given and reports its export | `note::tests::the_writer_writes_on_its_own_thread` |
@@ -513,7 +563,7 @@ Knowing what a store refuses to hold is as useful as knowing what it holds.
 | the stroke under the nib | it is not history yet: it has no final geometry, it is not what a save writes, and taking it back would leave the model thinking the pen was lifted |
 | undo/redo history | it is a property of the session, not of the note. A note opens with a page of ink and no way back through last week's strokes |
 | an erased stroke | the eraser removes whole strokes, and undo takes back the most recent *surviving* stroke. There is no "recover what I erased" — see `src/ink.rs` |
-| the app's own settings | text size, the toolbar, the pen's smoothing and so on are the *user's*, and live in `cheap-note.settings.json` next to the program. A note records only what belongs to the note: its page list, paper size, open page, and document name |
+| the app's own settings | the toolbar, the status line, the ghost cursor, and how the pen *feels* — widths, resampling, smoothing, the eraser's reach — are the *person's*, and live in `cheap-note.settings.json` next to the program. They are all that lives there: a note records everything that belongs to the note, down to its paper, its ruling, its colours and its zoom (§3) |
 | attachments (for now) | the container carries an `attachments\` folder faithfully, but nothing in this build writes one yet — it is where a pasted image or a recording will go |
 | rendered PDF pages | those are a cache, rebuilt from `source.pdf` whenever they are needed |
 
@@ -556,7 +606,7 @@ CREATE TABLE dirty_strokes (
     created_at INTEGER NOT NULL
 ) STRICT;
 
-CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB NOT NULL) STRICT;
+CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB NOT NULL) STRICT;  -- see §3 for the keys
 
 CREATE INDEX idx_chunks_page ON chunks(page_id, stroke_start);
 CREATE INDEX idx_dirty_page  ON dirty_strokes(page_id, seq);
@@ -594,7 +644,7 @@ it.
 | `chunk::CHUNK_MAX_STROKES` | 512 | strokes per chunk, whichever comes first |
 | (palette) | 255 | distinct colours per chunk, enforced by ending the chunk |
 | `chunk::ZSTD_LEVEL` | 3 | the compression level the design settles on |
-| `store::SCHEMA_VERSION` | 3 | what `PRAGMA user_version` says (see §10) |
+| `store::SCHEMA_VERSION` | 4 | what `PRAGMA user_version` says (see §10) |
 | `app::BATCH_INTERVAL` | 500 ms | how long ink may wait in memory |
 | `app::BATCH_STROKES` | 200 | how much ink may wait in memory |
 | `app::CHECKPOINT_QUIET_INTERVAL` | 5 s | how long the pen must be still before a checkpoint |

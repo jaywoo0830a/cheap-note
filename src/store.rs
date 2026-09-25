@@ -23,8 +23,9 @@
 //!
 //! ## The schema
 //!
-//! Three tables for the ink, plus a `meta` table (the note's page list and what belongs to the note
-//! rather than to the app — see [`META_LAYOUT`]) and an ordering column on `pages`:
+//! Three tables for the ink, plus a `meta` table — what belongs to the note rather than to the app:
+//! its page list, the page that was open, the sheet the ink was written on, and how that sheet is set
+//! up (see [`META_LAYOUT`] and [`META_STYLE`]) — and an ordering column on `pages`:
 //!
 //! ```sql
 //! pages(id, ord, created_at, updated_at, bbox_*, stroke_count)
@@ -72,13 +73,23 @@ use serde::{Deserialize, Serialize};
 use crate::chunk::{self, Codec};
 use crate::error::{AppError, Result};
 use crate::ink::Stroke;
+use crate::settings::NoteStyle;
 
 /// The schema version this build writes, in `PRAGMA user_version`.
 ///
-/// A *newer* file is refused rather than read: the tables it added are ones this build does not
-/// know, and guessing is how a note gets rewritten without the ink that was in them. An older one
-/// is read as it stands, and its stamp is brought up to this number when it is opened.
-pub const SCHEMA_VERSION: i32 = 3;
+/// A note is read by the build whose schema wrote it and by no other. A *newer* file is refused
+/// because the tables and the `meta` keys it added are ones this build has never heard of, and
+/// guessing is how a note gets rewritten without the ink that was in them. An *older* one is refused
+/// for the mirror image of that reason: this build would read its pages and write back its own shape,
+/// and anything it did not know about would be gone the next time the note was opened.
+///
+/// There is deliberately no migration. A note this build cannot read is a note it does not touch, and
+/// the message says which way round the difference is — a person with an old note is told to open it
+/// with the build that wrote it, not handed a note that was quietly rewritten.
+///
+/// `0` is not an older note: it is a file with no tables in it yet, which is what a note looks like
+/// between [`NoteStore::open`] creating the database and [`NoteStore::create_schema`] stamping it.
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// The page the note was last on, as a `u64` little-endian.
 pub const META_OPEN_PAGE: &str = "open_page";
@@ -86,6 +97,14 @@ pub const META_OPEN_PAGE: &str = "open_page";
 pub const META_SHEET: &str = "sheet";
 /// What each page shows, in reading order, as `postcard`-encoded [`crate::pages::Page`]s.
 pub const META_LAYOUT: &str = "layout";
+/// How the note is written on, as `postcard`-encoded [`NoteStyle`].
+///
+/// The note's own answer to the questions the settings file used to answer for every note at once:
+/// its paper, its ruling, the colour of its paper and of its pen, whether its document is shown in
+/// grey, and the zoom it was left at. It is *in the note* because it is about the note — a sketchbook
+/// in grid and a diary in rules must not have to re-choose between them every time one is opened —
+/// and it is written by the app rather than by any of the ink paths here (see [`crate::settings`]).
+pub const META_STYLE: &str = "style";
 /// The name the document had when the note was made, as UTF-8.
 pub const META_DOCUMENT: &str = "document";
 /// The file the note was placed from, as it was given, as UTF-8.
@@ -171,7 +190,16 @@ impl NoteStore {
         Ok(store)
     }
 
-    /// Refuses a file written by a build that knows more than this one.
+    /// Refuses a file this build did not write.
+    ///
+    /// One rule, two directions: a note from a *newer* build holds tables and `meta` this build has
+    /// never heard of, and a note from an *older* one is a shape this build would rewrite in its own.
+    /// Both are refused, and the message says which way round it is, because "open it with the build
+    /// that wrote it" is only advice if the person is told which build that is.
+    ///
+    /// `0` is neither. It is a file with no tables in it yet — what a note looks like between
+    /// [`Self::open`] creating the database and [`Self::create_schema`] stamping it — so it is let
+    /// through to become one.
     fn check_version(&self, path: &Path) -> Result<()> {
         let version: i32 = self
             .conn
@@ -180,14 +208,15 @@ impl NoteStore {
                 AppError::Note(format!("{} is not a note: {error}", path.display()))
             })?;
 
-        if version > SCHEMA_VERSION {
-            return Err(AppError::Note(format!(
-                "{} was written by a newer version of this app (note schema {version}, this build reads {SCHEMA_VERSION})",
-                path.display()
-            )));
+        if version == 0 || version == SCHEMA_VERSION {
+            return Ok(());
         }
 
-        Ok(())
+        Err(AppError::Note(format!(
+            "{} was written by a {} version of this app (note schema {version}, this build reads {SCHEMA_VERSION})",
+            path.display(),
+            if version > SCHEMA_VERSION { "newer" } else { "older" },
+        )))
     }
 
     /// Creates the tables and the view, and stamps the version on a file that is new.
@@ -761,6 +790,38 @@ impl NoteStore {
         })
     }
 
+    /// Records how the note is written on: its paper, its colours, its ruling, its zoom.
+    ///
+    /// Written whenever any of it changes — a paper choice, a colour, a zoom, a grayscale toggle —
+    /// rather than on a clock, because these are the answers the next session reads back and they
+    /// change at the speed of a hand.
+    pub fn set_style(&mut self, style: &NoteStyle) -> Result<()> {
+        let bytes = postcard::to_allocvec(style).map_err(|error| {
+            AppError::Note(format!("the note's style could not be written: {error}"))
+        })?;
+
+        self.set_meta(META_STYLE, &bytes)
+    }
+
+    /// How the note is written on, when the note has been told.
+    ///
+    /// `None` is a note that has never had one written to it, which is the state of a note nothing has
+    /// been chosen in yet: the row is written on the first change, not at creation. The caller's
+    /// answer to `None` is [`NoteStyle::default`] — the sheet the app ships with.
+    pub fn style(&self) -> Result<Option<NoteStyle>> {
+        let Some(bytes) = self.meta(META_STYLE)? else {
+            return Ok(None);
+        };
+
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+
+        postcard::from_bytes(&bytes)
+            .map(Some)
+            .map_err(|error| AppError::Note(format!("the note's style could not be read: {error}")))
+    }
+
     /// Records the name the document had, so a note stays about the file it was made from.
     pub fn set_document(&mut self, name: &str) -> Result<()> {
         self.set_meta(META_DOCUMENT, name.as_bytes())
@@ -1094,6 +1155,7 @@ fn open_dirty(blob: &[u8]) -> Result<Vec<Stroke>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canvas::{CanvasSize, CanvasStyle};
     use crate::ink::InkPoint;
     use crate::pages::Page;
     use std::path::PathBuf;
@@ -1373,7 +1435,12 @@ mod tests {
         cleanup(&path);
     }
 
-    /// A note remembers what belongs to the note: the page it was on, the sheet, the page list.
+    /// A note remembers what belongs to the note: the page it was on, the sheet, the page list, and
+    /// how it is written on.
+    ///
+    /// The style is one of those facts rather than one of the app's, which is what
+    /// [`two_notes_keep_their_own_sheets`] is about; what this test holds it to is the `None` that
+    /// comes back before anything has been chosen.
     #[test]
     fn a_note_remembers_its_own_page_list() {
         let (mut store, path) = store_for("meta");
@@ -1381,6 +1448,7 @@ mod tests {
         assert_eq!(store.open_page().expect("a page"), None);
         assert_eq!(store.layout().expect("a layout"), Vec::<Page>::new());
         assert_eq!(store.sheet().expect("a sheet"), None);
+        assert_eq!(store.style().expect("a style"), None);
 
         store.set_open_page(4).expect("a page");
         store.set_sheet(Some((794.0, 1123.0))).expect("a sheet");
@@ -1388,6 +1456,7 @@ mod tests {
             .set_layout(&[Page::Blank, Page::Document(3)])
             .expect("a layout");
         store.set_document("chapter-3.pdf").expect("a name");
+        store.set_style(&NoteStyle::default()).expect("a style");
 
         assert_eq!(store.open_page().expect("a page"), Some(4));
         assert_eq!(store.sheet().expect("a sheet"), Some((794.0, 1123.0)));
@@ -1399,8 +1468,56 @@ mod tests {
             store.document().expect("a name").as_deref(),
             Some("chapter-3.pdf")
         );
+        assert_eq!(
+            store.style().expect("a style"),
+            Some(NoteStyle::default()),
+            "a style that was written down comes back, even when it is the shipped one"
+        );
 
         cleanup(&path);
+    }
+
+    /// Two notes written on two different sheets keep their own answers.
+    ///
+    /// This is the whole reason the style is stored in the note. The paper, the ruling, the ink
+    /// colour and the zoom are a *note's*, so opening one must not hand its sheet to the next — and
+    /// the only way to say that is two notes side by side, each with its own file.
+    #[test]
+    fn two_notes_keep_their_own_sheets() {
+        let (mut ruled, ruled_path) = store_for("style-ruled");
+        let (mut grid, grid_path) = store_for("style-grid");
+
+        let ruled_style = NoteStyle {
+            ink_color: 0xDC_26_26,
+            page_color: 0xFF_FF_FF,
+            page_display_width: 640.0,
+            canvas_size: CanvasSize::A5,
+            canvas_style: CanvasStyle::Ruled,
+            grayscale_pages: true,
+            zoom: 1.5,
+        };
+        let grid_style = NoteStyle {
+            ink_color: 0x1D_4E_D8,
+            page_color: 0x20_20_24,
+            page_display_width: 720.0,
+            canvas_size: CanvasSize::Square,
+            canvas_style: CanvasStyle::Grid,
+            grayscale_pages: false,
+            zoom: 2.0,
+        };
+
+        ruled.set_style(&ruled_style).expect("a style");
+        grid.set_style(&grid_style).expect("a style");
+
+        assert_eq!(ruled.style().expect("a style"), Some(ruled_style));
+        assert_eq!(grid.style().expect("a style"), Some(grid_style));
+        assert_ne!(
+            ruled_style, grid_style,
+            "the two notes have to differ, or this proves nothing"
+        );
+
+        cleanup(&ruled_path);
+        cleanup(&grid_path);
     }
 
     /// A note can be given a name, and the name is the row's word for it — never the folder's.
@@ -1525,6 +1642,34 @@ mod tests {
 
         let error = NoteStore::open(&path).expect_err("a newer note is refused");
         assert!(error.to_string().contains("newer version"), "{error}");
+
+        cleanup(&path);
+    }
+
+    /// A note from a build with *another* schema is refused in both directions, and untouched.
+    ///
+    /// There is no migration (see [`SCHEMA_VERSION`]), so a note from an older build is refused exactly
+    /// as one from a newer build is. The stamp is asserted as well, because "refused" has to mean
+    /// *left alone*: a note that was refused and stamped on the way out would be a note the build that
+    /// wrote it could no longer open.
+    #[test]
+    fn an_older_note_is_refused() {
+        let (store, path) = store_for("older");
+        store.run(&format!("PRAGMA user_version = {};", SCHEMA_VERSION - 1));
+        drop(store);
+
+        let error = NoteStore::open(&path).expect_err("an older note is refused");
+        assert!(error.to_string().contains("older version"), "{error}");
+
+        let stamp: i32 = Connection::open(&path)
+            .expect("the file is still there")
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("a version");
+        assert_eq!(
+            stamp,
+            SCHEMA_VERSION - 1,
+            "a refused note is left exactly as it was found"
+        );
 
         cleanup(&path);
     }

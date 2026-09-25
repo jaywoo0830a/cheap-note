@@ -2,7 +2,7 @@
 //!
 //! ## Why zoom is not the sheet's size
 //!
-//! `Settings::page_display_width` is *paper*: choosing A5 means half a sheet of A4, and a PDF page
+//! `NoteStyle::page_display_width` is *paper*: choosing A5 means half a sheet of A4, and a PDF page
 //! brings its own shape whatever it is drawn at. Zoom is not paper — it is how close the reader is
 //! standing to it. Keeping them apart is what lets Fit Width be pressed, the paper chosen
 //! afterwards, and the paper's own size still be what it claims to be.

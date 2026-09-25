@@ -1543,7 +1543,7 @@ impl NoteApp {
 
     /// Records which page is open, so reopening the note comes back to it.
     ///
-    /// Written through the reader's connection rather than the writer's: this is one small update on
+    /// Written through the app's own connection rather than the writer's: this is one small update on
     /// a page turn, not a stream of ink, and WAL is what makes two connections to one note safe.
     fn remember_page(&mut self) {
         if let Some(note) = &mut self.note {

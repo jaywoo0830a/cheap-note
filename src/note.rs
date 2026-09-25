@@ -119,7 +119,12 @@ pub fn folder_name(source: &Path) -> String {
 pub struct Note {
     /// The folder the note lives in.
     dir: PathBuf,
-    /// The reader's connection to the note.
+    /// The app's own connection to the note.
+    ///
+    /// Pages are read through it, and so is the little the app itself records about the note — which
+    /// page is open, the page list, the paper size. The *ink* is written by [`NoteWriter`], on a
+    /// connection of its own: two connections to one file is the design's arrangement, and WAL is
+    /// what makes it safe.
     store: NoteStore,
 }
 
@@ -174,13 +179,13 @@ impl Note {
         &self.dir
     }
 
-    /// The reader's connection.
+    /// The app's connection, for reading a page and for the note's own facts.
     pub fn store(&self) -> &NoteStore {
         &self.store
     }
 
-    /// The reader's connection, for the writes that happen before a note is handed to a writer —
-    /// a migration, or a setting the app changes once.
+    /// The app's connection, mutably: what the app records about the note when it changes — a page
+    /// turned, a page inserted, a note being migrated.
     pub fn store_mut(&mut self) -> &mut NoteStore {
         &mut self.store
     }

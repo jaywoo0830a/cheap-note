@@ -53,8 +53,8 @@
 //!
 //! A note is a folder under `%LOCALAPPDATA%\cheap-note\notes` — a SQLite file, the document, and
 //! anything attached to it — and it is written as the pen moves; `Save` writes the single file a
-//! person carries to another machine. `BUNDLE.md` is the design note that arrangement implements,
-//! and the section at its end records how this build follows it.
+//! person carries to another machine. **`doc/STORE.md` explains that arrangement in full**; the
+//! Korean design note it grew out of is `BUNDLE.md`, which is not part of the program.
 
 mod app;
 mod canvas;

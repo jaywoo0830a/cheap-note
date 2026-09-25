@@ -37,7 +37,7 @@
 //! | [`home`]    | the screen that offers what was opened, and what it does            |
 //! | [`app`]     | the view: the bar and the pills, canvas painting, the two pumps     |
 //! | [`timing`]  | what every hot path costs, measured rather than guessed            |
-//! | [`settings`]| the user's tuning, serialised as JSON                              |
+//! | [`settings`]| the person's tuning, and the note's own sheet                      |
 //! | [`theme`]   | the palette, the bundled font, and the icons' asset source         |
 //! | [`error`]   | the error type every fallible boundary returns                     |
 //!

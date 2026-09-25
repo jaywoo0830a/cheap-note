@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Page {
-    /// A blank sheet: its ruling and colour come from the canvas settings, as they do for a note
+    /// A blank sheet: its ruling and colour come from the note's style, as they do for a note
     /// with no document open.
     Blank,
     /// A page of the open document, by its index in that document.

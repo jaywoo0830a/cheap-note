@@ -13,10 +13,22 @@
 //!
 //! ## This list is a cache, and it is treated like one
 //!
-//! Losing it loses nothing: every note it names is still a folder on disk, and the next launch
-//! *adopts* the folders it finds and never mentioned (a note carried in from another machine, or a
-//! folder whose entry was lost). Losing a *note* is the thing to avoid, and nothing here can touch
-//! one: the only write this module makes is to its own file.
+//! Losing it costs nothing that is *written*: every note it names is still a folder on disk, and the
+//! next launch *adopts* the folders it finds and never mentioned (a note carried in from another
+//! machine, or a folder whose entry was lost). Losing a *note* is the thing to avoid, and nothing
+//! here can touch one: the only write this module makes is to its own file.
+//!
+//! ## The one thing the file has to remember
+//!
+//! What a person took out of the list. Adoption is why: a forgotten note is a folder the notes folder
+//! still has, so a list that forgot only the *entry* would adopt it straight back on the next scan —
+//! the row would come back on its own, and the menu item that took it away would be a lie. So the
+//! folder is remembered as *taken out*, and adoption skips it (see [`Recents::reconcile`]).
+//!
+//! Opening the note again is the way back, and it is the only one: that is a person asking for it,
+//! and no scan can ask on their behalf. Which also means this list is no longer purely a cache —
+//! losing the file loses one small decision with it, and the module is honest about that here rather
+//! than in a comment buried in [`Recents::forget`].
 //!
 //! ## What an entry is
 //!
@@ -284,6 +296,8 @@ pub fn path() -> PathBuf {
 #[serde(default)]
 struct Index {
     entries: Vec<Recent>,
+    /// The folders taken out of the list, which a scan must not adopt back. See [`Recents::forgotten`].
+    forgotten: Vec<PathBuf>,
 }
 
 /// What the app remembers opening, newest first.
@@ -293,6 +307,13 @@ pub struct Recents {
     path: PathBuf,
     /// The entries, newest first.
     entries: Vec<Recent>,
+    /// Folders a person took out of the list, which adoption therefore skips.
+    ///
+    /// The one thing here that is not a cache of something the disk already says: it is a decision,
+    /// and the file is the only place it can live (the note must not be modified to leave a list —
+    /// see [`Self::forget`]). It stays small because a folder that is not on disk is dropped from it:
+    /// only a folder that is *there* can be adopted, so only one that is there needs a reminder.
+    forgotten: Vec<PathBuf>,
 }
 
 impl Recents {
@@ -307,15 +328,15 @@ impl Recents {
 
     /// Loads the index from a given path: the same thing, for a test or another location.
     pub fn load_from(path: &Path) -> Self {
-        let entries = std::fs::read_to_string(path)
+        let index = std::fs::read_to_string(path)
             .ok()
             .and_then(|text| serde_json::from_str::<Index>(&text).ok())
-            .map(|index| index.entries)
             .unwrap_or_default();
 
         let mut recents = Recents {
             path: path.to_path_buf(),
-            entries,
+            entries: index.entries,
+            forgotten: index.forgotten,
         };
 
         recents.sort();
@@ -333,6 +354,10 @@ impl Recents {
     /// not the moment it was opened — and the next scan corrects them if the note has changed. An
     /// entry that is *new* has no stamp, so its counts are read on that scan.
     pub fn record(&mut self, fresh: Recent) {
+        // Opening a note is a person asking for it, and that is the one thing that takes it back off
+        // the list of folders they took out of the list.
+        self.forgotten.retain(|folder| folder != &fresh.folder);
+
         match self
             .entries
             .iter_mut()
@@ -353,8 +378,21 @@ impl Recents {
     }
 
     /// Takes a folder out of the list. The note itself is not touched.
+    ///
+    /// And it *stays* out. That is the whole of this method's care: the note is still a folder under
+    /// `notes\`, so a scan would adopt it right back if the only thing taken out were the entry — the
+    /// row would return on its own, which makes the menu item that removed it meaningless. The folder
+    /// is therefore remembered as one a person took out, and [`Self::reconcile`] skips it.
+    ///
+    /// The note is not marked: a list a person keeps on *this* machine is not something to write into
+    /// a note, which may be opened on another one. The decision lives in the index, beside the list it
+    /// is about, and [`Self::record`] is what reverses it.
     pub fn forget(&mut self, folder: &Path) {
         self.entries.retain(|entry| entry.folder != folder);
+
+        if !self.forgotten.iter().any(|path| path == folder) {
+            self.forgotten.push(folder.to_path_buf());
+        }
     }
 
     /// Records what a scan saw of one note: everything the note says about itself, and the database
@@ -389,12 +427,26 @@ impl Recents {
     /// `found` is what a scan of the notes folder saw. Whether an entry is *still* there is answered
     /// by the filesystem rather than by that list: a folder opened where it stands lives outside the
     /// notes folder, and reading its absence from the list would call every such note gone.
+    ///
+    /// A folder a person took out of the list is not adopted, though it is a folder the notes folder
+    /// knows: being told about it is exactly what taking it out meant, and a scan that adopted it back
+    /// would undo the one thing this list is asked to remember. See [`Self::forget`].
     pub fn reconcile(&mut self, found: &[PathBuf], now_ms: u64) {
         for entry in &mut self.entries {
             entry.gone = !entry.folder.is_dir();
         }
 
+        // A folder that is not there cannot be adopted, so it needs no reminder — and this is what
+        // keeps the list of them short: a note that is deleted, or a folder a person forgot while it
+        // was already gone, is dropped here. Should such a folder turn up again it turns up as a note
+        // the notes folder is telling us about, which is the same road a carried-in note takes.
+        self.forgotten.retain(|folder| folder.is_dir());
+
         for folder in found {
+            if self.forgotten.iter().any(|path| path == folder) {
+                continue;
+            }
+
             if self.entries.iter().any(|entry| entry.folder == *folder) {
                 continue;
             }
@@ -427,6 +479,7 @@ impl Recents {
 
         let index = Index {
             entries: self.entries.clone(),
+            forgotten: self.forgotten.clone(),
         };
         let temporary = self.path.with_extension("json.tmp");
         std::fs::write(&temporary, serde_json::to_string_pretty(&index)?)?;
@@ -772,5 +825,145 @@ mod tests {
             sheet: None,
         };
         assert_eq!(entry.counts(), "12 pages · 340 strokes");
+    }
+    /// Taking a row out of the list keeps it out.
+    ///
+    /// The note is still a folder under `notes\`, so the scan that follows has to *not* adopt it back:
+    /// a row that returns on its own makes the menu item that removed it meaningless.
+    #[test]
+    fn a_note_taken_out_of_the_list_is_not_adopted_back() {
+        let path = scratch("forget");
+        let mut recents = Recents::load_from(&path);
+        let dir = folder("forget-note");
+        // What a scan of the notes folder sees: this note's folder, still on disk — which is exactly
+        // why an entry that was merely removed would come straight back.
+        let scan = [dir.clone()];
+
+        recents.record(Recent::note(
+            dir.clone(),
+            None,
+            String::from("Blank sheet"),
+            None,
+            1_000,
+        ));
+        recents.reconcile(&scan, 2_000);
+        assert_eq!(recents.entries().len(), 1, "the note is in the list");
+
+        recents.forget(&dir);
+        assert!(recents.entries().is_empty(), "the row is gone");
+
+        // The scan that follows: the folder is still there, and a folder a person took out is not a
+        // folder nobody told us about.
+        recents.reconcile(&scan, 3_000);
+        assert!(
+            recents.entries().is_empty(),
+            "a scan does not adopt back what a person took out"
+        );
+
+        // Opening it again is a person asking for it, and that is the one way back.
+        recents.record(Recent::note(
+            dir.clone(),
+            None,
+            String::from("Blank sheet"),
+            None,
+            4_000,
+        ));
+        assert_eq!(recents.entries().len(), 1, "opening it says so");
+        assert_eq!(recents.entries()[0].folder, dir);
+
+        recents.reconcile(&scan, 5_000);
+        assert_eq!(
+            recents.entries().len(),
+            1,
+            "and it is an ordinary note again"
+        );
+    }
+
+    /// Being taken out is written down, so a restart does not bring the row back either.
+    #[test]
+    fn a_note_taken_out_stays_out_across_a_restart() {
+        let path = scratch("forget-persisted");
+        let dir = folder("forget-persisted-note");
+        let scan = [dir.clone()];
+
+        let mut recents = Recents::load_from(&path);
+        recents.record(Recent::note(
+            dir.clone(),
+            None,
+            String::from("a note"),
+            None,
+            1_000,
+        ));
+        recents.forget(&dir);
+        recents.save().expect("the index is written");
+
+        // What the next launch has before anything is scanned.
+        let mut loaded = Recents::load_from(&path);
+        assert!(loaded.entries().is_empty(), "the row is not in the file");
+
+        loaded.reconcile(&scan, 2_000);
+        assert!(
+            loaded.entries().is_empty(),
+            "and the scan that follows does not bring it back"
+        );
+    }
+
+    /// A folder that is not on disk needs no reminder, because it cannot be adopted.
+    ///
+    /// This is what keeps the reminders from piling up: a note that was deleted, or a folder taken out
+    /// of the list while it was already gone, is dropped on the next scan.
+    #[test]
+    fn a_folder_that_is_gone_needs_no_reminder() {
+        let path = scratch("forget-gone");
+        let mut recents = Recents::load_from(&path);
+        let missing = std::env::temp_dir().join("cheap-note-recent-forget-gone");
+        let _ = std::fs::remove_dir_all(&missing);
+
+        recents.record(Recent::note(
+            missing.clone(),
+            None,
+            String::from("gone"),
+            None,
+            10,
+        ));
+        recents.reconcile(&[], 20);
+        recents.forget(&missing);
+        recents.reconcile(&[], 30);
+        recents.save().expect("the index is written");
+
+        let text = std::fs::read_to_string(&path).expect("the index is there");
+        assert!(
+            !text.contains("forget-gone"),
+            "a folder that is not there is not kept as taken out: {text}"
+        );
+    }
+
+    /// A folder that *is* there is kept as taken out — once, however often the row was removed.
+    #[test]
+    fn a_taken_out_folder_is_remembered_once() {
+        let path = scratch("forget-twice");
+        let mut recents = Recents::load_from(&path);
+        let dir = folder("forget-twice-note");
+        let scan = [dir.clone()];
+
+        recents.record(Recent::note(
+            dir.clone(),
+            None,
+            String::from("a note"),
+            None,
+            10,
+        ));
+        recents.forget(&dir);
+        recents.forget(&dir);
+        recents.reconcile(&scan, 20);
+        recents.save().expect("the index is written");
+
+        let text = std::fs::read_to_string(&path).expect("the index is there");
+        assert_eq!(
+            text.matches("forget-twice-note").count(),
+            1,
+            "one reminder, not one per attempt: {text}"
+        );
+        assert!(recents.entries().is_empty());
     }
 }

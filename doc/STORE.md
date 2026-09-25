@@ -75,6 +75,15 @@ It is a **cache, not a note**, and it is treated like one:
 * an entry whose folder has gone is marked rather than removed, because the note may be one directory
   away (and the list says "not on disk" instead of quietly forgetting).
 
+One thing in the file is *not* a cache: the **folders taken out of the list**. *Forget this row* takes a
+line out of the list and touches no note, and the note is still a folder under `notes\` — so adoption
+would put the row straight back if the entry were all that was removed. The folder is therefore written
+down as taken out, and adoption skips it. Opening the note again is the way back, because that is a person
+asking for it and no scan can ask on their behalf. A folder that is no longer on disk is dropped from that
+record, since only a folder that is *there* can be adopted — which is what keeps it short. Deleting
+`recent.json` therefore costs the order of the list and the record of what was taken out of it, and
+nothing else.
+
 The counts are cached together with a **stamp** of the note's database — its size and its modification
 time — so drawing the list normally costs one `stat` per note rather than one database read. Only a
 note whose database has changed since its stamp is read again, on a worker thread, and its row fills in

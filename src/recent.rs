@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::note;
-use crate::store::Summary;
+use crate::store::{Facts, Summary};
 
 /// The index of what the app has opened, beside the `notes` folder.
 pub const RECENT_FILE: &str = "recent.json";
@@ -227,6 +227,19 @@ impl Recent {
         }
     }
 
+    /// What the list calls this note: the name a person gave it, or the words derived for it.
+    ///
+    /// One rule, in one place, because three things ask it — the row that draws it, the search that
+    /// looks for it, and the rename that starts from it — and a note whose name is shown one way and
+    /// searched another is a note that cannot be found by looking at it.
+    pub fn shown_title(&self) -> String {
+        if self.title.is_empty() {
+            Recent::title_for(&self.folder)
+        } else {
+            self.title.clone()
+        }
+    }
+
     /// How long ago this was opened, in words.
     pub fn age(&self, now_ms: u64) -> String {
         age_label(now_ms.saturating_sub(self.opened_at))
@@ -344,11 +357,30 @@ impl Recents {
         self.entries.retain(|entry| entry.folder != folder);
     }
 
-    /// Records what a scan saw of one note: its counts, and the database they came from.
-    pub fn learn(&mut self, folder: &Path, stamp: Stamp, summary: Summary) {
+    /// Records what a scan saw of one note: everything the note says about itself, and the database
+    /// that answer came from.
+    ///
+    /// The name is included because it *can* change — a person renames a note, and a note carried in
+    /// from another machine arrives with a name already given to it — and this is the only place that
+    /// hears about it without the note being open.
+    pub fn learn(&mut self, folder: &Path, stamp: Stamp, facts: &Facts) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.folder == folder) {
             entry.stamp = Some(stamp);
-            entry.summary = summary;
+            entry.summary = facts.summary;
+            entry.document = facts.document.clone();
+            entry.title = facts.title.clone().unwrap_or_default();
+        }
+    }
+
+    /// Sets the name a person gave the note.
+    ///
+    /// The stamp is deliberately left alone: it is a description of the database as it was *read*, and
+    /// writing a name to the database changes it. Leaving the old stamp means the next scan notices
+    /// the difference and re-reads the note — which is how the list confirms the new name instead of
+    /// trusting this writer.
+    pub fn rename(&mut self, folder: &Path, title: &str) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.folder == folder) {
+            entry.title = title.to_string();
         }
     }
 
@@ -435,6 +467,50 @@ mod tests {
             .iter()
             .find(|entry| entry.folder == folder)
             .expect("the entry was recorded or adopted")
+    }
+
+    /// An entry takes the name the note gives it — whatever the note's database said — and wakes up
+    /// stale, so that the next scan confirms what was just written instead of trusting this writer.
+    #[test]
+    fn what_a_note_says_about_itself_reaches_the_entry() {
+        let mut recents = Recents::load_from(&scratch("learn"));
+        let dir = folder("learned");
+        recents.record(Recent::note(
+            dir.clone(),
+            None,
+            String::from("Blank sheet"),
+            None,
+            1_000,
+        ));
+
+        let stamp = Stamp {
+            mtime_ms: 5,
+            len: 40,
+        };
+        let facts = Facts {
+            title: Some(String::from("3\u{c7a5} \u{c694}\u{c57d}")),
+            document: Some(String::from("chapter-3.pdf")),
+            summary: Summary {
+                pages: 4,
+                strokes: 12,
+                sheet: Some((720.0, 1018.0)),
+            },
+        };
+
+        recents.learn(&dir, stamp, &facts);
+
+        let entry = found(&recents, &dir);
+        assert_eq!(entry.title, "3\u{c7a5} \u{c694}\u{c57d}", "the note's own name");
+        assert_eq!(entry.document.as_deref(), Some("chapter-3.pdf"));
+        assert_eq!(entry.summary.strokes, 12);
+        assert_eq!(entry.stamp, Some(stamp));
+
+        // A name given in the app reaches the entry too, and the stamp is left where it was: a name
+        // written to the database changes it, and the next scan is what notices.
+        recents.rename(&dir, "chapter three");
+        let entry = found(&recents, &dir);
+        assert_eq!(entry.title, "chapter three");
+        assert_eq!(entry.stamp, Some(stamp), "the entry is stale, by design");
     }
 
     /// A missing index is an empty list, not an error.

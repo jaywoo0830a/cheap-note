@@ -49,7 +49,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::error::{AppError, Result};
 use crate::ink::Stroke;
-use crate::store::NoteStore;
+use crate::store::{Facts, NoteStore};
 
 /// The database inside a note folder.
 pub const NOTE_DB: &str = "note.db";
@@ -147,6 +147,21 @@ pub fn notes_in(root: &Path) -> Result<Vec<PathBuf>> {
     // By name, so that two scans of an unchanged folder agree about the order they found things in.
     found.sort();
     Ok(found)
+}
+
+/// Gives the note in `folder` a name, and answers what the list should now show for it.
+///
+/// Done through the note's own database rather than the index, because the *note* owns its name: that
+/// is what makes a name survive being carried to another machine, and what makes the index a cache
+/// that can be deleted. Nothing about the ink is touched — this is one `meta` write.
+///
+/// The database is opened for the length of the write and closed. Opening a second connection to a
+/// note the app already has open is what SQLite is for: WAL means two connections never wait for each
+/// other, and this one only writes.
+pub fn set_title(folder: &Path, name: &str) -> Result<Facts> {
+    let mut store = NoteStore::open(&folder.join(NOTE_DB))?;
+    store.set_title(name)?;
+    store.facts()
 }
 
 /// A note: a folder, and the store inside it.
@@ -705,6 +720,39 @@ mod tests {
     /// A PDF that is not one, since nothing in this module parses it.
     fn a_pdf() -> Vec<u8> {
         b"%PDF-1.4 not really".to_vec()
+    }
+
+    /// Naming a note writes the name into the *note*, not into any list of notes.
+    ///
+    /// That is the whole point of where the name lives: a folder carried to another machine arrives
+    /// with its name already on it, and deleting the app's list of recent notes costs the order of a
+    /// list rather than the names of everything a person wrote.
+    #[test]
+    fn naming_a_note_writes_it_into_the_note() {
+        let root = scratch("name");
+        let document = root.join("chapter-3.pdf");
+        std::fs::write(&document, a_pdf()).expect("the document is written");
+
+        let folder = Note::placed_from(&document, &root.join("notes"))
+            .expect("a note")
+            .dir()
+            .to_path_buf();
+        let facts = set_title(&folder, "3\u{c7a5} \u{c694}\u{c57d}").expect("a name");
+
+        assert_eq!(facts.title.as_deref(), Some("3\u{c7a5} \u{c694}\u{c57d}"));
+        assert_eq!(facts.summary.pages, 1, "the counts come back with the name");
+
+        // A fresh connection agrees, and the folder keeps the name it was made with: the folder is
+        // the note's *identity*, and the name is only what it is called.
+        let store = NoteStore::open(&folder.join(NOTE_DB)).expect("the note");
+        assert_eq!(store.title().expect("a name").as_deref(), Some("3\u{c7a5} \u{c694}\u{c57d}"));
+        assert_eq!(
+            folder,
+            root.join("notes"),
+            "naming a note does not move it, and does not rename its folder"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A note on a document can be placed from the document alone.

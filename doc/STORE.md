@@ -85,6 +85,40 @@ The index is deliberately *not* kept in `cheap-note.settings.json` (§ the setti
 that file is looked up relative to the directory the program is started in: a list of what you last
 wrote in must not depend on where you were standing.
 
+### The name a person gives a note
+
+A note can be *named* — and the name lives in the note, in the same `meta` table as its open page and
+its paper size, under the key `title`:
+
+```text
+note.db  →  meta('title') = "3장 요약"      what the note is called (optional, UTF-8)
+```
+
+It is **what a note is called, never what it is**. The folder keeps the name it was made with — a
+digest of the path it was imported from, or the moment a blank sheet was created — because that name
+*is* the note's identity: it is what the index keys on, and what makes importing the same PDF twice
+find the same note rather than a second copy of it. Renaming therefore writes one `meta` row and
+touches nothing else: no ink, no folder, no page.
+
+Writing it there rather than in the index is the point of the whole cache argument above: a folder
+carried to another machine arrives with its name already on it, and deleting `recent.json` costs the
+order of a list rather than the names of everything a person wrote.
+
+**An empty name is a legitimate answer and the normal state.** Most notes have none, and the list
+derives one — the document's name first, then the folder's name with its digest taken off. That is
+why `title` may be absent, and why the app never *requires* a name to write one.
+
+**Where a name is given.** Two places, one word. In the list, *Rename* on the row's right-click menu
+puts a field in the row; on the sheet, double-clicking the note's title — the name at the left of the
+bar — turns it into a field in place. Both end in the same write: the note is renamed *first*, and the
+index is then told what the note answered, never the other way round. Enter keeps the name, Escape
+leaves it as it was.
+
+What is written is a *rule* rather than a validation (§ `store::normalize_title`): the text is
+trimmed, a newline becomes a space, runs of whitespace collapse, and the result is cut to 64
+**characters** — characters rather than bytes, so that a name in Korean is not cut twice as short and
+never in the middle of a syllable.
+
 ## 2. Where the ink goes, end to end
 
 ```text
@@ -129,7 +163,7 @@ There are only two things to remember about this pipeline:
 | `pages` | one page of the note | the page's position, its timestamps, its bounding box, and how many strokes its chunks hold |
 | `chunks` | up to 512 strokes, compressed | the *stored* ink: this is what a page is made of once it is closed |
 | `dirty_strokes` | exactly one stroke, compressed | freshly drawn ink waiting to become a chunk |
-| `meta` | one key and its value | the note's own facts: which page was open, the page list, the paper size, the document's name |
+| `meta` | one key and its value | the note's own facts: which page was open, the page list, the paper size, the document's name, and the name a person gave the note (§1) |
 | `page_strokes` *(view)* | one chunk **or** one dirty stroke | a page's ink, whole, in the order it was drawn — what a read runs against |
 
 A page with nothing on it has **no row** in `pages`. "The pages that hold ink" is therefore a query,

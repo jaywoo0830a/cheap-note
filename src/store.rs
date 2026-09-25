@@ -96,6 +96,18 @@ pub const META_DOCUMENT: &str = "document";
 /// carries its own copy of the document — so a note whose original file has gone is still whole.
 pub const META_SOURCE: &str = "source";
 
+/// The name a person gave the note, as UTF-8.
+///
+/// *Not* the folder's name, and never a path: the folder keeps the name it was made with — a digest of
+/// the file it came from, or the moment a blank sheet was made — and that name is the note's identity
+/// (it is what the index keys on, and what makes importing the same PDF twice find the same note). So
+/// a name given here is what the note is *called*, and the folder is what it *is*. An empty value
+/// means "no name", which is the normal state: the list derives one from the document, or from the
+/// blank sheet it started as.
+pub const META_TITLE: &str = "title";
+/// How many characters a name may have. Characters, not bytes: a name in Korean is a name.
+pub const TITLE_MAX: usize = 64;
+
 /// What a note holds, without reading any of its ink.
 ///
 /// Three numbers the home screen's list needs and can afford: the counts are answered by the
@@ -110,6 +122,22 @@ pub struct Summary {
     pub strokes: usize,
     /// The sheet the ink was written on, when the note remembers one.
     pub sheet: Option<(f32, f32)>,
+}
+
+/// What a note says about itself: the name a person gave it, the document it was made from, and how
+/// much is in it.
+///
+/// Gathered in one place and read in one go, because the home screen's list needs all of it to draw
+/// one row — a row is a name, where the note came from, and its counts. [`crate::recent`]'s entries
+/// cache exactly this, and re-read it only when the database has changed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Facts {
+    /// The name a person gave the note, if they gave it one.
+    pub title: Option<String>,
+    /// The name the document had, if the note remembers one.
+    pub document: Option<String>,
+    /// The counts, and the sheet.
+    pub summary: Summary,
 }
 
 /// One note's ink, in one SQLite file.
@@ -762,13 +790,43 @@ impl NoteStore {
             .and_then(|bytes| String::from_utf8(bytes).ok()))
     }
 
+    /// Gives the note a name, or takes its name away.
+    ///
+    /// An empty name is a legitimate answer, and means *no name*: the list derives one, which is what
+    /// most notes do. What is written is [`normalize_title`]'s answer, so a name that arrives from a
+    /// paste on two lines or is longer than a row becomes the name a person meant rather than an
+    /// error.
+    pub fn set_title(&mut self, name: &str) -> Result<()> {
+        self.set_meta(META_TITLE, normalize_title(name).as_bytes())
+    }
+
+    /// The name a person gave the note, if they gave it one.
+    pub fn title(&self) -> Result<Option<String>> {
+        Ok(self
+            .meta(META_TITLE)?
+            .filter(|bytes| !bytes.is_empty())
+            .and_then(|bytes| String::from_utf8(bytes).ok()))
+    }
+
+    /// Everything the note says about itself: its name, its document, and its counts.
+    ///
+    /// The read the home screen's list makes for a note that changed: three small `meta` reads and two
+    /// counts, and not a byte of ink. See [`Facts`] and [`Summary`].
+    pub fn facts(&self) -> Result<Facts> {
+        Ok(Facts {
+            title: self.title()?,
+            document: self.document()?,
+            summary: self.summary()?,
+        })
+    }
+
     /// What the note holds: its pages, its strokes, and the sheet they were written on.
     ///
     /// Two counts and one small read, and no blob is touched — which is what lets a list of forty
     /// notes be drawn without opening forty pages of ink (see [`crate::recent`]). The page count is
     /// the note's own *list* when it has one, because that is what a reader can turn to; a note
     /// written before the list existed has only the pages that hold ink.
-    pub fn summary(&self) -> Result<Summary> {
+    fn summary(&self) -> Result<Summary> {
         let (strokes, ink_pages): (i64, i64) = self
             .conn
             .query_row(
@@ -793,6 +851,47 @@ impl NoteStore {
             sheet: self.sheet()?,
         })
     }
+}
+
+/// What a name becomes when it is written down: one line, trimmed, and not too long.
+///
+/// A rule rather than a validation, deliberately: a name that arrives *wrong* — pasted on two lines,
+/// padded with spaces, longer than a row can show — should become the name a person meant, not an
+/// error to argue with. So a newline becomes a space, runs of whitespace collapse to one, the ends are
+/// trimmed, and the result is cut to [`TITLE_MAX`] characters.
+///
+/// Cutting on characters and not on bytes is the one part of this that is not cosmetic: a name in
+/// Korean is three bytes a syllable, so a byte cut would both shorten the name twice as fast and be
+/// able to split a syllable in half.
+fn normalize_title(name: &str) -> String {
+    let mut clean = String::with_capacity(name.len().min(TITLE_MAX * 4));
+    let mut letters = 0;
+    let mut space = false;
+
+    for character in name.chars() {
+        if character.is_whitespace() || character.is_control() {
+            space = true;
+            continue;
+        }
+
+        if space && letters > 0 {
+            if letters == TITLE_MAX {
+                break;
+            }
+            clean.push(' ');
+            letters += 1;
+        }
+        space = false;
+
+        if letters == TITLE_MAX {
+            break;
+        }
+
+        clean.push(character);
+        letters += 1;
+    }
+
+    clean
 }
 
 /// The row id of the page at `ord`, making the row if it is asked for and is not there yet.
@@ -1305,6 +1404,52 @@ mod tests {
         cleanup(&path);
     }
 
+    /// A note can be given a name, and the name is the row's word for it — never the folder's.
+    #[test]
+    fn a_note_can_be_named() {
+        let (mut store, path) = store_for("title");
+
+        assert_eq!(
+            store.facts().expect("the facts").title,
+            None,
+            "a new note has no name of its own, and the list derives one"
+        );
+
+        store.set_title("3\u{c7a5} \u{c694}\u{c57d}").expect("a name");
+        assert_eq!(
+            store.title().expect("a name").as_deref(),
+            Some("3\u{c7a5} \u{c694}\u{c57d}"),
+            "a name is written exactly as it is given"
+        );
+
+        // The rule is forgiving rather than a validation: what arrives *wrong* is made into the name
+        // a person meant.
+        store
+            .set_title("  two\nlines  and   spaces \n")
+            .expect("a name");
+        assert_eq!(
+            store.title().expect("a name").as_deref(),
+            Some("two lines and spaces"),
+            "one line, trimmed, and no runs of whitespace"
+        );
+
+        let long = "\u{ac00}".repeat(TITLE_MAX + 20);
+        store.set_title(&long).expect("a name");
+        let cut = store.title().expect("a name").expect("a name");
+        assert_eq!(
+            cut.chars().count(),
+            TITLE_MAX,
+            "cut on characters, not bytes: a Korean name is three bytes a syllable"
+        );
+        assert!(long.starts_with(&cut), "and cut from the end");
+
+        // Taking the name away is a legitimate answer rather than an error: the list derives one.
+        store.set_title("   \n  ").expect("no name");
+        assert_eq!(store.title().expect("no name"), None);
+
+        cleanup(&path);
+    }
+
     /// A note says what it holds without reading any of its ink: the counts, the pages it lists, and
     /// the sheet, and where it came from.
     #[test]
@@ -1312,7 +1457,7 @@ mod tests {
         let (mut store, path) = store_for("summary");
 
         assert_eq!(
-            store.summary().expect("a summary"),
+            store.facts().expect("the facts").summary,
             Summary {
                 pages: 1,
                 strokes: 0,
@@ -1328,7 +1473,7 @@ mod tests {
             .expect("ink");
         store.append(1, &[stroke(4, 80.0, 0)]).expect("ink");
 
-        let dirty = store.summary().expect("a summary");
+        let dirty = store.facts().expect("the facts").summary;
         assert_eq!(dirty.strokes, 3, "dirty rows are strokes as well");
         assert_eq!(dirty.pages, 2, "two pages hold ink");
 
@@ -1339,7 +1484,7 @@ mod tests {
         store.set_sheet(Some((794.0, 1123.0))).expect("a sheet");
         store.compact(0).expect("a compaction");
 
-        let listed = store.summary().expect("a summary");
+        let listed = store.facts().expect("the facts").summary;
         assert_eq!(listed.pages, 4, "the list, not the pages that happen to hold ink");
         assert_eq!(listed.strokes, 3, "compaction moved the ink, it did not lose it");
         assert_eq!(listed.sheet, Some((794.0, 1123.0)));

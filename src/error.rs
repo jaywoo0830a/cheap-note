@@ -2,7 +2,7 @@
 //!
 //! Every fallible boundary in the app names the thing that failed, because a single opaque
 //! string ("something went wrong") hides the difference between a missing `pdfium.dll`, a PDF
-//! that is encrypted, and a settings file that has a typo in it. `thiserror` builds the
+//! that is encrypted, and a note whose rows cannot be read. `thiserror` builds the
 //! `Display`/`Error` implementations from those names, and `anyhow` carries them to the
 //! boundary where the app decides what to show.
 
@@ -29,13 +29,17 @@ pub enum AppError {
     #[error("the PDF document could not be read: {0}")]
     Pdf(String),
 
-    /// The settings file could not be read from or written to disk.
-    #[error("the settings file could not be accessed: {0}")]
-    SettingsIo(#[from] std::io::Error),
+    /// The index of what has been opened could not be read from or written to disk.
+    ///
+    /// Named for the index rather than for "a file", because that is the only file this app writes
+    /// that is not a note: every setting lives *in* a note (see [`crate::settings`]), and a note is
+    /// written through [`crate::note`] and its own error. See [`crate::recent`].
+    #[error("the index of opened notes could not be accessed: {0}")]
+    IndexIo(#[from] std::io::Error),
 
-    /// The settings file is not the JSON this application writes.
-    #[error("the settings file is not valid: {0}")]
-    SettingsFormat(#[from] serde_json::Error),
+    /// The index of what has been opened is not the JSON this application writes.
+    #[error("the index of opened notes is not valid: {0}")]
+    IndexFormat(#[from] serde_json::Error),
 
     /// A saved note — the zip holding the PDF and the ink — could not be read or written.
     #[error("the note file could not be read or written: {0}")]

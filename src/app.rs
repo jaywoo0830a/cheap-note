@@ -61,6 +61,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{Disableable as _, Selectable as _};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::label::Label;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _};
@@ -259,6 +261,47 @@ fn file_label(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// What a note's name can be as far as a *file* name goes.
+///
+/// A name is free text — a person may type a slash, a colon, a question mark, or nothing at all — and a
+/// file name is not: the characters Windows refuses become dashes, a run of whitespace becomes one
+/// space, and a dot or a space at either end goes, because Windows quietly drops those itself and a name
+/// that comes back different from the one that was typed is worse than one that is visibly tidied.
+///
+/// Long names are cut to 64 *characters*, not bytes: a Korean name is three bytes a syllable, and
+/// cutting by bytes would halve it and split the last one.
+fn file_stem(title: &str) -> String {
+    const STEM_MAX: usize = 64;
+
+    let mut stem = String::with_capacity(title.len());
+    let mut last_was_space = false;
+
+    for character in title.chars() {
+        let character = match character {
+            // The reserved set, plus the control characters a paste can bring along.
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_control() => ' ',
+            c => c,
+        };
+
+        if character.is_whitespace() {
+            if !last_was_space {
+                stem.push(' ');
+                last_was_space = true;
+            }
+            continue;
+        }
+
+        last_was_space = false;
+        stem.push(character);
+    }
+
+    let stem = stem.trim().trim_end_matches('.').trim_end();
+    let cut: String = stem.chars().take(STEM_MAX).collect();
+
+    cut.trim_end().to_string()
+}
+
 /// Whether the pen has been quiet long enough to spend a rasterisation on it.
 ///
 /// A free function for the same reason [`status_due`] and [`display_due`] are: it is a decision,
@@ -426,6 +469,36 @@ pub struct NoteApp {
     status_at: Instant,
     /// The last thing worth telling the user.
     message: String,
+    /// What the note on the sheet is called — its own name, or one the list would derive.
+    ///
+    /// Kept rather than asked for every frame: the note's name lives in the database (see
+    /// [`crate::store::META_TITLE`]), and a read per frame is a read per frame. It is set when a note
+    /// is opened and when one is renamed.
+    note_title: String,
+    /// The window's title as last set, so that it is set when it *changes* rather than every frame.
+    window_title: String,
+    /// The folder whose name is being typed on the sheet, if any.
+    ///
+    /// The *folder* rather than the note, for the same reason the list keeps the folder: it is what the
+    /// note is called in its own database (see [`crate::store::META_TITLE`]).
+    naming: Option<PathBuf>,
+    /// Whether a name has been asked for, and the field has not been put up yet.
+    ///
+    /// The bar's button has no window to focus a field with, so the ask is kept and carried out on the
+    /// frame that has one — the same arrangement the list uses for its own field.
+    naming_asked: bool,
+    /// The field the name is typed into on the sheet.
+    name_input: Entity<InputState>,
+    /// The keyboard the sheet gets back when the field goes away.
+    ///
+    /// A screen with nothing focused still hears the keys it paints (see [`Self::note_key_down`]), but a
+    /// *field* that has just gone away is a window that thinks something is still focused — so finishing
+    /// a name puts the focus somewhere real.
+    sheet_focus: FocusHandle,
+    /// What the field being typed into says — Enter keeps the name, a click away leaves it as it was.
+    ///
+    /// Held rather than dropped: dropping a subscription is how a listener stops listening.
+    _name_events: Subscription,
     /// The bar's paper-size chooser.
     ///
     /// A `Select` rather than a row of buttons, and it is the *only* thing that changes
@@ -493,6 +566,16 @@ impl NoteApp {
             cx,
         );
 
+        // The field a note's name is typed into on the sheet, and the two things the field can say:
+        // Enter keeps the name, and losing focus — clicking anywhere else — leaves it as it was.
+        let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("A name"));
+        let _name_events = cx.subscribe_in(
+            &name_input,
+            window,
+            |app, _, event: &InputEvent, window, cx| app.note_name_event(event, window, cx),
+        );
+        let sheet_focus = cx.focus_handle();
+
         let mut app = NoteApp {
             settings,
             settings_path,
@@ -526,6 +609,13 @@ impl NoteApp {
             status: String::new(),
             status_at: Instant::now(),
             message,
+            note_title: String::new(),
+            window_title: String::new(),
+            naming: None,
+            naming_asked: false,
+            name_input,
+            sheet_focus,
+            _name_events,
             sheet_select,
             rule_select,
             home: Home::open(window, cx),
@@ -762,6 +852,13 @@ impl NoteApp {
     /// The transform comes from the last frame's sheet rather than from the window: a reading
     /// belongs on the sheet the user was looking at when the nib moved.
     fn consume_ink(&mut self, samples: &[pen_windows::PenSample]) -> bool {
+        // The pen is not a pen while something is in front of the sheet: a name being typed must not
+        // leave a line across the page behind the field, and the list of recent notes is drawn over a
+        // sheet nobody can see — a stroke laid there would go into a note the user is not looking at.
+        if self.naming.is_some() || self.home_is_open() {
+            return false;
+        }
+
         let transform = self.sheet.transform(self.scale);
         let _timed = measure(&self.timings.ink);
 
@@ -1717,24 +1814,221 @@ impl NoteApp {
         .detach();
     }
 
-    /// The home screen's keyboard: the chords that are the app's, and nothing else.
+    /// The home screen's keyboard: the chords that are the app's.
     ///
     /// The list is this screen's keyboard — arrows, Enter, Escape, and typing into its search box —
     /// and it has the focus, which [`Home::settle`] gives it on the frame after the screen appears.
-    /// What is left here is what the list cannot know: the commands that belong to the app wherever
-    /// it is.
-    pub(crate) fn home_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    /// What is left here is what the list cannot know: the commands that belong to the app wherever it
+    /// is. Everything a *row* can do beyond being opened is on the row's right-click menu, which is
+    /// where a mouse reaches it and where the operations that touch the list are named.
+    pub(crate) fn home_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let keystroke = &event.keystroke;
-        if !keystroke.modifiers.control {
+
+        if keystroke.modifiers.control {
+            match keystroke.key.as_str() {
+                "n" => self.new_blank_sheet(cx),
+                "o" => self.prompt_for_pdf(cx),
+                "s" => self.save(cx),
+                _ => {}
+            }
             return;
         }
 
-        match keystroke.key.as_str() {
-            "n" => self.new_blank_sheet(cx),
-            "o" => self.prompt_for_pdf(cx),
-            "s" => self.save(cx),
-            _ => {}
+        if keystroke.modifiers.alt || keystroke.modifiers.platform {
+            return;
         }
+
+        // A rename in progress owns the keyboard: Escape abandons it, and everything else is the
+        // field's own business (Enter arrives as the field's event; see [`Self::home_name_event`]).
+        if keystroke.key.as_str() == "escape" && self.home.is_renaming(cx) {
+            self.home.stop_rename(window, cx);
+            self.touch_status();
+            cx.notify();
+        }
+    }
+
+    /// Starts naming the row a menu was opened on.
+    pub(crate) fn rename_entry(&mut self, entry: Recent, cx: &mut Context<Self>) {
+        self.home.ask_rename(&entry.folder, cx);
+        self.message = String::from("type a name, Enter keeps it, Esc leaves it as it was");
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// What the name field says: Enter keeps the name, and clicking away leaves it as it was.
+    ///
+    /// A name half typed is not a name, and a row left holding a field that nothing focuses is a row
+    /// that has to be clicked before it can be used again — so both endings are endings.
+    pub(crate) fn home_name_event(
+        &mut self,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::PressEnter { .. } => self.commit_rename(window, cx),
+            InputEvent::Blur => {
+                if self.home.is_renaming(cx) {
+                    self.home.stop_rename(window, cx);
+                    cx.notify();
+                }
+            }
+            InputEvent::Change | InputEvent::Focus => {}
+        }
+    }
+
+    /// Keeps the name that was typed into the list's field: the note is renamed, and the list is told
+    /// what the note said.
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((folder, name)) = self.home.take_rename(cx) else {
+            return;
+        };
+
+        self.keep_name(folder, &name, cx);
+        // The field goes away with the name, and the keyboard goes back to the list: the row is a row
+        // again, and a window with nothing focused is a window whose arrows go nowhere.
+        self.home.stop_rename(window, cx);
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// Keeps the name that was typed into the sheet's field: the same thing, from the other screen.
+    ///
+    /// A note opened by a double click is the note a person is *in*, and naming it is the same act
+    /// whether the list is in front of it or not — which is why both fields end here.
+    fn commit_note_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(folder) = self.naming.take() else {
+            return;
+        };
+
+        let name = self.name_input.read(cx).value().to_string();
+        self.keep_name(folder, &name, cx);
+        // The field goes away with the name; the keyboard has to go somewhere, and on the sheet that is
+        // the sheet itself.
+        self.sheet_focus.focus(window, cx);
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// Asks for the note on the sheet to be renamed, on the next frame.
+    ///
+    /// Asked for, rather than done: focusing a field needs the window, and this is reached from a click
+    /// — which has a context and no window. A rename that is *already* being typed is left alone, so
+    /// that a second click on the title cannot clear a half-typed name.
+    fn ask_note_name(&mut self, cx: &mut Context<Self>) {
+        if self.naming.is_some() {
+            return;
+        }
+
+        if self.note.is_none() {
+            self.report(String::from(
+                "there is nothing to rename yet \u{2014} the first stroke makes the note",
+            ));
+            return;
+        }
+
+        self.naming_asked = true;
+        cx.notify();
+    }
+
+    /// Puts the name field in the bar, holding the name the note shows now.
+    ///
+    /// What it holds is what the bar says the note is called, which may be the name derived from the
+    /// folder ("Blank sheet", "chapter-3") — a person renaming a note is editing the words they can see,
+    /// not an empty box they have to recreate them in.
+    fn start_note_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(note) = self.note.as_ref() else {
+            return;
+        };
+
+        let folder = note.dir().to_path_buf();
+        let written = self.note_title.clone();
+
+        self.name_input.update(cx, |input, cx| {
+            input.set_value(written, window, cx);
+            // Selected, so that the first character typed replaces what is showing.
+            input.select_all(window, cx);
+            input.focus_handle(cx).focus(window, cx);
+        });
+
+        self.naming = Some(folder);
+        self.message = String::from("type a name, Enter keeps it, Esc leaves it as it was");
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// Leaves the name as it was, and gives the keyboard back to the sheet.
+    fn stop_note_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.naming.take().is_none() {
+            return;
+        }
+
+        self.sheet_focus.focus(window, cx);
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// What the sheet's name field says: Enter keeps the name, and clicking away leaves it as it was.
+    pub(crate) fn note_name_event(
+        &mut self,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::PressEnter { .. } => self.commit_note_name(window, cx),
+            InputEvent::Blur => self.stop_note_name(window, cx),
+            InputEvent::Change | InputEvent::Focus => {}
+        }
+    }
+
+    /// The name a person gave a note, wherever it was typed.
+    ///
+    /// The note is renamed *first*, and the list is told what the note answered — never the other way
+    /// round. The index is a cache of what the notes say, and a cache that runs ahead of what it
+    /// describes is how a name goes missing from a note that has it.
+    fn keep_name(&mut self, folder: PathBuf, name: &str, cx: &mut Context<Self>) {
+        match note::set_title(&folder, name) {
+            Ok(facts) => {
+                // What the *note* says, not what the list would show for it: an unnamed note is written
+                // to the index as unnamed, and the list derives the words at the moment it draws them.
+                // Storing the derived words would freeze them — a row that says "Blank sheet" because
+                // that is what it was called the day it was made, not because that is what it is.
+                let named = facts.title.clone().unwrap_or_default();
+                let shown = if named.is_empty() {
+                    Recent::title_for(&folder)
+                } else {
+                    named.clone()
+                };
+
+                if let Err(error) = self.home.rename(&folder, &named) {
+                    self.message =
+                        format!("the name was kept, but the list could not be written: {error}");
+                } else if named.is_empty() {
+                    self.message = format!("{shown} has no name of its own again");
+                } else {
+                    self.message = format!("named {named}");
+                }
+
+                // The note may be the one on the sheet: its name is what the window says, and what the
+                // file it is written out as is called.
+                if self
+                    .note
+                    .as_ref()
+                    .is_some_and(|note| note.dir() == folder.as_path())
+                {
+                    self.note_title = shown;
+                }
+            }
+            Err(error) => self.report(format!("{error}")),
+        }
+
+        cx.notify();
     }
 
     /// Takes an entry out of the list. The note is *not* deleted.
@@ -1746,8 +2040,8 @@ impl NoteApp {
         match self.home.forget(&entry.folder) {
             Ok(()) => {
                 self.message = format!(
-                    "forgot {} — the note is still in {}",
-                    entry.title,
+                    "forgot {} \u{2014} the note is still in {}",
+                    entry.shown_title(),
                     entry.folder.display()
                 );
             }
@@ -1824,13 +2118,24 @@ impl NoteApp {
     ///
     /// `Escape` leaves the note rather than the window: nothing can be lost by walking away from a
     /// note — the ink is in it as it is laid — and a screen that lists what you were writing is the
-    /// one thing an app like this should be one keystroke away from.
-    fn note_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    /// one thing an app like this should be one keystroke away from. While a name is being typed,
+    /// Escape is spent on that instead: an open field that Escape did not close would leave a person
+    /// typing into a box they cannot leave.
+    fn note_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let keystroke = &event.keystroke;
 
         if !keystroke.modifiers.control {
             if keystroke.key == "escape" {
-                self.show_home(cx);
+                if self.naming.is_some() {
+                    self.stop_note_name(window, cx);
+                } else {
+                    self.show_home(cx);
+                }
             }
             return;
         }
@@ -1845,9 +2150,11 @@ impl NoteApp {
 
     /// Remembers what was just opened, so the home screen offers it next time.
     ///
-    /// The title is the document's own name, or the note's folder turned back into words — a note
-    /// made on a blank sheet is named after the moment it was made. The *folder* is what an entry
-    /// opens; the source path is a convenience, and no ink depends on it. See [`crate::recent`].
+    /// The title is the name a person gave the note if they gave it one (see
+    /// [`crate::store::META_TITLE`]), then the document's own name, then the note's folder turned back
+    /// into words — a note made on a blank sheet is named after the moment it was made. The *folder*
+    /// is what an entry opens; the source path is a convenience, and no ink depends on it. See
+    /// [`crate::recent`].
     fn remember_opened(&mut self, source: Option<&Path>) {
         let Some(note) = &self.note else {
             return;
@@ -1861,14 +2168,22 @@ impl NoteApp {
         let source = source
             .map(Path::to_path_buf)
             .or_else(|| note.store().source().ok().flatten().map(PathBuf::from));
-        let title = document
-            .as_deref()
-            .map(|name| match name.rsplit_once('.') {
-                Some((stem, _)) if !stem.is_empty() => stem.to_string(),
-                _ => name.to_string(),
-            })
-            .unwrap_or_else(|| Recent::title_for(&folder));
+        let title = note
+            .store()
+            .title()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| {
+                document
+                    .as_deref()
+                    .map(|name| match name.rsplit_once('.') {
+                        Some((stem, _)) if !stem.is_empty() => stem.to_string(),
+                        _ => name.to_string(),
+                    })
+                    .unwrap_or_else(|| Recent::title_for(&folder))
+            });
 
+        self.note_title = title.clone();
         let entry = Recent::note(folder, source, title, document, recent::now_ms());
 
         if let Err(error) = self.home.record(entry) {
@@ -1931,7 +2246,17 @@ impl NoteApp {
     }
 
     /// The name a note about the open document should suggest.
+    ///
+    /// The name a person gave the note comes first, because that is the name the note is *called*: a
+    /// file written out of it is the note's public shape, and a person who named a note "3장 요약" is
+    /// looking for `3장 요약.zip`. With no name it falls back to the document's own, and with neither —
+    /// a blank sheet nobody has named — to the word "note".
     fn note_stem(&self) -> String {
+        let named = file_stem(&self.note_title);
+        if !named.is_empty() {
+            return named;
+        }
+
         if !self.pdf.is_loaded() {
             return String::from("note");
         }
@@ -2440,7 +2765,7 @@ impl NoteApp {
             .gap_1()
             .w_full()
             .text_color(muted)
-            .child(self.document_chip(cx))
+            .child(self.title_chip(cx))
             .child(toolbar_divider(hairline))
             .children(tools)
             .child(div().flex_1())
@@ -2449,42 +2774,61 @@ impl NoteApp {
             .children(switches)
     }
 
-    /// The document's name, at the left of the bar, where a notebook shows its title.
+    /// The note's name, at the left of the bar, where a notebook shows its title.
     ///
-    /// A label and not a button: this app has no library to go back to, and a control that does
-    /// nothing is worse than no control. With nothing open it says so — the one place the interface
-    /// explains itself, because a blank sheet is otherwise indistinguishable from a page of a
-    /// document that has not finished rendering.
-    fn document_chip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// This is the *title*: the name a person gave the note, or the one the app derived from the folder
+    /// while it has none ("chapter-3", "Blank sheet"). The file the note was written on is still in the
+    /// status line, because a note that was renamed still came from somewhere.
+    ///
+    /// Double-clicking it is the whole of the way in — there is no button beside it, because there is no
+    /// second gesture to offer: every notebook turns its own title into a field when it is double-clicked,
+    /// and a control that does what the title already does is a control nobody uses. While a name is being
+    /// typed the field is *here*, in place: a name is edited where it is read.
+    fn title_chip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, foreground) = (theme.muted_foreground, theme.foreground);
-        let open = self.pdf.is_loaded();
-        let name = if open {
-            self.pdf.file_name()
+        let named = !self.note_title.is_empty();
+
+        let title: AnyElement = if self.naming.is_some() {
+            Input::new(&self.name_input)
+                .small()
+                .w(px(220.0))
+                .into_any_element()
+        } else if named {
+            Label::new(self.note_title.clone()).into_any_element()
         } else {
-            String::from("Untitled note")
+            Label::new("Untitled note").text_color(muted).into_any_element()
         };
 
         div()
+            .id("note-title")
             .flex()
             .flex_row()
             .items_center()
             .gap_1p5()
             .pl(px(4.0))
             .pr_1()
-            // A long file name is cut rather than wrapped or allowed to push the commands off the
-            // row: the bar has a fixed height, and the name is the one piece of text here whose
-            // length the user chooses.
+            // A long name is cut rather than wrapped or allowed to push the commands off the row: the
+            // bar has a fixed height, and the name is the one piece of text here whose length the user
+            // chooses.
             .max_w(px(260.0))
-            .text_color(if open { foreground } else { muted })
+            .text_color(if named { foreground } else { muted })
             .child(div().text_size(px(15.0)).child(IconName::BookOpen))
             .child(
                 div()
                     .text_size(px(13.0))
                     .whitespace_nowrap()
                     .truncate()
-                    .child(name),
+                    .child(title),
             )
+            .on_click(cx.listener(|app, event: &ClickEvent, _, cx| {
+                // Two clicks on a name are a person saying "this word, right here". A single click is
+                // nothing: the title is not a control, and a label that acts on one click is a label
+                // that acts on every stray click.
+                if event.click_count() >= 2 {
+                    app.ask_note_name(cx);
+                }
+            }))
     }
 
     /// The bar's second row: the page's commands, the sheet's size, what is printed on it, and its
@@ -2901,11 +3245,31 @@ impl Render for NoteApp {
         // The counters describe one frame, so this frame's are its own.
         self.timings.start_frame();
 
+        // A name that was asked for by the bar's button is put up here, on the frame that has a window
+        // to put the keyboard in the field with.
+        if self.naming_asked {
+            self.naming_asked = false;
+            self.start_note_name(window, cx);
+        }
+
         // The monitor's mode, re-read on a slow clock. It costs a user-mode query at most once
         // every couple of seconds, it cannot happen anywhere but here — this is the only place the
         // window is in hand — and a change in it resets the measurement, so the frames that follow
         // are the new display's.
         self.reprobe_display(window);
+
+        // The window's own title bar is the one place a person can see, from outside the app, which
+        // note they are in — and it is set when it *changes*, not every frame.
+        let wanted = if self.home_is_open() || self.note_title.is_empty() {
+            String::from("cheap-note")
+        } else {
+            format!("{} \u{2014} cheap-note", self.note_title)
+        };
+
+        if self.window_title != wanted {
+            window.set_window_title(&wanted);
+            self.window_title = wanted;
+        }
 
         // The scale factor is what turns a physical pen pixel into a logical one, so it is
         // captured before anything that depends on it.
@@ -3030,8 +3394,14 @@ impl Render for NoteApp {
             // here rather than as bindings because a screen with nothing focused is a screen whose
             // keys have to be caught as they are painted — see [`crate::home`].
             .on_key_down(
-                cx.listener(|app, event: &KeyDownEvent, _, cx| app.note_key_down(event, cx)),
+                cx.listener(|app, event: &KeyDownEvent, window, cx| {
+                    app.note_key_down(event, window, cx)
+                }),
             )
+            // The sheet is what the keyboard goes back to when a field goes away: a name field that has
+            // just closed is a window that still thinks something is focused, and keys would go to a
+            // box that is no longer drawn.
+            .track_focus(&self.sheet_focus)
             .child(
                 canvas(
                     |_, _, _| (),
@@ -3323,7 +3693,8 @@ mod tests {
     // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
     // scope and shadow the attribute this module needs.
     use super::{
-        display_due, file_label, notch_in_pixels, pdf_render_due, pinch_zoom_factor, quantise_width,
+        display_due, file_label, file_stem, notch_in_pixels, pdf_render_due, pinch_zoom_factor,
+        quantise_width,
         sheet_matches, solid_path, status_due, wheel_pan, wheel_zoom_factor, DISPLAY_INTERVAL,
         PDF_QUIET_INTERVAL, STATUS_INTERVAL, WHEEL_LINE_HEIGHT, WHEEL_LINES_PER_NOTCH,
         WHEEL_ZOOM_STEP,
@@ -3588,6 +3959,28 @@ mod tests {
             "chapter-3.zip"
         );
         assert_eq!(file_label(std::path::Path::new("note.zip")), "note.zip");
+    }
+
+    /// A name a person gave a note becomes a file name: what Windows refuses becomes a dash, a run of
+    /// whitespace becomes one space, and what a file system would quietly drop is dropped *visibly*.
+    #[test]
+    fn a_note_s_name_becomes_a_file_name() {
+        assert_eq!(file_stem("3\u{c7a5} \u{c694}\u{c57d}"), "3\u{c7a5} \u{c694}\u{c57d}");
+        assert_eq!(file_stem("  chapter   3  "), "chapter 3");
+        assert_eq!(file_stem("a/b\\c:d*e?f\"g<h>i|j"), "a-b-c-d-e-f-g-h-i-j");
+        assert_eq!(file_stem("report."), "report", "a trailing dot is dropped");
+        assert_eq!(file_stem("..."), "", "and a name that was only dots is nothing");
+        assert_eq!(
+            file_stem("\u{2026}"),
+            "\u{2026}",
+            "a character a file system is happy with is left alone"
+        );
+        assert_eq!(file_stem(""), "");
+        assert_eq!(
+            file_stem(&"\u{c7a5}".repeat(80)).chars().count(),
+            64,
+            "a long name is cut by characters, so a Korean one is not halved"
+        );
     }
 
     /// A page is rasterised when the pen stops, not while it is writing.

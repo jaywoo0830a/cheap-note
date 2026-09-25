@@ -64,6 +64,10 @@ use crate::settings::Settings;
 /// The zoom is *not* applied to a point's width: widths stay in paper units, so a stroke keeps its
 /// weight relative to the page it was written on, and zooming in enlarges it along with everything
 /// else printed there.
+///
+/// The **paper's own size** is carried too, because "on the paper" has to be answerable here rather
+/// than guessed at downstream: the canvas is the whole window, with the sheet a rectangle inside it,
+/// so the desk beside the page is paintable — and a reading that lands on the desk is not ink.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InkTransform {
     /// Physical pixels to logical pixels: the window's DPI scale factor.
@@ -72,6 +76,8 @@ pub struct InkTransform {
     pub zoom: f32,
     /// The sheet's top-left corner, in window logical pixels.
     pub origin: (f32, f32),
+    /// The paper's own size, in sheet units. `(0.0, 0.0)` means "no paper": see [`Self::has_paper`].
+    pub paper: (f32, f32),
 }
 
 impl Default for InkTransform {
@@ -82,11 +88,15 @@ impl Default for InkTransform {
 
 impl InkTransform {
     /// The reading's own coordinates: what a test with no window wants.
+    ///
+    /// It has no paper — see [`Self::has_paper`] — so every reading is on the sheet by construction.
+    /// A test that wants the paper's edges sets them itself.
     pub const fn identity() -> Self {
         InkTransform {
             scale: 1.0,
             zoom: 1.0,
             origin: (0.0, 0.0),
+            paper: (0.0, 0.0),
         }
     }
 
@@ -102,6 +112,38 @@ impl InkTransform {
             (pixel.0 / scale - self.origin.0) / zoom,
             (pixel.1 / scale - self.origin.1) / zoom,
         )
+    }
+
+    /// Whether a point in the sheet's own coordinates is on the paper.
+    ///
+    /// A point that is nowhere — a NaN — is not on it either.
+    pub fn on_paper(&self, (x, y): (f32, f32)) -> bool {
+        if !self.has_paper() {
+            return true;
+        }
+
+        (0.0..=self.paper.0).contains(&x) && (0.0..=self.paper.1).contains(&y)
+    }
+
+    /// The nearest point *on* the paper to a point that is off it.
+    ///
+    /// What a line that runs off the page gets: pulled back to the border rather than dropped, which
+    /// is what clipping to a page looks like — the ink stops at the edge and runs along it, rather
+    /// than jumping from where the pen left the paper to wherever it came back.
+    pub fn onto_paper(&self, (x, y): (f32, f32)) -> (f32, f32) {
+        if !self.has_paper() {
+            return (x, y);
+        }
+
+        (x.clamp(0.0, self.paper.0), y.clamp(0.0, self.paper.1))
+    }
+
+    /// Whether there is a paper to be off.
+    ///
+    /// A sheet with no size is the transform for a test with no window (see [`Self::identity`]): it
+    /// has no edges, so nothing is refused and nothing is pulled back.
+    fn has_paper(&self) -> bool {
+        self.paper.0 > 0.0 && self.paper.1 > 0.0
     }
 }
 
@@ -370,6 +412,9 @@ pub struct InkStats {
     pub kept_points: u64,
     /// Points dropped because they were too close to the previous kept point.
     pub resampled: u64,
+    /// Readings that were not on the paper: a nib that came down beside the sheet, or a line pulled
+    /// back to its edge. Zero for every drawing that stayed on the page.
+    pub off_paper: u64,
     /// Strokes the eraser removed.
     pub erased_strokes: u64,
 }
@@ -587,9 +632,10 @@ impl InkDocument {
     /// Feeds a batch of pen readings to the model.
     ///
     /// `transform` is how a physical reading becomes a place on the sheet: the window's DPI scale,
-    /// the sheet's zoom and where the sheet is drawn. All three are applied here, once, so that
-    /// nothing downstream has to know about any of them — the ink, the eraser and the geometry all
-    /// work in the sheet's own coordinates.
+    /// the sheet's zoom, where the sheet is drawn, and how large the paper is. All of them are
+    /// applied here, once, so that nothing downstream has to know about any of them — the ink, the
+    /// eraser and the geometry all work in the sheet's own coordinates, and everything they produce
+    /// is *on the paper*, because a reading that is not on it is not ink.
     ///
     /// Returns whether anything changed, which is what the caller uses to decide whether a
     /// repaint is worth scheduling.
@@ -604,7 +650,16 @@ impl InkDocument {
         for sample in samples {
             self.stats.readings += 1;
 
-            let (x, y) = transform.sheet_point((sample.pixel.x, sample.pixel.y));
+            // Where the reading lands on the sheet, and whether that is on the *paper* inside it.
+            // The canvas is the whole window, so a reading beside the page lands on the desk — and
+            // before this was asked, a nib that came down there drew on the desk and *saved* it:
+            // ink at coordinates the page has no room for and no reader would ever see.
+            let mapped = transform.sheet_point((sample.pixel.x, sample.pixel.y));
+            let on_paper = transform.on_paper(mapped);
+            // A line that leaves the paper is pulled back to its edge rather than dropped: that is
+            // the part of the line the page can hold, and stopping at the last point *on* it would
+            // leave the stroke to jump across the page when the pen came back.
+            let (x, y) = transform.onto_paper(mapped);
 
             match sample.phase {
                 PenPhase::Down => {
@@ -612,32 +667,46 @@ impl InkDocument {
                     // drew is kept, and an `Up` that never arrived is no reason to lose it.
                     self.finish_open();
 
-                    let tool = if self.mode == Tool::Eraser || sample.eraser || sample.inverted {
-                        Tool::Eraser
+                    // A nib that comes down on the desk opens nothing: clipping cannot help there,
+                    // because there is no line to clip yet, and starting one would put a dot on the
+                    // nearest edge of the paper — ink at a place nobody wrote.
+                    if !on_paper {
+                        self.stats.off_paper += 1;
+                        changed = true;
                     } else {
-                        Tool::Pen
-                    };
-                    self.active_pointer = Some(sample.id);
-                    self.active_tool = tool;
+                        let tool = if self.mode == Tool::Eraser || sample.eraser || sample.inverted {
+                            Tool::Eraser
+                        } else {
+                            Tool::Pen
+                        };
+                        self.active_pointer = Some(sample.id);
+                        self.active_tool = tool;
 
-                    match tool {
-                        Tool::Eraser => {
-                            self.last_erase = None;
-                            self.erase_at(x, y, settings);
+                        match tool {
+                            Tool::Eraser => {
+                                self.last_erase = None;
+                                self.erase_at(x, y, settings);
+                            }
+                            Tool::Pen => {
+                                let width = settings.width_for_pressure(sample.applied_pressure());
+                                // The pen in hand is stamped into the stroke: it is chosen at the
+                                // moment the nib goes down, and it stays with that line for good.
+                                self.open = Some(Stroke::new(
+                                    InkPoint::new(x, y, width),
+                                    settings.ink_color,
+                                ));
+                            }
                         }
-                        Tool::Pen => {
-                            let width = settings.width_for_pressure(sample.applied_pressure());
-                            // The pen in hand is stamped into the stroke: it is chosen at the
-                            // moment the nib goes down, and it stays with that line for good.
-                            self.open =
-                                Some(Stroke::new(InkPoint::new(x, y, width), settings.ink_color));
-                        }
+
+                        changed = true;
                     }
-                    changed = true;
                 }
 
                 PenPhase::Move => {
                     if self.active_pointer == Some(sample.id) {
+                        if !on_paper {
+                            self.stats.off_paper += 1;
+                        }
                         match self.active_tool {
                             Tool::Eraser => self.erase_at(x, y, settings),
                             Tool::Pen => self.push_point(x, y, sample, settings, false),
@@ -648,6 +717,9 @@ impl InkDocument {
 
                 PenPhase::Up => {
                     if self.active_pointer == Some(sample.id) {
+                        if !on_paper {
+                            self.stats.off_paper += 1;
+                        }
                         if self.active_tool == Tool::Pen {
                             // The lift is where the pen left the paper, so it is the stroke's
                             // last point regardless of what the resampler would prefer.
@@ -1007,6 +1079,14 @@ mod tests {
         }
     }
 
+    /// A transform for a sheet that is *paper*: A4, at 1:1, with its edges where the page's are.
+    fn papered() -> InkTransform {
+        InkTransform {
+            paper: (595.0, 842.0),
+            ..InkTransform::identity()
+        }
+    }
+
     /// The edges are what make a stroke: a down, positions, and an up.
     #[test]
     fn a_down_and_up_make_one_stroke() {
@@ -1099,6 +1179,89 @@ mod tests {
 
         assert_eq!(ink.stroke_count(), 0);
         assert!(ink.is_blank());
+    }
+
+    /// The paper's edges are the edges of the ink: a reading outside them is off the paper, and the
+    /// nearest point that *is* on it is the border.
+    #[test]
+    fn the_paper_has_edges() {
+        let t = papered();
+
+        assert!(t.on_paper((0.0, 0.0)), "the corner is on the paper");
+        assert!(t.on_paper((595.0, 842.0)), "so is the far one");
+        assert!(!t.on_paper((-0.5, 10.0)), "a point past the left edge is not");
+        assert!(!t.on_paper((10.0, 842.5)), "nor one past the bottom");
+        assert!(!t.on_paper((f32::NAN, 10.0)), "and a point that is nowhere is not");
+
+        assert_eq!(
+            t.onto_paper((-50.0, 900.0)),
+            (0.0, 842.0),
+            "the nearest point on the paper is a corner"
+        );
+        assert_eq!(
+            t.onto_paper((300.0, 400.0)),
+            (300.0, 400.0),
+            "a point that is already on it does not move"
+        );
+
+        // A transform with no paper — the one a test without a window uses — has no edges at all.
+        let none = InkTransform::identity();
+        assert!(none.on_paper((f32::MAX, f32::MIN)));
+        assert_eq!(none.onto_paper((-10.0, -10.0)), (-10.0, -10.0));
+    }
+
+    /// A nib that comes down beside the page draws nothing.
+    ///
+    /// The canvas is the window and the sheet is a rectangle inside it, so the desk is paintable:
+    /// without this, a tap beside the page became a stroke — and the ink went into the note, at
+    /// coordinates the page has no room for and no reader would ever see.
+    #[test]
+    fn a_nib_that_comes_down_off_the_paper_draws_nothing() {
+        let mut ink = InkDocument::default();
+        let s = settings();
+        let t = papered();
+
+        // Down on the desk and then dragged across the page: no stroke was opened, so the drag across
+        // it is not one either.
+        ink.consume(&[reading(7, PenPhase::Down, 900.0, 400.0, Some(0.5))], &t, &s);
+        ink.consume(&[reading(7, PenPhase::Move, 300.0, 400.0, Some(0.5))], &t, &s);
+        ink.consume(&[reading(7, PenPhase::Up, 300.0, 400.0, None)], &t, &s);
+
+        assert_eq!(ink.stroke_count(), 0, "the desk is not paper");
+        assert!(ink.open().is_none());
+        assert_eq!(ink.stats().off_paper, 1, "and the nib that landed there is counted");
+    }
+
+    /// A line that leaves the paper is pulled back to its edge, rather than drawn beside it.
+    #[test]
+    fn a_line_that_leaves_the_paper_stops_at_its_edge() {
+        let mut ink = InkDocument::default();
+        let s = settings();
+        let t = papered();
+
+        ink.consume(&[reading(7, PenPhase::Down, 100.0, 100.0, Some(0.5))], &t, &s);
+        // Past the right edge by 300 px, then back on the page at the same height.
+        ink.consume(&[reading(7, PenPhase::Move, 900.0, 100.0, Some(0.5))], &t, &s);
+        ink.consume(&[reading(7, PenPhase::Move, 400.0, 100.0, Some(0.5))], &t, &s);
+        ink.consume(&[reading(7, PenPhase::Up, 400.0, 100.0, None)], &t, &s);
+
+        let strokes = ink.finished();
+        assert_eq!(strokes.len(), 1);
+        let xs: Vec<f32> = strokes[0].points.iter().map(|p| p.x).collect();
+
+        assert!(
+            strokes[0].points.iter().all(|p| t.on_paper((p.x, p.y))),
+            "every point of it is on the paper: {xs:?}"
+        );
+        assert!(
+            xs.contains(&t.paper.0),
+            "the reading past the edge came back as the edge itself: {xs:?}"
+        );
+        assert_eq!(
+            ink.stats().off_paper,
+            1,
+            "the one reading past the edge is counted"
+        );
     }
 
     /// A pen with no pressure sensor draws at the constant width, not at zero.
@@ -1384,6 +1547,7 @@ mod tests {
             scale: 0.0,
             zoom: f32::NAN,
             origin: (10.0, 10.0),
+            ..InkTransform::identity()
         };
 
         assert_eq!(broken.sheet_point((30.0, 30.0)), (20.0, 20.0));

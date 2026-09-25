@@ -335,11 +335,15 @@ impl Sheet {
     }
 
     /// Where a reading in physical client pixels lands on the sheet.
+    ///
+    /// The paper travels with it: the pump has to be able to refuse a reading that landed on the desk
+    /// beside the page, and the paper's edges are what "beside" means (see [`InkTransform::on_paper`]).
     fn transform(&self, scale: f32) -> InkTransform {
         InkTransform {
             scale,
             zoom: self.zoom,
             origin: self.origin,
+            paper: self.paper,
         }
     }
 
@@ -2130,12 +2134,20 @@ impl NoteApp {
         let keystroke = &event.keystroke;
 
         if !keystroke.modifiers.control {
-            if keystroke.key == "escape" {
-                if self.naming.is_some() {
-                    self.stop_note_name(window, cx);
-                } else {
-                    self.show_home(cx);
+            match keystroke.key.as_str() {
+                "escape" => {
+                    if self.naming.is_some() {
+                        self.stop_note_name(window, cx);
+                    } else {
+                        self.show_home(cx);
+                    }
                 }
+                // The arrows turn the page — the one thing a keyboard is asked for here, and the same
+                // two commands the page pill's buttons are. Not while a name is being typed: there the
+                // arrows belong to the field, and a caret that turned the page instead would be a trap.
+                "left" if self.naming.is_none() => self.previous_page(cx),
+                "right" if self.naming.is_none() => self.next_page(cx),
+                _ => {}
             }
             return;
         }
@@ -2551,6 +2563,12 @@ impl NoteApp {
             ink.resampled,
             ink.resample_ratio() * 100.0
         ));
+
+        // The readings that landed beside the page, said only when there are any: it is the answer to
+        // "why did that line stop at the edge of the sheet?", and a zero on every frame is noise.
+        if ink.off_paper > 0 {
+            parts.push(format!("{} off the sheet", ink.off_paper));
+        }
 
         // What the page cache has done, when there is a page to cache. The counters are the whole
         // reason the cache can be argued about rather than guessed at: a hit ratio of 0% and one of
@@ -2971,18 +2989,17 @@ impl NoteApp {
             );
         }
 
-        // The zoom is a command like the ones in the bar, and it hides with them: a clean sheet is a
-        // sheet with no controls on it. The page pill and the counters stay, because they are how the
-        // desk is read rather than what it is set to.
-        if self.settings.show_toolbar {
-            row = row.child(
-                div()
-                    .absolute()
-                    .right_0()
-                    .bottom_0()
-                    .child(self.zoom_pill(cx)),
-            );
-        }
+        // The zoom stays when the bar is hidden, and it is the one control that has to: the switch that
+        // brings the bar back lives *in* the bar, so a sheet zoomed into a corner of itself with the
+        // bar away would have no way out. It is reading rather than writing — it changes nothing about
+        // the note — which is what the page pill and the counters have in common with it.
+        row = row.child(
+            div()
+                .absolute()
+                .right_0()
+                .bottom_0()
+                .child(self.zoom_pill(cx)),
+        );
 
         row
     }
@@ -3018,7 +3035,7 @@ impl NoteApp {
             .child(icon_button(
                 "page-prev",
                 IconName::ChevronLeft,
-                "Previous page",
+                "Previous page (Left arrow)",
                 true,
                 cx,
                 |app, cx| app.previous_page(cx),
@@ -3034,7 +3051,7 @@ impl NoteApp {
             .child(icon_button(
                 "page-next",
                 IconName::ChevronRight,
-                "Next page",
+                "Next page (Right arrow)",
                 true,
                 cx,
                 |app, cx| app.next_page(cx),
@@ -3051,9 +3068,10 @@ impl NoteApp {
     /// thing that says whether Fit Width has already been pressed. It is given a fixed width so that
     /// stepping from 99% to 100% to 101% does not shuffle the buttons either side of it.
     ///
-    /// It hides with the bar, because it is the same kind of thing as the controls that are still up
-    /// there: a clean sheet is a sheet with no controls on it. The page pill and the counters stay —
-    /// they are how the desk is read, not what it is set to.
+    /// It does *not* hide with the bar, unlike the controls up there: zoom is how the sheet is *read*,
+    /// and a person who turned the bar off is the one with the least way back — Fit Width is what
+    /// recovers a view that has been zoomed into a corner of the page. The page pill and the counters
+    /// stay for the same reason.
     fn zoom_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (surface, hairline, accent, radius) = (
@@ -3390,10 +3408,11 @@ impl Render for NoteApp {
                 cx.listener(|app, event: &ScrollWheelEvent, _, cx| app.on_wheel(event, cx)),
             )
             .on_pinch(cx.listener(|app, event: &PinchEvent, _, cx| app.on_pinch(event, cx)))
-            // The note's keyboard, on the screen being painted: Esc for the home screen, and the
-            // three commands a person expects to reach without letting go of the pen. Registered
-            // here rather than as bindings because a screen with nothing focused is a screen whose
-            // keys have to be caught as they are painted — see [`crate::home`].
+            // The note's keyboard, on the screen being painted: Esc for the home screen, the two
+            // arrows for the page, and the three commands a person expects to reach without letting
+            // go of the pen. Registered here rather than as bindings because a screen with nothing
+            // focused is a screen whose keys have to be caught as they are painted — see
+            // [`crate::home`].
             .on_key_down(
                 cx.listener(|app, event: &KeyDownEvent, window, cx| {
                     app.note_key_down(event, window, cx)
@@ -3457,24 +3476,36 @@ impl Render for NoteApp {
                         let mut vertices = 0u64;
                         let mut culled = 0u64;
 
-                        for stroke in finished.iter() {
-                            if !stroke.visible_in(visible) {
-                                culled += 1;
-                                continue;
-                            }
+                        // The ink is clipped to the sheet, which is the display half of the rule the
+                        // ink model enforces: a reading off the paper is not ink (see
+                        // [`InkTransform::on_paper`]), and ink off the paper is not *drawn* either. The
+                        // clip is here rather than in the model because it also has to hide ink written
+                        // before that rule existed, and because one rectangle for the whole page is
+                        // cheaper than a mask per stroke.
+                        window.with_content_mask(
+                            Some(ContentMask { bounds: sheet_bounds }),
+                            |window| {
+                                for stroke in finished.iter() {
+                                    if !stroke.visible_in(visible) {
+                                        culled += 1;
+                                        continue;
+                                    }
 
-                            painted += 1;
-                            vertices += stroke.outline.len() as u64;
-                            paint_stroke(window, stroke, &sheet, &mut scratch);
-                        }
+                                    painted += 1;
+                                    vertices += stroke.outline.len() as u64;
+                                    paint_stroke(window, stroke, &sheet, &mut scratch);
+                                }
 
-                        // The stroke being drawn is never culled: it is by definition under the
-                        // pen, and a stroke that vanished for a frame would read as a glitch.
-                        if let Some(stroke) = &open {
-                            painted += 1;
-                            vertices += stroke.outline.len() as u64;
-                            paint_stroke(window, stroke, &sheet, &mut scratch);
-                        }
+                                // The stroke being drawn is never culled: it is by definition under
+                                // the pen, and a stroke that vanished for a frame would read as a
+                                // glitch.
+                                if let Some(stroke) = &open {
+                                    painted += 1;
+                                    vertices += stroke.outline.len() as u64;
+                                    paint_stroke(window, stroke, &sheet, &mut scratch);
+                                }
+                            },
+                        );
 
                         timings.count_painted(painted, vertices, culled);
 

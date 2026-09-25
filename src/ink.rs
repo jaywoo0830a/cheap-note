@@ -167,8 +167,8 @@ pub enum Tool {
 
 /// One point of a stroke: a position and the width the pen drew it at.
 ///
-/// The width is baked in when the point is created, so changing the stroke-width setting does
-/// not retroactively redraw the ink the user already laid down.
+/// The width is baked in when the point is created, so changing the pen — its colour or its weight
+/// ([`crate::settings`]) — does not retroactively redraw the ink already laid down.
 ///
 /// `Serialize` and no `Deserialize`: the only reader of ink is [`crate::chunk`], which has its own
 /// encoding, and the one thing that ever *parsed* a stroke was the reader for the old note format.
@@ -217,7 +217,7 @@ impl Stroke {
     /// The near-black the app drew everything in before a stroke could carry a colour of its own.
     ///
     /// Test-only, and named here rather than repeated in every test module: the app's own paths write
-    /// ink in [`crate::settings::NoteStyle::ink_color`], and a page of ink in a test still has to be
+    /// ink in [`crate::settings::Settings::ink_color`], and a page of ink in a test still has to be
     /// written in *some* colour.
     #[cfg(test)]
     pub const DEFAULT_COLOR: u32 = 0x1B_1B_1F;
@@ -693,7 +693,7 @@ impl InkDocument {
                                 // moment the nib goes down, and it stays with that line for good.
                                 self.open = Some(Stroke::new(
                                     InkPoint::new(x, y, width),
-                                    settings.style.ink_color,
+                                    settings.ink_color,
                                 ));
                             }
                         }
@@ -1114,11 +1114,11 @@ mod tests {
         let mut ink = InkDocument::default();
         let mut s = settings();
 
-        s.style.ink_color = 0xDC_26_26;
+        s.ink_color = 0xDC_26_26;
         ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
         ink.consume(&[reading(7, PenPhase::Up, 18.0, 10.0, None)], &id(), &s);
 
-        s.style.ink_color = 0x1D_4E_D8;
+        s.ink_color = 0x1D_4E_D8;
         ink.consume(&[reading(7, PenPhase::Down, 10.0, 40.0, Some(0.5))], &id(), &s);
         ink.consume(&[reading(7, PenPhase::Up, 18.0, 40.0, None)], &id(), &s);
 

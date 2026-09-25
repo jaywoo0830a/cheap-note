@@ -7,9 +7,10 @@
 //! So the app keeps one small index of what it has opened, beside the notes themselves:
 //! `%LOCALAPPDATA%\cheap-note\recent.json`, a sibling of the `notes` folder.
 //!
-//! Not in `cheap-note.settings.json`, which is *relative to the working directory* (see
-//! [`crate::settings::SETTINGS_FILE`]): a list of what you last wrote in must not depend on where
-//! the program happened to be started from.
+//! Not inside the settings at all — there are none any more, because every setting belongs to a note
+//! (see [`crate::settings`]). The index is about *every* note rather than any one of them, and it
+//! belongs beside them: a list of what you last wrote in must not depend on which note is open, nor on
+//! where the program happened to be started from.
 //!
 //! ## This list is a cache, and it is treated like one
 //!

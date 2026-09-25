@@ -37,8 +37,9 @@
 //!
 //! What the user writes on is described by [`crate::canvas`]: its size, its colour, and what is
 //! printed on it. A PDF page overrides all three, because a PDF page is its own paper. All of it —
-//! the size, the colours, the ruling, the ink's colour, and the zoom — belongs to the *note* and is
-//! kept in it (see [`crate::settings`]), so opening a note opens the sheet it was written on.
+//! the size, the colours, the ruling, the ink's colour, the pen's weight, and the zoom — belongs to
+//! the *note* and is kept in it (see [`crate::settings`]), so opening a note opens the sheet it was
+//! written on, written with the pen it was written with.
 //!
 //! ## Where the ink goes
 //!
@@ -84,7 +85,7 @@ use crate::pages::Pages;
 use crate::pen::{capture_config, PenInbox, PenService};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
 use crate::recent::{self, Recent};
-use crate::settings::Settings;
+use crate::settings::{PenWeight, Settings};
 use crate::system_cursor::SystemCursor;
 use crate::timing::{measure, Timings};
 use crate::view::{Fit, Viewport};
@@ -369,14 +370,14 @@ impl Sheet {
 
 /// The application view.
 pub struct NoteApp {
-    /// The app's state: the person's tuning, and — under `style` — how the note in hand is set up.
+    /// Everything the note in hand remembers, in memory: its paper, its pen, its switches, and how the
+    /// pen feels.
     ///
-    /// The `style` half is the *note's* rather than the app's: it is read out of the note when one is
-    /// opened and written back into that note when it changes, and it is the one part of this struct
-    /// that is never written to [`Self::settings_path`]. See [`crate::settings`].
+    /// There is no global half — this is the whole of it, it belongs to the note that is open, and it is
+    /// read out of that note when one is opened and written back into it when anything changes (see
+    /// [`crate::settings`] and [`Self::save_note_state`]). With no note open it is the shipped set: what
+    /// a blank sheet starts as, and what the first note made from one is told.
     settings: Settings,
-    /// Where [`Self::settings`] is written.
-    settings_path: PathBuf,
     /// The ink.
     ink: Notes,
     /// The note being written: its folder, its database, and the document it was written on.
@@ -486,13 +487,20 @@ pub struct NoteApp {
     /// The bar's paper-size chooser.
     ///
     /// A `Select` rather than a row of buttons, and it is the *only* thing that changes
-    /// [`crate::settings::NoteStyle::canvas_size`]: the choice comes back as the label that was
+    /// [`crate::settings::Settings::canvas_size`]: the choice comes back as the label that was
     /// showing, which [`CanvasSize::from_label`] turns into a size, so the box and the style cannot
     /// drift apart. Opening a note *does* move this box, because the paper travels with the note —
     /// see [`Self::sync_choosers`].
     sheet_select: Entity<SelectState<Vec<&'static str>>>,
     /// The bar's ruling chooser. Held for the same reason as [`NoteApp::sheet_select`].
     rule_select: Entity<SelectState<Vec<&'static str>>>,
+    /// The bar's pen-weight chooser: the pen the note in hand is written with.
+    ///
+    /// A chooser rather than a row of buttons for the same reason the size and the ruling are: the
+    /// alternatives have names, and a row of marks a person has to compare by eye is a row a person
+    /// has to guess at. It is also the control that moved the ink's *width* where the ink's colour
+    /// already was — into the note (see [`crate::settings`]).
+    pen_select: Entity<SelectState<Vec<&'static str>>>,
     /// The screen that offers what was opened recently, and the app starts on.
     ///
     /// Held here rather than as a view of its own because the window *is* the app: a second screen
@@ -508,12 +516,12 @@ impl NoteApp {
     /// association or a drag onto the executable becomes. Opening it here rather than on the first
     /// frame means the very first frame already shows it, and the home screen is never seen.
     pub fn new(window: &mut Window, start: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
-        let settings_path = Settings::default_path();
-
-        let (settings, mut message) = match Settings::load(&settings_path) {
-            Ok(settings) => (settings, String::new()),
-            Err(error) => (Settings::default(), format!("using default settings ({error})")),
-        };
+        // There is nothing to load, and nowhere to load it from: every setting a person can change
+        // belongs to a note, and no note is open yet. This is the shipped set — and it is not a
+        // *global* set: whatever is opened or made below takes it over, and from then on these answers
+        // live in that note (see [`crate::settings`] and [`Self::adopt`]).
+        let settings = Settings::default();
+        let mut message = String::new();
 
         // The capture must be attached on the thread that owns the window, which is this one.
         let pen = PenService::attach(window, capture_config());
@@ -526,7 +534,7 @@ impl NoteApp {
             message = pen.status().to_string();
         }
 
-        let view = Viewport::new(settings.style.zoom);
+        let view = Viewport::new(settings.zoom);
 
         // The two choosers are built from the style the app starts on, so the first frame already
         // shows the right one. They are the control the style comes from, and they are put back in
@@ -535,7 +543,7 @@ impl NoteApp {
             &CanvasSize::ALL.map(CanvasSize::label),
             CanvasSize::ALL
                 .iter()
-                .position(|size| *size == settings.style.canvas_size),
+                .position(|size| *size == settings.canvas_size),
             window,
             cx,
         );
@@ -543,7 +551,15 @@ impl NoteApp {
             &CanvasStyle::ALL.map(CanvasStyle::label),
             CanvasStyle::ALL
                 .iter()
-                .position(|style| *style == settings.style.canvas_style),
+                .position(|style| *style == settings.canvas_style),
+            window,
+            cx,
+        );
+        let pen_select = choice(
+            &PenWeight::ALL.map(PenWeight::label),
+            PenWeight::ALL
+                .iter()
+                .position(|weight| *weight == settings.pen_weight),
             window,
             cx,
         );
@@ -560,7 +576,6 @@ impl NoteApp {
 
         let mut app = NoteApp {
             settings,
-            settings_path,
             ink: Notes::new(),
             note: None,
             writer: None,
@@ -594,6 +609,7 @@ impl NoteApp {
             _name_events,
             sheet_select,
             rule_select,
+            pen_select,
             home: Home::open(window, cx),
         };
 
@@ -608,7 +624,7 @@ impl NoteApp {
 
         // What a chooser reports is the label that was showing, so a label is what has to become a
         // setting again. A `Confirm` with no choice behind it — the box has been cleaned — is not
-        // one, and is ignored: a sheet always has a size and something printed on it.
+        // one, and is ignored: a sheet always has a size, something printed on it, and a pen.
         cx.subscribe(
             &app.sheet_select,
             |app, _, event: &SelectEvent<Vec<&'static str>>, cx| {
@@ -627,6 +643,18 @@ impl NoteApp {
                 if let SelectEvent::Confirm(Some(label)) = event {
                     if let Some(style) = CanvasStyle::from_label(label) {
                         app.set_canvas_style(style, cx);
+                    }
+                }
+            },
+        )
+        .detach();
+
+        cx.subscribe(
+            &app.pen_select,
+            |app, _, event: &SelectEvent<Vec<&'static str>>, cx| {
+                if let SelectEvent::Confirm(Some(label)) = event {
+                    if let Some(weight) = PenWeight::from_label(label) {
+                        app.set_pen_weight(weight, cx);
                     }
                 }
             },
@@ -932,14 +960,14 @@ impl NoteApp {
 
         let mut note = Note::open(&note::root().join(format!("blank-{stamp}")))?;
 
-        // What the note remembers about itself: the page list, the sheet the ink is written on, how
-        // that sheet is set up, and which page is open — the same facts a note with a document carries.
-        // The style comes from the app's live state, which is why a blank page continues the sheet that
-        // was open before it.
+        // What the note remembers about itself: the page list, the sheet the ink is written on, every
+        // setting in hand, and which page is open — the same facts a note with a document carries. The
+        // settings come from the app's live state, which is why a blank page continues the sheet that was
+        // open before it.
         let layout = self.pages.layout().to_vec();
         note.store_mut().set_layout(&layout)?;
         note.store_mut().set_sheet(Some(self.sheet_size()))?;
-        note.store_mut().set_style(&self.settings.style)?;
+        note.store_mut().set_settings(&self.settings)?;
         note.store_mut().set_open_page(self.page_index as u64)?;
 
         // The writer's connection opens before its thread, as it does for a note that is opened, so a
@@ -996,8 +1024,11 @@ impl NoteApp {
         for report in reports {
             match report {
                 Report::Written(path) => {
+                    // Where the note was carried to is a *setting*, and settings are the note's: the
+                    // directory is written into this note, so the next export of *this* note is offered
+                    // there (see [`crate::settings`]).
                     self.settings.export_dir = path.parent().map(|parent| parent.to_path_buf());
-                    self.save_settings();
+                    self.save_note_state();
                     self.message = format!("wrote {}", file_label(&path));
                 }
                 Report::Failed(message) => self.message = message,
@@ -1019,14 +1050,14 @@ impl NoteApp {
     /// A paper size is a physical size, so choosing one sets the drawing scale too: a person
     /// picking A5 expects half a sheet of A4, not the same sheet under another name.
     fn set_canvas_size(&mut self, size: CanvasSize, cx: &mut Context<Self>) {
-        self.settings.style.canvas_size = size;
-        self.settings.style.page_display_width = size.display_width();
+        self.settings.canvas_size = size;
+        self.settings.page_display_width = size.display_width();
         self.finish_setting(cx);
     }
 
     /// Changes what is printed on the sheet.
     fn set_canvas_style(&mut self, style: CanvasStyle, cx: &mut Context<Self>) {
-        self.settings.style.canvas_style = style;
+        self.settings.canvas_style = style;
         self.finish_setting(cx);
     }
 
@@ -1036,7 +1067,7 @@ impl NoteApp {
     /// bitmaps the toggle changed simply are not the bitmaps the cache holds, and the next frame
     /// asks for the ones it now wants.
     fn set_pdf_grayscale(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.settings.style.grayscale_pages = on;
+        self.settings.grayscale_pages = on;
         self.finish_setting(cx);
     }
 
@@ -1071,7 +1102,7 @@ impl NoteApp {
 
     /// Keeps the settings and the status line in step with a zoom the view already accepted.
     fn finish_zoom(&mut self, cx: &mut Context<Self>) {
-        self.settings.style.zoom = self.view.zoom();
+        self.settings.zoom = self.view.zoom();
         self.finish_setting(cx);
     }
 
@@ -1134,13 +1165,24 @@ impl NoteApp {
 
     /// Changes the sheet's colour.
     fn set_paper_color(&mut self, color: u32, cx: &mut Context<Self>) {
-        self.settings.style.page_color = color;
+        self.settings.page_color = color;
         self.finish_setting(cx);
     }
 
     /// Changes the ink's colour.
     fn set_ink_color(&mut self, color: u32, cx: &mut Context<Self>) {
-        self.settings.style.ink_color = color;
+        self.settings.ink_color = color;
+        self.finish_setting(cx);
+    }
+
+    /// Changes how heavy the pen is.
+    ///
+    /// What is already on the page is untouched: a stroke keeps the width it was drawn at, exactly as
+    /// it keeps its colour, because the width is stamped into every point as the nib moves (see
+    /// [`crate::ink`]). So this is what the *next* line is laid with, and choosing a marker on a page
+    /// of fine writing changes nothing about the page.
+    fn set_pen_weight(&mut self, weight: PenWeight, cx: &mut Context<Self>) {
+        self.settings.pen_weight = weight;
         self.finish_setting(cx);
     }
 
@@ -1214,17 +1256,15 @@ impl NoteApp {
 
     /// Persists and repaints after anything changed.
     ///
-    /// Both halves of the state are written — the app's settings, and the note's own — because a
-    /// change that arrives here may be either, and both writes are small. Which half a value belongs
-    /// to is decided by the *type* rather than by the caller: everything under `settings.style` is the
-    /// note's and goes into the note (see [`crate::settings`]).
+    /// One write covers all of it, because there is only one place for it to go: every setting — the
+    /// paper, the pen, the switches, and how the pen *feels* — belongs to the note that is open, and
+    /// [`Self::save_note_state`] puts them there (see [`crate::settings`]).
     ///
     /// The ruling is keyed on the sheet's rectangle, its style and its paper colour, so it
     /// discards itself on the next frame without being told. Only the status line has to be
     /// rebuilt, and it is rebuilt here rather than on the clock because the user is looking for
     /// the change they just made.
     fn finish_setting(&mut self, cx: &mut Context<Self>) {
-        self.save_settings();
         self.save_note_state();
         self.touch_status();
         // A setting can change whether the pen has a cursor of its own — the Tilt switch does — and
@@ -1430,25 +1470,24 @@ impl NoteApp {
             .collect();
     }
 
-    /// Stores what the note remembers about itself: its page list, its sheet, how it is written on,
+    /// Stores what the note remembers about itself: its page list, its sheet, every setting in hand,
     /// and which page is open.
     ///
-    /// Written on the commands that change any of them — an insert, a delete, a paper choice, a
-    /// colour, a zoom — rather than on a clock: these are the answers the next session reads back,
-    /// and they change at the speed of a hand.
+    /// Written on the commands that change any of them — an insert, a delete, a paper choice, a colour,
+    /// a pen, a zoom, a switch — rather than on a clock: these are the answers the next session reads
+    /// back, and they change at the speed of a hand.
     ///
-    /// This is the one place the app's live state and the note's stored state meet: `settings.style`
-    /// is the note's, and it is copied out of the app and into the note here (see [`crate::settings`]).
-    /// The style is taken by value first, because the note is borrowed mutably below.
+    /// This is where the app's live state becomes the note's stored state, and the only place it does:
+    /// [`crate::settings::Settings`] is the whole of what a note remembers, and it is handed over whole
+    /// (see [`crate::store::NoteStore::set_settings`]).
     fn save_note_state(&mut self) {
         let layout = self.pages.layout().to_vec();
         let sheet = self.sheet_size();
-        let style = self.settings.style;
 
         if let Some(note) = &mut self.note {
             let _ = note.store_mut().set_layout(&layout);
             let _ = note.store_mut().set_sheet(Some(sheet));
-            let _ = note.store_mut().set_style(&style);
+            let _ = note.store_mut().set_settings(&self.settings);
             let _ = note.store_mut().set_open_page(self.page_index as u64);
         }
     }
@@ -1551,19 +1590,21 @@ impl NoteApp {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| folder.clone());
 
-        // How the note is written on, taken over *before* the document is opened and before the
-        // viewport is built: the paper's width is what a page is rasterised at (see
-        // [`Self::pdf_render_pixel_width`]) and the zoom is where the reader was. A note that has never
-        // been told keeps whatever the app is set up as — which is how placing a PDF continues the sheet
-        // in hand rather than snapping back to the shipped one — and is told here, so that the answer
-        // travels with the note from the moment it exists.
-        match note.store().style()? {
-            Some(style) => self.settings.style = style,
-            None => note.store_mut().set_style(&self.settings.style)?,
-        }
+        // Every setting in hand is replaced by the note's own — read *before* the document is opened and
+        // before the viewport is built, because the paper's width is what a page is rasterised at (see
+        // [`Self::pdf_render_pixel_width`]) and the zoom is where the reader was.
+        //
+        // [`crate::store::NoteStore::read_settings`] fills in only what the note actually says, so a note
+        // that has never been told anything keeps the sheet and the pen already up: that is how a blank
+        // page, or a PDF just placed, continues what is in hand instead of snapping back to the shipped
+        // set. The whole set is then written straight back, so the note is told once and for all — from
+        // here on these answers travel with *it* and not with whoever was written in last.
+        note.store().read_settings(&mut self.settings)?;
+        note.store_mut().set_settings(&self.settings)?;
+
         // A whole note, not a page turn: the pan is reset with the zoom, because the sheet that was
         // being looked at is not the sheet in hand any more.
-        self.view = Viewport::new(self.settings.style.zoom);
+        self.view = Viewport::new(self.settings.zoom);
 
         // The writer's connection is opened here, before its thread runs, so that a note that cannot
         // be written is something the user is told about rather than something they discover the next
@@ -2219,7 +2260,7 @@ impl NoteApp {
     /// without one it is the chosen canvas size. This is the space every stroke's coordinates are
     /// in, which is why it is what a note records about itself.
     fn sheet_size(&self) -> (f32, f32) {
-        let width = self.settings.style.page_display_width;
+        let width = self.settings.page_display_width;
 
         self.pdf
             .page_point_size(self.page_index)
@@ -2227,18 +2268,8 @@ impl NoteApp {
                 let scale = width / point_width.max(1.0);
                 (width, point_height * scale)
             })
-            .unwrap_or_else(|| self.settings.style.canvas_size.display_size(width))
+            .unwrap_or_else(|| self.settings.canvas_size.display_size(width))
     }
-    /// Writes the app's own tuning out: everything except the note's `style`.
-    ///
-    /// The style is not in the file at all — `#[serde(skip)]` on the field keeps it out of both
-    /// directions (see [`crate::settings`]) — so this never has to remember to leave it behind.
-    fn save_settings(&mut self) {
-        if let Err(error) = self.settings.save(&self.settings_path) {
-            self.message = format!("settings could not be saved: {error}");
-        }
-    }
-
     /// The bitmap width a page is rendered at, in device pixels.
     ///
     /// The displayed width is the paper's own width times the zoom, in logical pixels; device
@@ -2246,7 +2277,7 @@ impl NoteApp {
     /// result is then quantised onto [`PDF_PIXEL_WIDTHS`], which is what keeps a zoom gesture from
     /// re-rasterising the page on every event.
     fn pdf_render_pixel_width(&self) -> u32 {
-        let logical = self.settings.style.page_display_width * self.view.zoom();
+        let logical = self.settings.page_display_width * self.view.zoom();
         let wanted = logical * self.scale.max(1.0) * PDF_RENDER_SCALE;
 
         quantise_width(wanted)
@@ -2278,7 +2309,7 @@ impl NoteApp {
         }
 
         let wanted = PageRequest::new(document_page, self.pdf_render_pixel_width())
-            .grayscale(self.settings.style.grayscale_pages);
+            .grayscale(self.settings.grayscale_pages);
 
         if let Some(page) = self.pdf.page_for_frame(wanted) {
             self.plan_pdf(wanted);
@@ -2288,7 +2319,7 @@ impl NoteApp {
         // Nothing for this page at any rung: pay for the cheapest one now, so the frame has
         // something to draw, then leave the rung the zoom wanted to the pump.
         let preview = PageRequest::new(document_page, PDF_PIXEL_WIDTHS[0])
-            .grayscale(self.settings.style.grayscale_pages);
+            .grayscale(self.settings.grayscale_pages);
         let page = match self.render_now(preview) {
             Ok(page) => Some(page),
             Err(error) => {
@@ -2417,13 +2448,12 @@ impl NoteApp {
     ) -> Sheet {
         let paper = match page {
             // A PDF brings its own shape; only how wide it is drawn is the app's choice.
-            Some(page) => page.display_size(self.settings.style.page_display_width),
+            Some(page) => page.display_size(self.settings.page_display_width),
             // The blank sheet takes both its shape and its scale from the chosen canvas size.
             None => self
                 .settings
-                .style
                 .canvas_size
-                .display_size(self.settings.style.page_display_width),
+                .display_size(self.settings.page_display_width),
         };
 
         Sheet {
@@ -2781,21 +2811,27 @@ impl NoteApp {
             }))
     }
 
-    /// The bar's second row: the page's commands, the sheet's size, what is printed on it, and its
-    /// two colours.
+    /// The bar's second row: the page's commands, the sheet's size, what is printed on it, its two
+    /// colours, and the pen's weight.
     ///
-    /// This row wraps and the first does not. The size and the ruling are *choosers* — each one a
-    /// single box showing what is in use, with the alternatives in a list under it — while the twelve
-    /// colours stay a row of swatches, which is what a palette is. Six sizes and four rulings as
-    /// buttons was more than a narrow window holds, and the one that was current had to be found
+    /// This row wraps and the first does not. The size, the ruling and the pen are *choosers* — each one
+    /// a single box showing what is in use, with the alternatives in a list under it — while the twelve
+    /// colours stay a row of swatches, which is what a palette is. Six sizes, four rulings and five pens
+    /// as buttons was more than a narrow window holds, and the one that was current had to be found
     /// among its neighbours rather than read off the control.
     ///
-    /// Each group is captioned because without the words it would be a guess which of the two runs
-    /// of squares is the paper and which the ink, and which of the two boxes is the size and which
-    /// the ruling. The page's three commands lead the row because a page *is* the sheet — they are
-    /// the only controls here that change how much of it there is — and the zoom they traded places
-    /// with is at the bottom of the desk, on the pill beside the page it acts on (see
+    /// Each group is captioned because without the words it would be a guess which of the two runs of
+    /// squares is the paper and which the ink, and which of the three boxes is the size, which the
+    /// ruling, and which the pen. The page's three commands lead the row because a page *is* the sheet —
+    /// they are the only controls here that change how much of it there is — and the zoom they traded
+    /// places with is at the bottom of the desk, on the pill beside the page it acts on (see
     /// [`NoteApp::zoom_pill`]).
+    ///
+    /// The pen's weight sits beside the ink's colour rather than up with the tools, because the two are
+    /// one answer: the colour is *which* pen, the weight is *how heavy* it is, and both travel with the
+    /// note (see [`crate::settings`]). Its caption is a property and not a thing, like
+    /// `Gray` — `Ink` is already the caption of the colours, and a second caption of `Pen` beside it
+    /// would leave a person guessing which of the two was the pen.
     fn sheet_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (hairline, muted, accent) = (
@@ -2811,7 +2847,7 @@ impl NoteApp {
             paper.push(
                 swatch_button(
                     swatch,
-                    self.settings.style.page_color == swatch.color,
+                    self.settings.page_color == swatch.color,
                     accent,
                     false,
                     cx,
@@ -2826,7 +2862,7 @@ impl NoteApp {
             ink.push(
                 swatch_button(
                     swatch,
-                    self.settings.style.ink_color == swatch.color,
+                    self.settings.ink_color == swatch.color,
                     accent,
                     true,
                     cx,
@@ -2861,12 +2897,15 @@ impl NoteApp {
             .child(control_label("Ink", muted))
             .children(ink)
             .child(toolbar_divider(hairline))
+            .child(control_label("Weight", muted))
+            .child(self.chooser(&self.pen_select))
+            .child(toolbar_divider(hairline))
             // A render option for the *page*, next to the colours it overrides: this row wraps, so
             // one more control here cannot push the others off the edge.
             .child(visibility_switch(
                 "gray-pages",
                 "Gray",
-                self.settings.style.grayscale_pages,
+                self.settings.grayscale_pages,
                 cx,
                 |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
                     app.set_pdf_grayscale(on, cx)
@@ -2884,39 +2923,49 @@ impl NoteApp {
         div().w(px(112.0)).child(Select::new(state).small())
     }
 
-    /// Keeps the two choosers showing the sheet the note is actually written on.
+    /// Keeps the three choosers showing what the note is actually written with.
     ///
     /// What the style *is* and what a box *draws* are two things — the style decides, `Select` draws —
     /// and they are kept in step here, the same way [`crate::home`] keeps its list's highlight on the
-    /// row Enter would open. Two reads a frame, and a write only on the frames where they disagree.
+    /// row Enter would open. Three reads a frame, and a write only on the frames where they disagree.
     ///
-    /// Not cosmetic: these boxes are the only control that changes the paper and the ruling, and a box
-    /// showing A4 while the note is A5 is a press that asks for A4 and reports A4 — the one choice the
-    /// note is already on. It moved from cosmetic to necessary when the style became the *note's*:
-    /// opening a note now changes the paper, the ruling and the zoom without any box being pressed.
+    /// Not cosmetic: these boxes are the only control that changes the paper, the ruling and the pen,
+    /// and a box showing A4 while the note is A5 is a press that asks for A4 and reports A4 — the one
+    /// choice the note is already on. It moved from cosmetic to necessary when the style became the
+    /// *note's*: opening a note now changes all three without any box being pressed.
     fn sync_choosers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let sheet = CanvasSize::ALL
-            .iter()
-            .position(|size| *size == self.settings.style.canvas_size)
-            .map(IndexPath::new);
-        let rule = CanvasStyle::ALL
-            .iter()
-            .position(|style| *style == self.settings.style.canvas_style)
-            .map(IndexPath::new);
+        let (canvas_size, canvas_style, pen_weight) = (
+            self.settings.canvas_size,
+            self.settings.canvas_style,
+            self.settings.pen_weight,
+        );
+        let boxes = [
+            (
+                self.sheet_select.clone(),
+                chosen_index(&CanvasSize::ALL, canvas_size),
+            ),
+            (
+                self.rule_select.clone(),
+                chosen_index(&CanvasStyle::ALL, canvas_style),
+            ),
+            (
+                self.pen_select.clone(),
+                chosen_index(&PenWeight::ALL, pen_weight),
+            ),
+        ];
 
-        self.sheet_select.update(cx, |state, cx| {
-            if state.selected_index(cx) != sheet {
-                state.set_selected_index(sheet, window, cx);
-                cx.notify();
-            }
-        });
+        for (chooser, chosen) in boxes {
+            // Reborrowed per box: a `Select`'s state can only be moved *with* a window, and one
+            // window cannot be lent to three closures at once.
+            let window = &mut *window;
 
-        self.rule_select.update(cx, |state, cx| {
-            if state.selected_index(cx) != rule {
-                state.set_selected_index(rule, window, cx);
-                cx.notify();
-            }
-        });
+            chooser.update(cx, |state, cx| {
+                if state.selected_index(cx) != chosen {
+                    state.set_selected_index(chosen, window, cx);
+                    cx.notify();
+                }
+            });
+        }
     }
 
     /// The desk's own row: the counters at one edge, the page in the middle, the zoom at the other.
@@ -3312,8 +3361,8 @@ impl Render for NoteApp {
             let before = self.ruling.rebuilds();
             let quads = self.ruling.quads(
                 sheet_bounds,
-                self.settings.style.canvas_style,
-                self.settings.style.page_color,
+                self.settings.canvas_style,
+                self.settings.page_color,
                 sheet.zoom,
             );
 
@@ -3337,7 +3386,7 @@ impl Render for NoteApp {
             stroke
         });
         let page_image = page.as_ref().map(|page| Arc::clone(&page.image));
-        let page_color: Hsla = rgb(self.settings.style.page_color).into();
+        let page_color: Hsla = rgb(self.settings.page_color).into();
         let timings = Arc::clone(&self.timings);
 
         // The ghost cursor: a mark at the nib with the pen's body leaning away from it. Drawn last,
@@ -3346,7 +3395,7 @@ impl Render for NoteApp {
         let cursor = self.pen_cursor();
         // Its own colour rather than the ink's: it is not ink, and it has to be visible on a sheet
         // of any colour, including one where the ink would disappear.
-        let cursor_color: Hsla = rgb(contrast_color(self.settings.style.page_color)).into();
+        let cursor_color: Hsla = rgb(contrast_color(self.settings.page_color)).into();
 
         // The bar floats over the desk, so pen coordinates need no offset and the ink can run the
         // full height of the window. When it is hidden, the handle that brings it back takes its
@@ -3485,13 +3534,13 @@ impl Render for NoteApp {
 /// One of the bar's choosers: a list of options, and the one it starts on.
 ///
 /// A component rather than a row of buttons, because these are *choosers* and not toggles: six paper
-/// sizes and four rulings do not fit across a narrow window, and the set that is current is read off
-/// one control instead of being picked out of a row that wraps. The items are the labels and nothing
-/// else — a `Select` reports its choice as the text it was showing — which is why
-/// [`CanvasSize::from_label`] exists to turn that text back into a setting.
+/// sizes, four rulings and five pens do not fit across a narrow window, and the set that is current is
+/// read off one control instead of being picked out of a row that wraps. The items are the labels and
+/// nothing else — a `Select` reports its choice as the text it was showing — which is why
+/// [`CanvasSize::from_label`] and its two siblings exist to turn that text back into a setting.
 ///
-/// `None` leaves the box empty, and is only reachable for a value the labels cannot name; the size
-/// and the ruling always have one.
+/// `None` leaves the box empty, and is only reachable for a value the labels cannot name; the size,
+/// the ruling and the pen always have one.
 fn choice(
     labels: &[&'static str],
     selected: Option<usize>,
@@ -3500,6 +3549,17 @@ fn choice(
 ) -> Entity<SelectState<Vec<&'static str>>> {
     let items: Vec<&'static str> = labels.to_vec();
     cx.new(|cx| SelectState::new(items, selected.map(IndexPath::new), window, cx))
+}
+
+/// Where a value sits in the list a chooser offers it in, as the `Select` wants it.
+///
+/// A chooser holds its choice by *position* and the style holds the choice itself, so the two are
+/// married here: [`NoteApp::sync_choosers`] is the only caller, and it is the place a note's own
+/// answer is put back into the boxes that were showing another note's.
+fn chosen_index<T: PartialEq>(all: &[T], chosen: T) -> Option<IndexPath> {
+    all.iter()
+        .position(|one| *one == chosen)
+        .map(IndexPath::new)
 }
 
 /// An icon button that puts a tool in hand.

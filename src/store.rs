@@ -23,9 +23,8 @@
 //!
 //! ## The schema
 //!
-//! Three tables for the ink, plus a `meta` table — what belongs to the note rather than to the app:
-//! its page list, the page that was open, the sheet the ink was written on, and how that sheet is set
-//! up (see [`META_LAYOUT`] and [`META_STYLE`]) — and an ordering column on `pages`:
+//! Three tables for the ink, and a `meta` table that holds everything else a note knows — one row per
+//! fact, in text, and an ordering column on `pages`:
 //!
 //! ```sql
 //! pages(id, ord, created_at, updated_at, bbox_*, stroke_count)
@@ -40,6 +39,16 @@
 //! the two apart means an insert is two small `UPDATE`s on `pages` rather than a rewrite of every
 //! chunk in the note. The shift goes through an offset because `ord` is unique, and a single
 //! `ord = ord + 1` would collide with the row it is about to move.
+//!
+//! **Why the `meta` table is the whole of the rest of the schema.** Everything a note knows about
+//! itself — which page was open, what the page list is, the sheet the ink is in, the document it came
+//! from, its name, and every setting a person can change — is a row of its own: the *key* is the
+//! fact's name and the *value* is that fact, as text. There is no packed blob to decode and no shape
+//! for a struct to match, which is what makes a fact something that can be added to a note without
+//! anything being migrated: a row nobody knows is simply never read, and never written, so it is
+//! still there for the build that knows it. See [`crate::settings`] for the settings half of that
+//! table, row by row, and [`NoteStore::read_settings`] for the two lists that marry the rows to the
+//! app's own type.
 //!
 //! ## The write path
 //!
@@ -63,17 +72,18 @@
 //! and the transfer container, which are [`crate::note`]. This is the database, and the only thing
 //! it knows about a page is its position.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
 use rusqlite::{params, Connection, OptionalExtension as _};
 use serde::{Deserialize, Serialize};
 
+use crate::canvas::{CanvasSize, CanvasStyle};
 use crate::chunk::{self, Codec};
 use crate::error::{AppError, Result};
 use crate::ink::Stroke;
-use crate::settings::NoteStyle;
+use crate::settings::{PenWeight, Settings};
 
 /// The schema version this build writes, in `PRAGMA user_version`.
 ///
@@ -89,22 +99,24 @@ use crate::settings::NoteStyle;
 ///
 /// `0` is not an older note: it is a file with no tables in it yet, which is what a note looks like
 /// between [`NoteStore::open`] creating the database and [`NoteStore::create_schema`] stamping it.
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
-/// The page the note was last on, as a `u64` little-endian.
+/// The page the note was last on, as text: a whole number.
 pub const META_OPEN_PAGE: &str = "open_page";
-/// The sheet the ink was written on, as two `f32`s little-endian.
-pub const META_SHEET: &str = "sheet";
-/// What each page shows, in reading order, as `postcard`-encoded [`crate::pages::Page`]s.
-pub const META_LAYOUT: &str = "layout";
-/// How the note is written on, as `postcard`-encoded [`NoteStyle`].
+/// The sheet the ink was written on, as text: a number of logical pixels.
 ///
-/// The note's own answer to the questions the settings file used to answer for every note at once:
-/// its paper, its ruling, the colour of its paper and of its pen, whether its document is shown in
-/// grey, and the zoom it was left at. It is *in the note* because it is about the note — a sketchbook
-/// in grid and a diary in rules must not have to re-choose between them every time one is opened —
-/// and it is written by the app rather than by any of the ink paths here (see [`crate::settings`]).
-pub const META_STYLE: &str = "style";
+/// A sheet is a width and a height, and it is two rows rather than one — like every other fact here.
+/// They are written together, in one transaction, so a note that holds one without the other is a note
+/// somebody edited by hand; [`NoteStore::sheet`] answers that with "the note does not say" rather than
+/// with half a sheet.
+pub const META_SHEET_WIDTH: &str = "sheet_width";
+/// The other half of the sheet: see [`META_SHEET_WIDTH`].
+pub const META_SHEET_HEIGHT: &str = "sheet_height";
+/// What each page shows, in reading order, as JSON: a list of [`crate::pages::Page`]s.
+///
+/// The one row that is a *list* rather than a value, and it is JSON so that page kinds can be added
+/// without either side having to agree on an order for them — see the module docs.
+pub const META_LAYOUT: &str = "layout";
 /// The name the document had when the note was made, as UTF-8.
 pub const META_DOCUMENT: &str = "document";
 /// The file the note was placed from, as it was given, as UTF-8.
@@ -298,7 +310,7 @@ CREATE INDEX IF NOT EXISTS idx_dirty_page ON dirty_strokes(page_id, seq);
 
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
-    value BLOB NOT NULL
+    value TEXT NOT NULL
 ) STRICT;
 
 CREATE VIEW IF NOT EXISTS page_strokes AS
@@ -702,170 +714,211 @@ impl NoteStore {
 }
 
 impl NoteStore {
-    /// A value stored with the note, whatever it is.
-    pub fn meta(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        self.conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = ?1",
-                params![key],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()
-            .map_err(sql)
-    }
-
-    /// Stores a value with the note.
-    pub fn set_meta(&mut self, key: &str, value: &[u8]) -> Result<()> {
-        self.conn
-            .execute(
-                "INSERT INTO meta (key, value) VALUES (?1, ?2)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![key, value],
-            )
-            .map_err(sql)?;
-
-        Ok(())
-    }
-
     /// Records which page was open, so reopening the note comes back to it.
     pub fn set_open_page(&mut self, page: u64) -> Result<()> {
-        self.set_meta(META_OPEN_PAGE, &page.to_le_bytes())
+        put_row(&self.conn, META_OPEN_PAGE, page)
     }
 
     /// The page that was open, if the note says.
     pub fn open_page(&self) -> Result<Option<u64>> {
-        Ok(self
-            .meta(META_OPEN_PAGE)?
-            .and_then(|bytes| <[u8; 8]>::try_from(&bytes[..]).ok())
-            .map(u64::from_le_bytes))
+        row_maybe(&self.conn, META_OPEN_PAGE, whole_of)
     }
 
     /// Records the sheet the ink was written on, in logical pixels.
+    ///
+    /// A sheet is two rows, written together or not at all: one row per value is how everything in this
+    /// table is kept, and the transaction is what stops a note from holding a width and no height.
     pub fn set_sheet(&mut self, sheet: Option<(f32, f32)>) -> Result<()> {
+        let tx = self.begin()?;
+
         match sheet {
             Some((width, height)) => {
-                let mut bytes = Vec::with_capacity(9);
-                bytes.push(1);
-                bytes.extend_from_slice(&width.to_le_bytes());
-                bytes.extend_from_slice(&height.to_le_bytes());
-                self.set_meta(META_SHEET, &bytes)
+                put_row(&tx, META_SHEET_WIDTH, width)?;
+                put_row(&tx, META_SHEET_HEIGHT, height)?;
             }
-            None => self.set_meta(META_SHEET, &[0]),
+            None => {
+                drop_row(&tx, META_SHEET_WIDTH)?;
+                drop_row(&tx, META_SHEET_HEIGHT)?;
+            }
         }
+
+        tx.commit().map_err(sql)?;
+        Ok(())
     }
 
-    /// The sheet the ink was written on, when the note knows.
+    /// The sheet the ink was written on, when the note says.
+    ///
+    /// Both rows or nothing: a note holding one of them says nothing rather than half a sheet, which is
+    /// the state a row edited by hand leaves behind.
     pub fn sheet(&self) -> Result<Option<(f32, f32)>> {
-        let Some(bytes) = self.meta(META_SHEET)? else {
-            return Ok(None);
-        };
+        let width = row_maybe(&self.conn, META_SHEET_WIDTH, number_of)?;
+        let height = row_maybe(&self.conn, META_SHEET_HEIGHT, number_of)?;
 
-        if bytes.len() < 9 || bytes[0] != 1 {
-            return Ok(None);
-        }
-
-        let width = f32::from_le_bytes(bytes[1..5].try_into().expect("four bytes"));
-        let height = f32::from_le_bytes(bytes[5..9].try_into().expect("four bytes"));
-        Ok(Some((width, height)))
+        Ok(match (width, height) {
+            (Some(width), Some(height)) => Some((width, height)),
+            _ => None,
+        })
     }
 
     /// Records what each page shows, in reading order: the note's own page list.
     pub fn set_layout(&mut self, layout: &[crate::pages::Page]) -> Result<()> {
-        let bytes = postcard::to_allocvec(layout).map_err(|error| {
+        let text = serde_json::to_string(layout).map_err(|error| {
             AppError::Note(format!("the note's page list could not be written: {error}"))
         })?;
 
-        self.set_meta(META_LAYOUT, &bytes)
+        put_row(&self.conn, META_LAYOUT, text)
     }
 
-    /// What each page shows, in reading order. Empty means the note has no list of its own, which is
-    /// a note written before there was one — see [`crate::pages::Pages::restore`].
+    /// What each page shows, in reading order. Empty means the note has no list of its own: its pages
+    /// are the ones that hold ink — see [`crate::pages::Pages::restore`].
+    ///
+    /// A row that is not a list of pages is reported rather than replaced, as everything else here is:
+    /// the alternative is a note whose pages are silently rearranged.
     pub fn layout(&self) -> Result<Vec<crate::pages::Page>> {
-        let Some(bytes) = self.meta(META_LAYOUT)? else {
+        let Some(text) = row_text(&self.conn, META_LAYOUT)? else {
             return Ok(Vec::new());
         };
 
-        postcard::from_bytes(&bytes).map_err(|error| {
+        serde_json::from_str(&text).map_err(|error| {
             AppError::Note(format!("the note's page list could not be read: {error}"))
         })
     }
 
-    /// Records how the note is written on: its paper, its colours, its ruling, its zoom.
+    /// Reads the note's settings into `into`.
     ///
-    /// Written whenever any of it changes — a paper choice, a colour, a zoom, a grayscale toggle —
-    /// rather than on a clock, because these are the answers the next session reads back and they
-    /// change at the speed of a hand.
-    pub fn set_style(&mut self, style: &NoteStyle) -> Result<()> {
-        let bytes = postcard::to_allocvec(style).map_err(|error| {
-            AppError::Note(format!("the note's style could not be written: {error}"))
-        })?;
+    /// **This is where the note's rows meet the app's type**: one line per setting, named exactly as its
+    /// row is, in the order [`crate::settings::Settings`] declares them. Those lines, the field, and its
+    /// default are the whole of a setting's schema — which is what makes adding one four small edits and
+    /// no migration, and why a row a *newer* build wrote is not read here, not written by
+    /// [`Self::set_settings`], and not deleted: it is simply not ours to touch (see [`crate::settings`]).
+    ///
+    /// `into` is the answer for everything the note does not say. The caller passes the settings in
+    /// hand, so a note that has never been told anything keeps the sheet and the pen that are already
+    /// up — which is how a PDF just placed continues the page it was placed on instead of snapping back
+    /// to the shipped defaults. A note that does say something is read over it.
+    ///
+    /// A row that is there and cannot be understood is an error, not a default: something wrote it, and
+    /// quietly replacing a person's answer is worse than saying the note cannot be read.
+    pub fn read_settings(&self, into: &mut Settings) -> Result<()> {
+        let conn = &self.conn;
 
-        self.set_meta(META_STYLE, &bytes)
+        into.ink_color = row_value(conn, "ink_color", into.ink_color, colour_of)?;
+        into.page_color = row_value(conn, "page_color", into.page_color, colour_of)?;
+        into.pen_weight = row_value(conn, "pen_weight", into.pen_weight, PenWeight::from_label)?;
+        into.grayscale_pages = row_value(conn, "grayscale_pages", into.grayscale_pages, flag_of)?;
+        into.canvas_size = row_value(conn, "canvas_size", into.canvas_size, CanvasSize::from_label)?;
+        into.canvas_style =
+            row_value(conn, "canvas_style", into.canvas_style, CanvasStyle::from_label)?;
+        into.page_display_width =
+            row_value(conn, "page_display_width", into.page_display_width, number_of)?;
+        into.zoom = row_value(conn, "zoom", into.zoom, number_of)?;
+        into.resample_spacing =
+            row_value(conn, "resample_spacing", into.resample_spacing, number_of)?;
+        into.smoothing_ms = row_value(conn, "smoothing_ms", into.smoothing_ms, number_of)?;
+        into.min_width = row_value(conn, "min_width", into.min_width, number_of)?;
+        into.max_width = row_value(conn, "max_width", into.max_width, number_of)?;
+        into.no_pressure_width =
+            row_value(conn, "no_pressure_width", into.no_pressure_width, number_of)?;
+        into.erase_radius = row_value(conn, "erase_radius", into.erase_radius, number_of)?;
+        into.show_toolbar = row_value(conn, "show_toolbar", into.show_toolbar, flag_of)?;
+        into.show_status = row_value(conn, "show_status", into.show_status, flag_of)?;
+        into.show_tilt_cursor =
+            row_value(conn, "show_tilt_cursor", into.show_tilt_cursor, flag_of)?;
+
+        // A path is text with nothing to look up, and *no row* is the honest answer for "no place
+        // remembered yet" — an empty row would be a place with no name.
+        into.export_dir = row_text(conn, "export_dir")?
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from);
+
+        Ok(())
     }
 
-    /// How the note is written on, when the note has been told.
+    /// Writes every setting the note keeps, in one transaction.
     ///
-    /// `None` is a note that has never had one written to it, which is the state of a note nothing has
-    /// been chosen in yet: the row is written on the first change, not at creation. The caller's
-    /// answer to `None` is [`NoteStyle::default`] — the sheet the app ships with.
-    pub fn style(&self) -> Result<Option<NoteStyle>> {
-        let Some(bytes) = self.meta(META_STYLE)? else {
-            return Ok(None);
-        };
+    /// *Every* setting, every time something changes: eighteen small rows in one commit, and writing the
+    /// whole set is what makes the note the authority — a note written by a build that knew fewer
+    /// settings, or one whose rows were edited by hand, is given this build's complete answer the first
+    /// time anything changes. A row this build does not know is not in the list, so it is neither
+    /// overwritten nor deleted.
+    ///
+    /// One transaction because some of these belong together: a paper size and the width it is drawn at
+    /// are set by one command (see [`crate::app::NoteApp::set_canvas_size`]), and a note caught holding
+    /// one without the other is a note whose sheet and scale disagree.
+    pub fn set_settings(&mut self, settings: &Settings) -> Result<()> {
+        let tx = self.begin()?;
 
-        if bytes.is_empty() {
-            return Ok(None);
+        put_row(&tx, "ink_color", settings.ink_color)?;
+        put_row(&tx, "page_color", settings.page_color)?;
+        put_row(&tx, "pen_weight", settings.pen_weight.label())?;
+        put_flag(&tx, "grayscale_pages", settings.grayscale_pages)?;
+        put_row(&tx, "canvas_size", settings.canvas_size.label())?;
+        put_row(&tx, "canvas_style", settings.canvas_style.label())?;
+        put_row(&tx, "page_display_width", settings.page_display_width)?;
+        put_row(&tx, "zoom", settings.zoom)?;
+        put_row(&tx, "resample_spacing", settings.resample_spacing)?;
+        put_row(&tx, "smoothing_ms", settings.smoothing_ms)?;
+        put_row(&tx, "min_width", settings.min_width)?;
+        put_row(&tx, "max_width", settings.max_width)?;
+        put_row(&tx, "no_pressure_width", settings.no_pressure_width)?;
+        put_row(&tx, "erase_radius", settings.erase_radius)?;
+        put_flag(&tx, "show_toolbar", settings.show_toolbar)?;
+        put_flag(&tx, "show_status", settings.show_status)?;
+        put_flag(&tx, "show_tilt_cursor", settings.show_tilt_cursor)?;
+
+        match &settings.export_dir {
+            Some(dir) => put_row(&tx, "export_dir", dir.display())?,
+            None => drop_row(&tx, "export_dir")?,
         }
 
-        postcard::from_bytes(&bytes)
-            .map(Some)
-            .map_err(|error| AppError::Note(format!("the note's style could not be read: {error}")))
+        tx.commit().map_err(sql)?;
+        Ok(())
     }
 
     /// Records the name the document had, so a note stays about the file it was made from.
     pub fn set_document(&mut self, name: &str) -> Result<()> {
-        self.set_meta(META_DOCUMENT, name.as_bytes())
+        put_row(&self.conn, META_DOCUMENT, name)
     }
 
     /// The name the document had, if the note has one.
     pub fn document(&self) -> Result<Option<String>> {
-        Ok(self
-            .meta(META_DOCUMENT)?
-            .and_then(|bytes| String::from_utf8(bytes).ok()))
+        Ok(row_text(&self.conn, META_DOCUMENT)?.filter(|name| !name.is_empty()))
     }
 
     /// Records the file the note was placed from, or that there was none.
+    ///
+    /// "There was none" is the row's *absence*, not an empty path: a note written on a blank sheet has
+    /// nothing to remember, so there is nothing to store.
     pub fn set_source(&mut self, path: Option<&Path>) -> Result<()> {
         match path {
-            Some(path) => self.set_meta(META_SOURCE, path.to_string_lossy().as_bytes()),
-            None => self.set_meta(META_SOURCE, &[]),
+            Some(path) => put_row(&self.conn, META_SOURCE, path.display()),
+            None => drop_row(&self.conn, META_SOURCE),
         }
     }
 
     /// The file the note was placed from, if it remembers one.
     pub fn source(&self) -> Result<Option<String>> {
-        Ok(self
-            .meta(META_SOURCE)?
-            .filter(|bytes| !bytes.is_empty())
-            .and_then(|bytes| String::from_utf8(bytes).ok()))
+        Ok(row_text(&self.conn, META_SOURCE)?.filter(|path| !path.is_empty()))
     }
 
     /// Gives the note a name, or takes its name away.
     ///
-    /// An empty name is a legitimate answer, and means *no name*: the list derives one, which is what
-    /// most notes do. What is written is [`normalize_title`]'s answer, so a name that arrives from a
-    /// paste on two lines or is longer than a row becomes the name a person meant rather than an
-    /// error.
+    /// An empty name is a legitimate answer, and means *no name* — so it takes the row away rather than
+    /// storing an empty one: the absence of a name is the absence of the row. What is written is
+    /// [`normalize_title`]'s answer, so a name that arrives from a paste on two lines or is longer than
+    /// a row becomes the name a person meant rather than an error.
     pub fn set_title(&mut self, name: &str) -> Result<()> {
-        self.set_meta(META_TITLE, normalize_title(name).as_bytes())
+        let name = normalize_title(name);
+
+        match name.is_empty() {
+            true => drop_row(&self.conn, META_TITLE),
+            false => put_row(&self.conn, META_TITLE, name),
+        }
     }
 
     /// The name a person gave the note, if they gave it one.
     pub fn title(&self) -> Result<Option<String>> {
-        Ok(self
-            .meta(META_TITLE)?
-            .filter(|bytes| !bytes.is_empty())
-            .and_then(|bytes| String::from_utf8(bytes).ok()))
+        Ok(row_text(&self.conn, META_TITLE)?.filter(|name| !name.is_empty()))
     }
 
     /// Everything the note says about itself: its name, its document, and its counts.
@@ -910,6 +963,122 @@ impl NoteStore {
             strokes: strokes as usize,
             sheet: self.sheet()?,
         })
+    }
+}
+
+// ── the rows ─────────────────────────────────────────────────────────────────────────────────────
+//
+// Everything a note knows is one row of `meta`: a name, and its value as text. These five functions are
+// the whole of how a row is read and written, and they take a *connection* rather than `&NoteStore`
+// because a batch of rows has to share one transaction — rusqlite's `Transaction` is a `Connection` for
+// every purpose here, so the same call serves one row and eighteen.
+
+/// A row's value, as text.
+fn row_text(conn: &Connection, key: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1",
+        params![key],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(sql)
+}
+
+/// A row's value, turned into the app's value by `parse` — or `fallback` when there is no such row.
+///
+/// This is the one place a note's answer becomes the app's, and the difference between the two ways that
+/// can fail to happen is the whole of the design. **No row is not a failure**: the note simply does not
+/// say, and the caller's own value stands — which is what makes a note written by a build that knew
+/// fewer settings open with the shipped answer instead of with nothing. **A row that will not parse
+/// is** a failure, because something wrote it, and quietly replacing a person's answer is worse than
+/// saying the note cannot be read.
+fn row_value<T>(
+    conn: &Connection,
+    key: &str,
+    fallback: T,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<T> {
+    let Some(text) = row_text(conn, key)? else {
+        return Ok(fallback);
+    };
+
+    parse(&text).ok_or_else(|| {
+        AppError::Note(format!(
+            "the note's {key} is not something this build knows: {text}"
+        ))
+    })
+}
+
+/// A row's value, or `None` when the note has no such row: for the facts that have no default.
+///
+/// The same two cases as [`row_value`], with "no row" answered by `None` rather than by a fallback —
+/// which is what a *fact* wants, because there is no shipped answer for the file a note was placed
+/// from. `None` says the note does not remember it; a row that will not parse is still an error.
+fn row_maybe<T>(
+    conn: &Connection,
+    key: &str,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<Option<T>> {
+    let Some(text) = row_text(conn, key)? else {
+        return Ok(None);
+    };
+
+    parse(&text).map(Some).ok_or_else(|| {
+        AppError::Note(format!(
+            "the note's {key} is not something this build knows: {text}"
+        ))
+    })
+}
+
+/// Writes a row, as the text its value spells.
+fn put_row(conn: &Connection, key: &str, value: impl std::fmt::Display) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value.to_string()],
+    )
+    .map_err(sql)?;
+
+    Ok(())
+}
+
+/// Writes a flag spelled out, so a person reading the database sees a word rather than a number.
+fn put_flag(conn: &Connection, key: &str, value: bool) -> Result<()> {
+    put_row(conn, key, if value { "true" } else { "false" })
+}
+
+/// Takes a row away, so the note goes back to not saying whatever it said.
+///
+/// What "not saying" means is [`row_value`]'s business: for a setting it is the app's own default, and
+/// for a fact — a source file, a name, a sheet — it is *nothing*.
+fn drop_row(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM meta WHERE key = ?1", params![key])
+        .map_err(sql)?;
+
+    Ok(())
+}
+
+/// The number a row holds: a float, which is every measurement here.
+fn number_of(text: &str) -> Option<f32> {
+    text.parse().ok()
+}
+
+/// The whole number a row holds: a page, or a count.
+fn whole_of(text: &str) -> Option<u64> {
+    text.parse().ok()
+}
+
+/// The colour a row holds: `0xRRGGBB` as one whole number, as it is everywhere else in the app.
+fn colour_of(text: &str) -> Option<u32> {
+    text.parse().ok()
+}
+
+/// The flag a row holds: `true` or `false`, spelled out.
+fn flag_of(text: &str) -> Option<bool> {
+    match text {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
     }
 }
 
@@ -1155,10 +1324,8 @@ fn open_dirty(blob: &[u8]) -> Result<Vec<Stroke>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canvas::{CanvasSize, CanvasStyle};
     use crate::ink::InkPoint;
     use crate::pages::Page;
-    use std::path::PathBuf;
 
     /// A note file in the temp directory, named after the test that wants it.
     fn store_for(name: &str) -> (NoteStore, PathBuf) {
@@ -1435,12 +1602,10 @@ mod tests {
         cleanup(&path);
     }
 
-    /// A note remembers what belongs to the note: the page it was on, the sheet, the page list, and
-    /// how it is written on.
+    /// A note remembers what it knows — the page it was on, the sheet, the page list, its name — and
+    /// says `None` for everything it has not been told.
     ///
-    /// The style is one of those facts rather than one of the app's, which is what
-    /// [`two_notes_keep_their_own_sheets`] is about; what this test holds it to is the `None` that
-    /// comes back before anything has been chosen.
+    /// The settings are the other half of that table and have tests of their own, below.
     #[test]
     fn a_note_remembers_its_own_page_list() {
         let (mut store, path) = store_for("meta");
@@ -1448,7 +1613,6 @@ mod tests {
         assert_eq!(store.open_page().expect("a page"), None);
         assert_eq!(store.layout().expect("a layout"), Vec::<Page>::new());
         assert_eq!(store.sheet().expect("a sheet"), None);
-        assert_eq!(store.style().expect("a style"), None);
 
         store.set_open_page(4).expect("a page");
         store.set_sheet(Some((794.0, 1123.0))).expect("a sheet");
@@ -1456,7 +1620,6 @@ mod tests {
             .set_layout(&[Page::Blank, Page::Document(3)])
             .expect("a layout");
         store.set_document("chapter-3.pdf").expect("a name");
-        store.set_style(&NoteStyle::default()).expect("a style");
 
         assert_eq!(store.open_page().expect("a page"), Some(4));
         assert_eq!(store.sheet().expect("a sheet"), Some((794.0, 1123.0)));
@@ -1468,56 +1631,179 @@ mod tests {
             store.document().expect("a name").as_deref(),
             Some("chapter-3.pdf")
         );
+
+        cleanup(&path);
+    }
+
+    /// Half a sheet says nothing: the two rows are written together, and read together.
+    ///
+    /// A note holding a width and no height is a note somebody edited by hand, and the honest answer is
+    /// that the note does not say — not a sheet with a height of zero.
+    #[test]
+    fn half_a_sheet_says_nothing() {
+        let (mut store, path) = store_for("sheet-half");
+
+        store.set_sheet(Some((794.0, 1123.0))).expect("a sheet");
+        store.set_sheet(None).expect("no sheet");
         assert_eq!(
-            store.style().expect("a style"),
-            Some(NoteStyle::default()),
-            "a style that was written down comes back, even when it is the shipped one"
+            store.sheet().expect("a sheet"),
+            None,
+            "forgetting a sheet takes both rows away"
+        );
+
+        put_row(&store.conn, META_SHEET_WIDTH, 794.0).expect("half a sheet");
+        assert_eq!(store.sheet().expect("a sheet"), None);
+
+        cleanup(&path);
+    }
+
+    /// Two notes keep two different answers, whatever the answers are.
+    ///
+    /// This is the whole reason there is no global state. The paper, the ruling, the pen, the tuning and
+    /// the switches are a *note's*, so opening one must not hand its answers to the next — and the only
+    /// way to say that is two notes side by side, each with its own file. Every field is set to something
+    /// that is *not* the shipped default, so a setting that is written but never read back fails here.
+    #[test]
+    fn two_notes_keep_their_own_answers() {
+        let (mut ruled, ruled_path) = store_for("settings-ruled");
+        let (mut grid, grid_path) = store_for("settings-grid");
+
+        let ruled_settings = Settings {
+            ink_color: 0xDC_26_26,
+            page_color: 0xF5_F0_E6,
+            pen_weight: PenWeight::Fine,
+            grayscale_pages: true,
+            canvas_size: CanvasSize::A5,
+            canvas_style: CanvasStyle::Ruled,
+            page_display_width: 640.0,
+            zoom: 1.5,
+            resample_spacing: 0.5,
+            smoothing_ms: 4.0,
+            min_width: 0.8,
+            max_width: 3.2,
+            no_pressure_width: 1.6,
+            erase_radius: 9.0,
+            export_dir: Some(PathBuf::from("C:/carry")),
+            show_toolbar: false,
+            show_status: false,
+            show_tilt_cursor: false,
+        };
+        let grid_settings = Settings {
+            ink_color: 0x1D_4E_D8,
+            page_color: 0x20_20_24,
+            pen_weight: PenWeight::Heavy,
+            grayscale_pages: false,
+            canvas_size: CanvasSize::Square,
+            canvas_style: CanvasStyle::Grid,
+            page_display_width: 720.0,
+            zoom: 2.0,
+            resample_spacing: 1.25,
+            smoothing_ms: 0.0,
+            min_width: 2.0,
+            max_width: 9.0,
+            no_pressure_width: 4.0,
+            erase_radius: 20.0,
+            export_dir: None,
+            show_toolbar: true,
+            show_status: true,
+            show_tilt_cursor: true,
+        };
+
+        ruled.set_settings(&ruled_settings).expect("settings");
+        grid.set_settings(&grid_settings).expect("settings");
+
+        // Read into a *default* set, so anything the note fails to say comes back as the shipped answer
+        // and the comparison below can see it.
+        let mut read = Settings::default();
+        ruled.read_settings(&mut read).expect("the ruled note");
+        assert_eq!(read, ruled_settings, "every answer comes back");
+
+        read = Settings::default();
+        grid.read_settings(&mut read).expect("the grid note");
+        assert_eq!(read, grid_settings);
+
+        assert_ne!(ruled_settings, grid_settings, "the two notes differ");
+        assert_ne!(
+            ruled_settings,
+            Settings::default(),
+            "and neither fixture is the shipped set, so nothing here passes by accident"
+        );
+        assert_ne!(grid_settings, Settings::default());
+
+        cleanup(&ruled_path);
+        cleanup(&grid_path);
+    }
+
+    /// A row this build does not know is left exactly as it was found.
+    ///
+    /// The whole point of one row per setting: a note written by a build that knew more settings, or one
+    /// somebody added a row to by hand, keeps them. Nothing here writes a row it does not read and
+    /// nothing deletes one, so a newer build's answers survive a note passing through this one.
+    #[test]
+    fn a_row_this_build_does_not_know_is_left_alone() {
+        let (mut store, path) = store_for("row-unknown");
+
+        put_row(&store.conn, "brushes_from_the_future", "42").expect("a row");
+        put_row(&store.conn, "another", "a word").expect("a row");
+
+        store.set_settings(&Settings::default()).expect("settings");
+        let mut read = Settings::default();
+        store.read_settings(&mut read).expect("settings");
+
+        assert_eq!(
+            row_text(&store.conn, "brushes_from_the_future").expect("a row").as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            row_text(&store.conn, "another").expect("a row").as_deref(),
+            Some("a word")
         );
 
         cleanup(&path);
     }
 
-    /// Two notes written on two different sheets keep their own answers.
+    /// A row that is there and cannot be understood is reported, not replaced.
     ///
-    /// This is the whole reason the style is stored in the note. The paper, the ruling, the ink
-    /// colour and the zoom are a *note's*, so opening one must not hand its sheet to the next — and
-    /// the only way to say that is two notes side by side, each with its own file.
+    /// Something wrote it, and quietly answering with the shipped default is how a person's setting
+    /// disappears without a word — which is the one failure this whole design exists to avoid.
     #[test]
-    fn two_notes_keep_their_own_sheets() {
-        let (mut ruled, ruled_path) = store_for("style-ruled");
-        let (mut grid, grid_path) = store_for("style-grid");
+    fn a_row_that_is_not_a_number_is_reported() {
+        let (store, path) = store_for("row-broken");
 
-        let ruled_style = NoteStyle {
-            ink_color: 0xDC_26_26,
-            page_color: 0xFF_FF_FF,
-            page_display_width: 640.0,
-            canvas_size: CanvasSize::A5,
-            canvas_style: CanvasStyle::Ruled,
-            grayscale_pages: true,
-            zoom: 1.5,
+        put_row(&store.conn, "max_width", "as wide as you like").expect("a row");
+
+        let mut read = Settings::default();
+        let error = store
+            .read_settings(&mut read)
+            .expect_err("a broken row is reported");
+
+        assert!(error.to_string().contains("max_width"), "{error}");
+
+        cleanup(&path);
+    }
+
+    /// A row that is *not there* is not a failure: the answer in hand stands.
+    ///
+    /// This is what makes a note written by a build that knew fewer settings open with the shipped
+    /// answers rather than with nothing, and what lets a PDF just placed keep the sheet it was placed on.
+    #[test]
+    fn a_missing_row_keeps_the_answer_in_hand() {
+        let (store, path) = store_for("row-missing");
+
+        let mut read = Settings {
+            max_width: 7.25,
+            zoom: 3.0,
+            ..Settings::default()
         };
-        let grid_style = NoteStyle {
-            ink_color: 0x1D_4E_D8,
-            page_color: 0x20_20_24,
-            page_display_width: 720.0,
-            canvas_size: CanvasSize::Square,
-            canvas_style: CanvasStyle::Grid,
-            grayscale_pages: false,
-            zoom: 2.0,
-        };
+        store
+            .read_settings(&mut read)
+            .expect("a note that says nothing");
 
-        ruled.set_style(&ruled_style).expect("a style");
-        grid.set_style(&grid_style).expect("a style");
+        assert_eq!(read.max_width, 7.25, "the setting in hand is kept");
+        assert_eq!(read.zoom, 3.0);
+        assert_eq!(read.ink_color, Settings::default().ink_color);
 
-        assert_eq!(ruled.style().expect("a style"), Some(ruled_style));
-        assert_eq!(grid.style().expect("a style"), Some(grid_style));
-        assert_ne!(
-            ruled_style, grid_style,
-            "the two notes have to differ, or this proves nothing"
-        );
-
-        cleanup(&ruled_path);
-        cleanup(&grid_path);
+        cleanup(&path);
     }
 
     /// A note can be given a name, and the name is the row's word for it — never the folder's.

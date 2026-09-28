@@ -27,6 +27,7 @@ use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
 use crate::ink_layer::canvas::{Fill, Rect};
+use crate::pages::Quarters;
 
 /// How many logical pixels one millimetre of paper is drawn at.
 ///
@@ -357,19 +358,34 @@ fn channels(color: u32) -> (f32, f32, f32) {
 
 /// What the cached ruling was built for.
 ///
-/// Compared field by field rather than hashed: the sheet's rectangle is four floats and the rest
+/// Compared field by field rather than hashed: the sheet's rectangles are a few floats and the rest
 /// are two small enums, so there is nothing to gain from a hash and one more thing to get wrong.
 #[derive(Clone, Copy, PartialEq)]
 struct RulingKey {
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
+    at: RulingSheet,
     style: CanvasStyle,
     paper: u32,
     /// Part of the key, not derivable from the rectangle: the rule spacing depends on it, and two
     /// different papers drawn at two different zooms can share a rectangle.
     zoom: f32,
+}
+
+/// Where a sheet's ruling goes: the paper's own rectangle, the rectangle it is drawn in, and which way
+/// up the page is.
+///
+/// Two rectangles because the ruling is *printed on the paper*. It is built on the paper's rectangle,
+/// where a rule's spacing and its length mean what they mean on paper, and then placed in the drawn
+/// one — turned with the page, so a page on its side has its ruling running the other way. Building it
+/// in the drawn rectangle instead would give a turned page a ruling that is the wrong way round, which
+/// is the difference between paper that was turned and a grid an interface painted over it.
+#[derive(Clone, Copy, PartialEq)]
+pub struct RulingSheet {
+    /// The paper's own rectangle, in logical pixels at the *drawn* zoom: the un-turned shape.
+    pub paper: Bounds<Pixels>,
+    /// The rectangle the sheet is drawn in, in logical window pixels.
+    pub drawn: Rect,
+    /// How far the page has been turned, in quarter turns clockwise.
+    pub turns: Quarters,
 }
 
 /// The rule geometry for the current sheet, reused until the sheet changes.
@@ -396,34 +412,27 @@ impl Ruling {
     /// Returns the cached set when the sheet has not changed, so a frame that only adds ink pays
     /// nothing for the ruling; otherwise rebuilds it once and caches that.
     ///
-    /// `zoom` is separate from the sheet's rectangle because the ruling is *printed on the paper*:
-    /// the rules have to grow with it, or zooming in would make the grid relatively finer instead
-    /// of closer. It is part of the cache key for the same reason — two different papers at two
-    /// different zooms can share a rectangle.
+    /// `zoom` is separate from the rectangles because the ruling is *printed on the paper*: the rules
+    /// have to grow with it, or zooming in would make the grid relatively finer instead of closer. It is
+    /// part of the cache key for the same reason — two different papers at two different zooms can share
+    /// a rectangle.
     pub fn rules(
         &mut self,
-        sheet: Bounds<Pixels>,
+        at: RulingSheet,
         style: CanvasStyle,
         paper: u32,
         zoom: f32,
     ) -> Arc<Vec<Fill>> {
         let key = RulingKey {
-            x: sheet.origin.x.into(),
-            y: sheet.origin.y.into(),
-            width: sheet.size.width.into(),
-            height: sheet.size.height.into(),
+            at,
             style,
             paper,
             zoom,
         };
 
         if self.built_for != Some(key) {
-            self.rules = Arc::new(build_ruling(
-                sheet,
-                style,
-                rgb(rule_color(paper)).into(),
-                zoom,
-            ));
+            let rules = build_ruling(at.paper, style, rgb(rule_color(paper)).into(), zoom);
+            self.rules = Arc::new(place(rules, at));
             self.built_for = Some(key);
             self.rebuilds += 1;
         }
@@ -496,6 +505,56 @@ fn build_ruling(sheet: Bounds<Pixels>, style: CanvasStyle, color: Hsla, zoom: f3
     quads
 }
 
+/// Moves marks built on the paper's own rectangle into the rectangle the sheet is drawn in, turned with
+/// the page.
+///
+/// A quarter turn takes an axis-aligned rectangle to another one, so each mark is still one fill — and
+/// the mapping is [`crate::ink::drawn_of_paper`]'s, applied to whole rectangles, which is what keeps the
+/// ruling and the ink agreeing about which way up the page is.
+fn place(rules: Vec<Fill>, at: RulingSheet) -> Vec<Fill> {
+    let (x, y) = (at.drawn.x, at.drawn.y);
+    let (width, height) = (
+        f32::from(at.paper.size.width),
+        f32::from(at.paper.size.height),
+    );
+
+    rules
+        .into_iter()
+        .map(|mut fill| {
+            let rect = fill.rect;
+
+            fill.rect = match at.turns % 4 {
+                1 => Rect {
+                    x: x + height - rect.y - rect.height,
+                    y: y + rect.x,
+                    width: rect.height,
+                    height: rect.width,
+                },
+                2 => Rect {
+                    x: x + width - rect.x - rect.width,
+                    y: y + height - rect.y - rect.height,
+                    width: rect.width,
+                    height: rect.height,
+                },
+                3 => Rect {
+                    x: x + rect.y,
+                    y: y + width - rect.x - rect.width,
+                    width: rect.height,
+                    height: rect.width,
+                },
+                _ => Rect {
+                    x: x + rect.x,
+                    y: y + rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                },
+            };
+
+            fill
+        })
+        .collect()
+}
+
 /// How many rules fit inside `extent`, leaving `spacing` of margin at each end.
 ///
 /// The margin is the point: a rule hard against the sheet's edge reads as a border, and a dot
@@ -563,8 +622,8 @@ mod tests {
     // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
     // scope and shadow the attribute this module needs.
     use super::{
-        build_ruling, contrast_color, relative_luminance, rule_color, rules_that_fit, CanvasSize,
-        CanvasStyle, Ruling, INK_COLORS, PAPER_COLORS,
+        build_ruling, contrast_color, place, relative_luminance, rule_color, rules_that_fit,
+        CanvasSize, CanvasStyle, Rect, Ruling, RulingSheet, INK_COLORS, PAPER_COLORS,
     };
     use gpui_kit::{point, px, rgb, size, Bounds, Hsla, Pixels};
     use std::sync::Arc;
@@ -581,6 +640,21 @@ mod tests {
         Bounds {
             origin: point(px(24.0), px(24.0)),
             size: size(px(width), px(height)),
+        }
+    }
+
+    /// A ruling request for a sheet the right way up: the paper and the rectangle it is drawn in are the
+    /// same shape, which is what a page nobody has turned is.
+    fn upright(paper: Bounds<Pixels>) -> RulingSheet {
+        RulingSheet {
+            drawn: Rect {
+                x: 24.0,
+                y: 24.0,
+                width: f32::from(paper.size.width),
+                height: f32::from(paper.size.height),
+            },
+            paper,
+            turns: 0,
         }
     }
 
@@ -689,20 +763,113 @@ mod tests {
         let mut ruling = Ruling::default();
         let sheet = sheet(720.0, 1018.0);
 
-        let first = ruling.rules(sheet, CanvasStyle::Grid, 0xFF_FF_FF, 1.0);
-        let again = ruling.rules(sheet, CanvasStyle::Grid, 0xFF_FF_FF, 1.0);
+        let first = ruling.rules(upright(sheet), CanvasStyle::Grid, 0xFF_FF_FF, 1.0);
+        let again = ruling.rules(upright(sheet), CanvasStyle::Grid, 0xFF_FF_FF, 1.0);
         assert!(
             Arc::ptr_eq(&first, &again),
             "an unchanged sheet is not rebuilt"
         );
 
-        let restyled = ruling.rules(sheet, CanvasStyle::Dots, 0xFF_FF_FF, 1.0);
+        let restyled = ruling.rules(upright(sheet), CanvasStyle::Dots, 0xFF_FF_FF, 1.0);
         assert!(!Arc::ptr_eq(&first, &restyled), "a new style is rebuilt");
 
-        let repapered = ruling.rules(sheet, CanvasStyle::Dots, 0x14_16_1A, 1.0);
+        let repapered = ruling.rules(upright(sheet), CanvasStyle::Dots, 0x14_16_1A, 1.0);
         assert!(
             !Arc::ptr_eq(&restyled, &repapered),
             "new paper changes the rule's colour, so it is rebuilt"
+        );
+
+        // A page turned is a different ruling, even when the paper and the drawn rectangle are the
+        // shapes of a page that has not been: the rules run the other way. (A square, because this test's
+        // own `sheet` is the sheet it drew with — the helper has been shadowed.)
+        let square = Bounds {
+            origin: point(px(24.0), px(24.0)),
+            size: size(px(720.0), px(720.0)),
+        };
+        let turned = RulingSheet {
+            turns: 1,
+            ..upright(square)
+        };
+        let upright_ruling = ruling.rules(upright(square), CanvasStyle::Dots, 0x14_16_1A, 1.0);
+        let turned_ruling = ruling.rules(turned, CanvasStyle::Dots, 0x14_16_1A, 1.0);
+        assert!(
+            !Arc::ptr_eq(&upright_ruling, &turned_ruling),
+            "a turn is a rebuild"
+        );
+    }
+
+    /// The ruling turns with the page: a rule that runs across the paper runs down it once the page is on
+    /// its side, inside the rectangle the sheet is drawn in.
+    #[test]
+    fn the_ruling_turns_with_the_page() {
+        let paper = sheet(720.0, 1018.0);
+        let rule = vec![Fill::new(
+            Rect {
+                x: 30.0,
+                y: 40.0,
+                width: 200.0,
+                height: 2.0,
+            },
+            rgb(0x00_00_00).into(),
+        )];
+
+        // The rectangle the sheet is drawn in, for a page at `turns`: the paper's shape, or that shape on
+        // its side. Written out per turn because it is part of the input and not something the mapping
+        // can be asked to guess — a page and its drawn rectangle always agree about their shape.
+        let drawn = |turns: u8| Rect {
+            x: 10.0,
+            y: 20.0,
+            width: if turns % 2 == 1 { 1018.0 } else { 720.0 },
+            height: if turns % 2 == 1 { 720.0 } else { 1018.0 },
+        };
+
+        let once = place(
+            rule.clone(),
+            RulingSheet {
+                paper,
+                drawn: drawn(1),
+                turns: 1,
+            },
+        );
+        assert_eq!(
+            fill_bounds(&once[0]),
+            (986.0, 50.0, 2.0, 200.0),
+            "the rule lies the other way, inside the drawn rectangle"
+        );
+
+        // Every turn places the mark inside the sheet that is drawn, which is the whole of what the
+        // mapping has to get right: a ruling outside its paper is a grid on the desk instead.
+        for turns in 0..4u8 {
+            let at = RulingSheet {
+                paper,
+                drawn: drawn(turns),
+                turns,
+            };
+            let (x, y, width, height) = fill_bounds(&place(rule.clone(), at)[0]);
+            let rect = drawn(turns);
+
+            assert!(
+                x >= rect.x
+                    && y >= rect.y
+                    && x + width <= rect.x + rect.width
+                    && y + height <= rect.y + rect.height,
+                "turn {turns} put the rule at {x}, {y} ({width}x{height})"
+            );
+        }
+
+        // And the whole way round is where it started.
+        let round = place(
+            rule.clone(),
+            RulingSheet {
+                paper,
+                drawn: drawn(4),
+                turns: 4,
+            },
+        );
+        assert_eq!(
+            fill_bounds(&round[0]),
+            (40.0, 60.0, 200.0, 2.0),
+            "four turns is the page it was"
         );
     }
 

@@ -138,10 +138,20 @@ and writes it back whenever something changes.
 note.db → meta('open_page')    = "7"                       the page that was open
           meta('sheet_width')  = "685.71429"               the sheet the ink's coordinates are in
           meta('sheet_height') = "970.0"
-          meta('layout')       = ["blank",{"document":3}]  what each page shows, in reading order
+          meta('layout')       = [{"show":"blank","rotation":0},   what each page shows, in reading
+                                  {"show":{"document":3},          order, and which way up it is
+                                   "rotation":1}]                  (quarter turns clockwise)
           meta('canvas_size')  = "A5"                      …and every setting, one row each
           meta('title')        = "3장 요약"
 ```
+
+**A page's rotation is in this list and not in the ink.** Turning a page writes nothing at all: the ink
+of a page is stored in the page's own coordinates and never moves, and a turn changes only *where those
+coordinates are drawn* — so the note remembers a turn as a field of one row of the page list, the same
+way it remembers what a page shows. That is also what makes turning a page free: no stroke is rewritten,
+no chunk is re-encoded, and a page turned while writing does not hand the writer anything. A note
+written before pages could be turned has a list of bare pages in this row; they are read as pages that
+are the right way up (see `crate::pages::StoredPage`).
 
 **The rows *are* the schema, and that is the whole point of them.** There is no packed blob to decode
 and no stored shape for a struct to match, so a fact can be added to a note without anything being

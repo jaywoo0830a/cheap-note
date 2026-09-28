@@ -52,6 +52,7 @@ use std::sync::Arc;
 use pen_windows::{PenPhase, PenSample};
 use serde::{Deserialize, Serialize};
 
+use crate::pages::Quarters;
 use crate::settings::Settings;
 
 /// Where the pen is, in the sheet's own coordinates.
@@ -89,6 +90,59 @@ pub struct InkTransform {
     /// the one question this model asks of every reading: is it *on the page the user is writing
     /// on* — and the top of the page behind a bar is not somewhere a nib can write.
     pub bar: f32,
+    /// How far the page has been turned, in quarter turns clockwise.
+    ///
+    /// A reading is turned back by it — see [`paper_of_drawn`] — so ink written on a page the reader
+    /// has turned is stored the way it will be read: turn the page back and the writing turns with it,
+    /// because both are in the page's own coordinates and neither was ever anything else.
+    pub rotation: Quarters,
+}
+
+/// Where the paper's own point `paper` is drawn inside the sheet's rectangle, in the sheet's units.
+///
+/// The whole of what a page's rotation is: a rectangle of paper `size` turned `turns` quarter turns
+/// *clockwise* — its top-left corner goes to the top-right, its own rightwards direction points down the
+/// screen — and this is where each of its points lands. A page turned twice is not the same as a page
+/// turned none: `(pw - x, ph - y)` is a different mapping from `(x, y)`, and the difference is exactly
+/// what a reader sees.
+///
+/// The layer draws the ink through the same mapping — its transform is *built* from this function (see
+/// [`crate::ink_layer::render::ink_matrix`]) — so there is one convention and not two, and no way for the
+/// layer and the ink model to disagree about which way is clockwise.
+pub fn drawn_of_paper(
+    (x, y): (f32, f32),
+    (width, height): (f32, f32),
+    turns: Quarters,
+) -> (f32, f32) {
+    match turns % 4 {
+        1 => (height - y, x),
+        2 => (width - x, height - y),
+        3 => (y, width - x),
+        _ => (x, y),
+    }
+}
+
+/// Where a point of the sheet's rectangle came from on the paper: the inverse of [`drawn_of_paper`].
+///
+/// What a pen reading is put through, and the reason a page turned is still written on in the page's own
+/// coordinates.
+///
+/// The four are written out rather than taken from [`drawn_of_paper`], because a quarter turn is not a
+/// rotation matrix here: it *also* swaps the rectangle's sides, so the three-quarter turn of the same
+/// function is not this one — for a 600×800 page, `paper_of_drawn` of `(800, 0)` is `(0, 0)`, while the
+/// three-quarter turn of the forward mapping is `(0, -200)`. `the_two_mappings_are_inverses` is what
+/// holds the two tables together, and it is the test to keep when either changes.
+pub fn paper_of_drawn(
+    (x, y): (f32, f32),
+    (width, height): (f32, f32),
+    turns: Quarters,
+) -> (f32, f32) {
+    match turns % 4 {
+        1 => (y, height - x),
+        2 => (width - x, height - y),
+        3 => (width - y, x),
+        _ => (x, y),
+    }
 }
 
 impl Default for InkTransform {
@@ -109,6 +163,7 @@ impl InkTransform {
             origin: (0.0, 0.0),
             paper: (0.0, 0.0),
             bar: 0.0,
+            rotation: 0,
         }
     }
 
@@ -120,10 +175,18 @@ impl InkTransform {
         let scale = finite_or_one(self.scale);
         let zoom = finite_or_one(self.zoom);
 
-        (
+        let drawn = (
             (pixel.0 / scale - self.origin.0) / zoom,
             (pixel.1 / scale - self.origin.1) / zoom,
-        )
+        );
+
+        // Turned back into the page's own coordinates: with no paper there is no page to be turned,
+        // and a rotation of a shape with no size would be a mapping of nothing into itself.
+        if !self.has_paper() {
+            return drawn;
+        }
+
+        paper_of_drawn(drawn, self.paper, self.rotation)
     }
 
     /// Whether a point in the sheet's own coordinates is on the paper.
@@ -1548,6 +1611,104 @@ impl Notes {
 mod tests {
     use super::*;
     use pen_windows::Point;
+
+    /// A reading on a turned page is stored in the page's own coordinates, and reads back where it was
+    /// written.
+    ///
+    /// The whole of what turning a page means for the pen. The sheet on screen is the paper turned, so a
+    /// reading is turned *back* into the page's coordinates — and the mapping that does it has to be the
+    /// one the layer draws the ink through, or the line under the nib is not the line that appears. That
+    /// agreement is what this checks, against the same function the layer's matrix is tested with.
+    #[test]
+    fn a_reading_on_a_turned_page_is_stored_in_the_pages_own_coordinates() {
+        let paper = (600.0, 800.0);
+        let origin = (100.0, 50.0);
+
+        for turns in 0..4u8 {
+            let transform = InkTransform {
+                scale: 1.0,
+                zoom: 1.0,
+                origin,
+                paper,
+                bar: 0.0,
+                rotation: turns,
+            };
+
+            // Points inside the sheet whichever way up it is drawn.
+            for window in [(400.0, 300.0), (200.0, 200.0), (650.0, 600.0)] {
+                let at = transform.sheet_point(window);
+
+                assert!(
+                    transform.on_paper(at),
+                    "turn {turns}: {window:?} landed off the page at {at:?}"
+                );
+
+                let (drawn_x, drawn_y) = drawn_of_paper(at, paper, turns);
+                let back = (origin.0 + drawn_x, origin.1 + drawn_y);
+                assert!(
+                    (back.0 - window.0).abs() < 0.001 && (back.1 - window.1).abs() < 0.001,
+                    "turn {turns}: {window:?} was stored at {at:?} and drawn back at {back:?}"
+                );
+            }
+        }
+    }
+
+    /// A reading beside a turned page is beside it, not on it.
+    ///
+    /// The paper's box is the page's own shape and not the drawn one, which is the half of this that is
+    /// easy to get wrong: check a reading against the drawn rectangle and a page on its side has a strip
+    /// of desk that writes.
+    #[test]
+    fn a_reading_beside_a_turned_page_is_not_ink() {
+        let transform = InkTransform {
+            scale: 1.0,
+            zoom: 1.0,
+            origin: (0.0, 0.0),
+            paper: (600.0, 800.0),
+            bar: 0.0,
+            rotation: 1,
+        };
+
+        // The drawn sheet is 800 wide and 600 tall; the page is 600 wide and 800 tall. A reading at
+        // (700, 700) is past the *drawn* rectangle's bottom edge, and it is the page's own coordinates
+        // that decide: turned back it is (700, 100), which is past the page's right edge too. Reading it
+        // against the drawn rectangle instead would call that point paper, because 700 is inside the
+        // sheet's 800.
+        assert!(transform.on_paper(transform.sheet_point((300.0, 300.0))));
+        assert!(
+            !transform.on_paper(transform.sheet_point((700.0, 700.0))),
+            "the desk beside a page on its side is not paper"
+        );
+        assert_eq!(
+            transform.onto_paper(transform.sheet_point((700.0, 700.0))),
+            (600.0, 100.0),
+            "and a line that runs off it is pulled back to the page's edge"
+        );
+    }
+
+    /// A page the reader has turned is the page's own coordinates the other way round, for all four
+    /// turns: the two mappings are inverses, and the whole way round is the page it started as.
+    #[test]
+    fn the_two_mappings_are_inverses() {
+        let paper = (600.0, 800.0);
+
+        for turns in 0..4u8 {
+            for point in [(0.0, 0.0), (600.0, 0.0), (0.0, 800.0), (123.0, 456.0)] {
+                let round = paper_of_drawn(drawn_of_paper(point, paper, turns), paper, turns);
+
+                assert!(
+                    (round.0 - point.0).abs() < 0.001 && (round.1 - point.1).abs() < 0.001,
+                    "turn {turns}: {point:?} came back as {round:?}"
+                );
+            }
+        }
+
+        assert_eq!(
+            drawn_of_paper((100.0, 200.0), paper, 4),
+            (100.0, 200.0),
+            "four turns is the page it was"
+        );
+    }
 
     /// A reading at a position, in physical client pixels, with the given phase.
     fn reading(id: u32, phase: PenPhase, x: f32, y: f32, pressure: Option<f32>) -> PenSample {

@@ -676,7 +676,7 @@ impl Drop for NoteWriter {
 mod tests {
     use super::*;
     use crate::ink::InkPoint;
-    use crate::pages::Page;
+    use crate::pages::{Page, PageEntry};
     use std::io::Write as _;
     use std::time::{Duration, Instant};
     use zip::write::SimpleFileOptions;
@@ -805,7 +805,10 @@ mod tests {
             .rewrite(1, &[stroke(4, 0.0), stroke(4, 40.0)])
             .expect("ink");
         note.store_mut()
-            .set_layout(&[Page::Document(0), Page::Blank])
+            .set_layout(&[
+                PageEntry::new(Page::Document(0)),
+                PageEntry::new(Page::Blank),
+            ])
             .expect("a list");
         note.store_mut()
             .set_sheet(Some((794.0, 1123.0)))
@@ -827,7 +830,10 @@ mod tests {
         );
         assert_eq!(
             arrived.store().layout().expect("a list"),
-            vec![Page::Document(0), Page::Blank]
+            vec![
+                PageEntry::new(Page::Document(0)),
+                PageEntry::new(Page::Blank)
+            ]
         );
         let (name, bytes) = arrived
             .document()

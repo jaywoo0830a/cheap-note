@@ -1,133 +1,51 @@
 # How cheap-note stores your ink
 
-This document explains, from the outside in, what happens to a stroke after you draw it: where it
-goes on disk, how it is encoded, when it is written, and what it costs. It is written for anyone who
-has to use, debug, or change this program — no prior knowledge of SQLite, compression, or the app's
+This document follows one stroke from the pen to the disk and back: what is written, when it is
+written, how it is encoded, and what it costs. No knowledge of SQLite, of compression, or of this
 code is assumed.
 
 If you read only one paragraph, read this one:
 
 > **A note is a folder with one SQLite file in it.** Ink is written into that file *while you draw*,
-> in batches, on a background thread — nothing waits for a *Save*. Strokes are not stored as JSON
-> but as compressed structure-of-arrays blobs, so a page costs a few kilobytes rather than a few
-> hundred. *Save* does not "save" anything: it writes one portable file (a zip) that you can carry
-> to another machine.
+> in batches, on a background thread — nothing waits for a *Save*. Strokes are not stored as JSON but
+> as compressed structure-of-arrays blobs, so a page costs a few kilobytes rather than a few hundred.
+> *Save* does not "save" anything: it writes one portable file (a zip) you can carry to another
+> machine.
 
 ---
 
-## 1. The two shapes of a note
+## 1. What a note is on disk
 
-A note exists in two forms, and only one of them is the one you work in.
-
-**The working copy** is what the app opens and writes to. It lives in the app's own state directory:
+A note is one folder in the app's own state directory, and the same three names make up the single file
+a person carries — this is what the *Save* button writes:
 
 ```text
 %LOCALAPPDATA%\cheap-note\notes\chapter-3-9f2a1c44\
     note.db                  the SQLite database: all of the ink and the note's own facts
     source.pdf               the PDF the note was written on, byte for byte (optional)
     attachments\             anything else the note carries (nothing writes here yet)
+
+chapter-3.zip                the carried form: a standalone copy of note.db, plus the two above
 ```
 
-**The carried file** is what you move between machines — it is what the *Save* button writes:
+While it is open, `note.db-wal` and `note.db-shm` sit beside it. That is the write-ahead log, it is
+normal, and it is the whole reason a write does not stop a read (§6): it is folded back into `note.db`
+when the pen has been still, and always before the note is exported (§8).
 
-```text
-chapter-3.zip
-    note.db                  a complete, standalone copy of the database
-    source.pdf
-    attachments\
-```
+**Why the working copy is not next to your files.** An open database is three files written
+independently, and synchronising folders (Dropbox, OneDrive, iCloud) copy and merge files under a
+running program, which corrupts databases. So a note is *imported* into the app's own directory and
+*exported* as one file: open locally, move by exporting. A folder you point the app at is opened where
+it stands, for someone who keeps their notes in their own directory and will not sync it.
 
-The two are the same note; the zip is a *snapshot* of the folder, made with `VACUUM INTO` so that it
-has nothing half-written in it (see §8).
+`chapter-3-9f2a1c44` is the name of the file the note was made from plus a short digest of its full
+path, and that name *is* the note's identity: it is what makes importing the same PDF twice find the
+same note rather than a second copy of it. What a note is *called* — the name on the bar, and in the
+list — is a `meta` row, so a note carried to another machine arrives already named (§3).
 
-`chapter-3-9f2a1c44` is the name of the file the note was made from — `chapter-3.pdf` — plus a short
-digest of its full path, so that two different files with the same name are two different notes, and
-so that importing the same file twice finds the same working copy again.
-
-**Why the working copy is not next to your files.** An open SQLite database is three files (`note.db`
-and, while it is open, `note.db-wal` and `note.db-shm`) that are written independently. Synchronising
-folders — Dropbox, OneDrive, iCloud — copy and merge files under a running program, which corrupts
-databases. So a note is *imported* into the app's own directory and *exported* as a single file. That
-is the whole of the rule: open locally, move by exporting.
-
-Whereas a *folder* you point the app at is opened where it stands, for someone who wants their notes
-in their own directory and promises not to sync it.
-
-### What the app remembers about what you opened
-
-Beside the notes folder there is one small file, and it is what the app starts on:
-
-```text
-%LOCALAPPDATA%\cheap-note\recent.json      what you have opened, newest first
-```
-
-It holds one entry per note the app has been asked to open: the note's *folder* — which is what an
-entry opens — the file it was made from, its name, the sheet, how much is in it, and when it was last
-opened. The file it came from is a *convenience* and nothing more: a note carries its own copy of the
-document, so an entry whose original file has moved is still a whole note.
-
-It is a **cache, not a note**, and it is treated like one:
-
-* deleting it costs the order of a list and nothing else — every note it names is still a folder under
-  `notes\`;
-* a folder it has never heard of — a note carried in from another machine — is *adopted* by simply
-  being there, so the list heals itself;
-* an entry whose folder has gone is marked rather than removed, because the note may be one directory
-  away (and the list says "not on disk" instead of quietly forgetting).
-
-One thing in the file is *not* a cache: the **folders taken out of the list**. *Forget this row* takes a
-line out of the list and touches no note, and the note is still a folder under `notes\` — so adoption
-would put the row straight back if the entry were all that was removed. The folder is therefore written
-down as taken out, and adoption skips it. Opening the note again is the way back, because that is a person
-asking for it and no scan can ask on their behalf. A folder that is no longer on disk is dropped from that
-record, since only a folder that is *there* can be adopted — which is what keeps it short. Deleting
-`recent.json` therefore costs the order of the list and the record of what was taken out of it, and
-nothing else.
-
-The counts are cached together with a **stamp** of the note's database — its size and its modification
-time — so drawing the list normally costs one `stat` per note rather than one database read. Only a
-note whose database has changed since its stamp is read again, on a worker thread, and its row fills in
-when the answer arrives. That is what makes the list cheap however many notes there are: §5's numbers
-are a note's *size*, and the size is in its pages, not in its ink.
-
-The index is deliberately *not* kept inside a note — it is a list of *every* note, so no one of them
-could hold it — and it holds no settings, because a setting is a property of a note and there is
-nowhere left to keep a global one (§3). It is a cache of the notes folder, kept beside the notes
-folder, and deleting it costs the order of a list and nothing else.
-
-### The name a person gives a note
-
-A note can be *named* — and the name lives in the note, in the same `meta` table as its open page and
-its paper size, under the key `title`:
-
-```text
-note.db  →  meta('title') = "3장 요약"      what the note is called (optional, UTF-8)
-```
-
-It is **what a note is called, never what it is**. The folder keeps the name it was made with — a
-digest of the path it was imported from, or the moment a blank sheet was created — because that name
-*is* the note's identity: it is what the index keys on, and what makes importing the same PDF twice
-find the same note rather than a second copy of it. Renaming therefore writes one `meta` row and
-touches nothing else: no ink, no folder, no page.
-
-Writing it there rather than in the index is the point of the whole cache argument above: a folder
-carried to another machine arrives with its name already on it, and deleting `recent.json` costs the
-order of a list rather than the names of everything a person wrote.
-
-**An empty name is a legitimate answer and the normal state.** Most notes have none, and the list
-derives one — the document's name first, then the folder's name with its digest taken off. That is
-why `title` may be absent, and why the app never *requires* a name to write one.
-
-**Where a name is given.** Two places, one word. In the list, *Rename* on the row's right-click menu
-puts a field in the row; on the sheet, double-clicking the note's title — the name at the left of the
-bar — turns it into a field in place. Both end in the same write: the note is renamed *first*, and the
-index is then told what the note answered, never the other way round. Enter keeps the name, Escape
-leaves it as it was.
-
-What is written is a *rule* rather than a validation (§ `store::normalize_title`): the text is
-trimmed, a newline becomes a space, runs of whitespace collapse, and the result is cut to 64
-**characters** — characters rather than bytes, so that a name in Korean is not cut twice as short and
-never in the middle of a syllable.
+Beside the notes folder there is one small file, `%LOCALAPPDATA%\cheap-note\recent.json`: the list of
+what has been opened. It is a **cache of the notes folder, not a note** — deleting it costs the order of
+a list, and a folder it has never heard of is adopted by being there.
 
 ## 2. Where the ink goes, end to end
 
@@ -144,7 +62,7 @@ never in the middle of a syllable.
   dirty_strokes ───────────── one row per stroke, one transaction per batch, WAL
      │  the page closes (you turn away from it)
      ▼
-  chunks ──────────────────── the dirty rows are encoded, compressed, and deleted in the
+  chunks ──────────────────── the dirty rows are encoded, compressed and deleted in the
      │                        same transaction — this is called *compaction*
      │  the app has been quiet for a while
      ▼
@@ -155,42 +73,35 @@ never in the middle of a syllable.
   chapter-3.zip ───────────── VACUUM INTO, then packed with the document and attachments
 ```
 
-There are only two things to remember about this pipeline:
+Two things to remember about this pipeline:
 
 1. **Writes are small and incremental.** A batch adds rows; it never rewrites the page, and never
-   touches the ink that is already stored.
-2. **Reads never wait for writes.** The database runs in WAL mode, so the thread that draws the page
-   in front of you is never blocked by the thread that is writing it (see §6).
+   touches ink that is already stored.
+2. **Reads never wait for writes.** The database runs in WAL mode, so the thread drawing the page in
+   front of you is never blocked by the thread writing it (§6).
 
 ---
 
-## 3. The database, table by table
+## 3. The database
 
 `note.db` holds four tables and one view. Only two of them ever hold ink.
 
 | Table | One row is | Why it exists |
 |---|---|---|
-| `pages` | one page of the note | the page's position, its timestamps, its bounding box, and how many strokes its chunks hold |
-| `chunks` | up to 512 strokes, compressed | the *stored* ink: this is what a page is made of once it is closed |
+| `pages` | one page of the note | its position, its timestamps, its bounding box, and how many strokes its chunks hold |
+| `chunks` | up to 512 strokes, compressed | the *stored* ink: what a page is made of once it is closed |
 | `dirty_strokes` | exactly one stroke, compressed | freshly drawn ink waiting to become a chunk |
-| `meta` | one fact and its value | **everything else the note knows**: which page was open, the page list, the sheet the ink is in, the document it came from, the name a person gave it (§1), and every setting there is to change (below) |
+| `meta` | one fact and its value | **everything else the note knows**: the page that was open, the page list, the sheet the ink is in, the document it came from, its name, and every setting there is to change |
 | `page_strokes` *(view)* | one chunk **or** one dirty stroke | a page's ink, whole, in the order it was drawn — what a read runs against |
 
-A page with nothing on it has **no row** in `pages`. "The pages that hold ink" is therefore a query,
-not a column somebody has to remember to update.
+A page with nothing on it has **no row** in `pages`. "The pages that hold ink" is therefore a query
+rather than a column somebody has to remember to update.
 
-### Why a page has both an `id` and an `ord`
-
-```sql
-pages(id INTEGER PRIMARY KEY,   -- an identity: never changes, and what chunks point at
-      ord INTEGER NOT NULL,     -- the page's position in the note's reading order
-      ...)
-```
-
-Inserting a page renames every page after it, and deleting one closes the gap. If the identity *were*
-the position, that would mean rewriting the `page_id` of every chunk in the note. Keeping the two
-apart makes an insert two small updates of `pages` — and the ink, which points at `id`, does not move
-at all.
+**Why a page has both an `id` and an `ord`.** `id` is an identity that never changes, and it is what
+chunks point at; `ord` is the page's position in the note's reading order. Inserting a page renames
+every page after it and deleting one closes the gap — if the identity *were* the position, that would
+mean rewriting the `page_id` of every chunk in the note. Keeping the two apart makes an insert two
+small updates of `pages`, and the ink does not move at all.
 
 ### The ink itself
 
@@ -199,24 +110,23 @@ chunks(id, page_id, seq, stroke_start, stroke_count, codec, raw_len, data BLOB, 
 dirty_strokes(id, page_id, seq, data BLOB, created_at)
 ```
 
-`stroke_start` and `seq` are the page's two coordinates: `stroke_start` says *which stroke of the page*
-a chunk begins at, and `seq` says in *which order* the chunks were written. Chunks are written in
-order, so the two agree — `stroke_start` is what makes a chunk's place in the page explicit, which is
-what a rewrite and a re-compaction need. The view hands both kinds of row back with one `ord` that a
-read can simply sort by:
+`stroke_start` says *which stroke of the page* a chunk begins at, and `seq` says in *which order* the
+chunks were written. Chunks are written in order, so the two agree; `stroke_start` is what makes a
+chunk's place in the page explicit, which is what a rewrite needs. The view hands both kinds of row
+back with one `ord` a read can simply sort by — the dirty rows *after* the chunked ones, because dirty
+ink is always newer than compacted ink:
 
 ```sql
 CREATE VIEW page_strokes AS
     SELECT page_id, seq, stroke_start AS ord, stroke_count, codec, raw_len, crc32, data, 0 AS is_dirty
       FROM chunks
     UNION ALL
-    SELECT page_id, seq, <the page's chunk total> + seq AS ord, 1, 2, 0, 0, data, 1 AS is_dirty
+    SELECT page_id, seq, <the page's stroke_count> + seq AS ord, 1, 2, 0, 0, data, 1 AS is_dirty
       FROM dirty_strokes;
 ```
 
-The dirty strokes are given an `ord` *after* the chunked ones, because that is where they belong:
-dirty ink is always newer than compacted ink. So a read is `ORDER BY ord, seq` and the page comes back
-in the order it was drawn. `is_dirty` says how each row has to be decoded — see §4.
+A read is `ORDER BY ord, seq`, and the page comes back in the order it was drawn. `is_dirty` says how
+each row has to be decoded (§4).
 
 ### What the note's `meta` holds
 
@@ -230,49 +140,30 @@ note.db → meta('open_page')    = "7"                       the page that was o
           meta('sheet_height') = "970.0"
           meta('layout')       = ["blank",{"document":3}]  what each page shows, in reading order
           meta('canvas_size')  = "A5"                      …and every setting, one row each
-          meta('max_width')    = "4.5"
           meta('title')        = "3장 요약"
 ```
-
-| Row | What it holds |
-|---|---|
-| `open_page` | the page that was open, so reopening comes back to it — a whole number |
-| `sheet_width`, `sheet_height` | the sheet the ink's coordinates are in — two numbers, written together |
-| `layout` | what each page shows, in reading order — JSON, because it is a *list* and the only one |
-| `title`, `document`, `source` | what the note is called, the file it was made from, the file it was placed from (§1) |
-| the settings | one row each, named after the setting — `src/settings.rs` lists them, and this document does not duplicate the list |
 
 **The rows *are* the schema, and that is the whole point of them.** There is no packed blob to decode
 and no stored shape for a struct to match, so a fact can be added to a note without anything being
 migrated — and the three ways a row can fail to be there are three different answers:
 
-* **a row the app does not know is never read, never written and never deleted**, so a note written by a
-  build that knew more settings — or one somebody added a row to by hand — keeps them. Adding a setting
-  is four small edits (a field and its default in `src/settings.rs`, one line each in
-  `NoteStore::read_settings` and `NoteStore::set_settings`); *removing* one is the same four edits in
-  reverse, and every note that had it is simply left alone;
-* **a row that is not there is not a failure**: the note does not say, and the app's own answer stands.
-  That is what makes a note written by a build that knew fewer settings open with the shipped ones, and
-  what lets a PDF just placed continue the sheet it was placed on (§7);
-* **a row that is there and cannot be understood *is* a failure**, reported to the person. Something
+* **a row this build does not know is never read, written or deleted**, so a note written by a build
+  that knew more settings — or one somebody added a row to by hand — keeps them. Adding a setting is
+  four small edits: a field and its default in `src/settings.rs`, and one line each in
+  `NoteStore::read_settings` and `NoteStore::set_settings`;
+* **a row that is not there is not a failure**: the note does not say, and the app's own answer stands;
+* **a row that is there and cannot be understood *is* a failure**, reported to the person — something
   wrote it, and quietly replacing an answer is how a setting disappears without a word.
 
-**Every setting a person can change lives in this table.** The paper, the ruling, the colours, the pen
-and its weight, the zoom, whether a document is shown in grey, how the pen *feels* in the hand — the
-widths it answers pressure between, the resampling, the smoothing, the eraser's reach — whether the bar,
-the status line and the ghost cursor are shown, and where this note was last written out. There is no
-settings file any more, and nothing about a note is remembered anywhere but in the note: a sketchbook in
-grid written with a marker and a diary in rules written with a fine pen open as themselves, and neither
-hands the other its sheet, its pen or its switches.
+Every setting a person can change is a row here — the paper, the ruling, the colours, the pen and its
+weight, the zoom, whether the bar and the status line are shown, and how the pen *feels* in the hand —
+and nothing about a note is remembered anywhere but in the note. The pen is in two kinds of row on
+purpose: `pen_weight` says *which* pen (`Fine` … `Heavy`) while `min_width`, `max_width` and
+`no_pressure_width` say how *any* pen answers a hand, so a marker is fat at the lightest touch *and* at
+the heaviest and no weight can make a line that thins as it is pressed. What is already written is
+untouched: every point carries the width and the colour it was drawn with.
 
-**The pen is in two kinds of row, on purpose.** `pen_weight` says *which* pen — `Fine`, `Light`,
-`Normal`, `Bold`, `Heavy` — while `min_width`, `max_width` and `no_pressure_width` say how *any* pen
-answers a hand: the width at the lightest touch, the width at the heaviest press, and the width for a
-pen with no sensor at all. The weight is a multiplier on those numbers rather than a width of its own,
-which is what keeps the two from disagreeing: a marker is fat at the lightest touch *and* at the
-heaviest, and no weight can make a line that thins as it is pressed. What is already written is untouched
-by any of it — every point carries the width it was drawn at, exactly as it carries the colour it was
-drawn in.
+---
 
 ## 4. How a stroke becomes bytes
 
@@ -291,27 +182,21 @@ whichever comes first — laid out as three separate arrays rather than as a lis
   width array: | w0 (4 bytes) | Δw1 Δw2 ... |
 ```
 
-Everything except the four-byte starting values is a variable-length integer, and everything is
-*deltas*: the difference from the previous point. Both choices matter because of what a pen actually
-produces.
+Everything except the four-byte starting values is a variable-length integer, and everything is a
+*delta*: the difference from the previous point. Both choices matter because of what a pen actually
+produces. A resampled path steps a pixel or two at a time, so a delta is a small number, and a small
+number is one or two bytes as a varint where an `f32` is always four; and the values are fixed point
+at **1/64 of a pixel** (`chunk::QUANTUM`), which is finer than any digitizer reports and finer than one
+pixel at 400% zoom. The result is about **2 bytes for `x`, 2 for `y`, 1 for `width`** — four to five
+bytes per point, where JSON spent forty-seven.
 
-* A resampled pen path steps a pixel or two at a time, so a delta is a small number, and a small
-  number is one or two bytes as a varint where an `f32` is always four.
-* Values are fixed point at **1/64 of a pixel** (`QUANTUM`). That is finer than any digitizer reports
-  and finer than one pixel at 400% zoom, and it keeps a two-pixel step inside two bytes.
+Fixed point is also a *lattice*: decode gives back exactly the values that were written, so a note that
+is read and written again produces byte-identical chunks and cannot drift a little further from the
+original on every save. There is a test for exactly that.
 
-The result, per point, is about **2 bytes for `x`, 2 for `y`, 1 for `width`** — four to five bytes in
-total, where JSON spent forty-seven.
-
-The charm of fixed point is that it is a *lattice*: decode gives back exactly the values that were
-written, so a note that is read and written again produces byte-identical chunks and cannot drift a
-little further from the original on every save. There is a test for exactly that.
-
-### Colours are a palette
-
-A note is usually written in a handful of colours, so a chunk carries a table of them at its head and
-each stroke stores a one-byte index. A chunk ends early if a 256th colour would arrive — which is why
-the palette index can be a single byte.
+**Colours are a palette.** A note is usually written in a handful of colours, so a chunk carries a
+table of them at its head and each stroke stores a one-byte index. A chunk ends early if a 256th colour
+would arrive, which is why the index can be a single byte.
 
 ### The blob is compressed, and the compressor is recorded
 
@@ -328,7 +213,7 @@ That order is not decoration: a *dirty* row is a blob of **one stroke**, and a s
 is usually 20-80 points — a hundred to three hundred bytes, which is smaller than a compressor's own
 header (measured: raw wins at 20, 45 and 70 points; zstd only takes over somewhere past a hundred). So
 dirty rows are normally stored uncompressed, and it is the `chunks` rows, a page at a time, that
-compress. There is a test pinning both halves of that.
+compress.
 
 Every blob is sealed with a **CRC32**, and decoded with all four of its facts checked — the checksum,
 the expected uncompressed length, the codec, and the number of strokes it is filed under. A blob that
@@ -338,13 +223,8 @@ between "your note has a bad chunk" and "your page is now noise".
 ### What a dirty row looks like
 
 `dirty_strokes` has exactly one column for the ink, so a dirty row carries the three facts a chunk
-column would have given it in a nine-byte header:
-
-```text
-  [codec: 1 byte] [raw length: 4 bytes] [crc32: 4 bytes] [the blob]
-```
-
-### Two ways to encode, one way to read
+column would have given it in a nine-byte header — `[codec: 1 byte] [raw length: 4 bytes] [crc32: 4
+bytes] [the blob]`.
 
 `is_dirty` in the view is what tells a reader which of the two decodings to use — the nine-byte header
 or the chunk columns — and the two paths produce the same `Stroke` values. The hastiest way to think
@@ -364,21 +244,13 @@ to almost nothing and would flatter the format:
 | 100 strokes, 5.4 K points | 23.2 KB | 18.9 KB | 258 KB |
 | 1,000 strokes, 54.9 K points | 235 KB | 184 KB | 2.6 MB |
 
-*(The fixture and the shape of these numbers are pinned by the test
-`chunk::tests::a_hand_written_page_is_much_smaller_than_json`, which asserts a page of this fixture is
-at least eight times smaller than its JSON; the exact byte counts move a little with the fixture.)*
+*(Pinned by `chunk::tests::a_hand_written_page_is_much_smaller_than_json`; the exact byte counts move a
+little with the fixture.)*
 
-Two things follow:
-
-* **About 4 bytes per point before compression, about 3.4 after.** A dense handwritten A4 page is
-  maybe 4,000 points, so roughly 14 KB in the file. A hundred such pages is around 1.4 MB.
-* **The old format cost about 47 bytes per point.** The same notebook would have been 19 MB, and every
-  save rewrote all of it.
-
-Compression is the smaller half of the win, and it varies with your hand: the fixture above is close
-to a *worst case* for zstd because every stroke is unrelated to every other. Real writing repeats
-letters and long smooth runs, so real notes usually do better. The encoding — deltas, fixed point,
-structure of arrays — is what does the rest, and it is deterministic.
+**About 4 bytes per point before compression, about 3.4 after.** A dense handwritten A4 page is maybe
+4,000 points — roughly 14 KB in the file, so a hundred such pages is about 1.4 MB, where the JSON format
+spent about 47 bytes per point and rewrote all of it on every save. Compression is the smaller half of
+that win and varies with the hand: real writing repeats letters and long smooth runs.
 
 ## 6. When you draw
 
@@ -397,23 +269,21 @@ app hands finished strokes to a background thread on a schedule:
 
 Everything after "sent" happens on the writer thread, which owns its own connection to `note.db`; the
 app holds a second connection of its own, which it uses to read a page and to write the note's own
-facts (which page is open, the page list). Two connections, one file — and WAL is what makes that
-safe: a reader sees a consistent snapshot of the ink without ever waiting for a commit.
+facts (which page is open, the page list). Two connections, one file — and WAL is what makes that safe:
+a reader sees a consistent snapshot of the ink without ever waiting for a commit.
 
-### Why *rewrite* has to exist
+**Why *rewrite* has to exist.** Appending can only describe ink being **added**. Undo removes a stroke,
+the eraser removes several, and *Clear* removes all of them — none of which a batch of new strokes can
+express. The app notices this the only way that is cheap and reliable: it remembers how many strokes of
+the page it has already sent, and when the finished count goes **down**, the page is marked for
+rewriting. A rewritten page has its chunks and dirty rows dropped and its whole ink written again, in
+one transaction — so a crash in the middle leaves either the old page or the new one, never half of
+each.
 
-Appending can only describe ink being **added**. Undo removes a stroke, the eraser removes several,
-and *Clear* removes all of them — none of which a batch of new strokes can express. The app notices
-this the only way that is cheap and reliable: it remembers how many strokes of the page it has already
-sent, and when the finished count goes **down**, the page is marked for rewriting. A rewritten page
-has its chunks and dirty rows dropped and its whole ink written again, in one transaction — so a crash
-in the middle leaves either the old page or the new one, never half of each.
-
-### What a crash costs
-
-At most the ink of the batches that had not been sent yet: the last 500 ms, or the last 200 strokes,
-whichever is smaller. Everything else is in `note.db`, committed. Pressing *Save* is not a way to
-avoid that risk — the risk is already bounded to a fraction of a second by the batch rule.
+**What a crash costs.** At most the ink of the batches that had not been sent yet: the last 500 ms, or
+the last 200 strokes, whichever is smaller. Everything else is in `note.db`, committed. Pressing *Save*
+is not a way to avoid that risk — the risk is already bounded to a fraction of a second by the batch
+rule.
 
 ## 7. When you open a note
 
@@ -429,14 +299,11 @@ the session. A thousand-page notebook opens in the time a one-page one does, bec
 with the number of pages.
 
 Reading a single page is one query against the `page_strokes` view, then decompression of each chunk
-**in parallel** (a page is typically a handful of independent 64 KB blobs, so this is a broadcast
-across the thread pool rather than a loop). Dirty rows are decoded one at a time: they are single
-strokes, and parallelising them would cost more in hand-offs than it saves.
-
-Two more things a page carries, both read from `pages` rather than from the ink: how many strokes it
-holds (the `stroke_count` query counts chunks *and* dirty rows) and its bounding box. The box is kept
-up to date as ink is written — it is not read by anything yet, and it is there for the questions a
-future feature asks without loading a page ("is this page blank?", "where is the ink?").
+**in parallel** (a page is a handful of independent 64 KB blobs, so this is a broadcast across the
+thread pool rather than a loop); dirty rows are decoded one at a time, because parallelising single
+strokes would cost more in hand-offs than it saves. Two more things live in `pages` rather than in the
+ink: how many strokes the page holds, and its bounding box — kept up to date as ink is written, and
+there for the questions a future feature asks without loading a page.
 
 ---
 
@@ -454,30 +321,18 @@ current — it is a **snapshot**:
 Copying `note.db` by hand would be the wrong thing to do, and this is worth understanding: an open
 database has its newest pages in the `-wal` file, so a plain copy can miss recent ink, or capture a
 page that was being written at that instant. `VACUUM INTO` cannot: it reads the database as a
-consistent snapshot and writes a new file. That is also why this is the *only* way this app hands you
-a note to carry.
+consistent snapshot and writes a new file. That is also why this is the *only* way this app hands you a
+note to carry.
 
 To open one on the other machine: *Open*, choose the zip. The app unpacks it into a working copy and
 opens it. If the given name is already in use, the working copy is replaced — the same file imported
-twice is one note, not two.
+twice is one note, not two. The format itself is portable in the boring way that matters: SQLite files
+are byte-order independent, so x86 and ARM machines read each other's notes. What is *this app's* is the
+chunk encoding, and its version travels in the database (§9).
 
-The format itself is portable in the boring way that matters: SQLite files are byte-order
-independent, so x86 and ARM machines read each other's notes, and the file format has been stable for
-twenty years. What is *this app's* is the chunk encoding, and its version travels in the database
-(`PRAGMA user_version`, see §10).
+---
 
-## 9. Notes written by older versions
-
-**Nothing reads them any more.** A note used to be a zip holding `document.pdf` and a `notes.json` —
-every point of every stroke as text — and both the reader for that shape and the migration that turned
-one into a store have been deleted. An old note is now the same case as any other zip that is not a
-note: there is no `note.db` in it, so it is refused by name rather than unpacked (§10).
-
-The refusal is part of the deletion rather than an accident of it. A zip unpacked "in case" would leave
-a folder of someone else's files in the notes folder, and a note half-imported is a worse thing to
-explain than one that was refused.
-
-## 10. Versioning and integrity
+## 9. Versioning, integrity, and old notes
 
 | Mechanism | What it protects against |
 |---|---|
@@ -488,81 +343,43 @@ explain than one that was refused.
 | the stroke count every blob is filed under | a blob that is intact and is *not the chunk it is filed under* — the case where guessing would write a corrupted page over a good one |
 | an unknown `codec` id | a compressor a newer build knows and this one does not |
 
-The version number continues the note format's own history rather than starting over: `1` was the
-first zip of JSON, `2` added the page list to it, `3` is the database, `4` moved the paper, the ruling,
-the colours and the zoom out of the app's settings and into the note, and `5` finished the job — every
-row of `meta` is a fact of its own in text, and the last settings file is gone (§3). So one number
-orders every note file this app has ever written, whichever shape it is in.
+**Only the current number is read, and there is deliberately no migration.** A note is opened by the
+build whose schema wrote it and by no other, because this build would otherwise write its own shape
+back over one it does not know. Refused means *left alone* — the stamp is not brought forward — so the
+build that wrote the note can still open it afterwards, and the message names the number, so "open it
+with the build that wrote it" is advice a person can act on. A version number covers the *tables* and
+the meaning of a row this build reads; it no longer covers *adding* one, because with rows instead of a
+blob a new setting is not a new schema (§3).
 
-**A version number covers the *tables* and the *meaning of a row we read*; it no longer covers adding
-one.** With rows instead of a blob, a new setting is not a new schema: a note that does not mention it
-simply takes the shipped answer (§3). The number moves when a row's shape changes or a table does —
-which is rare, and is exactly the kind of change that *does* need both builds to agree.
+**Nothing reads the old format.** A note used to be a zip holding `document.pdf` and a `notes.json` —
+every point of every stroke as text — and both its reader and the migration that turned one into a store
+have been deleted. An old note is therefore the same case as any other zip that is not a note: there is
+no `note.db` in it, so it is refused by name. The refusal is part of the deletion rather than an
+accident of it: a zip unpacked "in case" would leave a stranger's files in the notes folder, and a note
+half-imported is a worse thing to explain than one that was refused.
 
-**Only the current number is read.** A note is opened by the build whose schema wrote it and by no
-other: an older note is refused exactly as a newer one is, because this build would write its own
-shape back over a shape it does not know. Refused means *left alone* — the stamp is not brought
-forward — so the build that wrote the note can still open it afterwards. The message names the number,
-so that "open it with the build that wrote it" is advice a person can act on rather than a guess.
+## 10. What is deliberately *not* stored
 
----
-
-## 11. The promises, and the tests that keep them
-
-Every claim in this document is checked by a test that fails if the behaviour changes. The names are
-listed so a reader can go and read the code that proves the thing they just took on trust.
-
-| Promise | Test |
+| Not stored | Why |
 |---|---|
-| A page of ink comes back exactly, stroke for stroke, point for point | `chunk::tests::a_chunk_round_trips` |
-| A one-point stroke (a dot) survives — the case a delta-only format gets wrong | `chunk::tests::a_single_point_stroke_round_trips` |
-| Reading and writing again produces identical bytes: fixed point cannot drift | `chunk::tests::re_encoding_what_was_decoded_gives_the_same_bytes` |
-| A damaged blob is refused, not turned into noise | `chunk::tests::a_damaged_chunk_is_refused` |
-| A blob that is intact but is not the chunk it claims to be is refused | `chunk::tests::a_chunk_filed_under_the_wrong_count_is_refused` |
-| A hand-written page is at least 8× smaller than its JSON | `chunk::tests::a_hand_written_page_is_much_smaller_than_json` |
-| A single-stroke blob is usually stored uncompressed (and a long one is not) | `chunk::tests::a_single_stroke_blob_usually_skips_the_compressor` |
-| The chunks of a page tile it: every stroke in exactly one chunk, in order | `chunk::tests::a_page_is_split_into_chunks_that_tile_it` |
-| A page of hundreds of colours is split before the palette overflows | `chunk::tests::the_palette_ends_a_chunk_before_it_overflows` |
-| The database is created with the journal mode, page size and version it asks for | `store::tests::a_new_note_is_a_tuned_database` |
-| Appended ink comes back, in the order it was drawn | `store::tests::what_is_appended_comes_back` |
-| Compaction folds the dirty rows into chunks and the page reads the same | `store::tests::compaction_folds_the_dirty_strokes_into_chunks` |
-| Ink added after a compaction follows the ink already there | `store::tests::a_page_written_in_two_batches_keeps_its_order` |
-| A rewrite replaces a page (what undo, the eraser and Clear need) | `store::tests::rewriting_a_page_replaces_what_was_there` |
-| Inserting or deleting a page moves its ink with it | `store::tests::a_page_moves_when_one_is_inserted_or_deleted` |
-| A page left empty stops counting as a page with ink | `store::tests::an_emptied_page_stops_counting_as_a_page` |
-| A damaged chunk in a note is reported when the page is read | `store::tests::a_damaged_chunk_is_reported` |
-| An export is a note of its own, complete and standalone | `store::tests::an_export_is_a_note_of_its_own` |
-| The note remembers its page list, open page, sheet and name | `store::tests::a_note_remembers_its_own_page_list` |
-| Two notes keep two different answers to every setting | `store::tests::two_notes_keep_their_own_answers` |
-| A row this build does not know is left exactly as it was found | `store::tests::a_row_this_build_does_not_know_is_left_alone` |
-| A row that is not there keeps the answer in hand | `store::tests::a_missing_row_keeps_the_answer_in_hand` |
-| A row that cannot be understood is reported, not replaced | `store::tests::a_row_that_is_not_a_number_is_reported` |
-| Half a sheet says nothing | `store::tests::half_a_sheet_says_nothing` |
-| The note says which pen and the tuning says how it answers pressure | `settings::tests::a_note_weighs_the_pen_and_the_tuning_shapes_the_line` |
-| Every pen has a name of its own, and the name leads back to it | `settings::tests::a_label_leads_back_to_its_weight` |
-| Checkpointing folds the log back and the ink is still there | `store::tests::checkpointing_folds_the_log_back` |
-| A note from a newer build is refused | `store::tests::a_newer_note_is_refused` |
-| A note from an older build is refused, and left as it was found | `store::tests::an_older_note_is_refused` |
-| A note travels as one file and comes back whole | `note::tests::a_note_travels_as_one_file` |
-| Attachments travel with the note | `note::tests::attachments_travel_with_the_note` |
-| The writer thread writes what it is given and reports its export | `note::tests::the_writer_writes_on_its_own_thread` |
-| A PDF becomes a note with that document | `note::tests::a_note_starts_on_a_document` |
-| A zip that is not a note is refused — an old note zip among them | `note::tests::a_foreign_zip_is_refused` |
+| the stroke under the nib | it is not history yet: it has no final geometry, and taking it back would leave the model thinking the pen was lifted |
+| undo/redo history | it is a property of the session, not of the note: a note opens with a page of ink and no way back through last week's strokes |
+| an erased stroke | the eraser removes whole strokes and undo takes back the most recent *surviving* one; there is no "recover what I erased" — see `src/ink.rs` |
+| anything global | there is nothing global to store: every setting is a row of the note it was changed in (§3), so a note carried to another machine arrives as it was left. The one file outside a note is the index of what has been opened, and that is a cache (§1) |
+| attachments (for now) | the container carries an `attachments\` folder faithfully, but nothing in this build writes one yet — it is where a pasted image or a recording will go |
+| rendered PDF pages | a cache, rebuilt from `source.pdf` whenever they are needed |
 
-## 12. Where the code is
+## 11. Where the code is
 
 | Module | Responsibility |
 |---|---|
 | `src/store.rs` | the database: schema, PRAGMAs, the batch write, compaction, the read path, checkpoint, `VACUUM INTO`, and the rows of `meta` |
-| `src/settings.rs` | every setting a note remembers, and the row each one is written in |
 | `src/chunk.rs` | the blob format: encode, decode, integrity, chunk boundaries |
+| `src/settings.rs` | every setting a note remembers, and the row each one is written in |
 | `src/note.rs` | the note folder, the writer thread and its job queue, the zip container |
 | `src/ink.rs` | strokes in memory: what a stroke is, and where each page's ink is kept |
-| `src/recent.rs` | the index of what has been opened: the file beside the notes, and its rules |
-| `src/home.rs` | the start screen: the list of recent notes, and what a confirmation opens |
+| `src/recent.rs`, `src/home.rs` | the index of what has been opened, and the list that shows it |
 | `src/app.rs` | when to write: the batch clock, page close, the checkpoint rule, and the UI |
-
-The handful of functions worth knowing by name:
 
 | Function | What it does |
 |---|---|
@@ -574,33 +391,22 @@ The handful of functions worth knowing by name:
 | `NoteStore::load` | one page's ink, in order |
 | `NoteStore::summary` | what a note holds, without reading a blob |
 | `NoteStore::export` | `VACUUM INTO` |
-| `NoteStore::read_settings` / `set_settings` | the note's rows and the app's type, in one line per setting: a setting's whole schema |
+| `NoteStore::read_settings` / `set_settings` | the note's rows and the app's type: a setting's whole schema |
 | `Note::placed_from` | import: a zip, a PDF, or a folder → a working copy |
 | `NoteWriter::spawn` | the writing thread and its queue |
 | `NoteApp::persist` | the rule that decides *when* ink is handed over |
 | `NoteApp::load_page_ink` | the read that happens when you turn a page |
-| `home::scan` | what a launch costs: one `stat` per note, and a read only for the ones that changed |
-| `recent::Recents::reconcile` | the list healing itself around the notes folder |
+| `home::scan`, `recent::Recents::reconcile` | what a launch costs, and the list healing itself |
+
+**Every claim in this document is checked by a test that fails if the behaviour changes.** The format is
+pinned by `chunk::tests` (a round trip, a one-point stroke, byte-identical re-encoding, a damaged blob,
+chunk tiling), the database by `store::tests` (append, compaction, rewrite, pages moving, damaged
+chunks, exports, every way a `meta` row can behave), the container by `note::tests`, and the pen by
+`settings::tests`.
 
 ---
 
-## 13. What is deliberately *not* stored
-
-Knowing what a store refuses to hold is as useful as knowing what it holds.
-
-| Not stored | Why |
-|---|---|
-| the stroke under the nib | it is not history yet: it has no final geometry, it is not what a save writes, and taking it back would leave the model thinking the pen was lifted |
-| undo/redo history | it is a property of the session, not of the note. A note opens with a page of ink and no way back through last week's strokes |
-| an erased stroke | the eraser removes whole strokes, and undo takes back the most recent *surviving* stroke. There is no "recover what I erased" — see `src/ink.rs` |
-| anything global | there is nothing global to store. Every setting a person can change is a row of the note it was changed in (§3), so a note carried to another machine arrives the way it was left, and no file beside the program can disagree with it. The one file outside a note is the index of what has been opened, and that is a *cache* of the notes folder rather than an answer to anything |
-| attachments (for now) | the container carries an `attachments\` folder faithfully, but nothing in this build writes one yet — it is where a pasted image or a recording will go |
-| rendered PDF pages | those are a cache, rebuilt from `source.pdf` whenever they are needed |
-
-One more non-storage worth naming: **the note is not rewritten when you press Save.** Save cannot
-destroy anything — it reads the note and writes a *new* file somewhere else.
-
-## 14. Appendix: the exact schema, PRAGMAs and constants
+## 12. Appendix: the schema, the PRAGMAs and the constants
 
 ### The schema
 
@@ -643,8 +449,8 @@ CREATE INDEX idx_dirty_page  ON dirty_strokes(page_id, seq);
 ```
 
 `STRICT` means SQLite checks the declared type of every value, which is what keeps a `BLOB` column a
-`BLOB` column. `ON DELETE CASCADE` is why deleting a page is one statement: its chunks and dirty rows
-go with it.
+`BLOB` column. `ON DELETE CASCADE` is why deleting a page is one statement: its chunks and dirty rows go
+with it.
 
 ### The pragmas, in the order they are applied
 
@@ -662,8 +468,7 @@ PRAGMA foreign_keys = ON;         -- the cascade above only works with this
 
 **Why `page_size` comes first.** A page size is only read when a database has no pages yet, and
 switching to WAL *writes* to the file. Set the page size afterwards and the file keeps SQLite's 4 KB
-default for the rest of its life. This one was found by a test, which is the reason the test asserts
-it.
+default for the rest of its life. This one was found by a test, which is the reason the test asserts it.
 
 ### The constants
 
@@ -674,15 +479,11 @@ it.
 | `chunk::CHUNK_MAX_STROKES` | 512 | strokes per chunk, whichever comes first |
 | (palette) | 255 | distinct colours per chunk, enforced by ending the chunk |
 | `chunk::ZSTD_LEVEL` | 3 | the compression level the design settles on |
-| `store::SCHEMA_VERSION` | 5 | what `PRAGMA user_version` says (see §10) |
+| `store::SCHEMA_VERSION` | 5 | what `PRAGMA user_version` says (§9) |
 | `app::BATCH_INTERVAL` | 500 ms | how long ink may wait in memory |
 | `app::BATCH_STROKES` | 200 | how much ink may wait in memory |
 | `app::CHECKPOINT_QUIET_INTERVAL` | 5 s | how long the pen must be still before a checkpoint |
 | `app::CHECKPOINT_INTERVAL` | 5 min | the least time between two checkpoints |
 | `note::NOTE_DB` / `NOTE_PDF` / `ATTACHMENTS` | `note.db` / `source.pdf` / `attachments` | the three names inside a note folder |
 
-### A note about the database's own files
-
-While a note is open you will see `note.db-wal` and `note.db-shm` beside it. That is normal, and it
-is the whole reason a write does not stop a read. The log is folded back into `note.db` when the app
-has been idle (§6), and always before a note is exported — so an exported file never has one.
+The settings a note remembers are not listed here: `src/settings.rs` is the list, one row each (§3).

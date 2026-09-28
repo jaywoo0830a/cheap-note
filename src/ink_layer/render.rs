@@ -38,7 +38,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use gpui_kit::{rgb, Hsla, ImageId, Rgba};
+use gpui_kit::{rgb, rgba, Hsla, ImageId, Rgba};
 // `cast`: asking a context for the later interface whose method bakes a geometry into a realization.
 use windows::core::Interface as _;
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -297,7 +297,7 @@ impl Renderer {
                     continue;
                 }
 
-                self.brush.SetColor(&colour_of(rgb(stroke.color).into()));
+                self.brush.SetColor(&colour_of(ink_colour(stroke.color)));
                 self.context1
                     .DrawGeometryRealization(realization, &self.brush);
             }
@@ -329,7 +329,7 @@ impl Renderer {
                         continue;
                     }
 
-                    self.brush.SetColor(&colour_of(rgb(stroke.color).into()));
+                    self.brush.SetColor(&colour_of(ink_colour(stroke.color)));
                     self.context1
                         .DrawGeometryRealization(realization, &self.brush);
 
@@ -343,8 +343,27 @@ impl Renderer {
 
             if let Some(stroke) = &canvas.ink.open {
                 let outline = self.outline_geometry(stroke)?;
-                self.brush.SetColor(&colour_of(rgb(stroke.color).into()));
+                // The live stroke is drawn in the colour it will keep: a highlighter marks as it goes, with the
+                // page showing through it, which is exactly what the reader is deciding about.
+                self.brush.SetColor(&colour_of(ink_colour(stroke.color)));
                 self.context.FillGeometry(&outline, &self.brush, None);
+            }
+
+            // The text a highlighter has hold of, drawn through the ink's own transform because that is where the
+            // text is: the bands are in the paper's units, exactly as the strokes they are about to become. Drawn
+            // before the lasso's loop, so that the mark being swept stays on top of everything.
+            if let Some((colour, bands)) = &canvas.ink.highlight {
+                self.context.SetTransform(&ink_transform(canvas));
+                self.brush.SetColor(&colour_of(*colour));
+
+                for band in bands {
+                    if band.is_empty() {
+                        continue;
+                    }
+
+                    self.context
+                        .FillRectangle(&rect_of(*band, 1.0), &self.brush);
+                }
             }
 
             // And the loop a lasso is sweeping, over everything: it is the mark the reader is making *now*,
@@ -355,7 +374,7 @@ impl Renderer {
                 let colour = canvas
                     .ink
                     .selection
-                    .unwrap_or_else(|| rgb(loop_stroke.color).into());
+                    .unwrap_or_else(|| ink_colour(loop_stroke.color));
 
                 self.brush.SetColor(&colour_of(colour));
                 self.context.FillGeometry(&outline, &self.brush, None);
@@ -658,6 +677,24 @@ fn point_of(point: [f32; 2]) -> Vector2 {
 
 /// A colour as Direct2D takes it.
 ///
+/// The paint colour of a stroke: the colour it was written in, with the alpha it was written with.
+///
+/// A highlighter is drawn exactly as a pen stroke is — the same ribbon, the same geometry realization, the same
+/// brush — and the whole of the difference is here. `rgba` takes `0xRRGGBBAA` while a stroke's colour carries its
+/// alpha in the *top* byte (`0xAARRGGBB`), so the two have to be moved to where Direct2D's brush reads them; and a
+/// colour with no alpha byte is opaque, which is what every pen stroke is (see [`crate::ink::alpha_of`]).
+pub(crate) fn ink_colour(color: u32) -> Hsla {
+    let alpha = crate::ink::alpha_of(color);
+    if alpha >= 1.0 {
+        return rgb(color).into();
+    }
+
+    let byte = (alpha * 255.0).round() as u32;
+    let (r, g, b) = ((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
+
+    rgba((r << 24) | (g << 16) | (b << 8) | byte).into()
+}
+
 /// Straight (not premultiplied) red, green, blue, alpha in `0..=1`. Not the byte order of a BGRA
 /// *pixel* — that is the surface's business, and Direct2D is the one that writes it.
 fn colour_of(hsla: Hsla) -> D2D1_COLOR_F {
@@ -685,6 +722,27 @@ mod tests {
         let red = colour_of(rgba(0xFF00_00FF).into());
 
         assert_eq!((red.r, red.g, red.b, red.a), (1.0, 0.0, 0.0, 1.0));
+    }
+
+    /// A highlighter's ink is drawn with its alpha, and a pen's is drawn opaque: the two are one path.
+    #[test]
+    fn a_highlighter_keeps_its_alpha() {
+        let alpha = crate::ink::HIGHLIGHTER_ALPHA;
+        let band = colour_of(ink_colour(crate::ink::with_alpha(0xFF_EB_3B, alpha)));
+        let pen = colour_of(ink_colour(0x1C_1C_1E));
+
+        assert!(
+            (band.a - alpha).abs() < 0.01,
+            "the band lets the page through it: {}",
+            band.a
+        );
+        assert_eq!(pen.a, 1.0, "a pen's line is opaque");
+        assert!(
+            (band.r - 1.0).abs() < 0.02
+                && (band.g - 0.92).abs() < 0.06
+                && (band.b - 0.23).abs() < 0.06,
+            "and the colour is the one the stroke was stamped with: {band:?}"
+        );
     }
 
     /// A rectangle is passed on by its own four numbers, as two corners, scaled for the display.

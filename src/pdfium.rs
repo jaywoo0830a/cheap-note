@@ -106,6 +106,8 @@ type FpdfBookmark = *mut c_void;
 type FpdfDest = *mut c_void;
 /// What an entry does instead of pointing somewhere in this document.
 type FpdfAction = *mut c_void;
+/// A page's text: the character stream Pdfium builds for a page that has been asked for its text.
+type FpdfTextPage = *mut c_void;
 
 /// Pdfium's `IFSDK_PAUSE`: the callback that decides when a render may stop.
 ///
@@ -195,6 +197,27 @@ pub struct OutlineEntry {
     pub children: Vec<OutlineEntry>,
 }
 
+/// One character of a page, and the box it is drawn in: what a highlighter snaps to.
+///
+/// The box is in the page's own points, with the origin at its **bottom-left** — Pdfium's convention for text, as
+/// it is for the page itself — so putting one on the paper means flipping the y (see `ink::paper_of_page_point`).
+/// `ch` is the character as Unicode and may be a space or a line break: Pdfium counts the characters it
+/// *generates* as well as the glyphs the file draws, which is what makes the stream a page's text rather than a
+/// list of marks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextChar {
+    /// The character, as Unicode. Zero when Pdfium cannot map one.
+    pub ch: char,
+    /// The box's left edge, in page points.
+    pub left: f32,
+    /// The box's right edge.
+    pub right: f32,
+    /// The box's bottom edge — nearer the page's bottom-left corner, in PDF's upward y.
+    pub bottom: f32,
+    /// The box's top edge.
+    pub top: f32,
+}
+
 /// What Pdfium's progressive calls return.
 const RENDER_TO_BE_CONTINUED: c_int = 1;
 /// The page is fully rendered.
@@ -280,6 +303,12 @@ struct Api {
     action_type: unsafe extern "C" fn(FpdfAction) -> c_ulong,
     action_dest: unsafe extern "C" fn(FpdfDocument, FpdfAction) -> FpdfDest,
     dest_page_index: unsafe extern "C" fn(FpdfDocument, FpdfDest) -> c_int,
+    text_load_page: unsafe extern "C" fn(FpdfPage) -> FpdfTextPage,
+    text_close_page: unsafe extern "C" fn(FpdfTextPage),
+    text_count_chars: unsafe extern "C" fn(FpdfTextPage) -> c_int,
+    text_unicode: unsafe extern "C" fn(FpdfTextPage, c_int) -> c_uint,
+    text_char_box:
+        unsafe extern "C" fn(FpdfTextPage, c_int, *mut f64, *mut f64, *mut f64, *mut f64) -> c_int,
 }
 
 /// The process-wide library, or the message explaining why there is none.
@@ -342,6 +371,14 @@ fn load_api() -> Result<Api> {
             action_type: resolve(library, "FPDFAction_GetType")?,
             action_dest: resolve(library, "FPDFAction_GetDest")?,
             dest_page_index: resolve(library, "FPDFDest_GetDestPageIndex")?,
+            // The text of a page: what a highlighter snaps to. Reading it is not rendering — the char
+            // boxes are in the page's own coordinates — so this needs no bitmap and no render, which is
+            // what lets a page's text be read the moment it is turned to.
+            text_load_page: resolve(library, "FPDFText_LoadPage")?,
+            text_close_page: resolve(library, "FPDFText_ClosePage")?,
+            text_count_chars: resolve(library, "FPDFText_CountChars")?,
+            text_unicode: resolve(library, "FPDFText_GetUnicode")?,
+            text_char_box: resolve(library, "FPDFText_GetCharBox")?,
         };
 
         // Once, for the process: every document lives inside this initialisation, and Pdfium's own
@@ -656,11 +693,65 @@ impl Document {
         rotation
     }
 
+    /// The characters of a page, with the box each is drawn in.
+    ///
+    /// A page with no text — a scan, a drawing, a blank sheet — answers with nothing rather than failing: that is
+    /// the common case for the pages a note is written on, and the highlighter's own answer to it (a freehand
+    /// band) is not an error.
+    ///
+    /// Costs one page load and one text-page load, both released before this returns: what comes back is copies of
+    /// numbers, so nothing here outlives the call and no handle is kept between frames.
+    pub fn text_chars(&self, index: usize) -> Result<Vec<TextChar>> {
+        let api = api()?;
+
+        let page = unsafe { (api.load_page)(self.handle, index as c_int) };
+        if page.is_null() {
+            return Ok(Vec::new());
+        }
+
+        let text = unsafe { (api.text_load_page)(page) };
+        if text.is_null() {
+            unsafe { (api.close_page)(page) };
+            return Ok(Vec::new());
+        }
+
+        let count = unsafe { (api.text_count_chars)(text) }.max(0);
+        let mut chars = Vec::with_capacity(count as usize);
+
+        for at in 0..count {
+            let (mut left, mut right, mut bottom, mut top) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+
+            let ok = unsafe {
+                (api.text_char_box)(text, at, &mut left, &mut right, &mut bottom, &mut top)
+            };
+
+            if ok == 0 {
+                continue;
+            }
+
+            let code = unsafe { (api.text_unicode)(text, at) };
+
+            chars.push(TextChar {
+                ch: char::from_u32(code).unwrap_or('\u{0}'),
+                left: left as f32,
+                right: right as f32,
+                bottom: bottom as f32,
+                top: top as f32,
+            });
+        }
+
+        unsafe {
+            (api.text_close_page)(text);
+            (api.close_page)(page);
+        }
+
+        Ok(chars)
+    }
+
     /// The handle a render job needs.
     fn handle(&self) -> FpdfDocument {
         self.handle
     }
-
     /// The document's outline — the table of contents it carries — as a tree.
     ///
     /// Read once, when the document is opened, rather than when the app asks: an outline is a few dozen

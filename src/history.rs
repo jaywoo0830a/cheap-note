@@ -325,16 +325,6 @@ impl History {
         !self.undone.is_empty()
     }
 
-    /// Whether anything is waiting to be told to the note.
-    ///
-    /// Not read by the write path — an update is taken when a write is due, and every edit that has news also marks
-    /// the page for a rewrite (see `NoteApp::persist`) — but kept as the statement of what "waiting" means, and
-    /// checked by the tests that walk a history through a write.
-    #[cfg(test)]
-    pub fn has_news(&self) -> bool {
-        self.appended < self.done.len()
-    }
-
     /// How many of the applied edits the note already holds: where the tail the note has not heard about begins.
     ///
     /// What the app asks before reading *deeper* into the note's log: the edits below the cursor are the applied

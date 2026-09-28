@@ -29,7 +29,7 @@
 //! | `resample_spacing`, `smoothing_ms` | numbers: logical pixels, and milliseconds |
 //! | `min_width`, `max_width`, `no_pressure_width` | numbers: logical pixels |
 //! | `erase_radius` | a number: logical pixels |
-//! | `ink_color`, `page_color` | whole numbers, `0xRRGGBB` |
+//! | `ink_color`, `highlighter_color`, `page_color` | whole numbers, `0xRRGGBB` |
 //! | `pen_weight` | a name: `Fine`, `Light`, `Normal`, `Bold`, `Heavy` |
 //! | `canvas_size` | a name: `A4`, `A5`, `Letter`, `Legal`, `Square`, `Wide` |
 //! | `canvas_style` | a name: `Plain`, `Ruled`, `Grid`, `Dots` |
@@ -160,6 +160,14 @@ pub struct Settings {
     /// when the nib goes down — so this is only ever what the *next* stroke is laid with, and
     /// changing it leaves everything already written exactly as it was.
     pub ink_color: u32,
+    /// The colour the highlighter lays down, as `0xRRGGBB`.
+    ///
+    /// The marker in hand, beside the pen's colour because the two are the same idea: a colour that the *next*
+    /// stroke is stamped with. What makes it a highlighter is not the colour but the alpha the tool adds to it
+    /// ([`crate::ink::HIGHLIGHTER_ALPHA`]) — which is why this is a plain `0xRRGGBB` like every other colour in a
+    /// note, and why a highlighter's colours are a palette of their own: a highlighter is read *through*, so the
+    /// colours that work are the pale ones.
+    pub highlighter_color: u32,
     /// The colour of the sheet, as `0xRRGGBB`.
     pub page_color: u32,
 
@@ -265,6 +273,8 @@ impl Default for Settings {
             // The palette's black, so the swatch that is in use is ringed on a fresh install: see
             // `canvas::INK_COLORS`.
             ink_color: 0x1C_1C_1E,
+            // `canvas::HIGHLIGHTER_COLORS`: the first of them, which is the yellow everybody has read through.
+            highlighter_color: 0xFF_EB_3B,
             page_color: 0xFF_FF_FF,
             // The tuning's own widths, untouched: the sheet the app ships with is written with the pen
             // it ships with.

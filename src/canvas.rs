@@ -300,6 +300,35 @@ pub const INK_COLORS: [Swatch; 12] = [
     },
 ];
 
+/// The colours the highlighter lays down, as the `0xRRGGBB` each stroke is stamped with.
+///
+/// A palette of their own rather than the pen's, and the reason is the *alpha* the tool adds to them
+/// ([`crate::ink::HIGHLIGHTER_ALPHA`]): a band that is read *through* has to be a colour there is something to
+/// read behind. Laid over black ink at that alpha, these four stay recognisably themselves and leave the writing
+/// and the ruling visible; a pen's black at the same alpha would be a grey smear over the page.
+pub const HIGHLIGHTER_COLORS: [Swatch; 4] = [
+    Swatch {
+        name: "yellow",
+        id: "highlighter-yellow",
+        color: 0xFF_EB_3B,
+    },
+    Swatch {
+        name: "green",
+        id: "highlighter-green",
+        color: 0xA8_E0_6A,
+    },
+    Swatch {
+        name: "pink",
+        id: "highlighter-pink",
+        color: 0xFF_8F_B1,
+    },
+    Swatch {
+        name: "blue",
+        id: "highlighter-blue",
+        color: 0x7F_C4_FF,
+    },
+];
+
 /// The colour a rule is drawn in on the given paper.
 ///
 /// One fixed grey cannot serve both a white sheet and a blackboard: it vanishes on one of them. On a
@@ -623,12 +652,34 @@ mod tests {
     // scope and shadow the attribute this module needs.
     use super::{
         build_ruling, contrast_color, place, relative_luminance, rule_color, rules_that_fit,
-        CanvasSize, CanvasStyle, Rect, Ruling, RulingSheet, INK_COLORS, PAPER_COLORS,
+        CanvasSize, CanvasStyle, Rect, Ruling, RulingSheet, HIGHLIGHTER_COLORS, INK_COLORS,
+        PAPER_COLORS,
     };
     use gpui_kit::{point, px, rgb, size, Bounds, Hsla, Pixels};
     use std::sync::Arc;
 
     use crate::ink_layer::canvas::Fill;
+
+    /// The highlighter's palette is paler than the pen's, and its own.
+    ///
+    /// The rule the four colours are chosen by: a highlighter is read *through*, so every one of them has to be a
+    /// colour there is something to read behind — and a palette of its own is what keeps a reader from having to
+    /// pick a pen colour to get the marker they meant.
+    #[test]
+    fn the_highlighter_palette_is_pale_and_its_own() {
+        for swatch in HIGHLIGHTER_COLORS.iter() {
+            assert!(
+                relative_luminance(swatch.color) > 0.5,
+                "the {} highlighter is too dark to read through",
+                swatch.name
+            );
+            assert!(
+                !INK_COLORS.iter().any(|pen| pen.color == swatch.color),
+                "the {} highlighter is one of the pen's colours",
+                swatch.name
+            );
+        }
+    }
 
     /// The rule colour for a sheet of white paper, as a paintable colour.
     fn rule_on_white() -> Hsla {
@@ -961,6 +1012,7 @@ mod tests {
         let controls = PAPER_COLORS
             .iter()
             .chain(INK_COLORS.iter())
+            .chain(HIGHLIGHTER_COLORS.iter())
             .map(|swatch| swatch.id);
 
         for id in controls {
@@ -968,7 +1020,10 @@ mod tests {
             ids.push(id);
         }
 
-        assert_eq!(ids.len(), PAPER_COLORS.len() + INK_COLORS.len());
+        assert_eq!(
+            ids.len(),
+            PAPER_COLORS.len() + INK_COLORS.len() + HIGHLIGHTER_COLORS.len()
+        );
     }
 
     /// What building a sheet's ruling costs.

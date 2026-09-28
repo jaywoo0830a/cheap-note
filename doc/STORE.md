@@ -177,6 +177,8 @@ note.db → meta('open_page')    = "7"                       the page that was o
                                   {"show":{"document":3},          order, and which way up it is
                                    "rotation":1}]                  (quarter turns clockwise)
           meta('canvas_size')  = "A5"                      …and every setting, one row each
+          meta('ink_color')    = "1842206"                  the pen in hand (0x1C1C1E)
+          meta('highlighter_color') = "16771899"            and the marker in hand (0xFFEB3B)
           meta('title')        = "3장 요약"
 ```
 
@@ -238,6 +240,14 @@ bytes per point, where JSON spent forty-seven.
 Fixed point is also a *lattice*: decode gives back exactly the values that were written, so a note that
 is read and written again produces byte-identical chunks and cannot drift a little further from the
 original on every save. There is a test for exactly that.
+
+**The tool a statement was stamped with.** A stroke's colour is a whole number with its alpha in the *top* byte
+(`0xAARRGGBB`), and **a colour whose top byte is nought is opaque** — which is the rule that keeps every line of
+ink ever written exactly as it was, because a pen's colour has always been written as `0xRRGGBB`. The alpha is how
+a highlighter exists at all: it is not a second kind of stroke, or a second list, but the same stroke with ink that
+lets the page through (see [VIEW.md](VIEW.md), §7, *The highlighter*). A highlight built over a document's text is
+therefore written down like anything else — one band per line, as strokes — and a note whose document was replaced
+keeps its highlights, because they were never a property of the text.
 
 **Colours are a palette.** A note is usually written in a handful of colours, so a chunk carries a
 table of them at its head and each stroke stores a one-byte index. A chunk ends early if a 256th colour
@@ -418,6 +428,7 @@ half-imported is a worse thing to explain than one that was refused.
 |---|---|
 | the stroke under the nib | it is not history yet: it has no final geometry, and taking it back would leave the model thinking the pen was lifted |
 | the *selection* a lasso holds | it is not ink and not an edit: it is the page's idea of what is in hand for as long as the note is open, and nothing about it belongs in a file |
+| the document's text layout | it belongs to the *document* — which the note carries inside itself — so it is read again when a page is turned to. A highlight built from it is written down like any other ink, which is why nothing is lost by not keeping the boxes |
 | anything global | there is nothing global to store: every setting is a row of the note it was changed in (§3), so a note carried to another machine arrives as it was left. The one file outside a note is the index of what has been opened, and that is a cache (§1) |
 | attachments (for now) | the container carries an `attachments\` folder faithfully, but nothing in this build writes one yet — it is where a pasted image or a recording will go |
 | rendered PDF pages | a cache, rebuilt from `source.pdf` whenever they are needed |

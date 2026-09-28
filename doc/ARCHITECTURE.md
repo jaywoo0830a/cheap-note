@@ -410,7 +410,7 @@ swallows the note's keys entirely (it did, from opening a note until a rename).
 | `app` | every screen, the two pumps, and the canvas description — see [VIEW.md](VIEW.md) |
 | **The document** | |
 | `pdf` | the Pdfium document, page rendering, and the page cache |
-| `pdfium` | Pdfium's own C API, including the sliced render the wrapper does not expose |
+| `pdfium` | Pdfium's own C API, including the sliced render the wrapper does not expose, and a page's text |
 | `outline` | the document's own table of contents, and the screen that lists it |
 | `bookmarks` | the pages the note has marked, and the screen that lists them |
 | **The note, on disk** | |
@@ -500,6 +500,14 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
     ends at — and the log row and the ink row commit together, so a crash cannot leave an edit describing ink the
     note does not have. The app's in-memory history is a *session's* worth and the note's is a depth
     ([STORE.md](STORE.md), §3, *The history*).
+17. **The marking tools are not new kinds of ink.** A highlighter is one `Stroke` with a wide width and a colour
+    whose top byte is an alpha (`ink::with_alpha`, `ink::alpha_of`, and `ink::HIGHLIGHTER_WIDTH`), which is why a
+    band can be erased, dragged, undone and stored without one line of the file format changing. Where a page has a
+    document under it, the marker takes hold of *characters* instead: the app reads the page's text once, when it is
+    turned to, and maps every box onto the paper (`ink::paper_of_page_point` — one scale, one flip, and the
+    document's own `/Rotate`, which `pdf::a_pages_text_is_in_the_pages_own_points` is what pins down), and the model
+    turns a span into bands without ever asking Pdfium anything. What is written down is still ink
+    ([VIEW.md](VIEW.md), §7, *The highlighter*).
 
 ## 12. Requirements, building, running
 

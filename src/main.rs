@@ -30,6 +30,7 @@
 //! | [`pdf`]     | the Pdfium document, page rendering, and the page cache            |
 //! | [`pages`]   | what a note's pages are, and what each one shows                   |
 //! | [`bookmarks`] | the pages a note has marked, and the screen that lists them      |
+//! | [`outline`] | the document's own table of contents, and the screen that lists it  |
 //! | [`pdfium`]  | Pdfium's own C API: documents, pages, and the sliced render        |
 //! | [`store`]   | the note's SQLite file: the schema, the batch write, the read path |
 //! | [`chunk`]   | a page of ink as one blob: SoA, varints, zstd, CRC32               |
@@ -70,6 +71,7 @@ mod error;
 mod home;
 mod ink;
 mod note;
+mod outline;
 mod pdf;
 mod pdfium;
 mod pen;

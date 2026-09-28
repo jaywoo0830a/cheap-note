@@ -368,6 +368,7 @@ half-imported is a worse thing to explain than one that was refused.
 | anything global | there is nothing global to store: every setting is a row of the note it was changed in (§3), so a note carried to another machine arrives as it was left. The one file outside a note is the index of what has been opened, and that is a cache (§1) |
 | attachments (for now) | the container carries an `attachments\` folder faithfully, but nothing in this build writes one yet — it is where a pasted image or a recording will go |
 | rendered PDF pages | a cache, rebuilt from `source.pdf` whenever they are needed |
+| the document's outline | it belongs to the *document* — which the note carries inside itself — so it is read again at every open: a note whose document was replaced arrives with the new contents (see `src/outline.rs`) |
 
 ## 11. Where the code is
 
@@ -457,10 +458,9 @@ CREATE INDEX idx_dirty_page  ON dirty_strokes(page_id, seq);
 `BLOB` column. `ON DELETE CASCADE` is why deleting a page is one statement: its chunks and dirty rows go
 with it.
 
-**`bookmarks` is the one table that is not ink.** A mark names a *page* by its position, so inserting a
-page in front of a marked one renames the mark together with `pages.ord`, and deleting a page deletes its
-mark. It arrives in an older note the way any table does — `CREATE TABLE IF NOT EXISTS` runs on every
-open — which is why this build's `user_version` is still `5` (§9), and why a note with marks opens anywhere.
+**`bookmarks` is the one table that is not ink.** A mark names a *page* by its position, so it is renamed
+with `pages.ord` when a page is inserted and deleted with the page it is on. It arrives in an older note
+the way any table does — `CREATE TABLE IF NOT EXISTS` runs on every open — so the version stays `5` (§9).
 
 ### The pragmas, in the order they are applied
 

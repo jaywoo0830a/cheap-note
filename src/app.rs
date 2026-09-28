@@ -89,6 +89,7 @@ use crate::cursor::{
 use crate::home::Home;
 use crate::ink::{InkTransform, Notes, Stroke, Tool};
 use crate::note::{self, Note, NoteWriter, Report};
+use crate::outline::{Outline, OutlinePages};
 use crate::pages::Pages;
 use crate::pen::{capture_config, PenInbox, PenService};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
@@ -439,6 +440,12 @@ pub struct NoteApp {
     bookmarks: Bookmarks,
     /// The list of those marks, drawn in front of the note while it is up.
     marks: Marks,
+    /// The document's own table of contents, drawn in front of the note while it is up.
+    ///
+    /// The twin of [`Self::marks`] — a screen over the sheet rather than a panel on it, for the reason
+    /// [`crate::bookmarks`] gives — and the other half of "how do I get there": the marks are the reader's
+    /// own list of places, and this is the document's.
+    outline: Outline,
     /// The PDF being annotated, if any.
     pdf: PdfDocumentView,
     /// The pen capture and its queue.
@@ -629,6 +636,7 @@ impl NoteApp {
             pages: Pages::default(),
             bookmarks: Bookmarks::default(),
             marks: Marks::new(window, cx),
+            outline: Outline::new(window, cx),
             pdf: PdfDocumentView::empty(),
             pen,
             system_cursor,
@@ -908,7 +916,8 @@ impl NoteApp {
         // would go into a note the user is not looking at, and behind a screen it would not even be
         // visible. This is why both are screens rather than panels floating on the sheet: see
         // [`crate::bookmarks`].
-        if self.naming.is_some() || self.home_is_open() || self.marks.is_open() {
+        if self.naming.is_some() || self.home_is_open() || self.marks.is_open() || self.outline.is_open()
+        {
             return false;
         }
 
@@ -1526,6 +1535,16 @@ impl NoteApp {
     /// Puts a bookmark on the page in front of the reader, or takes the one there off.
     fn toggle_bookmark(&mut self, cx: &mut Context<Self>) {
         let page = self.marked_page(cx);
+        self.toggle_page_bookmark(page, cx);
+    }
+
+    /// Puts a bookmark on one page of the note, or takes the one there off.
+    ///
+    /// The same act as [`Self::toggle_bookmark`], with the page *named* rather than worked out from what is
+    /// in front of the reader. What a row of the contents screen wants: a row's page is a page the reader
+    /// picked, not the one they happen to be looking at — and a right-clicked row is not necessarily the
+    /// highlighted one.
+    pub(crate) fn toggle_page_bookmark(&mut self, page: usize, cx: &mut Context<Self>) {
         self.record_mark(page, !self.bookmarks.contains(page), cx);
     }
 
@@ -1572,6 +1591,14 @@ impl NoteApp {
             self.marks.refresh(marked, cx);
         }
 
+        // And the contents screen, if *that* is the list that is up: its rows carry what their menus say
+        // they will do, so a mark made from one of them has to reach the rows too.
+        if self.outline.is_open() {
+            if let Some(pages) = self.outline_pages() {
+                self.outline.refresh(pages, cx);
+            }
+        }
+
         self.touch_status();
         cx.notify();
     }
@@ -1579,16 +1606,23 @@ impl NoteApp {
     /// The page a bookmark command acts on: the page in front of the reader.
     ///
     /// Which page that is depends on what they are looking at. With the sheet in front it is the page on
-    /// the desk; with the *list* in front it is the row under its highlight, because a person pointing at
-    /// a list of pages is pointing at a row — marking the page behind the screen is the one thing the key
-    /// would be understood not to do. The page on the desk is the answer either way when the list has no
-    /// highlight to go by.
+    /// the desk; with a *list* in front it is the page of the row that list is pointing at — the marks
+    /// list points at a marked page, the contents at the page of an entry — because a person pointing at a
+    /// list of places is pointing at a row, and marking the page behind the screen is the one thing the key
+    /// would be understood not to do. A row that names no page (an entry that leaves the document) leaves
+    /// the reader with the page on the desk, which is the only page left.
     fn marked_page(&self, cx: &Context<Self>) -> usize {
-        if self.marks.is_open() {
-            self.marks.highlighted(cx).unwrap_or(self.page_index)
-        } else {
-            self.page_index
+        if self.outline.is_open() {
+            if let Some(page) = self.outline.highlighted(cx) {
+                return page;
+            }
+        } else if self.marks.is_open() {
+            if let Some(page) = self.marks.highlighted(cx) {
+                return page;
+            }
         }
+
+        self.page_index
     }
 
     /// The note's marked pages, gathered for the list to draw.
@@ -1610,6 +1644,9 @@ impl NoteApp {
     /// gathered here rather than kept in step for as long as it is up.
     pub(crate) fn show_marks(&mut self, cx: &mut Context<Self>) {
         let marked = self.marked_pages();
+        // The two screens are the same kind of thing and are never both up: this one is opened from the
+        // sheet, and a sheet with two lists in front of it is a sheet with one list too many.
+        self.outline.hide();
         self.marks.show(marked, cx);
 
         self.message = if self.bookmarks.is_empty() {
@@ -1683,6 +1720,73 @@ impl NoteApp {
         } else {
             format!("no marked page {direction} this one")
         }
+    }
+
+    /// The document's contents, gathered for the screen that draws them.
+    ///
+    /// `None` when there is nothing to show: a note written on a blank sheet has no document, and most
+    /// documents carry no contents of their own. Both cases are answered the same way — there is no list to
+    /// put in front of the note — and the caller is the one that says which it was, because only it knows
+    /// whether a key was pressed or a button was greyed out.
+    fn outline_pages(&self) -> Option<OutlinePages> {
+        (!self.pdf.outline().is_empty()).then(|| {
+            OutlinePages::of(
+                self.pdf.outline(),
+                &self.pages,
+                &self.bookmarks,
+                self.page_index,
+                self.pdf.file_name(),
+            )
+        })
+    }
+
+    /// Puts the document's contents in front of the note.
+    ///
+    /// Refused, in words, for a note whose document has none: the bar's button is disabled in that case, and
+    /// a *key* cannot be disabled, so this is where the two part company. Nothing is written and no page is
+    /// closed — the sheet waits exactly as it does behind the bookmark list — and the screen is handed rows
+    /// that already know where in this note they land.
+    pub(crate) fn show_outline(&mut self, cx: &mut Context<Self>) {
+        let Some(pages) = self.outline_pages() else {
+            self.report(String::from(
+                "this note's document carries no contents of its own",
+            ));
+            cx.notify();
+            return;
+        };
+
+        let count = pages.rows.len();
+        self.marks.hide();
+        self.outline.show(pages, cx);
+
+        self.message = if count == 1 {
+            String::from("1 entry in this document's contents")
+        } else {
+            format!("{count} entries in this document's contents")
+        };
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// Takes the contents screen away: what Escape on it does.
+    pub(crate) fn hide_outline(&mut self, cx: &mut Context<Self>) {
+        self.outline.hide();
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// Shows a page the contents names — what opening a row of it does.
+    ///
+    /// The screen goes with it, as the bookmark list does when one of its rows is opened: the page the
+    /// reader asked for is the page in front of them now, and a list left over it would cover the answer.
+    pub(crate) fn go_to_entry(&mut self, page: usize, cx: &mut Context<Self>) {
+        self.outline.hide();
+
+        // A row can only name a page the note had when the rows were built, so this is a guard rather than
+        // a case: a note whose pages changed under a list that is somehow still up.
+        let page = page.min(self.page_total().saturating_sub(1));
+        self.turn_to(page);
+        cx.notify();
     }
 
     /// Renames the pages from `from` on by `by`, in what the app remembers about the note.
@@ -1885,6 +1989,9 @@ impl NoteApp {
         // would be a list of another note's pages.
         self.bookmarks = Bookmarks::of(marks);
         self.marks.hide();
+        // And the contents screen: it belongs to the document that was just closed as much as the marks
+        // belonged to the note.
+        self.outline.hide();
 
         // Everything the page turn keeps in memory is reset: the ink that was there belonged to the
         // note that is no longer open.
@@ -2326,6 +2433,7 @@ impl NoteApp {
         self.bookmarks = Bookmarks::default();
         // A screen over a sheet that is no longer open is a screen about nothing.
         self.marks.hide();
+        self.outline.hide();
         self.page_index = 0;
         self.ink = Notes::new();
         self.loaded.clear();
@@ -2389,6 +2497,10 @@ impl NoteApp {
         }
 
         match keystroke.key.as_str() {
+            // The document's own contents, under the letter that already means "open a file" — a table of
+            // contents is what a document is opened *by*, so the two chords sit on one key as the two
+            // bookmark chords do. A document without one is answered in words (see [`Self::show_outline`]).
+            "o" if keystroke.modifiers.shift => self.show_outline(cx),
             "n" => self.new_blank_sheet(cx),
             "o" => self.prompt_for_pdf(cx),
             "s" => self.save(cx),
@@ -2425,6 +2537,31 @@ impl NoteApp {
             "b" if !event.keystroke.modifiers.shift => self.toggle_bookmark(cx),
             "n" => self.new_blank_sheet(cx),
             "o" => self.prompt_for_pdf(cx),
+            "s" => self.save(cx),
+            _ => {}
+        }
+    }
+
+    /// The contents screen's keyboard: the app's own chords, and nothing the list wants.
+    ///
+    /// The twin of [`Self::marks_key_down`], and for the same reasons: the arrows, Enter and Escape belong
+    /// to the list, and what is left is what the list cannot know — `Ctrl+B`, which marks the page of the
+    /// row in front (an entry of the contents is a page like any other), and the three chords that are the
+    /// app's wherever it is.
+    pub(crate) fn outline_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.keystroke.modifiers.control {
+            return;
+        }
+
+        match event.keystroke.key.as_str() {
+            "b" if !event.keystroke.modifiers.shift => self.toggle_bookmark(cx),
+            "n" => self.new_blank_sheet(cx),
+            "o" if !event.keystroke.modifiers.shift => self.prompt_for_pdf(cx),
             "s" => self.save(cx),
             _ => {}
         }
@@ -3497,6 +3634,10 @@ impl NoteApp {
     /// page pill and the zoom pill are how the sheet is read, and this is something the page keeps. Its
     /// button says which way round the page is — a filled mark for a marked page — and the list of what
     /// is marked is the button beside it, because the two are the same subject.
+    ///
+    /// The last group is the *document's* own table of contents — see [`crate::outline`] — which is a
+    /// different subject again: the marks belong to the reader, the contents to the document they are
+    /// annotating. It is disabled for a document that has none, which is most of them.
     fn page_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let hairline = theme.title_bar_border;
@@ -3554,6 +3695,20 @@ impl NoteApp {
                 true,
                 cx,
                 |app, cx| app.show_marks(cx),
+            )
+            .into_any_element(),
+            toolbar_divider(hairline).into_any_element(),
+            // The document's own contents: a different subject from the marks — one belongs to the reader, the
+            // other to the document — so it stands in its own group. Disabled for a document that has none,
+            // which is most of them, because a button that opens a screen saying "there is nothing here" is a
+            // button that should not have been offered.
+            icon_button(
+                "page-contents",
+                IconName::ListTree,
+                "The document's own contents (Ctrl+Shift+O)",
+                self.pdf.has_outline(),
+                cx,
+                |app, cx| app.show_outline(cx),
             )
             .into_any_element(),
         ];
@@ -3700,6 +3855,22 @@ impl Render for NoteApp {
                 .bg(background)
                 .text_color(foreground)
                 .child(marks)
+                .into_any_element();
+        }
+
+        // The other list: the document's own table of contents. The same frame, the same kind of screen,
+        // and a separate one on purpose — they are two subjects that happen to be drawn alike, and a shared
+        // path would tie a change in either to both.
+        if self.outline.is_open() {
+            self.outline.settle(window, cx);
+            let outline = self.outline.view(&self.note_title, &self.message, cx);
+
+            return div()
+                .relative()
+                .size_full()
+                .bg(background)
+                .text_color(foreground)
+                .child(outline)
                 .into_any_element();
         }
 

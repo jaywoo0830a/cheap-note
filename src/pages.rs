@@ -103,6 +103,19 @@ impl Pages {
         }
     }
 
+    /// The page of the *note* that shows a document's page, when the note has one.
+    ///
+    /// The inverse of [`Self::document_page`], and the mapping every outline entry needs: a document's
+    /// table of contents names pages of the *document*, while a note is a list of its own pages with the
+    /// document's mixed in among blank sheets — inserted, deleted and moved around. A document page the
+    /// note does not show has no note page at all, which is an answer rather than a failure: the note was
+    /// made from some of the document, and an entry for a page outside that part cannot be opened.
+    pub fn note_page(&self, document_page: usize) -> Option<usize> {
+        self.pages
+            .iter()
+            .position(|page| *page == Page::Document(document_page))
+    }
+
     /// Inserts a blank page before or after `index`, and answers with the page to turn to.
     ///
     /// The new page is the one the reader is looking at afterwards, because a page that has just
@@ -185,6 +198,42 @@ mod tests {
 
         assert_eq!(pages.remove(0), None);
         assert_eq!(pages.len(), 1);
+    }
+
+    /// A note's page for a document's page is found, and a document page the note does not show has
+    /// none.
+    ///
+    /// The two directions of the same mapping, and the one an outline entry travels: a table of contents
+    /// names document pages, the note holds some of them, in whatever order they ended up in.
+    #[test]
+    fn a_document_page_is_found_in_the_note_that_shows_it() {
+        let mut pages = Pages::of_document(4);
+        pages.insert(0, false);
+        pages.remove(4);
+
+        assert_eq!(
+            pages.layout(),
+            &[
+                Page::Document(0),
+                Page::Blank,
+                Page::Document(1),
+                Page::Document(2)
+            ],
+            "three of the document's four pages, with a blank sheet in front of them"
+        );
+        assert_eq!(pages.note_page(0), Some(0));
+        assert_eq!(
+            pages.note_page(1),
+            Some(2),
+            "a blank sheet in between is not the document's page 2"
+        );
+        assert_eq!(pages.note_page(2), Some(3));
+        assert_eq!(
+            pages.note_page(3),
+            None,
+            "the page of the document this note no longer shows"
+        );
+        assert_eq!(pages.note_page(9), None, "and one it never showed");
     }
 
     /// A note saved before the page list existed opens with the pages it must have had.

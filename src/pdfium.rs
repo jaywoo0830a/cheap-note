@@ -9,7 +9,7 @@
 //! document and page handles private, so the raw calls cannot be reached from outside it.
 //!
 //! So this module resolves the handful of functions the app calls from the library directly. There
-//! are twenty of them, each with the signature Pdfium documents, and every one of them is checked
+//! are twenty-six of them, each with the signature Pdfium documents, and every one of them is checked
 //! for existence as it is resolved: a Pdfium build without the progressive entry points fails with
 //! a message naming the missing symbol rather than crashing the process.
 //!
@@ -70,21 +70,43 @@
 //! the next, which keeps any single wake bounded by whichever of the two is larger. What the budget
 //! bounds is the drawing, which is the part that grows with the *content* of a page; a page's own
 //! pixels, allocated and cleared once per rung of the quality ladder, are a floor under it.
+//!
+//! ## The document's own table of contents
+//!
+//! A PDF can carry an outline — the specification's name for what Pdfium calls *bookmarks*, which this
+//! app spells differently for its own reasons (see [`crate::bookmarks`]) — and this module reads it:
+//! [`Document::outline`] answers with a tree of titles, each with the page it opens. It is read once, at
+//! open, because the app asks for it when it draws a *screen* and never while drawing a page: eight
+//! entry points, no page handles, and nothing rasterised, so it costs less than the first page does.
+//!
+//! Two of its parts are worth naming here. A title arrives as UTF-16 with its length in *bytes*, so it is
+//! measured before it is collected ([`bookmark_title`]). An entry may point out of the document instead
+//! of at a page — a link, a file, another document — and such an entry is kept with no page rather than
+//! dropped: it is a line of the contents, and a table of contents that quietly loses lines is worse than
+//! one that shows a line it cannot follow.
 
 
-use std::ffi::{c_char, c_int, c_uint, c_void, CString};
+use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void, CString};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::error::{AppError, Result};
 
-/// The opaque handles Pdfium hands out.
+/// An opaque handle Pdfium hands out.
 type FpdfDocument = *mut c_void;
 /// An open page.
 type FpdfPage = *mut c_void;
 /// A device-independent bitmap Pdfium renders into.
 type FpdfBitmap = *mut c_void;
+/// One entry of a document's outline. Pdfium calls these bookmarks; the PDF specification calls the
+/// whole tree the *outline*, and this module follows the specification because the app has its own
+/// meaning for the word "bookmark" (see [`crate::bookmarks`]).
+type FpdfBookmark = *mut c_void;
+/// Where an entry points, before it has been turned into a page index.
+type FpdfDest = *mut c_void;
+/// What an entry does instead of pointing somewhere in this document.
+type FpdfAction = *mut c_void;
 
 /// Pdfium's `IFSDK_PAUSE`: the callback that decides when a render may stop.
 ///
@@ -154,6 +176,26 @@ pub enum Format {
     Grayscale,
 }
 
+/// One entry of a document's outline: the table of contents the document itself carries.
+///
+/// A tree rather than a list, because that is what a table of contents is: chapters with sections under
+/// them, and the depth is the document's meaning rather than a formatting choice. The app draws it
+/// indented and flattened (see [`crate::outline`]), which is the one thing this type does not do for
+/// itself.
+///
+/// `page` is `None` for an entry this app cannot follow: one that opens a link, a file, or a destination
+/// in another document. Such an entry is still *kept* — it is a line of the document's own contents, and
+/// dropping it would quietly shorten what the document says.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OutlineEntry {
+    /// The title the document gives the entry, in its own words.
+    pub title: String,
+    /// The page of *this* document the entry opens, when it opens one.
+    pub page: Option<usize>,
+    /// What is nested under it, in the document's order.
+    pub children: Vec<OutlineEntry>,
+}
+
 /// What Pdfium's progressive calls return.
 const RENDER_TO_BE_CONTINUED: c_int = 1;
 /// The page is fully rendered.
@@ -163,6 +205,27 @@ const RENDER_FAILED: c_int = 3;
 
 /// Draw the page's own annotations into the bitmap.
 const RENDER_ANNOTATIONS: c_int = 1;
+
+/// Pdfium's `PDFACTION_GOTO`: an action that jumps to a destination in this document.
+///
+/// The other kinds — a URI, a file, another document — are the ones an outline entry can carry and
+/// this app cannot follow, and they are why an entry's page is an `Option`.
+const ACTION_GOTO: c_uint = 1;
+
+/// How deep an outline is followed.
+///
+/// A real table of contents is two or three levels; a malformed file can describe a tree that never
+/// ends, and Pdfium's own documentation puts the handling of circular bookmark references on the
+/// caller. A cap is therefore not a formatting opinion — it is what keeps a broken document from
+/// being an unbounded walk.
+const OUTLINE_DEPTH: usize = 32;
+
+/// How many entries an outline may hold, across the whole tree.
+///
+/// The second bound on the same walk: depth catches a cycle that goes *down*, and this catches one that
+/// goes *sideways* — a sibling chain that loops, or a file that simply describes a hundred thousand
+/// entries. A table of contents larger than this is not a table of contents.
+const OUTLINE_ENTRIES: usize = 4096;
 
 /// Pdfium's bitmap formats, as `FPDFBitmap_*` defines them.
 const BITMAP_GRAY: c_int = 1;
@@ -211,6 +274,14 @@ struct Api {
     ) -> c_int,
     render_continue: unsafe extern "C" fn(FpdfPage, *mut Pause) -> c_int,
     last_error: unsafe extern "C" fn() -> c_uint,
+    bookmark_first_child: unsafe extern "C" fn(FpdfDocument, FpdfBookmark) -> FpdfBookmark,
+    bookmark_next_sibling: unsafe extern "C" fn(FpdfDocument, FpdfBookmark) -> FpdfBookmark,
+    bookmark_title: unsafe extern "C" fn(FpdfBookmark, *mut c_void, c_ulong) -> c_ulong,
+    bookmark_dest: unsafe extern "C" fn(FpdfDocument, FpdfBookmark) -> FpdfDest,
+    bookmark_action: unsafe extern "C" fn(FpdfBookmark) -> FpdfAction,
+    action_type: unsafe extern "C" fn(FpdfAction) -> c_ulong,
+    action_dest: unsafe extern "C" fn(FpdfDocument, FpdfAction) -> FpdfDest,
+    dest_page_index: unsafe extern "C" fn(FpdfDocument, FpdfDest) -> c_int,
 }
 
 /// The process-wide library, or the message explaining why there is none.
@@ -262,6 +333,17 @@ fn load_api() -> Result<Api> {
             render_start: resolve(library, "FPDF_RenderPageBitmap_Start")?,
             render_continue: resolve(library, "FPDF_RenderPage_Continue")?,
             last_error: resolve(library, "FPDF_GetLastError")?,
+            // The outline: what the document's own table of contents is made of. Reading it is not
+            // rendering, so it needs no page handle — a title, a destination, and the two ways of
+            // walking the tree.
+            bookmark_first_child: resolve(library, "FPDFBookmark_GetFirstChild")?,
+            bookmark_next_sibling: resolve(library, "FPDFBookmark_GetNextSibling")?,
+            bookmark_title: resolve(library, "FPDFBookmark_GetTitle")?,
+            bookmark_dest: resolve(library, "FPDFBookmark_GetDest")?,
+            bookmark_action: resolve(library, "FPDFBookmark_GetAction")?,
+            action_type: resolve(library, "FPDFAction_GetType")?,
+            action_dest: resolve(library, "FPDFAction_GetDest")?,
+            dest_page_index: resolve(library, "FPDFDest_GetDestPageIndex")?,
         };
 
         // Once, for the process: every document lives inside this initialisation, and Pdfium's own
@@ -581,6 +663,132 @@ impl Document {
     fn handle(&self) -> FpdfDocument {
         self.handle
     }
+
+    /// The document's outline — the table of contents it carries — as a tree.
+    ///
+    /// Read once, when the document is opened, rather than when the app asks: an outline is a few dozen
+    /// titles and page numbers, walking it is a handful of calls into Pdfium, and asking for it on a
+    /// frame (which is when the app wants it) is exactly the kind of work a frame must not do. It is
+    /// also read from the *document*, so it needs no page handles and survives any render in flight.
+    ///
+    /// A document with no outline answers with nothing, which is the common case and not a failure: most
+    /// PDFs have no contents. An entry that points out of the document is kept with no page (see
+    /// [`OutlineEntry`]), and the walk is bounded twice, which is what the two constants above are for:
+    /// Pdfium hands out circular references as easily as it hands out titles, and the caller is the one
+    /// who has to notice.
+    pub fn outline(&self) -> Vec<OutlineEntry> {
+        let Ok(api) = api() else {
+            return Vec::new();
+        };
+
+        let mut budget = OUTLINE_ENTRIES;
+        unsafe { outline_children(api, self.handle, std::ptr::null_mut(), 0, &mut budget) }
+    }
+}
+
+/// One level of the outline: the children of `parent`, and everything below them.
+///
+/// `parent` is null at the top, which is how Pdfium spells "the first top-level entry". The budget is
+/// shared across the whole walk rather than per level, so a tree that is wide *and* deep cannot get
+/// around it.
+unsafe fn outline_children(
+    api: &Api,
+    document: FpdfDocument,
+    parent: FpdfBookmark,
+    depth: usize,
+    budget: &mut usize,
+) -> Vec<OutlineEntry> {
+    let mut entries = Vec::new();
+    if depth >= OUTLINE_DEPTH {
+        return entries;
+    }
+
+    let mut node = unsafe { (api.bookmark_first_child)(document, parent) };
+    while !node.is_null() && *budget > 0 {
+        *budget -= 1;
+
+        let title = unsafe { bookmark_title(api, node) };
+        let page = unsafe { bookmark_page(api, document, node) };
+        let children = unsafe { outline_children(api, document, node, depth + 1, budget) };
+
+        entries.push(OutlineEntry {
+            title,
+            page,
+            children,
+        });
+
+        node = unsafe { (api.bookmark_next_sibling)(document, node) };
+    }
+
+    entries
+}
+
+/// One entry's title.
+///
+/// Pdfium answers in UTF-16LE with the length in *bytes*, including the terminating NUL, and it answers
+/// that length whether or not a buffer is handed over — so the title is measured first and collected
+/// second, which is what keeps a fixed-size buffer from truncating a long chapter name.
+unsafe fn bookmark_title(api: &Api, bookmark: FpdfBookmark) -> String {
+    let bytes = unsafe { (api.bookmark_title)(bookmark, std::ptr::null_mut(), 0) };
+    if bytes == 0 {
+        return String::new();
+    }
+
+    // The length is a byte count of UTF-16 code units plus a terminator, and a malformed file may make
+    // it odd: rounded up, because the buffer has to hold what Pdfium is about to write into it.
+    let mut buffer = vec![0u16; bytes.div_ceil(2) as usize];
+    let written = unsafe {
+        (api.bookmark_title)(
+            bookmark,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 2) as c_ulong,
+        )
+    };
+
+    // Trimming the terminator rather than sizing around it: the two lengths can disagree, and the one
+    // that says how much was written is the one to trust. A title with a NUL in the middle keeps it —
+    // this only trims the end.
+    let units = (written as usize / 2).min(buffer.len());
+    buffer.truncate(units);
+
+    while buffer.last() == Some(&0) {
+        buffer.pop();
+    }
+
+    String::from_utf16_lossy(&buffer)
+}
+
+/// The page an entry opens, when it opens one of this document's own pages.
+///
+/// Two ways to say the same thing, and a table of contents uses both: an entry can carry a
+/// *destination*, or an *action* that has one inside it (a link out of the document is the other kind of
+/// action, and it is what makes this an `Option`). A destination that resolves to no page — a name that
+/// is not in the document, a file that has been edited since its contents were written — is answered the
+/// same way, as no page, rather than as page zero.
+unsafe fn bookmark_page(
+    api: &Api,
+    document: FpdfDocument,
+    bookmark: FpdfBookmark,
+) -> Option<usize> {
+    let dest = unsafe { (api.bookmark_dest)(document, bookmark) };
+
+    let dest = if dest.is_null() {
+        let action = unsafe { (api.bookmark_action)(bookmark) };
+        if action.is_null() || unsafe { (api.action_type)(action) } != ACTION_GOTO {
+            return None;
+        }
+
+        unsafe { (api.action_dest)(document, action) }
+    } else {
+        dest
+    };
+
+    if dest.is_null() {
+        return None;
+    }
+
+    let index = unsafe { (api.dest_page_index)(document, dest) };
+    (index >= 0).then_some(index as usize)
 }
 
 impl Drop for Document {

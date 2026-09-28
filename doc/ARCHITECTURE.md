@@ -3,7 +3,8 @@
 This document is the *shape* of the program: what runs where, which thread owns what, what crosses a
 thread boundary, and where each kind of work is allowed to happen. It is written to be read before
 changing something structural — the reasoning behind the view is in [VIEW.md](VIEW.md), and one
-stroke's journey to the disk and back is in [STORE.md](STORE.md).
+stroke's journey to the disk and back is in [STORE.md](STORE.md). The diagrams are Mermaid, so they
+render where the file is read on GitHub.
 
 If you read only one paragraph, read this one:
 
@@ -15,27 +16,50 @@ If you read only one paragraph, read this one:
 
 ## 1. The shape, in one picture
 
-```text
-  pen (WM_POINTER) ─┐
-  mouse, keyboard ──┤
-  a PDF on disk ────┘
-                    │
-   ┌────────────────▼────────────────────────────────────────────────────────────────────┐
-   │ the window thread (GPUI's main thread)                                              │
-   │                                                                                     │
-   │   pen capture ─ring─▶ pen thread ─queue─▶ pen pump ─▶ InkDocument ─▶ Canvas            │
-   │   (in the WndProc,    (parks on the       (waits on     strokes,       desk, paper,    │
-   │    2–5 µs/message)     pen stream)         the queue)    undo, erase)   page, ink      │
-   │   the element tree (bar, pills, screens) ─▶ GPUI's renderer ─▶ the interface's visual │
-   │   the canvas description ─▶ the ink layer ─▶ the canvas's visual (behind that one)     │
-   │   housekeeping pump (1 ms) ─▶ PDF slices, the page cache, counters, writer's reports  │
-   └───────┬─────────────────────────────────────────────────────────────────────────────┘
-           │ a batch of strokes                    ▲ reports: a failure, an export done
-           ▼                                       │
-   the note writer thread (SQLite: append, compact, checkpoint, export)
+```mermaid
+flowchart TB
+    pen(["the pen reporting: WM_POINTER"]) --> capture
+    user(["the mouse and the keyboard"]) --> tree
+    file(["a PDF on disk"]) --> slice
 
-   the ghost cursor's own window is drawn on the pen thread's wake, and the compositor shows it
-   above everything the two renderers above produce.
+    subgraph WT["the window thread — GPUI's main thread"]
+        capture["the pen capture<br/>in the WndProc, 2-5 µs a message"]
+        pump["the pen pump<br/>an async task that waits on the inbox"]
+        model["InkDocument<br/>strokes, undo, erase"]
+        describe["the canvas description<br/>desk, paper, page, ink"]
+        tree["the element tree<br/>bar, pills, screens"]
+        slice["the page being rasterised<br/>one slice a wake"]
+        house["the housekeeping pump<br/>every 1 ms"]
+        layer["the ink layer's draw"]
+        guirend["GPUI's renderer"]
+    end
+
+    subgraph PT["the pen thread — pen-windows"]
+        stream["the stream reader<br/>parks on the pen's ring"]
+        tap["the tap"]
+        inbox["the inbox"]
+    end
+
+    writer["the note writer thread<br/>SQLite: append, compact, checkpoint, export"]
+    ghost["the ghost cursor's window<br/>a layered window, above everything"]
+    screen["the screen"]
+
+    capture -- a ring --> stream
+    stream --> inbox
+    stream --> tap
+    tap -. the pen's position, now .-> ghost
+    inbox -- an Arc --> pump
+    pump --> model
+    model -- a batch of strokes --> writer
+    model --> describe
+    describe --> layer
+    tree --> guirend
+    layer --> screen
+    guirend --> screen
+    slice --> describe
+    house --> slice
+    house -- ink still in memory --> writer
+    writer -. reports, an export done or a failure .-> house
 ```
 
 Four things run the whole app:
@@ -69,6 +93,15 @@ GPUI draws its window into a swap chain of its own and hands it to DirectComposi
 makes a *second* target for the same handle, with `topmost = false`, and its visual lands **behind**
 GPUI's. That one assumption — a `topmost = false` target renders behind a window whose content is a
 topmost one — is what the whole canvas rests on (see `src/ink_layer/device.rs`).
+
+```mermaid
+flowchart TB
+    surface["the ink layer's visual<br/>the desk, the paper, the ink<br/>a second target for the same window, topmost = false"] --> gui["GPUI's visual<br/>the bar, the pills, the lists, the text<br/>the window's own content"]
+    gui --> ghost["the ghost cursor's window<br/>a layered window of its own"]
+    ghost --> eyes(["what the eye sees"])
+```
+
+Painted back to front, in that order:
 
 | What | Drawn by | Where it is | Why there |
 |---|---|---|---|
@@ -106,22 +139,33 @@ window itself, since GPUI asks for the same device and has no software path eith
 
 ## 3. A reading, from the digitizer to the screen
 
-```text
-  the digitizer reports
-        │  WM_POINTER, on the window thread: 2–5 µs a message
-        ▼
-  the capture ──ring──▶ the pen thread: parks on the ring, groups what arrived together into a batch,
-        │               stamps it with how long its newest reading waited
-        │
-        ├──tap──▶ the ghost cursor's own window (presented from the pen thread)
-        ▼
-  the inbox (an Arc) ──▶ the pen pump: an async task on the window thread that waits on the inbox
-        │
-        ├─ records `pump_gap` and `pen_latency`
-        ├─ InkDocument::consume: edges, pointer identity, resampling, width, undo history
-        ├─ hands finished strokes to the note (200 strokes or 500 ms, on the writer's thread)
-        ├─ draws the canvas and presents it        ← the ink is on screen from here
-        └─ cx.notify: a frame is scheduled too, and redraws the same ink with the chrome around it
+```mermaid
+sequenceDiagram
+    autonumber
+    participant D as the digitizer
+    participant W as the window thread
+    participant P as the pen thread
+    participant G as the ghost cursor's window
+    participant U as the pen pump
+    participant L as the ink layer
+    participant C as the compositor
+    participant N as the note writer
+
+    D->>W: WM_POINTER, 2-5 µs a message
+    W->>W: the capture copies it into a ring
+    P->>P: read parks until the pen reports
+    P->>P: group the readings into a batch, stamp its wait
+    P->>G: the tap, so the ghost is where the pen is now
+    G-->>C: UpdateLayeredWindow
+    P->>U: fill the inbox
+    U->>U: take the batch whole, and record pump and pen latency
+    U->>U: the ink model consumes the readings, by edges, resampling and width
+    U->>N: append the finished strokes: 200 strokes or 500 ms
+    U->>L: draw the canvas
+    L->>C: Present
+    Note over C: the newest canvas it is given is the one it shows, and the rest are dropped
+    U->>U: cx.notify, so a frame is scheduled too
+    Note over W: the frame redraws the chrome, and the canvas with it
 ```
 
 Four things about that path are deliberate, and each one is a number:
@@ -165,6 +209,29 @@ The second async task wakes every `HOUSEKEEPING_INTERVAL` (`src/app.rs`) — one
 does everything that is not the ink. None of it is on the display's clock, and the point of it being
 here is that **a rasterisation can never delay a stroke**:
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant H as the housekeeping pump
+    participant PDF as Pdfium
+    participant W as the note writer thread
+    participant F as the frame
+
+    loop every 1 ms
+        H->>H: is the pen laying ink?
+        alt the pen is still
+            H->>PDF: advance the pending render
+            PDF-->>H: a slice ends when its budget does, not when the page does
+            H->>F: a page arrived, so repaint
+        else the pen is writing
+            H->>H: the sharp page waits, the rung on screen is the right one
+        end
+        H->>W: hand over ink still in memory, 500 ms or 200 strokes
+        W-)H: a report, when there is one
+        H->>H: checkpoint, if the pen has been still for 5 s
+    end
+```
+
 | On every wake | Rule |
 |---|---|
 | pay for the page the view is waiting for, in slices | a slice is bounded by `pdf::SLICE_BUDGET` (~4 ms); a whole page is 13.4 ms at 2880 px wide, so a synchronous render would be a frame that never arrives |
@@ -195,6 +262,29 @@ Four decisions keep that from being the thing that makes writing stutter:
 * **A page render waits for the pen to stop** (120 ms of stillness), because the pump is on this
   thread and a stroke must not queue behind a rasterisation.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant V as the view, a frame
+    participant P as the pending request
+    participant H as the housekeeping pump
+    participant F as Pdfium
+    participant C as the page cache
+
+    V->>C: is the rung the zoom asks for here?
+    C-->>V: no, but the cheapest one is
+    V->>P: remember what the zoom asked for, and render the cheapest rung now
+    Note over V: the first frame of a document shows a page rather than an empty desk
+    H->>P: take the request, once the pen has been still for 120 ms
+    loop until the page is drawn
+        H->>F: advance the render, one slice
+        F-->>H: NeedToPauseNow, the budget is spent
+    end
+    H->>C: the finished bitmap, filed under page, rung and grayscale
+    H->>V: a page became available, so repaint
+    Note over P: a request the view has moved on from is replaced, and an in-flight render is dropped
+```
+
 ## 6. The note's pages
 
 Three things can disagree about what "page 4" means — a document's own pages, a note written on blank
@@ -211,6 +301,22 @@ Two consequences worth knowing before touching the page commands:
 * A PDF's own outline points at *document* pages, so every row of the contents screen carries both the
   document's page (what the contents says) and the note's page (where the row goes). An entry whose
   document page the note does not show is listed, and cannot be opened.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant V as the window thread
+    participant W as the note writer thread
+    participant DB as note.db
+    participant R as Rayon's pool
+
+    V-)W: the ink of the page being left
+    V-)W: the compaction of that page, queued behind it
+    W->>DB: one transaction each, in that order
+    V->>DB: read the page being turned to
+    R->>R: decompress its chunks in parallel, each checked against its CRC
+    Note over V: the ink follows the page it was written on, so nothing is ever in two places
+```
 
 ## 7. Where the ink is stored
 
@@ -229,6 +335,26 @@ The other half of that is the shape of a note on disk: a note is a **folder** wi
 another machine. A note is never opened where the user's files are, because an open SQLite file in a
 synchronising folder gets copied and corrupted by the synchroniser (see [STORE.md](STORE.md) §1 for
 the whole argument).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as the window thread
+    participant W as the note writer thread
+    participant DB as note.db and its write-ahead log
+    participant Z as the zip a person carries
+
+    U-)W: append, once 200 strokes or 500 ms have passed
+    U-)W: compact, when a page closes
+    U-)W: checkpoint, when the pen has been still for 5 s
+    Note over W: one connection, on this thread and no other
+    W->>DB: one transaction a job, one BLOB a stroke
+    W->>DB: encode the dirty rows into chunks and delete them, one transaction
+    W->>DB: wal_checkpoint, folding the log back into the file
+    U-)W: export, when Save is pressed
+    W->>Z: VACUUM INTO a standalone copy, then the zip
+    W-)U: a report, which the housekeeping pump drains
+```
 
 ## 8. The bar, the screens, and the ghost cursor
 

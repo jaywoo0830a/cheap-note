@@ -31,7 +31,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use windows::core::Interface as _;
-use windows::Win32::Foundation::{HMODULE, HWND, RECT};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, HWND, RECT, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
@@ -47,10 +47,12 @@ use windows::Win32::Graphics::Dxgi::{
         DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN,
         DXGI_SAMPLE_DESC,
     },
-    CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
+    CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, IDXGISwapChain2,
     DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
+use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
 use super::canvas::Canvas;
@@ -78,6 +80,9 @@ pub(crate) struct Device {
     size: (u32, u32),
     /// Held, not read: dropping the target or the visual would take the canvas off the screen.
     _composition: Composition,
+    /// The compositor's own clock: whether it has taken the frame it was given last (see
+    /// [`FrameWait`]).
+    frame: FrameWait,
 }
 
 impl Device {
@@ -92,7 +97,7 @@ impl Device {
             unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS::default()) }
                 .context("creating a DXGI factory")?;
         let size = client_size(hwnd).context("measuring the window")?;
-        let swap_chain = create_swap_chain(&factory, &device, size)
+        let (swap_chain, frame) = create_swap_chain(&factory, &device, size)
             .context("creating a composition swap chain")?;
         let dxgi_device: IDXGIDevice = device.cast().context("taking the device's DXGI side")?;
         let renderer = Renderer::new(&dxgi_device).context("making the canvas's renderer")?;
@@ -107,11 +112,22 @@ impl Device {
             renderer,
             size,
             _composition: composition,
+            frame,
         })
     }
 
-    /// Draws a frame of the canvas and presents it.
-    pub(crate) fn render(&mut self, canvas: &Canvas) -> Result<()> {
+    /// Draws a frame of the canvas and presents it, reporting whether it reached the screen.
+    ///
+    /// Nothing is drawn while the compositor is still holding the frame before it: drawing one is a
+    /// whole surface's work — the desk, the sheet, its ruling, the page and every stroke on it — and
+    /// a canvas presented too soon is a canvas the compositor drops. A canvas that arrives too soon
+    /// is not lost: whichever wake called this will call it again in a few milliseconds, with more
+    /// ink on it than this one had (see [`crate::app`]).
+    pub(crate) fn render(&mut self, canvas: &Canvas) -> Result<bool> {
+        if !self.frame.ready() {
+            return Ok(false);
+        }
+
         self.resize()?;
 
         let buffer: IDXGISurface = unsafe { self.swap_chain.GetBuffer(0)? };
@@ -131,7 +147,7 @@ impl Device {
                 .context("presenting the canvas")?;
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Resizes the swap chain when the window's client area has changed under it.
@@ -198,6 +214,38 @@ impl Composition {
     }
 }
 
+/// The compositor's own clock: a handle that says the frame it was given last has been taken, or
+/// nothing at all on a chain that could not be made with one.
+struct FrameWait(Option<HANDLE>);
+
+impl FrameWait {
+    /// Whether the compositor is ready for another frame.
+    ///
+    /// A zero timeout, because the answer wanted here is "now or at the next wake": the canvas is
+    /// drawn again by the pen's pump a few milliseconds later, and waiting here would hold that wake
+    /// instead of drawing it (see [`Device::render`]).
+    ///
+    /// A chain made without the handle is always ready: the compositor drops whatever it cannot
+    /// show, which is what it did before the handle existed.
+    fn ready(&self) -> bool {
+        let Some(handle) = self.0 else {
+            return true;
+        };
+
+        let waited = unsafe { WaitForSingleObject(handle, 0) };
+
+        waited == WAIT_OBJECT_0
+    }
+}
+
+impl Drop for FrameWait {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0 {
+            unsafe { CloseHandle(handle) }.ok();
+        }
+    }
+}
+
 /// A Direct3D 11 device on the system's default hardware adapter, and its immediate context.
 ///
 /// `BGRA_SUPPORT` is asked for because every surface in this app is BGRA: the page Pdfium renders,
@@ -238,15 +286,46 @@ fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
     Ok((device, context))
 }
 
-/// A swap chain that DirectComposition can show.
+/// A swap chain that DirectComposition can show, and its frame clock.
+///
+/// Made with the clock if the system takes it there — see [`FrameWait`] — and without it if it does
+/// not: a canvas that cannot be paced is still a canvas, and refusing to draw ink because a present
+/// cannot be timed would be a worse trade than the one presentation the missing argument costs.
 fn create_swap_chain(
     factory: &IDXGIFactory2,
     device: &ID3D11Device,
     size: (u32, u32),
-) -> Result<IDXGISwapChain1> {
+) -> Result<(IDXGISwapChain1, FrameWait)> {
     let desc = swap_chain_desc(size);
 
-    Ok(unsafe { factory.CreateSwapChainForComposition(device, &desc, None)? })
+    if let Ok(chain) = unsafe { factory.CreateSwapChainForComposition(device, &desc, None) } {
+        // A chain that cannot hand over its clock is still a chain: being paced is a favour the
+        // compositor does, not a requirement of a canvas (see [`FrameWait`]).
+        let frame = frame_wait(&chain).unwrap_or(FrameWait(None));
+
+        return Ok((chain, frame));
+    }
+
+    let desc = DXGI_SWAP_CHAIN_DESC1 { Flags: 0, ..desc };
+    let chain = unsafe { factory.CreateSwapChainForComposition(device, &desc, None) }
+        .context("creating a composition swap chain")?;
+
+    Ok((chain, FrameWait(None)))
+}
+
+/// The frame clock of a chain, taken from it and set to one frame of latency.
+///
+/// One, because that is how many frames are being shown: more would let the canvas run ahead of the
+/// screen, which is the thing being avoided rather than a buffer to be filled.
+fn frame_wait(swap_chain: &IDXGISwapChain1) -> Result<FrameWait> {
+    let chain: IDXGISwapChain2 = swap_chain
+        .cast()
+        .context("the swap chain's frame latency interface")?;
+    unsafe { chain.SetMaximumFrameLatency(1) }.context("setting the frame latency")?;
+
+    Ok(FrameWait(Some(unsafe {
+        chain.GetFrameLatencyWaitableObject()
+    })))
 }
 
 /// The description a composition swap chain has to be made with.
@@ -271,7 +350,10 @@ fn swap_chain_desc(size: (u32, u32)) -> DXGI_SWAP_CHAIN_DESC1 {
         Scaling: DXGI_SCALING_STRETCH,
         SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
         AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-        Flags: 0,
+        // The compositor's clock, handed out as a waitable: without it, a present is the only way to
+        // ask whether the compositor has room for another frame, and there is no way to ask *before*
+        // a surface's worth of drawing has been spent on one it will drop (see [`FrameWait`]).
+        Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
     }
 }
 
@@ -312,6 +394,10 @@ mod tests {
         );
         assert_eq!(desc.BufferCount, BUFFERS, "buffer count");
         assert_eq!(desc.SampleDesc.Count, 1, "sample count");
+        assert_eq!(
+            desc.Flags, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
+            "the compositor's frame clock, which is what a present is paced by"
+        );
         assert_eq!((desc.Width, desc.Height), (1_280, 900), "size");
         assert_eq!(desc.Format, DXGI_FORMAT_B8G8R8A8_UNORM, "format");
     }

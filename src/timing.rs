@@ -501,6 +501,13 @@ pub struct Timings {
     pub pen_latency: Meter,
     /// The gap between two wakes of the ink pump: how often the pen reported.
     pub pump_gap: Meter,
+    /// The gap between two presents of the canvas layer: how often the ink actually reached the
+    /// screen, wherever it was drawn from.
+    ///
+    /// Not the same number as the frames' own rate, and deliberately: the canvas is presented by the
+    /// pen's pump as well as by a frame, on the compositor's clock, so that the ink does not wait for
+    /// the interface to be drawn around it (see [`crate::app`]).
+    pub present_gap: Meter,
     /// The measurement a person starts and stops by hand, and what it found.
     ///
     /// The meters above answer "what is happening right now", each for its own path; this is the only
@@ -558,13 +565,15 @@ impl Timings {
     /// this used to do) compared the pen against the wrong clock entirely.
     pub fn summary(&self) -> String {
         format!(
-            "ink {}  render {}  canvas {}  pdf {} ms  ·  pump {} ms ({} /s)  ·  pen→app {}  ·  {} strokes {} px{}",
+            "ink {}  render {}  canvas {}  pdf {} ms  ·  pump {} ms ({} /s)  ·  present {} ms ({} /s)  ·  pen→app {}  ·  {} strokes {} px{}",
             span(&self.ink),
             span(&self.render),
             span(&self.canvas),
             pdf_clause(&self.pdf, &self.pdf_slice),
             span_mean(&self.pump_gap),
             rate(&self.pump_gap),
+            span_mean(&self.present_gap),
+            rate(&self.present_gap),
             span_mean(&self.pen_latency),
             self.painted.load(Ordering::Relaxed),
             self.vertices.load(Ordering::Relaxed),
@@ -947,6 +956,32 @@ mod tests {
             pdf_clause(&timings.pdf, &timings.pdf_slice),
             "page 9.50 ×1, slice 4.00 (4.00) ×2",
             "and the slices sit beside it rather than being averaged into it"
+        );
+    }
+
+    /// The present clause is the ink's own rate: the gap between two presents of the canvas, and what
+    /// that works out to per second.
+    ///
+    /// Its own number rather than the frames' — the ink is presented by the pen's pump as well as by
+    /// a frame, so a session that read the frame rate would report the interface's pace as the ink's
+    /// (see [`Timings::present_gap`]).
+    #[test]
+    fn the_present_clause_is_the_ink_s_own_rate() {
+        let timings = Timings::default();
+
+        assert!(
+            timings.summary().contains("present — ms (— /s)"),
+            "nothing presented is nothing said: {}",
+            timings.summary()
+        );
+
+        timings.present_gap.record(Duration::from_micros(6_250));
+        timings.present_gap.record(Duration::from_micros(6_250));
+
+        assert!(
+            timings.summary().contains("present 6.25 ms (160 /s)"),
+            "a hundred and sixty presents a second: {}",
+            timings.summary()
         );
     }
 }

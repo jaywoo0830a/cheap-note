@@ -73,6 +73,9 @@ windows = { version = "0.62", features = [
     # LoadLibraryW / GetProcAddress: resolving Pdfium's own entry points, including the progressive
     # render the wrapper crate does not expose. See `src/pdfium.rs`.
     "Win32_System_LibraryLoader",
+    # WaitForSingleObject: the compositor's own frame clock, which is what the canvas layer's present
+    # is paced by (see `src/ink_layer/device.rs`).
+    "Win32_System_Threading",
     # The ghost cursor's own window (see `src/cursor_overlay.rs`): a top-down 32-bit DIB section, a
     # memory device context to hold it, and `UpdateLayeredWindow` to put it on screen — the pen's
     # cursor, drawn outside the frame.

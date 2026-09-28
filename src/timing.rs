@@ -63,7 +63,7 @@ impl Meter {
         self.samples.fetch_add(1, Ordering::Relaxed);
         self.total_nanos.fetch_add(nanos, Ordering::Relaxed);
         self.last_nanos.store(nanos, Ordering::Relaxed);
-        // `fetch_max` rather than a load/store pair: the paint callback and the pump are both on
+        // `fetch_max` rather than a load/store pair: a frame and the pen's pump are both on
         // the main thread today, but a meter that is only correct on one thread is a trap for
         // whoever moves a path onto another one.
         self.worst_nanos.fetch_max(nanos, Ordering::Relaxed);
@@ -472,8 +472,8 @@ impl Session {
 
 /// Every path the app measures, plus the counters that explain them.
 ///
-/// All of it is scalar and atomic, so a frame can hold an `Arc<Timings>` — the paint callback
-/// needs one, because it runs after the view has been borrowed.
+/// All of it is scalar and atomic, so a frame can hold an `Arc<Timings>` — the canvas's renderer
+/// and the pen's pump are handed one, because they run after the view has been borrowed.
 #[derive(Debug, Default)]
 pub struct Timings {
     /// Readings in, ink out: the whole of [`crate::ink::InkDocument::consume`].
@@ -540,7 +540,7 @@ impl Timings {
         self.pages_rasterised.fetch_add(pages, Ordering::Relaxed);
     }
 
-    /// Adds what a frame painted, for the paint callback.
+    /// Adds what a frame asked the canvas to draw.
     pub fn count_painted(&self, strokes: u64, vertices: u64, culled: u64) {
         self.painted.fetch_add(strokes, Ordering::Relaxed);
         self.vertices.fetch_add(vertices, Ordering::Relaxed);

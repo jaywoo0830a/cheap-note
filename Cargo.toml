@@ -86,11 +86,9 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     # And Direct2D, which draws it: retained geometry per stroke, analytic antialiasing, and one
-    # command batch per frame rather than one multisampled pass per batch. The numerics feature is
-    # Direct2D's: every call that takes a matrix takes a `Matrix3x2`.
+    # command batch per frame rather than one multisampled pass per batch.
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
-    "Foundation_Numerics",
 ] }
 # Direct2D's geometry is placed with a matrix, and that matrix type is this crate's.
 windows-numerics = "0.3"

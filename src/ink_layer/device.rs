@@ -14,8 +14,9 @@
 //! therefore no z-order to chase, nothing to re-position on a move, a resize, a DPI change, a
 //! minimize, or a trip through the task bar.
 //!
-//! Whether a `topmost = false` target really lands behind a window whose content is a topmost one
-//! is what the probe below exists to look at. It is the one assumption this arrangement makes.
+//! A `topmost = false` target does land behind a window whose content is a topmost one. That is the
+//! one assumption this arrangement makes, and the whole of the canvas depends on it: the interface
+//! is GPUI's and the canvas is this layer's, in the one window both were made for.
 //!
 //! ## A composition swap chain's three requirements
 //!
@@ -23,12 +24,10 @@
 //! API rather than choices made here, so they are pinned in one place — [`swap_chain_desc`] — and
 //! by a test, rather than spread over a call site where one of them could be dropped in passing.
 //!
-//! ## What this phase draws
+//! ## What is drawn with it
 //!
-//! An opaque red rectangle over the whole client area, presented every frame. It is not the canvas
-//! and it is not meant to look like anything: it answers whether the visual is behind GPUI's
-//! content, and whether a window whose background appearance is `Transparent` lets it show through
-//! where GPUI paints nothing.
+//! Not this module's business: it makes the device, the swap chain and the visual, and hands the
+//! current buffer to whatever draws a frame (see [`crate::ink_layer::render`]).
 
 use anyhow::{anyhow, Context, Result};
 use windows::core::Interface as _;
@@ -181,7 +180,7 @@ impl Composition {
         let device: IDCompositionDevice = unsafe { DCompositionCreateDevice(dxgi_device) }?;
 
         // `false`: behind the window's own content, which is GPUI's visual. This one argument is
-        // what the probe exists to confirm — see the module docs.
+        // what makes the canvas a canvas rather than an overlay — see the module docs.
         let target = unsafe { device.CreateTargetForHwnd(hwnd, false) }?;
         let visual = unsafe { device.CreateVisual() }?;
 
@@ -337,7 +336,7 @@ mod tests {
     /// the app says out loud.
     ///
     /// Whether the visual lands *behind* GPUI's is not this test's business. That is the one
-    /// assumption the arrangement makes, and the probe is what looks at it.
+    /// assumption the arrangement makes, and every screenshot of the app is what looks at it.
     #[test]
     fn a_canvas_is_installed_on_a_window_that_is_never_shown() {
         use windows::core::w;

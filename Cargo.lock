@@ -2244,7 +2244,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.21",
- "windows 0.62.2",
+ "windows 0.57.0",
 ]
 
 [[package]]
@@ -3195,7 +3195,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -4887,8 +4887,8 @@ dependencies = [
 
 [[package]]
 name = "pen-windows"
-version = "0.2.0"
-source = "git+https://github.com/jaywoo0830a/pen-windows?tag=0.2.0#8da5284c665b638356b8bd0cc6a2a7070302a060"
+version = "0.3.0"
+source = "git+https://github.com/jaywoo0830a/pen-windows?tag=0.3.0#9806d9b12d1c1c2ee8b87e109ee84f2c89ddaf72"
 dependencies = [
  "raw-window-handle",
  "windows 0.62.2",

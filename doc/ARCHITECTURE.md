@@ -396,7 +396,8 @@ swallows the note's keys entirely (it did, from opening a note until a rename).
 |---|---|
 | **The hand** | |
 | `pen` | the capture, its worker thread, the batch tap, and the hand-off inbox |
-| `ink` | readings in, strokes out: edges, pointer identity, resampling, width, undo history, the lasso's selection |
+| `ink` | readings in, strokes out: edges, pointer identity, resampling, width, the lasso's selection |
+| `history` | what an edit *is* (apply and revert), a page's history, and the bytes the note's log holds |
 | `cursor` | the ghost's shape: where the pen is, and how it leans |
 | `cursor_overlay` | the ghost's own window, drawn from the pen thread |
 | `system_cursor` | hiding the system pointer while the ghost replaces it |
@@ -414,7 +415,7 @@ swallows the note's keys entirely (it did, from opening a note until a rename).
 | `bookmarks` | the pages the note has marked, and the screen that lists them |
 | **The note, on disk** | |
 | `note` | a note as a folder, the writer thread, and the zip it is carried in |
-| `store` | the note's SQLite file: schema, batch write, read path |
+| `store` | the note's SQLite file: schema, batch write, read path, the history's log |
 | `chunk` | a page of ink as one blob: SoA, varints, zstd, CRC32 |
 | `recent` | what has been opened, and the index of it the app keeps |
 | `settings` | every choice a person can make, one `meta` row each — and all of them belong to a note |
@@ -489,6 +490,16 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
     canvas description, exactly as a page's rotation is one number in the same description. The one thing this
     costs is a second number in the write path: a note sees a page by counting strokes, and a *move* leaves the
     count alone, so the page counts its shifts too (see [STORE.md](STORE.md), §6, and `page_owes_a_rewrite`).
+15. **Every change to a page is an `Edit`**, and an edit knows how to put itself back: `history::Edit` holds the
+    strokes a change is about — written, removed, or moved — and undo is one edit at a time per page. This is
+    what replaced a list of strokes that undo popped and redo pushed back, and the difference is the whole of
+    why the eraser, a lasso's drag, and *Clear* can be taken back (see `src/history.rs`, and §7 of
+    [VIEW.md](VIEW.md)).
+16. **A page's history is written down beside its ink, in one transaction.** `store::NoteStore`'s writes take a
+    `history::HistoryUpdate` — the tail of applied edits the note has not heard about, and the cursor that tail
+    ends at — and the log row and the ink row commit together, so a crash cannot leave an edit describing ink the
+    note does not have. The app's in-memory history is a *session's* worth and the note's is a depth
+    ([STORE.md](STORE.md), §3, *The history*).
 
 ## 12. Requirements, building, running
 

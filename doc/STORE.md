@@ -128,6 +128,41 @@ CREATE VIEW page_strokes AS
 A read is `ORDER BY ord, seq`, and the page comes back in the order it was drawn. `is_dirty` says how
 each row has to be decoded (§4).
 
+### The history
+
+```sql
+pages(…, stroke_count, history_at, history_count)
+edits(page_id, ord, data BLOB, created_at)
+```
+
+One row per edit a page's ink has been through — a stroke written, ink erased, a selection dragged,
+the page cleared — each holding **ink**, not a description of an operation: `data` is the strokes the
+edit is about, sealed by the same codec a page or a dirty row uses (§4). That is what makes undo
+survive a restart without the note having to understand what an edit *means*: a build that changes the
+model can still read yesterday's strokes, and a row of a kind it does not know is refused by name
+rather than read as one of its own.
+
+`ord` counts a page's edits and never restarts, and the pair of columns on `pages` is the **cursor**:
+`history_at` is the ordinal of the last applied edit, `history_count` is how many strokes the page had
+when that edit was made. The rows at or below the cursor are the page as it stands; the rows above it
+are the redo branch. So:
+
+* **Undo** moves the cursor back one and reverts that edit; **redo** moves it forward and applies one.
+  Rows are never rewritten to do it — the cursor *is* the state.
+* **A new edit over an undone one** takes the place of the branch: the tail the app sends is written
+  from its own first ordinal onwards, and the rows it lands on are deleted in the same transaction.
+  That is the whole of "a new edit ends the redo branch".
+* **The log is only trusted while it agrees with the ink.** A cursor whose `history_count` is not the
+  page's stroke count — a page written by something that kept no history — is ignored rather than
+  repaired: the ink is read in full, there is simply nothing to take back. Opening a note never writes.
+* **It is a depth, not a lifetime.** The idle checkpoint drops everything below `history_at - 4096`
+  (§5's housekeeping), so "how far back can I go" has an answer and a note does not grow a history the
+  size of itself. What goes is the *deepest* undo, and the run that is left still follows.
+
+The log is written **in the same transaction as the ink it describes** — the app hands the writer a
+tail of edits in the job that carries the strokes — so a crash can leave the note with ink and no edit,
+or an edit and no ink, but never an edit that describes ink the note does not have.
+
 ### What the note's `meta` holds
 
 `meta` is where everything that is *about the note* is filed — **one row per fact, named after the
@@ -273,6 +308,7 @@ app hands finished strokes to a background thread on a schedule:
 | 500 ms have passed since the last batch | the smaller batch is sent anyway |
 | the page is closed (you turn away) | the batch goes out, and the page is **compacted** into chunks |
 | `undo`, the eraser, *Clear*, or a lasso moving a selection | the page is **rewritten**, not appended to |
+| an edit is made | the edits the note has not heard about go with the ink, in the same transaction (§3, *The history*) |
 | the pen has been still for 5 s, and 5 minutes have passed | the write-ahead log is folded back into `note.db` |
 | you press *Save* | everything outstanding is written, then the export is made |
 | the app closes | the writer's last job is a checkpoint |
@@ -381,19 +417,25 @@ half-imported is a worse thing to explain than one that was refused.
 | Not stored | Why |
 |---|---|
 | the stroke under the nib | it is not history yet: it has no final geometry, and taking it back would leave the model thinking the pen was lifted |
-| undo/redo history | it is a property of the session, not of the note: a note opens with a page of ink and no way back through last week's strokes |
-| an erased stroke | the eraser removes whole strokes and undo takes back the most recent *surviving* one; there is no "recover what I erased" — see `src/ink.rs` |
+| the *selection* a lasso holds | it is not ink and not an edit: it is the page's idea of what is in hand for as long as the note is open, and nothing about it belongs in a file |
 | anything global | there is nothing global to store: every setting is a row of the note it was changed in (§3), so a note carried to another machine arrives as it was left. The one file outside a note is the index of what has been opened, and that is a cache (§1) |
 | attachments (for now) | the container carries an `attachments\` folder faithfully, but nothing in this build writes one yet — it is where a pasted image or a recording will go |
 | rendered PDF pages | a cache, rebuilt from `source.pdf` whenever they are needed |
 | the document's outline | it belongs to the *document* — which the note carries inside itself — so it is read again at every open: a note whose document was replaced arrives with the new contents (see `src/outline.rs`) |
 
+Undo/redo history used to be in this table, as "a property of the session, not of the note". It is stored
+now (§3, *The history*): a page keeps its last few thousand edits beside its ink, so a note opened on Friday
+can take back what was written on Monday. What is still *not* stored is the part of it that is a session's:
+the in-memory history ([`history::HISTORY_EDITS`]) and which edits the app has already handed over — the
+note only needs to be told about a tail of edits and the cursor it ends at.
+
 ## 11. Where the code is
 
 | Module | Responsibility |
 |---|---|
-| `src/store.rs` | the database: schema, PRAGMAs, the batch write, compaction, the read path, checkpoint, `VACUUM INTO`, and the rows of `meta` |
-| `src/chunk.rs` | the blob format: encode, decode, integrity, chunk boundaries |
+| `src/store.rs` | the database: schema, PRAGMAs, the batch write, compaction, the read path, the history's log, checkpoint, `VACUUM INTO`, and the rows of `meta` |
+| `src/chunk.rs` | the blob format: encode, decode, integrity, chunk boundaries, the sealed frame a dirty row and an edit share |
+| `src/history.rs` | what an edit *is*: apply and revert, a page's history, and the bytes the note's log holds |
 | `src/settings.rs` | every setting a note remembers, and the row each one is written in |
 | `src/note.rs` | the note folder, the writer thread and its job queue, the zip container |
 | `src/ink.rs` | strokes in memory: what a stroke is, and where each page's ink is kept |
@@ -431,12 +473,14 @@ chunks, exports, every way a `meta` row can behave), the container by `note::tes
 
 ```sql
 CREATE TABLE pages (
-    id           INTEGER PRIMARY KEY,   -- identity, what chunks point at
-    ord          INTEGER NOT NULL,      -- position in the note's reading order
-    created_at   INTEGER NOT NULL,      -- milliseconds since the epoch
-    updated_at   INTEGER NOT NULL,
-    bbox_min_x   REAL, bbox_min_y REAL, bbox_max_x REAL, bbox_max_y REAL,
-    stroke_count INTEGER NOT NULL DEFAULT 0   -- strokes in this page's *chunks*
+    id            INTEGER PRIMARY KEY,   -- identity, what chunks point at
+    ord           INTEGER NOT NULL,      -- position in the note's reading order
+    created_at    INTEGER NOT NULL,      -- milliseconds since the epoch
+    updated_at    INTEGER NOT NULL,
+    bbox_min_x    REAL, bbox_min_y REAL, bbox_max_x REAL, bbox_max_y REAL,
+    stroke_count  INTEGER NOT NULL DEFAULT 0,  -- strokes in this page's *chunks*
+    history_at    INTEGER NOT NULL DEFAULT 0,  -- the cursor: the last applied edit's ordinal
+    history_count INTEGER NOT NULL DEFAULT 0   -- …and the page's stroke count when it was made
 ) STRICT;
 CREATE UNIQUE INDEX idx_pages_ord ON pages(ord);
 
@@ -466,6 +510,14 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;  -- one ro
 CREATE TABLE bookmarks (               -- the pages a person marked: one row per marked page
     ord        INTEGER PRIMARY KEY,    -- the same position `pages.ord` is, renamed with it
     created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE edits (                   -- a page's history: one row per edit, in the order made: see §3
+    page_id    INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    ord        INTEGER NOT NULL,       -- the cursor's ordinal space; never restarts, gaps at the bottom
+    data       BLOB NOT NULL,          -- the edit, as ink: see §4 and src/history.rs
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (page_id, ord)
 ) STRICT;
 
 CREATE INDEX idx_chunks_page ON chunks(page_id, stroke_start);

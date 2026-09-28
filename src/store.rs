@@ -91,6 +91,7 @@ use serde::{Deserialize, Serialize};
 use crate::canvas::{CanvasSize, CanvasStyle};
 use crate::chunk::{self, Codec};
 use crate::error::{AppError, Result};
+use crate::history::{Edit, History, HistoryUpdate};
 use crate::ink::Stroke;
 use crate::settings::{PenWeight, Settings};
 
@@ -108,7 +109,15 @@ use crate::settings::{PenWeight, Settings};
 ///
 /// `0` is not an older note: it is a file with no tables in it yet, which is what a note looks like
 /// between [`NoteStore::open`] creating the database and [`NoteStore::create_schema`] stamping it.
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 6;
+
+/// How many edits of a page's history the note keeps.
+///
+/// The app keeps a session's worth in memory ([`crate::history::HISTORY_EDITS`]) and this is the depth that
+/// outlives it: a page reopened days later can take back this many edits, and the oldest are dropped by the
+/// idle checkpoint rather than by a write, so a note does not grow a history the size of itself. Deep enough
+/// to cover a session of writing, bounded so that "how far back can I go" has an answer.
+pub const HISTORY_DEPTH: i64 = 4_096;
 
 /// The page the note was last on, as text: a whole number.
 pub const META_OPEN_PAGE: &str = "open_page";
@@ -285,15 +294,17 @@ const PRAGMAS: &str = "PRAGMA page_size = 8192;
 /// The tables, the indexes and the view.
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS pages (
-    id           INTEGER PRIMARY KEY,
-    ord          INTEGER NOT NULL,
-    created_at   INTEGER NOT NULL,
-    updated_at   INTEGER NOT NULL,
-    bbox_min_x   REAL,
-    bbox_min_y   REAL,
-    bbox_max_x   REAL,
-    bbox_max_y   REAL,
-    stroke_count INTEGER NOT NULL DEFAULT 0
+    id            INTEGER PRIMARY KEY,
+    ord           INTEGER NOT NULL,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL,
+    bbox_min_x    REAL,
+    bbox_min_y    REAL,
+    bbox_max_x    REAL,
+    bbox_max_y    REAL,
+    stroke_count  INTEGER NOT NULL DEFAULT 0,
+    history_at    INTEGER NOT NULL DEFAULT 0,
+    history_count INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_ord ON pages(ord);
@@ -338,6 +349,21 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS bookmarks (
     ord        INTEGER PRIMARY KEY,
     created_at INTEGER NOT NULL
+) STRICT;
+
+-- A page's history: one row per edit its ink has been through, in the order they were made.
+--
+-- `ord` counts the edits a page has ever had and does not restart: it is the *cursor* the app and the note
+-- agree about (see `pages.history_at`), and a row that was deleted because the history is deeper than it
+-- is kept for simply leaves a gap at the bottom. `data` is the edit, encoded by `src/history.rs`, and it
+-- holds strokes — the same codec a page's ink goes through — so what is written is ink rather than a
+-- command whose meaning a later build might have changed.
+CREATE TABLE IF NOT EXISTS edits (
+    page_id    INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    ord        INTEGER NOT NULL,
+    data       BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (page_id, ord)
 ) STRICT;
 
 CREATE VIEW IF NOT EXISTS page_strokes AS
@@ -393,35 +419,39 @@ impl NoteStore {
     /// The strokes are appended in the order they are given and after whatever the page already
     /// holds, which is what makes a page's ink a sequence rather than a set: `stroke_start` and
     /// `seq` are where the order lives.
-    pub fn append(&mut self, page: u64, strokes: &[Stroke]) -> Result<()> {
-        if strokes.is_empty() {
-            return Ok(());
-        }
-
+    pub fn append(&mut self, page: u64, strokes: &[Stroke], history: &HistoryUpdate) -> Result<()> {
         let tx = self.begin()?;
         let id = page_row(&tx, page, true)?.expect("the row was just made");
         let now = now_millis();
-        let mut seq = next_dirty_seq(&tx, id)?;
 
-        {
-            let mut insert = tx
-                .prepare_cached(
-                    "INSERT INTO dirty_strokes (page_id, seq, data, created_at) VALUES (?1, ?2, ?3, ?4)",
-                )
-                .map_err(sql)?;
+        if !strokes.is_empty() {
+            let mut seq = next_dirty_seq(&tx, id)?;
 
-            for stroke in strokes {
-                let blob = sealed_dirty(&chunk::encode(std::slice::from_ref(stroke))?);
-                insert.execute(params![id, seq, blob, now]).map_err(sql)?;
-                seq += 1;
+            {
+                let mut insert = tx
+                    .prepare_cached(
+                        "INSERT INTO dirty_strokes (page_id, seq, data, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    )
+                    .map_err(sql)?;
+
+                for stroke in strokes {
+                    let blob = sealed_dirty(stroke)?;
+                    insert.execute(params![id, seq, blob, now]).map_err(sql)?;
+                    seq += 1;
+                }
             }
+
+            tx.execute(
+                "UPDATE pages SET updated_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )
+            .map_err(sql)?;
         }
 
-        tx.execute(
-            "UPDATE pages SET updated_at = ?1 WHERE id = ?2",
-            params![now, id],
-        )
-        .map_err(sql)?;
+        // The page's history is written in the same transaction as the ink it describes, and that is the whole
+        // reason it is not a job of its own: a crash can leave the note with ink and no edit, or an edit and no
+        // ink, but never an edit that describes ink the note does not have.
+        write_history(&tx, id, history, now)?;
 
         tx.commit().map_err(sql)?;
         Ok(())
@@ -472,7 +502,12 @@ impl NoteStore {
     /// which the app marks as a rewrite rather than as a batch. The page's chunks and dirty rows are
     /// dropped and its ink is written again from the strokes it now has, in one transaction, so a
     /// crash leaves either the old page or the new one.
-    pub fn rewrite(&mut self, page: u64, strokes: &[Stroke]) -> Result<()> {
+    pub fn rewrite(
+        &mut self,
+        page: u64,
+        strokes: &[Stroke],
+        history: &HistoryUpdate,
+    ) -> Result<()> {
         let tx = self.begin()?;
 
         let id = match page_row(&tx, page, !strokes.is_empty())? {
@@ -498,26 +533,132 @@ impl NoteStore {
                 params![now_millis(), id],
             )
             .map_err(sql)?;
-
-            tx.commit().map_err(sql)?;
-            return Ok(());
+        } else {
+            write_chunks(&tx, id, 0, 0, strokes)?;
+            tx.execute(
+                "UPDATE pages
+                    SET stroke_count = ?1,
+                        bbox_min_x = NULL, bbox_min_y = NULL,
+                        bbox_max_x = NULL, bbox_max_y = NULL
+                  WHERE id = ?2",
+                params![strokes.len() as i64, id],
+            )
+            .map_err(sql)?;
+            touch_bounds(&tx, id, strokes)?;
         }
 
-        write_chunks(&tx, id, 0, 0, strokes)?;
-        tx.execute(
-            "UPDATE pages
-                SET stroke_count = ?1,
-                    bbox_min_x = NULL, bbox_min_y = NULL,
-                    bbox_max_x = NULL, bbox_max_y = NULL
-              WHERE id = ?2",
-            params![strokes.len() as i64, id],
-        )
-        .map_err(sql)?;
-        touch_bounds(&tx, id, strokes)?;
+        // The history, in the same transaction as the ink (see [`NoteStore::append`]).
+        write_history(&tx, id, history, now_millis())?;
 
         tx.commit().map_err(sql)?;
         Ok(())
     }
+}
+
+impl NoteStore {
+    /// A page as the reader gets it: its ink, and the history its ink has been through.
+    ///
+    /// The two are read together because they are one answer — "what is on this page, and what has been done to
+    /// it" — and because the second is only meaningful while it agrees with the first: `pages.history_count` is
+    /// the stroke count the cursor stands for, and a log whose count is not the page's is one this build cannot
+    /// trust (a page written by a build that kept no history, or by something else entirely). Such a log is
+    /// **ignored** rather than repaired — the next write of that page replaces it from its own cursor onwards —
+    /// so opening a note never writes to it.
+    pub fn load_page(&self, page: u64, depth: usize) -> Result<LoadedPage> {
+        let strokes = self.load(page)?;
+
+        let Some((id, at)) = self.cursor(page)? else {
+            return Ok(LoadedPage {
+                strokes,
+                history: History::new(),
+            });
+        };
+
+        let depth = depth as i64;
+        Ok(LoadedPage {
+            strokes,
+            history: History::loaded(
+                edits_applied(&self.conn, id, at, depth)?,
+                edits_undone(&self.conn, id, at, depth)?,
+                at as u64,
+            ),
+        })
+    }
+
+    /// One more applied edit of a page, older than the `skip` the caller already holds.
+    ///
+    /// This is how a session goes deeper than its own memory: the page's in-memory history holds
+    /// [`crate::history::HISTORY_EDITS`], the note holds [`HISTORY_DEPTH`], and an undo that runs out of the
+    /// first asks for one more out of the second. Nothing is applied by knowing it — the edit is *already*
+    /// applied, since it is below the cursor — so this only extends the stack an undo walks.
+    pub fn older_history(&self, page: u64, skip: usize) -> Result<Option<Edit>> {
+        let Some((id, at)) = self.cursor(page)? else {
+            return Ok(None);
+        };
+
+        older_edit(&self.conn, id, at, skip as i64)
+    }
+
+    /// How many edits a page's history holds, for the tests that check the depth is a depth.
+    #[cfg(test)]
+    pub fn history_rows(&self, page: u64) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM edits WHERE page_id = (SELECT id FROM pages WHERE ord = ?1)",
+                params![page as i64],
+                |row| row.get(0),
+            )
+            .map_err(sql)?)
+    }
+
+    /// A page's row and its cursor, when its history is one this build can trust.
+    ///
+    /// `None` for a page with no row, a page nothing has been done to, and a page whose log no longer describes
+    /// its ink — the three answers that all mean "there is no history here" (see [`Self::load_page`]). The count a
+    /// cursor stands for is the page's *whole* ink, compacted strokes and write-ahead rows together, which is the
+    /// same number [`Self::stroke_count`] answers with and the same one the app's write path measures against.
+    fn cursor(&self, page: u64) -> Result<Option<(i64, i64)>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT p.id, p.history_at, p.history_count,
+                        p.stroke_count
+                        + COALESCE((SELECT COUNT(*) FROM dirty_strokes d WHERE d.page_id = p.id), 0)
+                   FROM pages p
+                  WHERE p.ord = ?1",
+                params![page as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(sql)?;
+
+        let Some((id, at, history_count, stroke_count)) = row else {
+            return Ok(None);
+        };
+
+        if at <= 0 || history_count != stroke_count {
+            return Ok(None);
+        }
+
+        Ok(Some((id, at)))
+    }
+}
+
+/// A page as it is read out of a note: the ink, and the history it has been through.
+#[derive(Debug)]
+pub struct LoadedPage {
+    /// The strokes, in the order they were drawn.
+    pub strokes: Vec<Stroke>,
+    /// The history: the edits applied, the ones taken back, and the cursor they both hang off.
+    pub history: History,
 }
 
 /// Starts a transaction that is going to write, reporting failure the way every other failure here is
@@ -539,6 +680,108 @@ impl NoteStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(sql)
     }
+}
+
+/// Writes what a page's history did: the tail of applied edits the note has not been told about, and the cursor
+/// that tail ends at.
+///
+/// Called by [`NoteStore::append`] and [`NoteStore::rewrite`] inside their transactions rather than sent as a
+/// job, which is the whole design: the log and the ink are written together, so a crash can never leave the note
+/// with an edit that describes ink it does not have.
+///
+/// The rule for the tail is one statement: everything the note holds from the tail's own first ordinal onwards is
+/// replaced by it. That is also how a page's *redo branch* is dropped — an edit made over an undone one takes its
+/// place — without either side having to count what went.
+fn write_history(conn: &Connection, id: i64, update: &HistoryUpdate, now: i64) -> Result<()> {
+    if !update.appended.is_empty() {
+        // The tail replaces everything the note holds from its own first ordinal onwards (1-based: the tail's
+        // first edit is `applied - len + 1`), which is also how a page's redo branch is dropped when an edit is
+        // made over an undone one.
+        let first = (update.applied - update.appended.len() as u64 + 1) as i64;
+        conn.execute(
+            "DELETE FROM edits WHERE page_id = ?1 AND ord >= ?2",
+            params![id, first],
+        )
+        .map_err(sql)?;
+    }
+
+    for (index, edit) in update.appended.iter().enumerate() {
+        let ord = update.applied - update.appended.len() as u64 + 1 + index as u64;
+        conn.execute(
+            "INSERT INTO edits (page_id, ord, data, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![id, ord as i64, edit.encode()?, now],
+        )
+        .map_err(sql)?;
+    }
+
+    // The cursor, and the stroke count it stands for: the second is what tells a later open whether the log still
+    // describes this page (see [`NoteStore::history`]).
+    conn.execute(
+        "UPDATE pages SET history_at = ?1, history_count = ?2 WHERE id = ?3",
+        params![update.applied as i64, update.count as i64, id],
+    )
+    .map_err(sql)?;
+
+    Ok(())
+}
+
+/// The applied edits of a page: the newest `depth` of them at or below the cursor, oldest first.
+fn edits_applied(conn: &Connection, id: i64, at: i64, depth: i64) -> Result<Vec<Edit>> {
+    let mut edits = edits_at_most(conn, id, at, depth, 0)?;
+    edits.reverse();
+    Ok(edits)
+}
+
+/// The undone edits of a page: the newest `depth` of them above the cursor, oldest first.
+fn edits_undone(conn: &Connection, id: i64, at: i64, depth: i64) -> Result<Vec<Edit>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT data FROM edits
+              WHERE page_id = ?1 AND ord > ?2
+              ORDER BY ord
+              LIMIT ?3",
+        )
+        .map_err(sql)?;
+
+    let rows = statement
+        .query_map(params![id, at, depth], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(sql)?;
+
+    let mut edits = Vec::new();
+    for row in rows {
+        edits.push(Edit::decode(&row.map_err(sql)?)?);
+    }
+
+    Ok(edits)
+}
+
+/// One applied edit of a page: the `skip`th newest line at or below the cursor, or nothing when the log does not
+/// reach that far.
+fn older_edit(conn: &Connection, id: i64, at: i64, skip: i64) -> Result<Option<Edit>> {
+    Ok(edits_at_most(conn, id, at, 1, skip)?.pop())
+}
+
+/// The newest `depth` edits of a page at or below `at`, newest first, missing the first `skip` of them.
+fn edits_at_most(conn: &Connection, id: i64, at: i64, depth: i64, skip: i64) -> Result<Vec<Edit>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT data FROM edits
+              WHERE page_id = ?1 AND ord <= ?2
+              ORDER BY ord DESC
+              LIMIT ?3 OFFSET ?4",
+        )
+        .map_err(sql)?;
+
+    let rows = statement
+        .query_map(params![id, at, depth, skip], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(sql)?;
+
+    let mut edits = Vec::new();
+    for row in rows {
+        edits.push(Edit::decode(&row.map_err(sql)?)?);
+    }
+
+    Ok(edits)
 }
 
 /// The error type rusqlite gives, reported as a note problem.
@@ -796,7 +1039,20 @@ impl NoteStore {
     /// WAL means writes are cheap and reads never wait, at the cost of a `-wal` file growing beside
     /// the note. This truncates it — the design note calls it the idle housekeeping — so a note does
     /// not sit next to a log the size of the note itself until something opens it again.
+    ///
+    /// The same idle hour is when a page's history is cut back to [`HISTORY_DEPTH`]: history is a *depth* and
+    /// not a lifetime, and the rows this drops are the deepest undos — the ones a reader would have had to walk
+    /// back through every edit since to reach. It happens here rather than on a write because it is housekeeping:
+    /// how far back a note can be undone is not something a person is waiting for.
     pub fn checkpoint(&self) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM edits
+                  WHERE ord <= (SELECT history_at FROM pages WHERE pages.id = edits.page_id) - ?1",
+                params![HISTORY_DEPTH],
+            )
+            .map_err(sql)?;
+
         self.conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
             .map_err(|error| AppError::Note(format!("the note could not be tidied up: {error}")))
@@ -1426,34 +1682,19 @@ fn touch_bounds(conn: &Connection, id: i64, strokes: &[Stroke]) -> Result<()> {
     Ok(())
 }
 
-/// A dirty stroke's blob: the encoded chunk with the three columns it needs attached.
+/// A dirty stroke's blob: the encoded chunk, sealed with the three values the frame carries.
 ///
-/// `dirty_strokes` has one column for the ink — the design note's schema — while a chunk in the
-/// `chunks` table describes itself with `codec`, `raw_len` and `crc32`. A dirty row therefore carries
-/// those three values in a nine-byte header of its own, so one blob is still self-contained and the
-/// schema is still the one the design note gives.
-fn sealed_dirty(encoded: &chunk::Encoded) -> Vec<u8> {
-    let mut blob = Vec::with_capacity(9 + encoded.data.len());
-    blob.push(encoded.codec.id() as u8);
-    blob.extend_from_slice(&encoded.raw_len.to_le_bytes());
-    blob.extend_from_slice(&encoded.crc32.to_le_bytes());
-    blob.extend_from_slice(&encoded.data);
-    blob
+/// `dirty_strokes` has one column for the ink — the design note's schema — while a chunk in the `chunks` table
+/// describes itself with `codec`, `raw_len` and `crc32`. The frame that carries those three values is
+/// [`chunk::seal`]'s, because a page's *history* writes rows of strokes the same way; what is the store's here
+/// is only the fact that a dirty row is one stroke.
+fn sealed_dirty(stroke: &Stroke) -> Result<Vec<u8>> {
+    Ok(chunk::seal(&chunk::encode(std::slice::from_ref(stroke))?))
 }
 
 /// The one stroke in a dirty row's blob.
 fn open_dirty(blob: &[u8]) -> Result<Vec<Stroke>> {
-    if blob.len() < 9 {
-        return Err(AppError::Note(String::from(
-            "a stroke of this note is stored in fewer bytes than its own header",
-        )));
-    }
-
-    let codec = Codec::from_id(u32::from(blob[0]))?;
-    let raw_len = u32::from_le_bytes(blob[1..5].try_into().expect("four bytes")) as usize;
-    let crc32 = u32::from_le_bytes(blob[5..9].try_into().expect("four bytes"));
-
-    chunk::decode(&blob[9..], raw_len, codec, 1, crc32)
+    chunk::open_sealed(blob, 1)
 }
 
 #[cfg(test)]
@@ -1558,6 +1799,20 @@ mod tests {
             .iter()
             .map(|stroke| stroke.points.first().map(|point| point.x).unwrap_or(0.0))
             .collect()
+    }
+
+    /// A write with no history to tell: what these tests mean by ink landing in a note.
+    ///
+    /// The store's own writes always carry a page's history, because its log and its ink are written in one
+    /// transaction (see [`write_history`]). A test about *ink* has nothing to say about history, and this is how
+    /// it says so — the same "no history here" that a page written by a build which kept none is read as.
+    fn append(store: &mut NoteStore, page: u64, strokes: &[Stroke]) -> Result<()> {
+        store.append(page, strokes, &HistoryUpdate::default())
+    }
+
+    /// The same, for a page written again from scratch.
+    fn rewrite(store: &mut NoteStore, page: u64, strokes: &[Stroke]) -> Result<()> {
+        store.rewrite(page, strokes, &HistoryUpdate::default())
     }
 
     impl NoteStore {
@@ -1691,7 +1946,7 @@ mod tests {
     fn what_is_appended_comes_back() {
         let (mut store, path) = store_for("append");
         let strokes = vec![stroke(6, 0.0, 0x11_11_11), stroke(4, 100.0, 0x22_22_22)];
-        store.append(0, &strokes).expect("the ink is written");
+        append(&mut store, 0, &strokes).expect("the ink is written");
 
         let loaded = store.load(0).expect("the page is read");
         assert_eq!(first_points(&loaded), vec![0.0, 100.0]);
@@ -1713,7 +1968,7 @@ mod tests {
     fn compaction_folds_the_dirty_strokes_into_chunks() {
         let (mut store, path) = store_for("compact");
         let strokes = vec![stroke(9, 0.0, 0x11_11_11), stroke(7, 40.0, 0x11_11_11)];
-        store.append(0, &strokes).expect("the ink is written");
+        append(&mut store, 0, &strokes).expect("the ink is written");
         let before = store.load(0).expect("the page is read");
 
         assert_eq!(store.compact(0).expect("the page is compacted"), 2);
@@ -1737,14 +1992,10 @@ mod tests {
     #[test]
     fn a_page_written_in_two_batches_keeps_its_order() {
         let (mut store, path) = store_for("batches");
-        store
-            .append(0, &[stroke(5, 0.0, 0x11_11_11)])
-            .expect("the first batch");
+        append(&mut store, 0, &[stroke(5, 0.0, 0x11_11_11)]).expect("the first batch");
         store.compact(0).expect("the page is closed");
 
-        store
-            .append(0, &[stroke(5, 60.0, 0x22_22_22)])
-            .expect("the second batch");
+        append(&mut store, 0, &[stroke(5, 60.0, 0x22_22_22)]).expect("the second batch");
         assert_eq!(
             first_points(&store.load(0).expect("a page")),
             vec![0.0, 60.0],
@@ -1765,21 +2016,19 @@ mod tests {
     #[test]
     fn rewriting_a_page_replaces_what_was_there() {
         let (mut store, path) = store_for("rewrite");
-        store
-            .append(
-                0,
-                &[
-                    stroke(5, 0.0, 0x1),
-                    stroke(5, 10.0, 0x1),
-                    stroke(5, 20.0, 0x1),
-                ],
-            )
-            .expect("ink");
+        append(
+            &mut store,
+            0,
+            &[
+                stroke(5, 0.0, 0x1),
+                stroke(5, 10.0, 0x1),
+                stroke(5, 20.0, 0x1),
+            ],
+        )
+        .expect("ink");
         store.compact(0).expect("the page is closed");
 
-        store
-            .rewrite(0, &[stroke(5, 300.0, 0x2)])
-            .expect("the page is rewritten");
+        rewrite(&mut store, 0, &[stroke(5, 300.0, 0x2)]).expect("the page is rewritten");
         assert_eq!(
             first_points(&store.load(0).expect("a page")),
             vec![300.0],
@@ -1787,7 +2036,7 @@ mod tests {
         );
         assert_eq!(store.stroke_count(0).expect("a count"), 1);
 
-        store.rewrite(0, &[]).expect("the page is emptied");
+        rewrite(&mut store, 0, &[]).expect("the page is emptied");
         assert!(store.load(0).expect("a page").is_empty());
         assert_eq!(store.stroke_count(0).expect("a count"), 0);
 
@@ -1799,7 +2048,7 @@ mod tests {
     fn a_page_moves_when_one_is_inserted_or_deleted() {
         let (mut store, path) = store_for("pages");
         for (page, x) in [(0u64, 0.0f32), (1, 100.0), (2, 200.0)] {
-            store.append(page, &[stroke(4, x, 0x1)]).expect("ink");
+            append(&mut store, page, &[stroke(4, x, 0x1)]).expect("ink");
         }
 
         store.insert_page(1).expect("a page is inserted");
@@ -1947,7 +2196,7 @@ mod tests {
     #[test]
     fn a_damaged_chunk_is_reported() {
         let (mut store, path) = store_for("damaged");
-        store.append(0, &[stroke(40, 0.0, 0x1)]).expect("ink");
+        append(&mut store, 0, &[stroke(40, 0.0, 0x1)]).expect("ink");
         store.compact(0).expect("the page is closed");
         store.damage_a_chunk(0);
 
@@ -1961,7 +2210,7 @@ mod tests {
     #[test]
     fn an_export_is_a_note_of_its_own() {
         let (mut store, path) = store_for("export");
-        store.append(0, &[stroke(6, 0.0, 0x1)]).expect("ink");
+        append(&mut store, 0, &[stroke(6, 0.0, 0x1)]).expect("ink");
         store.compact(0).expect("the page is closed");
 
         let target = path.parent().expect("a directory").join("exported.db");
@@ -2252,10 +2501,8 @@ mod tests {
 
         // Ink that has not been compacted counts too: a note read the moment it is written in must
         // not look emptier than it is.
-        store
-            .append(0, &[stroke(4, 0.0, 0), stroke(4, 40.0, 0)])
-            .expect("ink");
-        store.append(1, &[stroke(4, 80.0, 0)]).expect("ink");
+        append(&mut store, 0, &[stroke(4, 0.0, 0), stroke(4, 40.0, 0)]).expect("ink");
+        append(&mut store, 1, &[stroke(4, 80.0, 0)]).expect("ink");
 
         let dirty = store.facts().expect("the facts").summary;
         assert_eq!(dirty.strokes, 3, "dirty rows are strokes as well");
@@ -2358,7 +2605,7 @@ mod tests {
     #[test]
     fn checkpointing_folds_the_log_back() {
         let (mut store, path) = store_for("checkpoint");
-        store.append(0, &[stroke(20, 0.0, 0x1)]).expect("ink");
+        append(&mut store, 0, &[stroke(20, 0.0, 0x1)]).expect("ink");
 
         store.checkpoint().expect("the note is tidied");
 
@@ -2376,15 +2623,243 @@ mod tests {
     #[test]
     fn an_emptied_page_stops_counting_as_a_page() {
         let (mut store, path) = store_for("empty");
-        store.append(3, &[stroke(4, 0.0, 0x1)]).expect("ink");
+        append(&mut store, 3, &[stroke(4, 0.0, 0x1)]).expect("ink");
         assert_eq!(store.pages().expect("pages"), vec![3]);
 
-        store.rewrite(3, &[]).expect("the page is emptied");
+        rewrite(&mut store, 3, &[]).expect("the page is emptied");
         assert_eq!(store.stroke_count(3).expect("a count"), 0);
         assert_eq!(
             store.pages().expect("pages"),
             vec![3],
             "the row stays until the page is deleted, but holds nothing"
+        );
+
+        cleanup(&path);
+    }
+
+    /// An edit that wrote a stroke, for the tests about a page's history.
+    fn written(at: usize, stroke: &Stroke) -> Edit {
+        Edit::Written {
+            at,
+            strokes: vec![std::sync::Arc::new(stroke.clone())],
+        }
+    }
+
+    /// A page's history is written with its ink and read back with it: what a session's undo hangs off.
+    #[test]
+    fn a_page_carries_its_history() {
+        let (mut store, path) = store_for("history");
+        let strokes = vec![stroke(4, 0.0, 0x1), stroke(4, 40.0, 0x1)];
+
+        store
+            .append(0, &strokes, &written_history(&strokes))
+            .expect("ink");
+
+        let page = store.load_page(0, 16).expect("a page");
+        assert_eq!(page.strokes.len(), 2, "the ink is there");
+        assert_eq!(page.history.depth(), 2, "and the edits came with it");
+        assert_eq!(page.history.applied(), 2, "with the cursor they end at");
+        assert!(page.history.can_undo() && !page.history.can_redo());
+
+        cleanup(&path);
+    }
+
+    /// An undo survives a restart, which is the whole point of writing a history down.
+    #[test]
+    fn an_undo_survives_a_restart() {
+        let (mut store, path) = store_for("restart");
+        let strokes = vec![stroke(4, 0.0, 0x1), stroke(4, 40.0, 0x1)];
+        store
+            .append(0, &strokes, &written_history(&strokes))
+            .expect("ink");
+
+        // The reader takes the second one back: the page is written again with one stroke, and the cursor moves back
+        // with it — no appended edits, one fewer applied.
+        store
+            .rewrite(
+                0,
+                &strokes[..1],
+                &HistoryUpdate {
+                    appended: Vec::new(),
+                    applied: 1,
+                    count: 1,
+                },
+            )
+            .expect("the page taken back");
+
+        // A new session opens the note.
+        drop(store);
+        let reopened = NoteStore::open(&path).expect("the note opens again");
+        let page = reopened.load_page(0, 16).expect("a page");
+
+        assert_eq!(page.strokes.len(), 1, "the ink is what was left");
+        assert_eq!(page.history.applied(), 1, "the cursor is where it was left");
+        assert_eq!(page.history.depth(), 1, "the edit still applied is here");
+        assert_eq!(page.history.forward(), 1, "and the one taken back is here");
+        assert!(page.history.can_redo(), "so it can be put forward again");
+
+        cleanup(&path);
+    }
+
+    /// A log that no longer describes its page is ignored, and the ink is still read in full.
+    #[test]
+    fn a_log_that_disagrees_with_the_ink_is_ignored() {
+        let (mut store, path) = store_for("stale");
+        let strokes = vec![stroke(4, 0.0, 0x1)];
+
+        // A cursor that claims a stroke count the page does not have: what a page written by something that kept no
+        // history looks like, and the one thing a log cannot survive.
+        let wrong = HistoryUpdate {
+            appended: vec![written(0, &strokes[0])],
+            applied: 1,
+            count: 7,
+        };
+        store.append(0, &strokes, &wrong).expect("ink");
+
+        let page = store.load_page(0, 16).expect("a page");
+        assert_eq!(page.strokes.len(), 1, "the ink is read");
+        assert_eq!(page.history.depth(), 0, "and the log is not trusted");
+        assert!(!page.history.can_undo(), "so there is nothing to take back");
+
+        cleanup(&path);
+    }
+
+    /// The history of a page whose strokes were written one after another, in order.
+    fn written_history(strokes: &[Stroke]) -> HistoryUpdate {
+        HistoryUpdate {
+            appended: strokes
+                .iter()
+                .enumerate()
+                .map(|(at, stroke)| written(at, stroke))
+                .collect(),
+            applied: strokes.len() as u64,
+            count: strokes.len(),
+        }
+    }
+
+    /// An edit made over an undone one takes its place in the log, so the branch cannot be redone.
+    #[test]
+    fn an_edit_over_an_undone_one_takes_its_place() {
+        let (mut store, path) = store_for("branch");
+        let strokes = vec![stroke(4, 0.0, 0x1), stroke(4, 40.0, 0x1)];
+        store
+            .append(0, &strokes, &written_history(&strokes))
+            .expect("ink");
+
+        // The cursor walks back to the first stroke: the second becomes the redo branch.
+        store
+            .rewrite(
+                0,
+                &strokes[..1],
+                &HistoryUpdate {
+                    appended: Vec::new(),
+                    applied: 1,
+                    count: 1,
+                },
+            )
+            .expect("taken back");
+
+        // A *different* stroke is drawn over it. The tail replaces everything the note holds from its own first
+        // ordinal on, which is what makes the branch the reader walked away from go.
+        let drawn = stroke(4, 100.0, 0x2);
+        store
+            .append(
+                0,
+                std::slice::from_ref(&drawn),
+                &HistoryUpdate {
+                    appended: vec![written(1, &drawn)],
+                    applied: 2,
+                    count: 2,
+                },
+            )
+            .expect("the new ink");
+
+        let page = store.load_page(0, 16).expect("a page");
+        assert_eq!(page.history.applied(), 2);
+        assert_eq!(page.history.depth(), 2, "the drawn stroke replaced it");
+        assert_eq!(page.history.forward(), 0, "and the branch is gone");
+        assert_eq!(
+            store.history_rows(0).expect("a count"),
+            2,
+            "the rows agree with the cursor"
+        );
+
+        cleanup(&path);
+    }
+
+    /// A page's history can be read one edit at a time, older than what memory already holds: what makes an undo
+    /// possible days after the edits were made.
+    #[test]
+    fn a_history_reaches_deeper_than_memory() {
+        let (mut store, path) = store_for("deeper");
+        let strokes = vec![
+            stroke(4, 0.0, 0x1),
+            stroke(4, 40.0, 0x1),
+            stroke(4, 80.0, 0x1),
+        ];
+        store
+            .append(0, &strokes, &written_history(&strokes))
+            .expect("ink");
+
+        // A session that keeps only the newest edit in memory, which is what the app does when a note is opened:
+        // the rest are still in the note, and are read one at a time as an undo asks for them.
+        let page = store.load_page(0, 1).expect("a page");
+        assert_eq!(page.history.depth(), 1, "one edit in memory");
+        assert_eq!(page.history.in_note(), 1, "and it is one the note holds");
+
+        // Each step deeper reads its own row, and the page never held more than three: the walk ends where the ink
+        // does, which is what makes an undo stop rather than read something that was never there.
+        let older = store
+            .older_history(0, 1)
+            .expect("the log is read")
+            .expect("the second edit");
+        let further = store
+            .older_history(0, 2)
+            .expect("the log is read")
+            .expect("the third edit");
+
+        assert_ne!(
+            older.encode().expect("it encodes"),
+            further.encode().expect("it encodes"),
+            "each step reads the row before the last"
+        );
+        assert!(
+            store
+                .older_history(0, 3)
+                .expect("the log is read")
+                .is_none(),
+            "and past the page's own ink there is nothing"
+        );
+
+        cleanup(&path);
+    }
+    #[test]
+    fn the_history_is_cut_back_to_a_depth() {
+        let (store, path) = store_for("trim");
+
+        // A page that has been written to more times than the depth allows, put there straight: this is about the
+        // housekeeping, not about drawing four thousand lines.
+        store.run(&format!(
+            "INSERT INTO pages (ord, created_at, updated_at, stroke_count, history_at, history_count)
+             VALUES (0, 0, 0, 1, {}, 1)",
+            HISTORY_DEPTH + 10
+        ));
+        let values: Vec<String> = (1..=(HISTORY_DEPTH + 10))
+            .map(|ord| format!("(1, {ord}, x'00', 0)"))
+            .collect();
+        store.run(&format!(
+            "INSERT INTO edits (page_id, ord, data, created_at) VALUES {}",
+            values.join(", ")
+        ));
+        assert_eq!(store.rows("edits"), HISTORY_DEPTH + 10);
+
+        store.checkpoint().expect("the idle housekeeping");
+
+        assert_eq!(store.rows("edits"), HISTORY_DEPTH, "a depth is a depth");
+        assert_eq!(
+            store.pragma_number("SELECT MIN(ord) FROM edits"),
+            11,
+            "and it is the *oldest* edits that went"
         );
 
         cleanup(&path);

@@ -26,25 +26,27 @@
 //! their own for the same reason one level down: a vector of pointers can be appended to,
 //! undone and filtered without touching the strokes themselves.
 //!
-//! ## What undo is, and what it is not
+//! ## What undo is
 //!
-//! Undo is one *finished* stroke at a time, per page, and redo is that same list walked the other
-//! way. The rules are the ones a hand expects, and they are written down because the exceptions are
-//! what a user notices:
+//! Every change to a page is an [`Edit`] — a value that knows how to put itself back — and undo is one edit at a
+//! time, per page. The model is [`crate::history`]'s, and why it is built this way is written down there; the
+//! rules a hand notices are these:
 //!
 //! * **The stroke under the nib is not history.** It has no closed geometry and the pen is still on
 //!   the paper, so undo leaves it exactly where it is: taking it away would remove a line that was
 //!   never finished, and would leave the model thinking the pen was up while it is down.
-//! * **Any new ink ends the redo branch.** A stroke finished after an undo — or an erase that
-//!   removed something — is a new drawing, so what was taken back is no longer something to put
+//! * **Any new edit ends the redo branch.** Anything done after an undo — a stroke, an erase, a
+//!   drag — makes the drawing a *new* one, so what was taken back is no longer something to put
 //!   forward. This is the rule every editor has, and the reason redo can be trusted.
-//! * **Erasing is not undoable.** The eraser removes whole strokes as its nib passes over them (see
-//!   [`InkDocument::erase_at`]), so undo afterwards takes the most recent *surviving* stroke of the
-//!   page, which need not be one the eraser touched.
-//! * **Clearing is not undoable either.** It is the one command that says "none of this page", and
-//!   it ends both directions rather than leaving a way back that the command itself did not mean.
+//! * **Everything else can be taken back**, which is what the rewrite from a list of strokes to edits
+//!   bought: the eraser holds the strokes it removed, a lasso's drag holds what it moved, and *Clear*
+//!   holds the whole page. Undo is not "give me the last stroke back"; it is "put back what I did".
 //! * **A page keeps its history while it can still be redone**, even with nothing drawn on it, so
 //!   turning the page and turning back does not quietly throw the redo away.
+//! * **The history outlives the session.** A page's edits are written down beside its ink, in one
+//!   transaction (see [`crate::store`]), so a note opened tomorrow can still take back what was
+//!   written today — and *before* that, the deepest undo of a long session is dropped rather than
+//!   kept ([`crate::history::HISTORY_EDITS`]).
 //!
 //! ## The lasso
 //!
@@ -64,10 +66,10 @@
 //!   the one the eraser makes too (see [`InkDocument::erase_at`]). Its points are resampled about a pixel
 //!   apart, so a crossing is caught; what is never produced is a fragment of a stroke, which nothing
 //!   could pick up again.
-//! * **Moving and deleting are not undoable**, for the reason erasing is not: the history is a list of
-//!   *strokes*, and an edit that moves or removes several of them at once has no single stroke for undo
-//!   to take back. What a move does do is leave the selection in hand, so it can be dragged back — and
-//!   what both do is end the redo branch, exactly as new ink does.
+//! * **Moving and deleting are edits like any other**, so undo puts them back: a drag reverses exactly, and a
+//!   deleted selection comes back where it was. What a move also does is leave the selection in hand, so it can be
+//!   dragged back by hand as well — and it is counted by the page, because it is the one edit a *stroke count*
+//!   cannot see (see `NoteApp::persist`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -75,6 +77,7 @@ use std::sync::Arc;
 use pen_windows::{PenPhase, PenSample};
 use serde::{Deserialize, Serialize};
 
+use crate::history::{self, Edit, History};
 use crate::pages::Quarters;
 use crate::settings::Settings;
 
@@ -404,6 +407,40 @@ impl Stroke {
         self.outline = ribbon_outline(&self.points, detail, tip);
     }
 
+    /// Rebuilds the derived geometry of a stroke for `detail`: its bounds and its outline.
+    ///
+    /// What a stroke read out of a note — or out of a logged *edit* — needs before it can be drawn or erased: the
+    /// derived geometry is not stored anywhere, so a stroke that arrives without a rebuild would draw as nothing
+    /// and refuse to be erased (see [`crate::chunk`] and [`crate::store`]).
+    pub(crate) fn rebuild(&mut self, detail: f32) {
+        self.freeze(detail, Tip::Curved);
+    }
+
+    /// Moves the whole line by `by`, and rebuilds what a move invalidates.
+    ///
+    /// The points are the ink; the bounds and the outline are *derived* from them, and a stroke whose points had
+    /// moved while one of those had not would refuse to be erased where it is and be erased where it used to be
+    /// (see [`Self::hits`] and [`crate::ink_layer`]).
+    pub(crate) fn translate(&mut self, by: (f32, f32), detail: f32) {
+        for point in &mut self.points {
+            point.x += by.0;
+            point.y += by.1;
+        }
+
+        self.rebuild(detail);
+    }
+
+    /// Whether this stroke is the same *ink* as another: the same line, in the same colour.
+    ///
+    /// Identity for a history, and deliberately not pointer equality: an edit is replayed against a page that may
+    /// have been read back out of a note — the same strokes, freshly decoded — so what an edit can check is that
+    /// the line it recorded is the line that is there (see [`crate::history::Edit::apply`]). The derived geometry
+    /// is not part of it: bounds and outlines are built for the sheet a page is drawn at, and the same ink at two
+    /// zooms is the same ink.
+    pub fn same_ink(&self, other: &Stroke) -> bool {
+        self.color == other.color && self.points == other.points
+    }
+
     /// Whether the eraser at `(x, y)` with the given radius touches this stroke.
     ///
     /// The test is against the stroke's *segments*, not only its stored points. A fast, straight
@@ -532,6 +569,35 @@ fn detail_zoom(zoom: f32) -> f32 {
     // the logarithm of `1.5^n` is not exactly `n` in floating point. Without it a rung would round up
     // to the next one and rebuild a page that was already drawn for it.
     RUNG.powf((zoom.log(RUNG) - 1e-4).ceil())
+}
+
+/// The view an edit acts on, built out of a page's own fields.
+///
+/// A free function over the fields rather than a method on the page, and that is the whole point of it: a method
+/// would borrow the *page*, and the page's history has to be borrowed at the same time as the ink it is about
+/// (see [`InkDocument::record`]). Through here an edit can reach the ink, the flags over it, and the shift count
+/// — and nothing else.
+fn editable<'a>(
+    finished: &'a mut Arc<Vec<Arc<Stroke>>>,
+    selected: &'a mut Arc<Vec<bool>>,
+    shifted: &'a mut u64,
+    detailed_at: Option<f32>,
+) -> history::Page<'a> {
+    history::Page {
+        strokes: finished,
+        selected,
+        shifts: shifted,
+        detail: detail_of(detailed_at),
+    }
+}
+
+/// The detail a page's outlines are built for, from the rung it was last detailed at.
+///
+/// A free function rather than a method, because an edit's view of a page is built out of the page's own fields —
+/// the ink and the page's *history* are borrowed at the same time — and reading one field through `&self` would
+/// borrow the whole page (see [`InkDocument::editable`]).
+fn detail_of(detailed_at: Option<f32>) -> f32 {
+    detailed_at.unwrap_or_else(|| detail_zoom(1.0))
 }
 
 /// Whether the newest segment of a stroke is drawn as a curve or as the line its points describe.
@@ -962,13 +1028,11 @@ pub struct InkDocument {
     /// that already held a thousand of them deep-copied all thousand — and the eraser, which
     /// touches this per reading, copied the page several hundred times a second.
     finished: Arc<Vec<Arc<Stroke>>>,
-    /// The strokes taken back by [`Self::undo`], newest last, waiting for [`Self::redo`].
+    /// The edits this page's ink has been through, and the ones taken back.
     ///
-    /// It holds strokes by pointer, like [`Self::finished`] does, so the two lists are one ink
-    /// between them and undoing a page of a thousand strokes copies no strokes at all. It is emptied
-    /// by anything that makes the drawing a *new* one rather than a shortened one: a finished
-    /// stroke, an erase that removed something, and a clear.
-    undone: Vec<Arc<Stroke>>,
+    /// Replaced a list of strokes that undo popped and redo pushed back: a list can only be *shortened*, which
+    /// is why the eraser, a lasso's drag, and a cleared page could not be undone (see [`crate::history`]).
+    history: History,
     /// The stroke currently being drawn, if a pen nib is down.
     open: Option<Stroke>,
     /// The pointer that owns the turn: the pen or eraser that is currently down.
@@ -1018,7 +1082,7 @@ impl Default for InkDocument {
     fn default() -> Self {
         InkDocument {
             finished: Arc::new(Vec::new()),
-            undone: Vec::new(),
+            history: History::new(),
             open: None,
             active_pointer: None,
             active_tool: Tool::Pen,
@@ -1091,70 +1155,156 @@ impl InkDocument {
         self.finished.len() + usize::from(self.open.is_some())
     }
 
-    /// Removes the most recent finished stroke, and nothing else.
+    /// Takes the most recent edit back: one command, whatever kind of edit it was.
     ///
-    /// The stroke the pen is still drawing is deliberately **not** touched: it is not history yet —
-    /// it has no closed geometry and it is not what a save would write — and the pen is still on the
-    /// paper, so taking it away would both lose a line the user meant to draw and leave the model
-    /// believing the pen was lifted. It is finished, or lifted, on its own.
+    /// Everything a command does to a page is an [`Edit`], so this is the whole of undo and there is nothing
+    /// here that knows what it is taking back: a stroke written, ink erased, a selection dragged, a page cleared
+    /// — all of them reverse the same way (see [`crate::history`]).
     ///
-    /// Returns whether there was a stroke to take back. A caller uses that to decide whether to
-    /// repaint, and the interface uses [`Self::can_undo`] to say so *before* it is asked.
+    /// The stroke the pen is still drawing is deliberately **not** touched: it is not history yet — it has no
+    /// closed geometry and it is not what a save would write — and the pen is still on the paper, so taking it
+    /// away would both lose a line the user meant to draw and leave the model believing the pen was lifted. It is
+    /// finished, or lifted, on its own.
+    ///
+    /// Returns whether anything was taken back. A caller uses that to decide whether to repaint, and the
+    /// interface uses [`Self::can_undo`] to say so *before* it is asked.
     pub fn undo(&mut self) -> bool {
-        let Some(stroke) = Arc::make_mut(&mut self.finished).pop() else {
-            return false;
-        };
+        let mut page = editable(
+            &mut self.finished,
+            &mut self.selected,
+            &mut self.shifted,
+            self.detailed_at,
+        );
 
-        self.undone.push(stroke);
-        self.trim_selection();
-        // The eraser's cheap path skips a rescan when the nib has barely moved, and the strokes
-        // under it have just changed. Forgetting the last position costs one rescan.
-        self.last_erase = None;
+        if !self.history.undo(&mut page) {
+            return false;
+        }
+
+        self.forget_erase();
         true
     }
 
-    /// Puts back the stroke the most recent [`Self::undo`] took away.
+    /// Puts the most recently taken-back edit forward again.
     ///
-    /// Nothing is undone by undoing: the stroke comes back exactly as it was drawn, because undo
-    /// moved a pointer rather than copying ink. The redo list is emptied by any new ink, so this can
-    /// never put a stroke back into a drawing it does not belong to.
+    /// Nothing is *copied* by undoing and nothing is invented by redoing: the ink comes back exactly as it was,
+    /// because an edit holds the strokes themselves (see [`Edit`]). A redo branch is ended by any new edit, so
+    /// this can never put ink back into a drawing it does not belong to.
     pub fn redo(&mut self) -> bool {
-        let Some(stroke) = self.undone.pop() else {
-            return false;
-        };
+        let mut page = editable(
+            &mut self.finished,
+            &mut self.selected,
+            &mut self.shifted,
+            self.detailed_at,
+        );
 
-        Arc::make_mut(&mut self.finished).push(stroke);
-        self.trim_selection();
-        self.last_erase = None;
+        if !self.history.redo(&mut page) {
+            return false;
+        }
+
+        self.forget_erase();
         true
     }
 
     /// Whether [`Self::undo`] would do anything.
     ///
-    /// The interface asks this rather than pressing the button to find out: a command that is
-    /// offered and then does nothing is indistinguishable from one that is broken.
+    /// The interface asks this rather than pressing the button to find out: a command that is offered and then
+    /// does nothing is indistinguishable from one that is broken. A page read out of the note answers with the
+    /// history the note holds, so a note opened after a night away still has a way back (see [`crate::store`]).
     pub fn can_undo(&self) -> bool {
-        !self.finished.is_empty()
+        self.history.can_undo()
     }
 
     /// Whether [`Self::redo`] would do anything.
     pub fn can_redo(&self) -> bool {
-        !self.undone.is_empty()
+        self.history.can_redo()
     }
 
-    /// Removes every stroke.
+    /// How many edits this page could take back, and how many it could put forward again.
     ///
-    /// Both directions are cleared: this is the command that says the page holds nothing, and a redo
-    /// list left behind it would be able to put ink back onto a page that was just emptied.
+    /// What the status line says (`history 12 back, 3 forward` — see `NoteApp::compose_status`), and the shape of a
+    /// history a session can see: a count out of *memory*, which the note's own log may reach further back than.
+    pub fn history_depth(&self) -> (usize, usize) {
+        (self.history.depth(), self.history.forward())
+    }
+
+    /// The page's history, mutably: the write path takes its news, and a *deeper* edit comes out of the note.
+    pub fn history_mut(&mut self) -> &mut History {
+        &mut self.history
+    }
+
+    /// Puts a history back on a page read out of the note.
+    ///
+    /// The history is the note's, not the app's: a page opened on Monday arrives with the edits it went through
+    /// last week, which is the whole of what makes undo survive a restart.
+    pub fn set_history(&mut self, history: History) {
+        self.history = history;
+    }
+
+    /// What to tell the note about this page's history, for a write that is about to go out.
+    pub fn history_update(&mut self, count: usize) -> crate::history::HistoryUpdate {
+        self.history.take_update(count)
+    }
+
+    /// How many of this page's applied edits the note already holds (see [`History::in_note`]).
+    pub fn history_in_note(&self) -> usize {
+        self.history.in_note()
+    }
+
+    /// Removes every stroke: an edit like any other, so undo puts the page back.
+    ///
+    /// This used to end both directions — "the one command that says *none of this page*" — because a history
+    /// that could only shorten had no way to hold a page's worth of ink. An [`Edit::Erased`] holds it, so a
+    /// cleared page is one command away from being back, and the edits *before* the clear are still behind it.
     pub fn clear(&mut self) {
-        self.finished = Arc::new(Vec::new());
-        self.selected = Arc::new(Vec::new());
-        self.undone.clear();
+        let removed: Vec<(usize, Arc<Stroke>)> = self
+            .finished
+            .iter()
+            .enumerate()
+            .map(|(index, stroke)| (index, Arc::clone(stroke)))
+            .collect();
+
+        if removed.is_empty() {
+            return;
+        }
+
+        self.record(Edit::Erased { removed });
         self.open = None;
         self.active_pointer = None;
         self.last_erase = None;
         // A loop being swept is not ink, and a cleared page is not a page to be selecting on.
         self.lasso = None;
+    }
+
+    /// Records an edit the page has just been given: what every command ends in.
+    ///
+    /// The edit is *applied* here and then filed, in that order and through one piece of code: a command that
+    /// changes the page runs the same [`Edit::apply`] a redo runs, so the two cannot come to disagree about what
+    /// an edit does. An edit that changes nothing is not history.
+    fn record(&mut self, edit: Edit) -> bool {
+        let applied = {
+            let mut page = editable(
+                &mut self.finished,
+                &mut self.selected,
+                &mut self.shifted,
+                self.detailed_at,
+            );
+
+            edit.apply(&mut page)
+        };
+
+        if applied {
+            self.history.record(edit);
+        }
+
+        applied
+    }
+
+    /// Forgets where the eraser last removed ink, because the ink under it has just changed.
+    ///
+    /// The eraser's cheap path skips a rescan when the nib has barely moved; that path is only sound while the
+    /// strokes under the nib are the ones it scanned, and an undo or a redo changes them.
+    fn forget_erase(&mut self) {
+        self.last_erase = None;
     }
 
     /// A page holding strokes that came from somewhere else — a saved note, or the clipboard of a
@@ -1182,16 +1332,10 @@ impl InkDocument {
         }
     }
 
-    /// The detail this page's outlines are built for, for a page nothing has detailed yet.
-    ///
-    /// 1:1 is the answer for a page whose reader has not said otherwise, and it is also what an
-    /// outline built outside a window — by a load, or by a test — is detailed for.
-    fn detail(&self) -> f32 {
-        self.detailed_at.unwrap_or_else(|| detail_zoom(1.0))
-    }
-
     /// Rebuilds the derived geometry of the page for a sheet drawn at `zoom`, returning whether
     /// anything was rebuilt.
+    ///
+    /// The detail a page is built for is [`detail_of`]'s, from the rung the zoom falls in.
     ///
     /// A stroke's outline depends on the zoom it is being drawn at: not its *shape*, which depends on
     /// its points alone, but how finely the curves in it are cut (see [`FACET`]). A page of ink is far
@@ -1396,19 +1540,16 @@ impl InkDocument {
                 // Detailed for the sheet as it is being drawn now rather than for 1:1: a stroke
                 // finished while the reader is zoomed in has to be as smooth as the ones around it,
                 // and the page's detail is whatever the last frame asked for (see [`Self::set_zoom`]).
-                stroke.freeze(self.detail(), Tip::Curved);
-                // `make_mut` reuses the existing vector when no frame is holding a snapshot, and
-                // copies it when one is — and that copy is of pointers, not of ink.
-                Arc::make_mut(&mut self.finished).push(Arc::new(stroke));
-                // A stroke that has just been written is not in hand: the flags follow the stroke list
-                // wherever it changes (see [`Self::trim_selection`]).
-                self.trim_selection();
+                stroke.freeze(detail_of(self.detailed_at), Tip::Curved);
 
-                // A stroke drawn after an undo makes the drawing a new one rather than a shortened
-                // one, so what was taken back is no longer something to put forward. Emptied here
-                // rather than when the pen went down: a `Down` whose stroke never became a line is
-                // not an edit at all.
-                self.undone.clear();
+                // One edit, and the only one a pen ever makes: the line it has just finished, written where the
+                // page ends. Recording it *is* the page change — the stroke is inserted by the edit's own
+                // `apply`, so a stroke written now and a stroke put back by a redo travel the same path.
+                let at = self.finished.len();
+                self.record(Edit::Written {
+                    at,
+                    strokes: vec![Arc::new(stroke)],
+                });
             }
         }
         self.active_pointer = None;
@@ -1485,30 +1626,27 @@ impl InkDocument {
             return;
         }
 
-        // Which strokes survive, worked out once and then applied to *both* lists: the strokes, and the
-        // flags that say which of them are in hand. Two lists that have to stay the same length is one list
-        // too many to keep in step by hand, so the survivors are decided first and both are filtered with
-        // the same answers.
-        let keep: Vec<bool> = self
+        // What the eraser took, with the indices it took them from: an edit has to be able to put them back
+        // where they were, so the strokes are *held* rather than dropped — which is the whole difference between
+        // an eraser that can be undone and one that cannot.
+        let removed: Vec<(usize, Arc<Stroke>)> = self
             .finished
             .iter()
-            .map(|stroke| !stroke.hits(x, y, settings.erase_radius))
+            .enumerate()
+            .filter(|(_, stroke)| stroke.hits(x, y, settings.erase_radius))
+            .map(|(index, stroke)| (index, Arc::clone(stroke)))
             .collect();
-        let erased = keep.iter().filter(|kept| !**kept).count();
 
-        if erased == 0 {
+        if removed.is_empty() {
             return;
         }
 
-        let mut strokes = keep.iter().copied();
-        let mut flags = keep.iter().copied();
-        Arc::make_mut(&mut self.finished).retain(|_| strokes.next().unwrap_or(true));
-        Arc::make_mut(&mut self.selected).retain(|_| flags.next().unwrap_or(false));
-
-        self.stats.erased_strokes += erased as u64;
-        // Erasing is a change of its own — the page it leaves is not the page undo takes back
-        // to — so it ends the redo branch exactly as new ink does.
-        self.undone.clear();
+        self.stats.erased_strokes += removed.len() as u64;
+        // One edit for the whole sweep of the nib, and the redo branch ends with it — the rule every edit
+        // follows. The flags that say which strokes are in hand are the *edit's* business: removing a stroke
+        // removes its flag (see [`Edit::apply`]), which is what used to be three lines of keeping two lists in
+        // step by hand.
+        self.record(Edit::Erased { removed });
     }
 
     /// Which strokes are in hand: one flag per finished stroke, in the same order.
@@ -1565,62 +1703,49 @@ impl InkDocument {
 
     /// Deletes the strokes in hand, answering how many went.
     ///
-    /// Whole strokes, in place: the rest of the page keeps its order, which is what keeps the surviving ink
-    /// the same ink. Not undoable, for the reason erasing is not — see the module docs.
+    /// The same edit an eraser makes — a removal, with the strokes and the places they came from — so undo puts
+    /// the selection back exactly where it was. "Not undoable" is a thing of the past: what is filed is the
+    /// removal, and that is all undo needs.
     pub fn delete_selected(&mut self) -> usize {
-        let removed = self.selected_count();
-        if removed == 0 {
+        let removed: Vec<(usize, Arc<Stroke>)> = self
+            .finished
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.selected.get(*index).copied().unwrap_or(false))
+            .map(|(index, stroke)| (index, Arc::clone(stroke)))
+            .collect();
+
+        if removed.is_empty() {
             return 0;
         }
 
-        let mut flags = self.selected.iter().copied();
-        Arc::make_mut(&mut self.finished).retain(|_| !flags.next().unwrap_or(false));
-        self.selected = Arc::new(vec![false; self.finished.len()]);
-
-        // A deletion is a change of its own — the page it leaves is not the page undo takes back to — so
-        // it ends the redo branch exactly as new ink does.
-        self.undone.clear();
-        removed
+        let count = removed.len();
+        self.record(Edit::Erased { removed });
+        count
     }
 
     /// Moves the strokes in hand by `by`, in the paper's units: what putting a drag down does.
     ///
-    /// The points are moved *now*, and the derived geometry with them. A stroke's bounds and outline are
-    /// what the eraser hit-tests against and what a frame culls by, so ink whose points had moved while its
-    /// bounds had not would refuse to be erased where it is and be erased where it used to be.
+    /// One edit, and the only one that changes a page without adding or removing a stroke — which is why the
+    /// page counts its shifts (see [`Self::shifted`]) and why undo of a move has to count one too.
     pub fn move_selected(&mut self, by: (f32, f32)) -> bool {
         if by.0 == 0.0 && by.1 == 0.0 {
             return false;
         }
 
-        // Taken before the loop: the stroke list is borrowed mutably inside it.
-        let selected = Arc::clone(&self.selected);
-        let detail = self.detail();
-        let mut moved = 0;
+        let strokes: Vec<usize> = self
+            .selected
+            .iter()
+            .enumerate()
+            .filter(|(_, in_hand)| **in_hand)
+            .map(|(index, _)| index)
+            .collect();
 
-        for (index, stroke) in Arc::make_mut(&mut self.finished).iter_mut().enumerate() {
-            if !selected.get(index).copied().unwrap_or(false) {
-                continue;
-            }
-
-            let stroke = Arc::make_mut(stroke);
-            for point in &mut stroke.points {
-                point.x += by.0;
-                point.y += by.1;
-            }
-            stroke.freeze(detail, Tip::Curved);
-            moved += 1;
-        }
-
-        if moved == 0 {
+        if strokes.is_empty() {
             return false;
         }
 
-        self.shifted += 1;
-        // A move is an edit, so what was taken back is no longer something to put forward — the rule every
-        // other change to the drawing follows.
-        self.undone.clear();
-        true
+        self.record(Edit::Shifted { strokes, by })
     }
 
     /// Begins what the lasso's nib is doing: taking hold of the ink in hand, or sweeping a new loop.
@@ -1728,19 +1853,6 @@ impl InkDocument {
             .collect();
 
         self.selected = Arc::new(selected);
-    }
-
-    /// Keeps the mask exactly as long as the stroke list.
-    ///
-    /// A stroke that has just arrived is not in hand, and one that has been taken back takes its flag with
-    /// it: all "kept in step" means, and the reason every edit that changes the list calls this.
-    fn trim_selection(&mut self) {
-        let flags = Arc::make_mut(&mut self.selected);
-        flags.truncate(self.finished.len());
-
-        if flags.len() < self.finished.len() {
-            flags.resize(self.finished.len(), false);
-        }
     }
 
     /// Drops whatever the nib was in the middle of: a page turn ends a gesture rather than carrying it over.
@@ -2043,6 +2155,7 @@ impl Notes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::HISTORY_EDITS;
     use pen_windows::Point;
 
     /// A reading on a turned page is stored in the page's own coordinates, and reads back where it was
@@ -3358,9 +3471,9 @@ mod tests {
         assert!(!ink.can_redo(), "and the eraser ended the branch");
     }
 
-    /// Clearing says the page holds nothing, in both directions.
+    /// Clearing is an edit like any other: undo puts the page back, and what came before it is still behind it.
     #[test]
-    fn clearing_ends_both_directions() {
+    fn clearing_is_an_edit_like_any_other() {
         let mut ink = page_with(3);
 
         ink.undo();
@@ -3368,11 +3481,21 @@ mod tests {
 
         ink.clear();
         assert!(ink.is_blank());
-        assert!(!ink.can_undo());
-        assert!(
-            !ink.can_redo(),
-            "nothing can be put back onto an emptied page"
+        assert!(ink.can_undo(), "the page can be put back");
+
+        // And the ink that came back is the ink that was there, with the earlier undo still behind it: the edits
+        // made *before* a clear are history too, which is what a list of strokes could never have said.
+        assert!(ink.undo());
+        assert_eq!(
+            ink.stroke_count(),
+            2,
+            "the page as it was when it was cleared"
         );
+        assert!(ink.can_undo(), "and the undo before the clear is there");
+        assert!(ink.can_redo());
+
+        assert!(ink.redo());
+        assert!(ink.is_blank(), "and the page can be emptied again");
     }
 
     /// Turning the page and turning back keeps a page's redo, even though the page itself is empty:
@@ -3857,6 +3980,14 @@ mod tests {
         ink
     }
 
+    /// The first point of every stroke, which is what says whether an order held.
+    fn first_x(ink: &InkDocument) -> Vec<f32> {
+        ink.finished()
+            .iter()
+            .map(|stroke| stroke.points.first().map(|point| point.x).unwrap_or(0.0))
+            .collect()
+    }
+
     /// A page of `count` strokes of 40 points each: enough ink to look like a written page.
     fn written_page(count: usize) -> InkDocument {
         let mut ink = InkDocument::default();
@@ -4331,11 +4462,16 @@ mod tests {
             "and there is nothing to delete twice"
         );
 
-        // Not undoable, and this is what that means: undo takes the most recent *surviving* stroke, which is
-        // not the one the selection removed. Written as a test because it is the rule a reader meets.
+        // And it can be taken back, which is the difference between an edit and a list of strokes: the removal is
+        // *filed*, so undo puts the stroke back where it was rather than taking the newest survivor away.
         assert!(ink.can_undo());
         assert!(ink.undo());
-        assert_eq!(ink.finished().len(), 1, "the last surviving stroke went");
+        assert_eq!(ink.finished().len(), 3, "the deleted stroke is back");
+        assert_eq!(
+            ink.finished()[1].points[0].x,
+            300.0,
+            "and it is back in its own place, not at the end"
+        );
     }
 
     /// The flags stay in step with the strokes through every edit that renumbers them.
@@ -4522,5 +4658,98 @@ mod tests {
             !inside_loop((50.0, 50.0), &square[..2]),
             "a line is not a region"
         );
+    }
+
+    /// The eraser can be undone, which is the whole reason an edit is a value.
+    ///
+    /// The stroke the nib passed over is *held* by the edit that removed it, so undo puts it back — in its own
+    /// place, in the middle of the page — rather than taking the newest survivor away, which is what a history
+    /// kept as a list of strokes could do and no more.
+    #[test]
+    fn the_eraser_can_be_undone() {
+        let mut ink = three_strokes();
+        ink.set_mode(Tool::Eraser);
+        assert_eq!(ink.stroke_count(), 3);
+
+        // The eraser over the middle of the three, which are written a hundred pixels apart.
+        let mut eraser = reading(7, PenPhase::Down, 350.0, 120.0, None);
+        eraser.eraser = true;
+        ink.consume(&[eraser], &id(), &settings());
+
+        assert_eq!(ink.stroke_count(), 2, "the nib took one stroke");
+        assert_eq!(first_x(&ink), vec![100.0, 500.0], "and it was the middle");
+        assert!(ink.can_undo());
+
+        assert!(ink.undo());
+        assert_eq!(ink.stroke_count(), 3, "and it is back");
+        assert_eq!(
+            first_x(&ink),
+            vec![100.0, 300.0, 500.0],
+            "in its own place, not at the end"
+        );
+
+        assert!(ink.redo());
+        assert_eq!(ink.stroke_count(), 2, "and it can be taken away again");
+    }
+
+    /// A lasso's drag can be undone: the one edit that changes a page without changing how much ink is on it.
+    #[test]
+    fn a_drag_can_be_undone() {
+        let mut ink = three_strokes();
+        sweep(&mut ink, (80.0, 80.0), (250.0, 200.0));
+        assert_eq!(ink.selected_count(), 1);
+
+        let before = ink.shifted();
+        assert!(ink.move_selected((40.0, 25.0)));
+        assert_eq!(ink.finished()[0].points[0].x, 140.0);
+        assert_eq!(ink.shifted(), before + 1, "a move is counted");
+
+        assert!(ink.undo());
+        assert_eq!(ink.finished()[0].points[0].x, 100.0, "the line is back");
+        assert_eq!(
+            ink.finished()[0].bounds[0],
+            100.0,
+            "and its bounds came back with it"
+        );
+        assert_eq!(
+            ink.shifted(),
+            before + 2,
+            "an undo of a move is a shift too: the note has to be told"
+        );
+
+        assert!(ink.redo());
+        assert_eq!(ink.finished()[0].points[0].x, 140.0);
+    }
+
+    /// The in-memory history is bounded, and it is the *deepest* undo that a full history costs.
+    #[test]
+    fn the_history_is_bounded() {
+        let mut ink = page_with(HISTORY_EDITS + 20);
+
+        assert_eq!(
+            ink.history_depth().0,
+            HISTORY_EDITS + 20,
+            "nothing has been written yet, so no edit may be dropped"
+        );
+
+        // The note is told about all of them (a write), and the limit applies from the next edit on: what goes is
+        // the oldest, so only the deepest undo is lost.
+        ink.history_update(ink.stroke_count());
+        write_line(&mut ink, (700.0, 300.0), (760.0, 320.0), 10);
+
+        assert_eq!(
+            ink.history_depth().0,
+            HISTORY_EDITS,
+            "memory holds a session's worth of edits, not a page's"
+        );
+
+        // What is left is still a run that follows: the newest edits are the ones an undo reaches, and it can be
+        // walked all the way back without a gap.
+        let mut taken = 0;
+        while ink.undo() {
+            taken += 1;
+        }
+
+        assert_eq!(taken, HISTORY_EDITS, "and every one of them can be undone");
     }
 }

@@ -137,14 +137,17 @@ pub struct Encoded {
 ///
 /// An empty slice is refused rather than encoded: `chunks.data` never holds a blob with nothing in
 /// it, and a chunk that decodes to no strokes is indistinguishable from a damaged one.
-pub fn encode(strokes: &[Stroke]) -> Result<Encoded> {
+pub fn encode<T: std::borrow::Borrow<Stroke>>(strokes: &[T]) -> Result<Encoded> {
     if strokes.is_empty() {
         return Err(AppError::Note(String::from(
             "a chunk of no strokes is not written",
         )));
     }
 
-    let raw = arrays(strokes);
+    // One pass over the slice, as references: a page's ink is `Arc<Stroke>` while a page being written out is
+    // `Stroke`, and both are encoded by the same walk rather than by copying the ink into the other shape.
+    let strokes: Vec<&Stroke> = strokes.iter().map(std::borrow::Borrow::borrow).collect();
+    let raw = arrays(&strokes);
 
     let zstd = zstd::encode_all(&raw[..], ZSTD_LEVEL).ok();
     if let Some(data) = zstd.filter(|data| data.len() < raw.len()) {
@@ -211,6 +214,36 @@ pub fn decode(
 
     Ok(strokes)
 }
+
+/// A chunk as one self-describing blob: the compressor, the decompressed length, the checksum, and the bytes.
+///
+/// This is the frame a *dirty row* uses — one stroke per row, in the write-ahead area — and the frame a page's
+/// history uses for an edit's strokes. Both are small and both are read back without the columns a `chunks` row
+/// has, so the four facts a decode needs travel *with* the bytes: nine bytes of header, then the blob.
+pub fn seal(encoded: &Encoded) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(9 + encoded.data.len());
+    blob.push(encoded.codec.id() as u8);
+    blob.extend_from_slice(&encoded.raw_len.to_le_bytes());
+    blob.extend_from_slice(&encoded.crc32.to_le_bytes());
+    blob.extend_from_slice(&encoded.data);
+    blob
+}
+
+/// The strokes of one sealed chunk (see [`seal`]), which must hold exactly `strokes` of them.
+pub fn open_sealed(blob: &[u8], strokes: usize) -> Result<Vec<Stroke>> {
+    if blob.len() < 9 {
+        return Err(AppError::Note(String::from(
+            "a chunk of this note is stored in fewer bytes than its own header",
+        )));
+    }
+
+    let codec = Codec::from_id(u32::from(blob[0]))?;
+    let raw_len = u32::from_le_bytes(blob[1..5].try_into().expect("four bytes")) as usize;
+    let crc32 = u32::from_le_bytes(blob[5..9].try_into().expect("four bytes"));
+
+    decode(&blob[9..], raw_len, codec, strokes, crc32)
+}
+
 /// Which slices of `strokes` make one chunk each.
 ///
 /// Chunking happens on the *writer's* side and is measured rather than counted, because the arrays
@@ -267,7 +300,7 @@ fn estimated_raw(stroke: &Stroke) -> usize {
     tables + points * 3 * 2
 }
 /// The lines of one page, split into the three arrays and the tables that describe them.
-fn arrays(strokes: &[Stroke]) -> Vec<u8> {
+fn arrays(strokes: &[&Stroke]) -> Vec<u8> {
     let points: usize = strokes.iter().map(|stroke| stroke.points.len()).sum();
     let mut colors: Vec<u32> = Vec::new();
     for stroke in strokes {
@@ -416,10 +449,10 @@ fn set(points: &mut [InkPoint], index: usize, axis: usize, value: i32) {
 }
 
 /// What every stroke of a page is expected to cost, for the initial capacity.
-fn estimated_raw_of(strokes: &[Stroke]) -> usize {
+fn estimated_raw_of(strokes: &[&Stroke]) -> usize {
     strokes
         .iter()
-        .map(estimated_raw)
+        .map(|stroke| estimated_raw(stroke))
         .sum::<usize>()
         .saturating_add(64)
 }
@@ -642,7 +675,7 @@ mod tests {
             .map(|index| hand_stroke(index as u64 + 7, 40 + index % 31))
             .collect();
 
-        let raw = arrays(&strokes);
+        let raw = arrays(&strokes.iter().collect::<Vec<_>>());
         let encoded = encode(&strokes).expect("the page encodes");
         let json = serde_json::to_vec(&strokes).expect("the strokes serialise");
 
@@ -768,7 +801,7 @@ mod tests {
     /// than guessed at.
     #[test]
     fn what_cannot_be_read_is_refused_by_name() {
-        assert!(encode(&[]).is_err());
+        assert!(encode::<Stroke>(&[]).is_err());
 
         let error = Codec::from_id(9).expect_err("an unknown codec is refused");
         assert!(error.to_string().contains('9'), "{error}");
@@ -858,7 +891,7 @@ mod tests {
     #[test]
     fn the_arrays_are_much_smaller_than_json() {
         let strokes = page(20);
-        let raw = arrays(&strokes);
+        let raw = arrays(&strokes.iter().collect::<Vec<_>>());
 
         let json = serde_json::to_vec(&strokes).expect("the strokes serialise");
         assert!(

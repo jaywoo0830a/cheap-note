@@ -1031,7 +1031,9 @@ mod tests {
         let ink: Vec<Stroke> = (0..strokes).map(|_| a_stroke()).collect();
 
         if !ink.is_empty() {
-            note.store_mut().append(0, &ink).expect("ink");
+            note.store_mut()
+                .append(0, &ink, &crate::history::HistoryUpdate::default())
+                .expect("ink");
         }
 
         dir
@@ -1183,7 +1185,7 @@ mod tests {
         Note::open(&first)
             .expect("a note")
             .store_mut()
-            .append(0, &[a_stroke()])
+            .append(0, &[a_stroke()], &crate::history::HistoryUpdate::default())
             .expect("ink");
 
         let (_, changed) = scan(&root, &stamps);

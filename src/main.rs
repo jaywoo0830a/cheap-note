@@ -79,6 +79,7 @@ mod chunk;
 mod cursor;
 mod cursor_overlay;
 mod error;
+mod history;
 mod home;
 mod ink;
 mod ink_layer;

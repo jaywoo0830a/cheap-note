@@ -877,8 +877,12 @@ impl NoteApp {
                 .map(|stroke| (**stroke).clone())
                 .collect();
 
+            // What the page's history did, taken here rather than at the top of this function: the update *is* the
+            // note being told, so it is asked for at the moment it is handed over.
+            let history = self.ink.history_update(count);
+
             if let Some(writer) = &self.writer {
-                writer.rewrite(page, ink);
+                writer.rewrite(page, ink, history);
             }
             self.rewritten.remove(&page);
         } else {
@@ -894,8 +898,10 @@ impl NoteApp {
                 return;
             }
 
+            let history = self.ink.history_update(count);
+
             if let Some(writer) = &self.writer {
-                writer.append(page, ink);
+                writer.append(page, ink, history);
             }
         }
 
@@ -1237,19 +1243,69 @@ impl NoteApp {
         cx.notify();
     }
 
-    /// Removes the most recent stroke.
+    /// Removes the most recent edit, whatever kind of edit it was, and says so.
+    ///
+    /// A page taken back is not a *shorter* page, so an undo is always a rewrite: the strokes that survive are in a
+    /// different order than the ones on disk — a stroke put back in the middle takes its place in the middle — and
+    /// an append can only add to the end (see [STORE.md](../../doc/STORE.md), §6).
     fn undo(&mut self, cx: &mut Context<Self>) {
+        if !self.ink.can_undo() {
+            // The session's own history has run out. The *note* keeps a deeper one, and an undo the reader asks for
+            // is not the moment to explain the difference between the two: one more edit is read in and taken back
+            // (see [`Self::deepen`]).
+            self.deepen();
+        }
+
         if self.ink.undo() {
+            self.rewritten.insert(page_of_write(&self.ink));
             self.persist(Instant::now(), true);
+            self.touch_status();
             cx.notify();
         }
     }
 
-    /// Puts back the stroke the last undo took away.
+    /// Puts back the edit the last undo took away.
     fn redo(&mut self, cx: &mut Context<Self>) {
         if self.ink.redo() {
+            // A redo is the mirror of an undo, for the same reason: it changes the *order* of the page as much as
+            // its length.
+            self.rewritten.insert(page_of_write(&self.ink));
             self.persist(Instant::now(), true);
+            self.touch_status();
             cx.notify();
+        }
+    }
+
+    /// Reads one more edit of the page's history out of the note, so that an undo can go deeper than the session's
+    /// memory does.
+    ///
+    /// The edits below a page's cursor are all *applied* — the note's log is the history of the page as it stands —
+    /// so nothing here changes the page: it puts back an undo that memory had let go of, which is what makes a note
+    /// opened on Friday able to take back what was written on Monday.
+    ///
+    /// Answers whether the note had one. What it does *not* do is say so: the bar's buttons are offered by
+    /// [`InkDocument::can_undo`], which asks the session's history — and a reader who asks for an undo that neither
+    /// memory nor the note can give is asking about a page that has nothing to take back.
+    fn deepen(&mut self) -> bool {
+        let page = page_of_write(&self.ink);
+        let skip = self.ink.history_in_note();
+
+        let older = match &self.note {
+            Some(note) => note.store().older_history(page, skip),
+            // Nothing is open, so there is no deeper history to read: the ink on screen belongs to a note that does
+            // not exist yet.
+            None => Ok(None),
+        };
+
+        match older {
+            Ok(Some(edit)) => self.ink.history_mut().deepened(edit),
+            Ok(None) => false,
+            // A log that cannot be read is a history that reaches only as far as memory does, and saying so is the
+            // whole of what can be done about it.
+            Err(error) => {
+                self.report(error.to_string());
+                false
+            }
         }
     }
 
@@ -1870,10 +1926,15 @@ impl NoteApp {
         }
 
         let stored = match &self.note {
-            Some(note) => note.page_strokes(page as u64)?,
+            Some(note) => note
+                .store()
+                .load_page(page as u64, crate::history::HISTORY_EDITS)?,
             // Nothing is open: the page in front of the user is a blank sheet, and what is drawn on
             // it belongs to a note that does not exist yet.
-            None => Vec::new(),
+            None => crate::store::LoadedPage {
+                strokes: Vec::new(),
+                history: crate::history::History::new(),
+            },
         };
 
         // What the note already holds is what has been written as far as the writer is concerned,
@@ -1883,8 +1944,12 @@ impl NoteApp {
             None => 0,
         };
 
-        self.ink
-            .put_page(page, crate::ink::InkDocument::from_strokes(stored));
+        // The page's *history* comes back with its ink: a page opened on Friday arrives with the edits it went
+        // through on Monday, which is the whole of what makes undo outlive a session.
+        let mut ink = crate::ink::InkDocument::from_strokes(stored.strokes);
+        ink.set_history(stored.history);
+
+        self.ink.put_page(page, ink);
         self.saved.insert(page as u64, written);
         self.loaded.insert(page);
         Ok(())
@@ -2690,6 +2755,14 @@ impl NoteApp {
         // Delete take?", and a zero on every frame is noise — the same rule the marks above follow.
         if self.ink.has_selection() {
             parts.push(format!("{} selected", self.ink.selected_count()));
+        }
+
+        // How far the page can be taken back, and how far forward: a count out of the *session's* memory, which the
+        // note's own log may reach deeper than. Said only while there is a history to speak of, and asked of the
+        // page because it is a fact about the page.
+        let (back, forward) = self.ink.history_depth();
+        if back > 0 || forward > 0 {
+            parts.push(format!("history {back} back, {forward} forward"));
         }
 
         // The marks, said only when there are any: it is the answer to "which pages did I keep", and a

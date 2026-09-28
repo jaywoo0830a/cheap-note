@@ -50,11 +50,11 @@
 //! A frame is not the only thing that asks this layer for a canvas. The pen's pump does too, on the
 //! wake that carried the newest ink, and that is the difference between writing at the frame rate
 //! and writing at the display's: a frame on this stack is redrawn on every vblank *and* carries the
-//! interface with it, which measured at 1.97 ms of the app's own work against a 9.4 ms interval — the
-//! rest of the time belongs to the window's own drawing and to the compositor. A line that waited for
-//! that reached the screen a hundred times a second on a display that can show a hundred and
-//! sixty-five. A present of the canvas alone is about a millisecond, and the compositor paces it (see
-//! [`device`]), so the ink follows the pen rather than the interface (see [`crate::app`]).
+//! interface with it, which measured at 0.89 ms of the app's own work against a 9.6 ms interval — the
+//! rest of the time belongs to the window's own drawing. A line that waited for that reached the
+//! screen a hundred times a second on a display that can show a hundred and sixty-five. A present of
+//! the canvas alone is about a millisecond, and it is handed over as soon as it is drawn: the
+//! compositor shows the newest canvas it is given and drops the rest (see [`device`]).
 
 use gpui_kit::base::{Root, RootPlugin};
 use gpui_kit::{
@@ -144,17 +144,13 @@ impl InkLayer {
         Ok(InkLayer { device })
     }
 
-    /// Draws a canvas into the layer, and says whether it reached the screen.
+    /// Draws a canvas into the layer.
     ///
     /// The canvas is described by the app (see [`Canvas`]) and drawn here, so the app's design — the
     /// shadow's steps, the paper's colour, the sheet's geometry — lives in one place whichever wake
-    /// asked for the frame: a frame, which is what the sheet's geometry comes from, or the pen's own
-    /// pump, which is what the ink's rate comes from (see [`crate::app`]).
-    ///
-    /// `false` means the compositor was still holding the frame before it, so nothing was drawn and
-    /// nothing was presented. That is not a failure: whatever called this holds the newest ink and
-    /// will call it again in a few milliseconds (see [`crate::ink_layer::device`]).
-    pub fn draw(&mut self, canvas: &Canvas) -> Result<bool, String> {
+    /// asked for it: a frame, which is what the sheet's geometry comes from, or the pen's own pump,
+    /// which is what the ink's rate comes from (see [`crate::app`]).
+    pub fn draw(&mut self, canvas: &Canvas) -> Result<(), String> {
         self.device
             .render(canvas)
             .map_err(|error| format!("{error:#}"))

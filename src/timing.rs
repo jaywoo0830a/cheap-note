@@ -501,12 +501,12 @@ pub struct Timings {
     pub pen_latency: Meter,
     /// The gap between two wakes of the ink pump: how often the pen reported.
     pub pump_gap: Meter,
-    /// The gap between two presents of the canvas layer: how often the ink actually reached the
-    /// screen, wherever it was drawn from.
+    /// The gap between two presents of the canvas layer: how often the ink was handed to the
+    /// compositor, which shows the newest of them.
     ///
     /// Not the same number as the frames' own rate, and deliberately: the canvas is presented by the
-    /// pen's pump as well as by a frame, on the compositor's clock, so that the ink does not wait for
-    /// the interface to be drawn around it (see [`crate::app`]).
+    /// pen's pump as well as by a frame, so that the ink does not wait for the interface to be drawn
+    /// around it (see [`crate::app`]).
     pub present_gap: Meter,
     /// The measurement a person starts and stops by hand, and what it found.
     ///

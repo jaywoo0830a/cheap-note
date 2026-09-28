@@ -1022,8 +1022,15 @@ impl NoteApp {
             }
             Ok(false) => {}
             Err(error) => {
-                self.ink_layer = None;
-                self.message = format!("canvas layer: {error}");
+                // Kept rather than dropped, and reported instead: there is no second renderer to fall
+                // back to — a frame paints none of the canvas (see [`crate::ink_layer`]) — so a layer
+                // that is dropped is a canvas that is gone, while a layer that is kept holds its last
+                // presented frame and says what is wrong. Set once, because a status line rebuilt on
+                // every frame is work the frame does not have to carry.
+                let message = format!("canvas: {error}");
+                if self.message != message {
+                    self.message = message;
+                }
             }
         }
     }

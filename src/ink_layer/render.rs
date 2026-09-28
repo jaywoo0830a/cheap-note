@@ -398,6 +398,16 @@ impl Renderer {
         .context("baking a stroke's geometry")
     }
 
+    /// Lets go of the frame's target, so that the swap chain can be resized.
+    ///
+    /// DXGI will not resize a chain while anything holds its back buffers, and a device context that
+    /// has drawn into one is holding it (see `IDXGISwapChain::ResizeBuffers`). The next frame binds a
+    /// target of its own, which is a frame the resize could not have been drawn into (see
+    /// [`Device::resize`]).
+    pub(crate) fn release_target(&self) {
+        unsafe { self.context.SetTarget(None) };
+    }
+
     /// The document page's bitmap, uploaded when the image it comes from changes.
     ///
     /// Kept rather than made per frame: a page's pixels are tens of megabytes, and the point of the

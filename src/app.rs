@@ -1007,20 +1007,20 @@ impl NoteApp {
         let started = Instant::now();
         let drawn = match self.ink_layer.as_mut() {
             Some(ink) => ink.draw(&self.canvas),
-            None => Ok(false),
+            None => Ok(()),
         };
         self.timings.canvas.record(started.elapsed());
 
         match drawn {
-            Ok(true) => {
-                // The ink reached the screen. The gap between two of those is the rate it reaches it
-                // at — the ink's own rate, drawn by whichever wake asked for it — and it is the number
-                // a session that reads only frames cannot show (see [`crate::timing`]).
+            Ok(()) => {
+                // The ink was handed over. The compositor shows the newest canvas it is given, so the
+                // gap between two of those is the rate the ink reaches the screen at — the ink's own
+                // rate, whichever wake drew it — and it is the number a session that reads only frames
+                // cannot show (see [`crate::timing`]).
                 if let Some(previous) = self.last_present.replace(started) {
                     self.timings.present_gap.record(started - previous);
                 }
             }
-            Ok(false) => {}
             Err(error) => {
                 // Kept rather than dropped, and reported instead: there is no second renderer to fall
                 // back to — a frame paints none of the canvas (see [`crate::ink_layer`]) — so a layer

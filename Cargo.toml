@@ -85,6 +85,12 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_DirectComposition",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    # And Direct2D, which draws it: retained geometry per stroke, analytic antialiasing, and one
+    # command batch per frame rather than one multisampled pass per batch. The numerics feature is
+    # Direct2D's: every call that takes a matrix takes a `Matrix3x2`.
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Foundation_Numerics",
 ] }
 # Named types for the raw window handle GPUI hands out (used to bind the pen capture).
 raw-window-handle = "0.6"

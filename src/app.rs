@@ -91,7 +91,7 @@ use crate::cursor::PenCursor;
 use crate::cursor_overlay::{CursorFeed, Screen};
 use crate::home::Home;
 use crate::ink::{InkTransform, Notes, Stroke, Tool};
-use crate::ink_layer::InkLayer;
+use crate::ink_layer::{Canvas, InkLayer, Rect};
 use crate::note::{self, Note, NoteWriter, Report};
 use crate::outline::{Outline, OutlinePages};
 use crate::pages::Pages;
@@ -482,6 +482,13 @@ pub struct NoteApp {
     /// Direct3D 11 a device — in which case the app says so once and draws the canvas the way it
     /// did before this existed. See [`crate::ink_layer`].
     ink_layer: Option<InkLayer>,
+    /// The canvas as the last frame described it: the desk, the page's shadow, and the sheet.
+    ///
+    /// Described by the app and drawn by the layer — or, when there is no layer, painted by the
+    /// frame from this same description. Held rather than built per frame for the memory's sake,
+    /// and because the two renderers must be handed the same rectangles (see
+    /// [`crate::ink_layer::canvas`]).
+    canvas: Canvas,
     /// The page being shown.
     page_index: usize,
     /// The window's DPI scale factor, captured each frame.
@@ -724,6 +731,7 @@ impl NoteApp {
             system_cursor,
             cursor,
             ink_layer,
+            canvas: Canvas::default(),
             page_index: 0,
             scale: window.scale_factor(),
             view,
@@ -4124,25 +4132,9 @@ impl Render for NoteApp {
                 .into_any_element();
         }
 
-        // The canvas's own renderer, called once per frame while the note screen is the one
-        // showing: the place, in later phases, where the desk, the paper and the ink are handed
-        // over. From this phase it draws a probe and nothing else (see [`crate::ink_layer`]).
-        if let Some(ink) = self.ink_layer.as_mut() {
-            ink.probe();
-        }
-
-        // The desk belongs to the canvas layer when there is one: this element leaves those pixels
-        // to it, and the layer's own background shows through them. Without a layer the desk is
-        // this element's, which is what the app drew before the layer existed.
-        //
-        // Resolved here rather than where the element is built: the theme is a borrow of `cx`, and
-        // the bar below is built from `cx` mutably.
-        let desk = if self.ink_layer.is_some() {
-            theme.transparent
-        } else {
-            background
-        };
-
+        // The canvas's own renderer, called once per frame while the note screen is the one showing
+        // (see [`crate::ink_layer`]). The description below is what the layer draws, and the `desk`
+        // this element leaves to it is what makes room for it.
         let page = self.current_page();
         let sheet = self.page_layout(window_size, page.as_ref());
         // Stored for the pump, which has no window to ask: a reading has to land on the sheet the
@@ -4205,6 +4197,39 @@ impl Render for NoteApp {
         });
         let page_image = page.as_ref().map(|page| Arc::clone(&page.image));
         let page_color: Hsla = rgb(self.settings.page_color).into();
+
+        // The canvas, described for its own renderer: the desk, the page's shadow and the sheet, in
+        // the order they are painted (see [`describe_canvas`]).
+        describe_canvas(&mut self.canvas, &sheet, self.scale, page_color, background);
+
+        // A layer that fails is dropped and reported rather than drawn into: the frame paints the
+        // canvas itself from then on, which is what this app did before the layer existed.
+        let failure = match self.ink_layer.as_mut() {
+            Some(ink) => ink.draw(&self.canvas).err(),
+            None => None,
+        };
+        if let Some(error) = failure {
+            self.ink_layer = None;
+            self.message = format!("canvas layer: {error}");
+        }
+
+        // What the frame paints itself, when the layer is not the one drawing it.
+        let fallback = self
+            .ink_layer
+            .is_none()
+            .then(|| self.canvas.clone());
+
+        // The desk belongs to the canvas layer when there is one: this element leaves those pixels
+        // to it, and the layer's own background shows through them. Without a layer the desk is
+        // this element's, which is what the app drew before the layer existed.
+        //
+        // Resolved here rather than where the element is built: the theme is a borrow of `cx`, and
+        // the bar below is built from `cx` mutably.
+        let desk = if self.ink_layer.is_some() {
+            theme.transparent
+        } else {
+            background
+        };
         let timings = Arc::clone(&self.timings);
 
         // The pen's ghost cursor is *not* drawn here. It is a position rather than a stroke, and a
@@ -4258,13 +4283,15 @@ impl Render for NoteApp {
                     move |_bounds, _, window: &mut Window, _cx: &mut App| {
                         let _timed = measure(&timings.paint);
 
-                        // The sheet's shadow first, on the desk, then the sheet over it: a paint
-                        // callback cannot put a layer behind what it draws, so the shadow is a few
-                        // translucent rectangles rather than a renderer shadow (see the helper).
-                        paint_page_shadow(window, page_origin, page_size.0, page_size.1);
-
-                        // The sheet: a filled rectangle, then its ruling, then the page image.
-                        paint_rect(window, page_origin, page_size.0, page_size.1, page_color);
+                        // The desk, the page's shadow and the sheet are the canvas layer's when
+                        // there is one; when there is not, this frame paints the same description
+                        // itself, in one coordinate system and with no layout involved (see
+                        // [`describe_canvas`]).
+                        if let Some(canvas) = &fallback {
+                            for fill in canvas.fills.iter() {
+                                paint_fill(window, fill.rect, fill.colour);
+                            }
+                        }
 
                         // Quad by quad, cloned: a `PaintQuad` is a handful of plain old data, so
                         // this is a memcpy per rule and needs no geometry work at all.
@@ -4883,39 +4910,65 @@ fn solid_path() -> PathBuilder {
     ))
 }
 
-/// The shadow a sheet casts on the desk.
+/// The shadow a sheet casts on the desk: spread, vertical offset beyond the spread, and colour —
+/// widest and faintest first.
 ///
-/// Three translucent rectangles, each a little wider than the last and a little fainter, the largest
-/// first: painted in that order they accumulate into one soft edge. The renderer's own shadows are
-/// for *elements* — they cost a layer, and they are painted behind an element's own background,
-/// which a rectangle drawn inside a paint callback does not have. A page is a path in a callback, so
-/// its shadow is drawn as a path too; three steps read as one blurred edge at the sizes a page is
-/// drawn at, and they cost three quads.
+/// Three translucent rectangles, each a little wider than the last and a little fainter, painted in
+/// that order: they accumulate into one soft edge. The renderer's own shadows are for *elements* —
+/// they cost a layer, and they are painted behind an element's own background, which a rectangle on
+/// the desk does not have. A page is drawn by the canvas layer or by a paint callback, so its shadow
+/// is three rectangles in the same description either way, and three steps read as one blurred edge
+/// at the sizes a page is drawn at.
 ///
 /// The sheet is lifted *and* offset downward, the way a sheet of paper lies on a desk: a shadow
 /// centred on the paper reads as a glow, and one that is only offset reads as a hard edge.
-fn paint_page_shadow(window: &mut Window, origin: Point<Pixels>, width: f32, height: f32) {
-    /// Spread, vertical offset beyond the spread, and colour — widest and faintest first.
-    const STEPS: [(f32, f32, u32); 3] = [
-        (12.0, 4.0, 0x0000_0008),
-        (7.0, 2.5, 0x0000_000C),
-        (3.0, 1.0, 0x0000_0014),
-    ];
+const PAGE_SHADOW: [(f32, f32, u32); 3] = [
+    (12.0, 4.0, 0x0000_0008),
+    (7.0, 2.5, 0x0000_000C),
+    (3.0, 1.0, 0x0000_0014),
+];
 
-    for (spread, drop, color) in STEPS {
-        let corner = point(
-            px(f32::from(origin.x) - spread),
-            px(f32::from(origin.y) - spread + drop),
-        );
+/// Describes a frame's canvas: the desk, the page's shadow, and the sheet — in the order painted.
+///
+/// One description for both renderers. The canvas layer draws it (see [`crate::ink_layer`]); when
+/// there is no layer the frame walks the same list, which is what keeps the two from drifting
+/// apart: a change to the shadow is a change to one array, and neither renderer can be the one that
+/// knows about it.
+///
+/// In logical window pixels, which is what the app has: the display's scale travels with the
+/// description and the layer applies it (see [`crate::ink_layer::canvas`]).
+fn describe_canvas(canvas: &mut Canvas, sheet: &Sheet, scale: f32, paper: Hsla, desk: Hsla) {
+    canvas.clear();
+    canvas.desk = desk;
+    canvas.scale = scale;
 
-        paint_rect(
-            window,
-            corner,
-            width + spread * 2.0,
-            height + spread * 2.0,
-            rgba(color).into(),
+    let (width, height) = sheet.drawn();
+    let (x, y) = sheet.origin;
+
+    for (spread, drop, tint) in PAGE_SHADOW {
+        canvas.fill(
+            Rect {
+                x: x - spread,
+                y: y - spread + drop,
+                width: width + spread * 2.0,
+                height: height + spread * 2.0,
+            },
+            rgba(tint).into(),
         );
     }
+
+    canvas.fill(Rect { x, y, width, height }, paper);
+}
+
+/// Paints one rectangle of a described canvas, for the frames the layer does not draw.
+fn paint_fill(window: &mut Window, rect: Rect, colour: Hsla) {
+    paint_rect(
+        window,
+        point(px(rect.x), px(rect.y)),
+        rect.width,
+        rect.height,
+        colour,
+    );
 }
 
 /// Fills a rectangle given in window coordinates.

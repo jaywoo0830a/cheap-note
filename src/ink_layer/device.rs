@@ -38,7 +38,7 @@ use windows::Win32::Graphics::Direct3D::{
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-    ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
+    ID3D11DeviceContext,
 };
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
@@ -48,11 +48,14 @@ use windows::Win32::Graphics::Dxgi::{
         DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN,
         DXGI_SAMPLE_DESC,
     },
-    CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGISwapChain1, DXGI_CREATE_FACTORY_FLAGS,
-    DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
-    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
+    DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+use super::canvas::Canvas;
+use super::render::Renderer;
 
 /// How many buffers the swap chain is made with.
 ///
@@ -60,23 +63,18 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 /// makes the two the same and tears.
 const BUFFERS: u32 = 2;
 
-/// The colour the probe fills the canvas with. Opaque, so that nothing behind it can be mistaken
-/// for it.
-const PROBE_COLOR: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
-
 /// The canvas's device, and everything that has to outlive it: the swap chain it presents, the
-/// view of the buffer it clears, and the composition that shows it.
+/// renderer that draws into it, and the composition that shows it.
 pub(crate) struct Device {
     /// The window the canvas is composed into.
     hwnd: HWND,
-    device: ID3D11Device,
+    /// Held, not read: the context, the renderer and the swap chain are all made from it, and the
+    /// canvas is theirs for as long as it is on the screen.
+    _device: ID3D11Device,
     context: ID3D11DeviceContext,
     swap_chain: IDXGISwapChain1,
-    /// The view of the swap chain's current back buffer.
-    ///
-    /// `None` only while the buffers are being resized: a view holds a reference to a buffer, and
-    /// DXGI refuses to resize while one is alive.
-    view: Option<ID3D11RenderTargetView>,
+    /// What draws a frame: Direct2D, on this same device (see [`Renderer`]).
+    renderer: Renderer,
     /// The client area the buffers were made for, in physical pixels.
     size: (u32, u32),
     /// Held, not read: dropping the target or the visual would take the canvas off the screen.
@@ -97,35 +95,37 @@ impl Device {
         let size = client_size(hwnd).context("measuring the window")?;
         let swap_chain = create_swap_chain(&factory, &device, size)
             .context("creating a composition swap chain")?;
-        let view = create_view(&device, &swap_chain).context("making a render target")?;
         let dxgi_device: IDXGIDevice = device.cast().context("taking the device's DXGI side")?;
+        let renderer = Renderer::new(&dxgi_device).context("making the canvas's renderer")?;
         let composition = Composition::new(hwnd, &swap_chain, &dxgi_device)
             .context("composing the canvas under the window's content")?;
 
         Ok(Device {
             hwnd,
-            device,
+            _device: device,
             context,
             swap_chain,
-            view: Some(view),
+            renderer,
             size,
             _composition: composition,
         })
     }
 
-    /// Fills the canvas with the probe colour and presents it.
-    pub(crate) fn probe(&mut self) -> Result<()> {
+    /// Draws a frame of the canvas and presents it.
+    pub(crate) fn render(&mut self, canvas: &Canvas) -> Result<()> {
         self.resize()?;
 
-        let view = self
-            .view
-            .as_ref()
-            .ok_or_else(|| anyhow!("the swap chain has no back buffer"))?;
+        let buffer: IDXGISurface = unsafe { self.swap_chain.GetBuffer(0)? };
+        self.renderer.draw(buffer, canvas)?;
 
         unsafe {
-            self.context.ClearRenderTargetView(view, &PROBE_COLOR);
-            // No interval: the probe is presented as soon as it is drawn, and nothing here waits
-            // for a display's clock. What paces the finished canvas is a decision of its own phase.
+            // Direct2D and this device share one immediate context, so what Direct2D has just
+            // ended is still a batch on it: the flush is what hands the frame over, and a present
+            // is not promised to wait for work that has not been handed over.
+            self.context.Flush();
+
+            // No interval: the canvas is presented as soon as it is drawn, and nothing here waits
+            // for a display's clock. What paces it is a decision of its own (see [`super`]).
             self.swap_chain
                 .Present(0, DXGI_PRESENT(0))
                 .ok()
@@ -146,9 +146,8 @@ impl Device {
             return Ok(());
         }
 
-        // The view goes first: DXGI refuses to resize buffers while a reference to one is alive.
-        self.view = None;
-
+        // Nothing is holding a buffer: the renderer takes one per frame and lets it go before the
+        // frame ends, so a resize never finds one alive (see [`Renderer::draw`]).
         let (width, height) = (size.0.max(1), size.1.max(1));
         unsafe {
             // A buffer count of zero keeps the count the chain was made with.
@@ -161,7 +160,6 @@ impl Device {
             )?;
         }
 
-        self.view = Some(create_view(&self.device, &self.swap_chain)?);
         self.size = size;
 
         Ok(())
@@ -279,18 +277,6 @@ fn swap_chain_desc(size: (u32, u32)) -> DXGI_SWAP_CHAIN_DESC1 {
 }
 
 /// A view of the swap chain's current back buffer, to clear and draw into.
-fn create_view(
-    device: &ID3D11Device,
-    swap_chain: &IDXGISwapChain1,
-) -> Result<ID3D11RenderTargetView> {
-    let buffer: ID3D11Texture2D = unsafe { swap_chain.GetBuffer(0)? };
-
-    let mut view: Option<ID3D11RenderTargetView> = None;
-    unsafe { device.CreateRenderTargetView(&buffer, None, Some(&mut view))? };
-
-    view.ok_or_else(|| anyhow!("Direct3D made no render target view"))
-}
-
 /// The window's client area, in physical pixels.
 ///
 /// The client area rather than the window's bounds: the visual is composed into the client area, so
@@ -379,7 +365,9 @@ mod tests {
 
         {
             let mut device = Device::new(hwnd).expect("a canvas for that window");
-            device.probe().expect("a frame of it");
+            device
+                .render(&Canvas::default())
+                .expect("a frame of it");
         }
 
         unsafe { DestroyWindow(hwnd).expect("the window to close") };

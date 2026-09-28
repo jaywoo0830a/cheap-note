@@ -53,7 +53,12 @@ use gpui_kit::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::HWND;
 
+mod canvas;
 mod device;
+mod render;
+
+pub use canvas::Canvas;
+pub use canvas::Rect;
 
 use device::Device;
 
@@ -129,12 +134,14 @@ impl InkLayer {
         Ok(InkLayer { device })
     }
 
-    /// Draws the probe and presents it.
+    /// Draws a frame of the canvas and presents it.
     ///
-    /// A probe reports by what is on the screen: a present that fails here has nothing to add to
-    /// what the screen already says, and this phase has no state to keep about it (see the module
-    /// docs).
-    pub fn probe(&mut self) {
-        let _ = self.device.probe();
+    /// The canvas is described by the app (see [`Canvas`]) and drawn here, so the app's design — the
+    /// shadow's steps, the paper's colour, the sheet's geometry — lives in one place whether the
+    /// frame is drawn by this layer or by the frame's own painting.
+    pub fn draw(&mut self, canvas: &Canvas) -> Result<(), String> {
+        self.device
+            .render(canvas)
+            .map_err(|error| format!("{error:#}"))
     }
 }

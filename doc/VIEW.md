@@ -312,7 +312,7 @@ A **deleted** page takes its ink with it: there is nowhere to show it afterwards
 mean keeping an identity for "the page that used to be here" that no later page could be confused with.
 On a note about a document the page leaves the *note*, not the file.
 
-### Turning a page
+### The page's rotation
 
 A page's rotation belongs to the **page**, not to the view. It is stored with the page — one field of the
 note's own page list, see `meta('layout')` in [STORE.md](STORE.md) — so a page turned and left comes back
@@ -339,6 +339,41 @@ of desk beside it that must not write.
 The interface offers the four as two pairs of buttons, and the page in front's two also answer to
 `Ctrl+R` and `Ctrl+Shift+R` (with `Alt` for every page). The status line says which way up the page is
 while it is not the right way up, and says nothing when it is.
+
+### The lasso
+
+The third tool neither adds ink nor removes it: it takes ink **in hand**. A loop is swept around the writing
+the reader wants, and what it encloses becomes the page's **selection** — which can then be dragged somewhere
+by pressing on the ink itself, or removed with Delete (and a button on the bar, because the hand holding the
+pen has no Delete key). Escape puts the selection down, and only then does Escape leave the note.
+
+The gestures are the ones a notebook has, and they are decided at the moment the nib goes down: a press *on*
+the selected ink takes hold of it; a press anywhere else starts a new loop, which is also how a selection is
+let go of — a reader pressing beside the ink is drawing a region, not asking for the old one. What the loop
+encloses is decided by the even-odd rule on the loop's own points, and the ink is taken a **whole stroke** at
+a time: a stroke the loop merely crosses is taken if any of its points is inside, which is the trade-off the
+eraser makes too, and never a fragment that nothing could pick up again.
+
+**A selection belongs to its page**, like the ink does: turn away and back and the same strokes are still in
+hand. It is the page's own idea of what is in hand — the note has never heard of it, and nothing about it is
+written to the file.
+
+**The ink does not move while it is being dragged.** A drag is one offset in the canvas description — the same
+idea as a page's rotation one level down — so dragging a page of handwriting costs the same as dragging one
+stroke, and a drag that is put down where it started costs nothing at all. The points move once, when the
+reader lifts, and the derived geometry with them, because a stroke's bounds and outline are what the eraser
+hit-tests and what a frame culls by.
+
+The one thing this costs the file is a second number. A note writes a page out again when an append cannot
+express what happened to it, and it tells that by *counting* strokes: an undo, an erase, or a deleted
+selection leaves fewer than the note holds. A **move** leaves the count exactly as it was and every stroke
+changed, so the page counts its shifts as well (see [STORE.md](STORE.md), §6). Neither a move nor a deletion
+is undoable, for the reason erasing is not: the history is a list of strokes, and an edit that moves or
+removes several of them at once has no single stroke for undo to take back — what a move does leave behind is
+the selection, so it can be dragged back.
+
+Showing it: the ink in hand is drawn once more in the theme's accent, translucent, and the loop being swept is
+drawn as the ring it is — thin, over the ink, so the writing can be read through it while it is being chosen.
 
 ### A mark
 

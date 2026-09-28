@@ -13,8 +13,12 @@ publish = false
 gpui-kit = "=0.7.0"
 
 # Low-latency pen input on Windows. This crate is not published on crates.io, so it is
-# pinned to the 0.2.0 git tag requested by the project.
-pen-windows = { git = "https://github.com/jaywoo0830a/pen-windows", tag = "0.2.0", features = ["window-handle"] }
+# pinned to the 0.3.0 git tag. Earlier tags worked out a reading's delay by subtracting a
+# 32-bit stamp from a 32-bit clock read, which wrapped whenever the stamp was a
+# millisecond or two *ahead* of the read: the status line showed `delay 4294967287 ms`,
+# and that one reading pinned the worst-seen figure at the top of its range for the rest
+# of the session. 0.3.0 answers a wrapped subtraction as no delay at all.
+pen-windows = { git = "https://github.com/jaywoo0830a/pen-windows", tag = "0.3.0", features = ["window-handle"] }
 
 # PDF: Pdfium, loaded at run time from `vendor/lib/pdfium.dll` — which `build.rs` copies next to the
 # executable a build produces, so that a release build is a pair of files rather than a path that

@@ -89,6 +89,14 @@ const STATUS_PILL_WIDTH: f32 = 0.6;
 /// How far above the desk's bottom row the status pill floats, in logical pixels.
 const STATUS_LIFT: f32 = 40.0;
 
+/// How much of the selection's colour is laid over the ink a lasso has hold of.
+///
+/// A wash rather than a coat: the ink keeps its own colour underneath, because a reader who has selected a
+/// word to move it still has to be able to *read* the word. Enough to be unmistakable at a glance, which is
+/// the whole of what a selection is for — and shared with the loop, so the ring the reader is drawing and the
+/// ink it takes are the same colour.
+const SELECTION_TINT: f32 = 0.45;
+
 /// How often the housekeeping pump wakes.
 const HOUSEKEEPING_INTERVAL: Duration = Duration::from_millis(1);
 
@@ -168,6 +176,22 @@ fn pdf_render_due(last_ink_at: Instant, now: Instant) -> bool {
 /// [`crate::ink::Notes::page`]).
 fn page_of_write(ink: &Notes) -> u64 {
     ink.page() as u64
+}
+
+/// Whether a note's copy of a page is out of date in a way an append cannot express.
+///
+/// Two ways, and the second is the one a stroke *count* cannot see:
+///
+/// * the page has **fewer** strokes than the note holds, which is what an undo, an erase, or a deleted
+///   selection leaves behind — the page is no longer a longer version of what is on disk;
+/// * the page has been **shifted** — the same strokes, moved — since the number the app last wrote. A lasso
+///   dragging a selection changes every point it holds and leaves the count exactly as it was, so a page moved
+///   after it was saved would otherwise never be written out at all.
+///
+/// Nothing else needs a rewrite. A page that has only gained strokes is a longer version of the one on disk,
+/// and appending to it is the cheap way to say so (see [STORE.md](../../doc/STORE.md)).
+fn page_owes_a_rewrite(count: usize, sent: usize, shift: u64, written: u64) -> bool {
+    count < sent || shift > written
 }
 
 /// The sheet as the last frame drew it: its size in paper units, and where that was placed.
@@ -273,6 +297,11 @@ pub struct NoteApp {
     writer: Option<NoteWriter>,
     /// How many strokes of each page have been handed to the writer as *appends*.
     saved: BTreeMap<u64, usize>,
+    /// How many times each page had been *shifted* when it was last written: see [`page_owes_a_rewrite`].
+    ///
+    /// Kept beside `saved` because the two are the same fact about two different edits: what the note holds,
+    /// and whether what it holds is still what is on disk. A move is the edit that only this one can see.
+    shifted: BTreeMap<u64, u64>,
     /// Pages whose stored ink no longer matches the page in memory, waiting to be written again.
     rewritten: BTreeSet<u64>,
     /// When a batch was last handed over, for the 500 ms rule.
@@ -305,6 +334,12 @@ pub struct NoteApp {
     last_present: Option<Instant>,
     /// The canvas as the last frame described it: the desk, the page's shadow, and the sheet.
     canvas: Canvas,
+    /// The colour the ink a lasso has hold of is shown in: the wash over the ink, and the loop's own mark.
+    ///
+    /// Kept rather than read where it is used, because it *is* used outside a frame: the pen's pump draws the
+    /// canvas too, and has no theme to read (see [`Self::describe_ink`]). The theme's accent, because a
+    /// selection is the one thing on the page that is the app's mark rather than the reader's ink.
+    selection_colour: Hsla,
     /// The page being shown.
     page_index: usize,
     /// The window's DPI scale factor, captured each frame.
@@ -443,6 +478,7 @@ impl NoteApp {
             note: None,
             writer: None,
             saved: BTreeMap::new(),
+            shifted: BTreeMap::new(),
             rewritten: BTreeSet::new(),
             saved_at: Instant::now(),
             checkpointed_at: Instant::now(),
@@ -459,6 +495,7 @@ impl NoteApp {
             ink_revision: 0,
             last_present: None,
             canvas: Canvas::default(),
+            selection_colour: cx.theme().accent.opacity(SELECTION_TINT),
             page_index: 0,
             scale: window.scale_factor(),
             view,
@@ -656,6 +693,16 @@ impl NoteApp {
             Arc::new(stroke)
         });
 
+        // The loop a lasso is sweeping, and whether there is anything to show in the selection's colour: the
+        // ink in hand, or the loop being drawn around it. Detailed for the sheet it is drawn at, exactly as the
+        // stroke under the pen is: the layer draws a stroke's *cached* outline, and a loop nobody has detailed
+        // is a ring with nothing in it.
+        let lasso = self.ink.lasso().cloned().map(|mut stroke| {
+            stroke.close_live(sheet.zoom);
+            Arc::new(stroke)
+        });
+        let shown = lasso.is_some() || self.ink.has_selection();
+
         self.canvas.ink = Ink {
             origin: sheet.origin,
             zoom: sheet.zoom,
@@ -667,6 +714,13 @@ impl NoteApp {
             // page, because the ink is written *on* the page (see [`crate::ink::drawn_of_paper`]).
             rotation: sheet.rotation,
             paper: sheet.ink_paper(),
+            // The lasso's own: which strokes are in hand, where a drag has taken them, and the loop being
+            // drawn. The colour is `None` when there is nothing to show, which is what leaves a page nobody
+            // has lassoed drawing exactly as it did before there was a lasso.
+            selected: Arc::clone(self.ink.selected()),
+            offset: self.ink.drag_offset(),
+            selection: shown.then_some(self.selection_colour),
+            lasso,
         };
     }
 
@@ -795,9 +849,12 @@ impl NoteApp {
         let page = page_of_write(&self.ink);
         let count = self.ink.finished().len();
         let sent = self.saved.get(&page).copied().unwrap_or(0);
+        let shift = self.ink.shifted();
+        let written = self.shifted.get(&page).copied().unwrap_or(0);
 
-        if count < sent {
-            // The page is no longer a longer version of what the note holds.
+        if page_owes_a_rewrite(count, sent, shift, written) {
+            // The page is not simply a longer version of what the note holds: something was taken back,
+            // removed, or moved.
             self.rewritten.insert(page);
         }
 
@@ -843,6 +900,9 @@ impl NoteApp {
         }
 
         self.saved.insert(page, count);
+        // The page as it now stands on disk, twice over: how many strokes the note holds, and how many times
+        // it had been moved when that was written.
+        self.shifted.insert(page, shift);
         self.saved_at = now;
     }
 
@@ -938,6 +998,40 @@ impl NoteApp {
     fn set_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
         self.ink.set_mode(tool);
         cx.notify();
+    }
+
+    /// Deletes the ink a lasso has hold of, and says so.
+    ///
+    /// One of the two edits a note notices by *counting*: the page it leaves has fewer strokes than the note
+    /// holds, which is what makes [`Self::persist`] write the page out again rather than append to it. Not
+    /// undoable, for the reason erasing is not (see [`crate::ink`]).
+    fn delete_selection(&mut self, cx: &mut Context<Self>) {
+        let removed = self.ink.delete_selected();
+        if removed == 0 {
+            return;
+        }
+
+        // Written out at once rather than on the batch clock: this is a deliberate command, and leaving it in
+        // memory for half a second is how it is lost if the app is closed in that half-second — the same
+        // reason an undo is written at once.
+        self.persist(Instant::now(), true);
+
+        self.report(format!(
+            "deleted {removed} stroke{}",
+            if removed == 1 { "" } else { "s" }
+        ));
+        cx.notify();
+    }
+
+    /// Lets the lasso's selection go: what Escape does before it leaves the note.
+    ///
+    /// Nothing is written: a selection is not ink and the note has never heard of it (see [`crate::ink`]) — it
+    /// is the page's own idea of what is in hand, for as long as the note is open.
+    fn deselect(&mut self, cx: &mut Context<Self>) {
+        if self.ink.deselect() {
+            self.touch_status();
+            cx.notify();
+        }
     }
 
     /// Changes the sheet's size, and its scale with it.
@@ -1284,6 +1378,7 @@ impl NoteApp {
         }
         self.loaded.remove(&self.page_index);
         self.saved.remove(&(self.page_index as u64));
+        self.shifted.remove(&(self.page_index as u64));
         self.rewritten.remove(&(self.page_index as u64));
         self.rename_pages(self.page_index as u64 + 1, -1);
 
@@ -1577,6 +1672,10 @@ impl NoteApp {
         self.saved = std::mem::take(&mut self.saved)
             .into_iter()
             .map(|(page, count)| (rename(page), count))
+            .collect();
+        self.shifted = std::mem::take(&mut self.shifted)
+            .into_iter()
+            .map(|(page, shift)| (rename(page), shift))
             .collect();
         self.rewritten = std::mem::take(&mut self.rewritten)
             .into_iter()
@@ -2168,10 +2267,18 @@ impl NoteApp {
                 "escape" => {
                     if self.naming.is_some() {
                         self.stop_note_name(window, cx);
+                    } else if self.ink.has_selection() {
+                        // A selection is let go of *before* the note is left: a reader who has just lassoed
+                        // something meant to put it down, not to go home — the same precedence the name being
+                        // typed follows one line up.
+                        self.deselect(cx);
                     } else {
                         self.show_home(cx);
                     }
                 }
+                // What a selection is for besides dragging: exactly what is in hand, removed. Only while a name
+                // is not being typed, because there the keys belong to the field.
+                "delete" | "backspace" if self.naming.is_none() => self.delete_selection(cx),
                 // The arrows turn the page — the one thing a keyboard is asked for here, and the same
                 // two commands the page pill's buttons are. Not while a name is being typed: there the
                 // arrows belong to the field, and a caret that turned the page instead would be a trap.
@@ -2579,6 +2686,12 @@ impl NoteApp {
             parts.push(format!("turned {}°", turns as u32 * 90));
         }
 
+        // What a lasso has hold of, said only when it has hold of something: it is the answer to "what would
+        // Delete take?", and a zero on every frame is noise — the same rule the marks above follow.
+        if self.ink.has_selection() {
+            parts.push(format!("{} selected", self.ink.selected_count()));
+        }
+
         // The marks, said only when there are any: it is the answer to "which pages did I keep", and a
         // zero on every frame is noise — the same rule the off-the-sheet readings follow below.
         if !self.bookmarks.is_empty() {
@@ -2768,6 +2881,18 @@ impl NoteApp {
                 |app, cx| app.set_tool(Tool::Eraser, cx),
             )
             .into_any_element(),
+            // The third tool takes ink rather than adding or removing it: sweep the writing that is wanted,
+            // then drag it somewhere or press Delete. The tooltip says the whole of it, because a lasso has no
+            // other way to be learned.
+            tool_button(
+                "tool-lasso",
+                IconName::Lasso,
+                "Lasso: sweep around the ink to take it, then drag it or press Delete",
+                tool == Tool::Lasso,
+                cx,
+                |app, cx| app.set_tool(Tool::Lasso, cx),
+            )
+            .into_any_element(),
         ];
 
         // Reading order is left to right, so the commands sit in the order they are reached for:
@@ -2776,7 +2901,7 @@ impl NoteApp {
         //
         // Offered only when the page's history says they would do something: a button that sometimes does
         // nothing is what a broken command looks like.
-        let actions = vec![
+        let mut actions = vec![
             // The way back to the list, first, because it is the way *out* of everything else: what
             // was opened is where a person starts, and Escape is the keyboard's way to the same
             // place.
@@ -2816,6 +2941,30 @@ impl NoteApp {
                 |app, cx| app.clear(cx),
             )
             .into_any_element(),
+        ];
+
+        // The command that acts on a selection exists only while there is one — the rule the undo buttons
+        // follow, and the reason it is the *element* that comes and goes rather than a button that is disabled:
+        // a command with nothing to act on is what a broken command looks like. It is worth a button of its
+        // own because the hand holding the pen has no Delete key, and `Scissors` rather than a second `Trash`,
+        // which the bar already spells "clear the page".
+        if self.ink.has_selection() {
+            actions.push(
+                icon_button(
+                    "selection-delete",
+                    IconName::Scissors,
+                    "Delete the selected ink (Delete)",
+                    true,
+                    cx,
+                    |app, cx| app.delete_selection(cx),
+                )
+                .into_any_element(),
+            );
+        }
+
+        // And the file: what was opened, and what is written out. Pushed after the page's own commands, which
+        // is where they sit in the row.
+        actions.push(
             icon_button(
                 "open-note",
                 IconName::FolderOpen,
@@ -2825,6 +2974,8 @@ impl NoteApp {
                 |app, cx| app.prompt_for_pdf(cx),
             )
             .into_any_element(),
+        );
+        actions.push(
             icon_button(
                 "save-note",
                 IconName::Save,
@@ -2834,7 +2985,7 @@ impl NoteApp {
                 |app, cx| app.save(cx),
             )
             .into_any_element(),
-        ];
+        );
 
         let switches = vec![
             visibility_switch(
@@ -3862,9 +4013,9 @@ mod tests {
     // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
     // scope and shadow the attribute this module needs.
     use super::{
-        file_label, file_stem, notch_in_pixels, page_of_write, pdf_render_due, pinch_zoom_factor,
-        quantise_width, sheet_matches, wheel_pan, wheel_zoom_factor, PDF_QUIET_INTERVAL,
-        WHEEL_LINES_PER_NOTCH, WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
+        file_label, file_stem, notch_in_pixels, page_of_write, page_owes_a_rewrite, pdf_render_due,
+        pinch_zoom_factor, quantise_width, sheet_matches, wheel_pan, wheel_zoom_factor,
+        PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH, WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
     };
     use crate::ink::Notes;
     use std::time::{Duration, Instant};
@@ -4092,6 +4243,29 @@ mod tests {
             3,
             "and the write follows the ink, which is now page 3"
         );
+    }
+
+    /// A page is written out again when an append cannot say what happened to it.
+    ///
+    /// Three cases, and the second is the one the app cannot see by counting: a page that has only grown is a
+    /// longer version of what the note holds (an append says it); a page that has *lost* strokes is not; and a
+    /// page whose strokes have been **moved** is not either, because a lasso drag changes every point it holds
+    /// and leaves the count exactly where it was.
+    #[test]
+    fn a_page_is_written_out_again_when_an_append_cannot_say_what_changed() {
+        // Grown: ten strokes on disk and twelve in memory — an append.
+        assert!(!page_owes_a_rewrite(12, 10, 0, 0));
+        // Nothing at all: not even a batch worth sending.
+        assert!(!page_owes_a_rewrite(10, 10, 0, 0));
+        // Undone, erased, or a selection deleted: fewer strokes than the note holds.
+        assert!(page_owes_a_rewrite(9, 10, 0, 0));
+        // Moved since it was last written: the same strokes, and not the ones on disk.
+        assert!(page_owes_a_rewrite(10, 10, 1, 0));
+        assert!(
+            !page_owes_a_rewrite(10, 10, 1, 1),
+            "and not twice for one move"
+        );
+        assert!(page_owes_a_rewrite(10, 10, 2, 1));
     }
 }
 

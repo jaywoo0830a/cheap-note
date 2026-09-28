@@ -272,18 +272,28 @@ impl Renderer {
     fn draw_ink(&mut self, canvas: &Canvas) -> Result<()> {
         self.refresh_ink(canvas)?;
 
+        // What is off the sheet's visible part is skipped, not drawn: it is the same test the app counts
+        // its `culled` figure with, so the number on the status line is what happened, and it is what makes
+        // zooming in on a page of handwriting cheap (see [`Stroke::visible_in`]).
+        let visible = canvas.ink.visible;
+        let selected = &canvas.ink.selected;
+        let in_hand = |index: usize| selected.get(index).copied().unwrap_or(false);
+        let offset = canvas.ink.offset;
+        let drawn = canvas.scale * canvas.ink.zoom;
+
         unsafe {
             self.context.SetTransform(&ink_transform(canvas));
 
-            // What is off the sheet's visible part is skipped, not drawn: it is the same test the
-            // app counts its `culled` figure with, so the number on the status line is what happened,
-            // and it is what makes zooming in on a page of handwriting cheap (see
-            // [`Stroke::visible_in`]).
-            let visible = canvas.ink.visible;
-
-            for (stroke, realization) in canvas.ink.strokes.iter().zip(self.ink.realizations.iter())
+            for (index, (stroke, realization)) in canvas
+                .ink
+                .strokes
+                .iter()
+                .zip(self.ink.realizations.iter())
+                .enumerate()
             {
-                if !stroke.visible_in(visible) {
+                // The ink in hand is drawn in the pass below, where the drag has taken it: drawing it here
+                // as well would leave a ghost of it behind at every step of a drag.
+                if in_hand(index) || !stroke.visible_in(visible) {
                     continue;
                 }
 
@@ -292,9 +302,62 @@ impl Renderer {
                     .DrawGeometryRealization(realization, &self.brush);
             }
 
+            // The ink *in hand*, where a drag has taken it, and once more in the selection's colour. The same
+            // realization twice rather than a second geometry: a highlight built as its own outline would be
+            // another shape to keep in step with the ink it is meant to be showing.
+            if canvas.ink.selection.is_some() || offset != (0.0, 0.0) {
+                self.context
+                    .SetTransform(&shifted(ink_transform(canvas), offset, drawn));
+
+                // The window, in the coordinates the *drawing* is in: a drag moves the ink, so the part of
+                // the paper that is on screen is that much the other way when the ink is asked about itself.
+                let culled = [
+                    visible[0] - offset.0,
+                    visible[1] - offset.1,
+                    visible[2] - offset.0,
+                    visible[3] - offset.1,
+                ];
+
+                for (index, (stroke, realization)) in canvas
+                    .ink
+                    .strokes
+                    .iter()
+                    .zip(self.ink.realizations.iter())
+                    .enumerate()
+                {
+                    if !in_hand(index) || !stroke.visible_in(culled) {
+                        continue;
+                    }
+
+                    self.brush.SetColor(&colour_of(rgb(stroke.color).into()));
+                    self.context1
+                        .DrawGeometryRealization(realization, &self.brush);
+
+                    if let Some(colour) = canvas.ink.selection {
+                        self.brush.SetColor(&colour_of(colour));
+                        self.context1
+                            .DrawGeometryRealization(realization, &self.brush);
+                    }
+                }
+            }
+
             if let Some(stroke) = &canvas.ink.open {
                 let outline = self.outline_geometry(stroke)?;
                 self.brush.SetColor(&colour_of(rgb(stroke.color).into()));
+                self.context.FillGeometry(&outline, &self.brush, None);
+            }
+
+            // And the loop a lasso is sweeping, over everything: it is the mark the reader is making *now*,
+            // and the one thing on the sheet that has to be visible over the ink it is choosing between.
+            if let Some(loop_stroke) = &canvas.ink.lasso {
+                self.context.SetTransform(&ink_transform(canvas));
+                let outline = self.outline_geometry(loop_stroke)?;
+                let colour = canvas
+                    .ink
+                    .selection
+                    .unwrap_or_else(|| rgb(loop_stroke.color).into());
+
+                self.brush.SetColor(&colour_of(colour));
                 self.context.FillGeometry(&outline, &self.brush, None);
             }
 
@@ -546,6 +609,20 @@ fn ink_matrix(
     }
 }
 
+/// The same transform, moved by a drag: where the ink in hand is drawn while the reader is taking it
+/// somewhere.
+///
+/// Added to the translation rather than composed as a second matrix: Direct2D's transform is a row-vector
+/// one — `x' = x*M11 + y*M21 + M31` — so "the same place, so much further along" is exactly the two
+/// `M31`/`M32` fields, and composing would be the same arithmetic with a matrix to allocate.
+fn shifted(transform: Matrix3x2, offset: (f32, f32), drawn: f32) -> Matrix3x2 {
+    Matrix3x2 {
+        M31: transform.M31 + offset.0 * drawn,
+        M32: transform.M32 + offset.1 * drawn,
+        ..transform
+    }
+}
+
 /// The transform the ink is drawn through, from what the app described.
 fn ink_transform(canvas: &Canvas) -> Matrix3x2 {
     ink_matrix(
@@ -719,6 +796,36 @@ mod tests {
             (round.M11, round.M12, round.M21, round.M22, round.M31, round.M32),
             (plain.M11, plain.M12, plain.M21, plain.M22, plain.M31, plain.M32),
             "a page turned four times is the page it was"
+        );
+    }
+
+    /// A dragged selection is drawn where the hand has taken it, and nothing else about it changes.
+    #[test]
+    fn a_dragged_selection_is_drawn_where_it_has_been_taken() {
+        let (scale, zoom) = (1.5f32, 2.0f32);
+        let drawn = scale * zoom;
+        let paper = (600.0f32, 800.0f32);
+        let origin = (37.0f32, 11.0f32);
+        let plain = ink_matrix(scale, zoom, origin, paper, 0);
+        let moved = shifted(plain, (10.0, -4.0), drawn);
+
+        let at = |matrix: &Matrix3x2, point: (f32, f32)| {
+            (
+                point.0 * matrix.M11 + point.1 * matrix.M21 + matrix.M31,
+                point.0 * matrix.M12 + point.1 * matrix.M22 + matrix.M32,
+            )
+        };
+
+        let (x0, y0) = at(&plain, (0.0, 0.0));
+        let (x1, y1) = at(&moved, (0.0, 0.0));
+        assert!(
+            (x1 - x0 - 10.0 * drawn).abs() < 0.01 && (y1 - y0 + 4.0 * drawn).abs() < 0.01,
+            "a drag of the paper's own units, drawn: {x0}, {y0} -> {x1}, {y1}"
+        );
+        assert_eq!(
+            (moved.M11, moved.M12, moved.M21, moved.M22),
+            (plain.M11, plain.M12, plain.M21, plain.M22),
+            "and a drag scales and turns nothing"
         );
     }
 

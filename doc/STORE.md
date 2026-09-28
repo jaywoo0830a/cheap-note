@@ -272,7 +272,7 @@ app hands finished strokes to a background thread on a schedule:
 | 200 finished strokes are waiting | they are sent as one batch |
 | 500 ms have passed since the last batch | the smaller batch is sent anyway |
 | the page is closed (you turn away) | the batch goes out, and the page is **compacted** into chunks |
-| `undo`, the eraser, or *Clear* changed the page | the page is **rewritten**, not appended to |
+| `undo`, the eraser, *Clear*, or a lasso moving a selection | the page is **rewritten**, not appended to |
 | the pen has been still for 5 s, and 5 minutes have passed | the write-ahead log is folded back into `note.db` |
 | you press *Save* | everything outstanding is written, then the export is made |
 | the app closes | the writer's last job is a checkpoint |
@@ -289,6 +289,14 @@ the page it has already sent, and when the finished count goes **down**, the pag
 rewriting. A rewritten page has its chunks and dirty rows dropped and its whole ink written again, in
 one transaction — so a crash in the middle leaves either the old page or the new one, never half of
 each.
+
+A **lasso that moves a selection** is the one edit counting cannot see: it takes the strokes it has hold
+of and shifts every point in them, so the number of strokes is exactly what it was while none of them is
+where the note last saw it. The page therefore carries a second number — how many times its ink has been
+*shifted* — and the app remembers the value it last wrote, beside the stroke count. One move, or twelve,
+marks the page for a rewrite the same way a deletion does, and nothing is written for a drag that was put
+down where it started. That count is per page and in memory only: it is a fact about what has *not* been
+written yet, and the ink itself says everything else (see `src/ink.rs`).
 
 **What a crash costs.** At most the ink of the batches that had not been sent yet: the last 500 ms, or
 the last 200 strokes, whichever is smaller. Everything else is in `note.db`, committed. Pressing *Save*

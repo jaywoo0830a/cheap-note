@@ -45,6 +45,29 @@
 //!   it ends both directions rather than leaving a way back that the command itself did not mean.
 //! * **A page keeps its history while it can still be redone**, even with nothing drawn on it, so
 //!   turning the page and turning back does not quietly throw the redo away.
+//!
+//! ## The lasso
+//!
+//! The third tool neither adds ink nor removes it: it takes ink *in hand*. A loop is swept around the
+//! writing the reader wants, and what the loop encloses becomes the **selection** — which can be dragged,
+//! and which a command can delete. The rules are the ones a hand expects, and the exceptions are again
+//! what a reader notices:
+//!
+//! * **A selection belongs to its page**, like the ink does: turn away and back, and the same strokes are
+//!   still in hand, because the selection is a fact about that page's writing and not about the view.
+//! * **The ink does not move while it is being dragged.** A drag changes where the selected strokes are
+//!   *drawn* and nothing else — one offset for the whole frame, the same idea as a page's rotation one
+//!   level down — and the points are moved once, when the drag is put down. Dragging a page of
+//!   handwriting is therefore as cheap as dragging one stroke, and a cancelled drag costs nothing at all.
+//! * **Whole strokes, by the loop.** A stroke the loop encloses is taken as one line, and a stroke the
+//!   loop merely crosses is taken if *any* of its points is inside — the prototype's trade-off, which is
+//!   the one the eraser makes too (see [`InkDocument::erase_at`]). Its points are resampled about a pixel
+//!   apart, so a crossing is caught; what is never produced is a fragment of a stroke, which nothing
+//!   could pick up again.
+//! * **Moving and deleting are not undoable**, for the reason erasing is not: the history is a list of
+//!   *strokes*, and an edit that moves or removes several of them at once has no single stroke for undo
+//!   to take back. What a move does do is leave the selection in hand, so it can be dragged back — and
+//!   what both do is end the redo branch, exactly as new ink does.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -251,6 +274,8 @@ pub enum Tool {
     Pen,
     /// Remove the strokes the nib passes near.
     Eraser,
+    /// Take the ink a loop encloses into the hand, to drag or delete.
+    Lasso,
 }
 
 /// One point of a stroke: a position and the width the pen drew it at.
@@ -888,6 +913,37 @@ impl InkStats {
     }
 }
 
+/// How thick the loop a lasso is drawing is drawn, in logical pixels.
+///
+/// Thin, because it is drawn *over* the ink it is being swept around: a fat ring hides the very writing
+/// the reader is choosing between. Not a setting — it is the app's mark rather than the reader's ink, and
+/// a person who wanted a different one would have nothing to point at.
+const LASSO_WIDTH: f32 = 1.5;
+
+/// How near the selected ink a reading has to be to take hold of it, in logical pixels.
+///
+/// About a nib's width. The reader presses *on* the writing they mean to move, and a line of handwriting
+/// is a fraction of a millimetre wide, so a bare hit-test would make taking hold of a word a matter of
+/// aim — while a radius much wider than this would reach the next line of a page written small.
+const GRAB_RADIUS: f32 = 10.0;
+
+/// What the lasso's nib is doing.
+///
+/// One field with two cases rather than two flags, because the gestures are exclusive: a reading that is
+/// sweeping a loop cannot be dragging a selection, and the state that says which is also the state the
+/// reading is applied to.
+#[derive(Debug)]
+enum Lasso {
+    /// A loop being swept around the ink to take.
+    Sweeping(Stroke),
+    /// The selection being dragged: where the reading that took hold of it went down, and how far the
+    /// hand has taken it since.
+    ///
+    /// An offset and not a moved stroke: the ink is not touched until the drag is put down (see the module
+    /// docs), so this is the whole of what a drag changes.
+    Dragging { from: (f32, f32), by: (f32, f32) },
+}
+
 /// The page's ink: the strokes that are finished, and the one being drawn.
 ///
 /// ## One consumer, one open stroke
@@ -938,6 +994,24 @@ pub struct InkDocument {
     detailed_at: Option<f32>,
     /// What the model has done since the app started.
     stats: InkStats,
+    /// Which strokes are in hand, one flag per stroke in [`Self::finished`], in the same order.
+    ///
+    /// Behind an `Arc` for the same reason the strokes are: a frame is handed the flags rather than a copy
+    /// of them, and the layer draws the ink in hand in the selection's colour (see [`crate::ink_layer`]).
+    /// A *mask* rather than a list of indices, because an index that still points at *something* after the
+    /// stroke it named has been removed is how the wrong line gets deleted — and every edit that renumbers
+    /// the strokes would have to remember to renumber the selection with them.
+    selected: Arc<Vec<bool>>,
+    /// What the lasso's nib is doing, if it is down.
+    lasso: Option<Lasso>,
+    /// How many times this page's ink has been *shifted*: moved without gaining or losing a stroke.
+    ///
+    /// The one edit the note cannot see from its own bookkeeping. A write is an append while a page only
+    /// gains strokes and a rewrite when it loses them (see `NoteApp::persist`), and a move does neither —
+    /// the count is exactly what it was, and every stroke it names has changed. So the page keeps this
+    /// count and the app remembers the number it last wrote, which is what makes a dragged selection reach
+    /// the file at all.
+    shifted: u64,
 }
 
 impl Default for InkDocument {
@@ -953,6 +1027,9 @@ impl Default for InkDocument {
             last_erase: None,
             detailed_at: None,
             stats: InkStats::default(),
+            selected: Arc::new(Vec::new()),
+            lasso: None,
+            shifted: 0,
         }
     }
 }
@@ -1029,6 +1106,7 @@ impl InkDocument {
         };
 
         self.undone.push(stroke);
+        self.trim_selection();
         // The eraser's cheap path skips a rescan when the nib has barely moved, and the strokes
         // under it have just changed. Forgetting the last position costs one rescan.
         self.last_erase = None;
@@ -1046,6 +1124,7 @@ impl InkDocument {
         };
 
         Arc::make_mut(&mut self.finished).push(stroke);
+        self.trim_selection();
         self.last_erase = None;
         true
     }
@@ -1069,10 +1148,13 @@ impl InkDocument {
     /// list left behind it would be able to put ink back onto a page that was just emptied.
     pub fn clear(&mut self) {
         self.finished = Arc::new(Vec::new());
+        self.selected = Arc::new(Vec::new());
         self.undone.clear();
         self.open = None;
         self.active_pointer = None;
         self.last_erase = None;
+        // A loop being swept is not ink, and a cleared page is not a page to be selecting on.
+        self.lasso = None;
     }
 
     /// A page holding strokes that came from somewhere else — a saved note, or the clipboard of a
@@ -1175,8 +1257,11 @@ impl InkDocument {
             match sample.phase {
                 PenPhase::Down => {
                     // A `Down` closes whatever the previous pointer left open: the ink the user
-                    // drew is kept, and an `Up` that never arrived is no reason to lose it.
+                    // drew is kept, and an `Up` that never arrived is no reason to lose it. A lasso's
+                    // gesture ends with it, for the same reason: a reading that never came is no reason to
+                    // keep a half-swept loop — or a half-moved selection — hanging on the page.
                     self.finish_open();
+                    self.lasso = None;
 
                     if transform.on_bar(sample.pixel.y) {
                         // A nib that comes down on the bar opens nothing either: the bar is in
@@ -1199,11 +1284,12 @@ impl InkDocument {
                         self.stats.off_paper += 1;
                         changed = true;
                     } else {
-                        let tool = if self.mode == Tool::Eraser || sample.eraser || sample.inverted
-                        {
+                        // The eraser end of a stylus always erases, whatever the bar has selected;
+                        // everything else is the bar's answer (see [`Tool`]).
+                        let tool = if sample.eraser || sample.inverted {
                             Tool::Eraser
                         } else {
-                            Tool::Pen
+                            self.mode
                         };
                         self.active_pointer = Some(sample.id);
                         self.active_tool = tool;
@@ -1222,6 +1308,9 @@ impl InkDocument {
                                     settings.ink_color,
                                 ));
                             }
+                            // The lasso takes hold of the ink already in hand when the reading is *on* it,
+                            // and sweeps a new loop around whatever else it is pressed on.
+                            Tool::Lasso => self.begin_lasso(x, y),
                         }
 
                         changed = true;
@@ -1236,6 +1325,7 @@ impl InkDocument {
                         match self.active_tool {
                             Tool::Eraser => self.erase_at(x, y, settings),
                             Tool::Pen => self.push_point(x, y, sample, settings, false),
+                            Tool::Lasso => self.sweep_lasso(x, y, sample, settings),
                         }
                         changed = true;
                     }
@@ -1246,11 +1336,18 @@ impl InkDocument {
                         if !on_paper {
                             self.stats.off_paper += 1;
                         }
-                        if self.active_tool == Tool::Pen {
-                            // The lift is where the pen left the paper, so it is the stroke's
-                            // last point regardless of what the resampler would prefer.
-                            self.push_point(x, y, sample, settings, true);
+
+                        match self.active_tool {
+                            Tool::Pen => {
+                                // The lift is where the pen left the paper, so it is the stroke's
+                                // last point regardless of what the resampler would prefer.
+                                self.push_point(x, y, sample, settings, true);
+                            }
+                            // The loop ends where the pen lifted, and a drag is put down there.
+                            Tool::Lasso => self.end_lasso(Some((x, y)), sample, settings),
+                            Tool::Eraser => {}
                         }
+
                         self.finish_open();
                         changed = true;
                     }
@@ -1259,7 +1356,13 @@ impl InkDocument {
                 PenPhase::Cancel | PenPhase::Leave => {
                     if self.active_pointer == Some(sample.id) {
                         // The position these phases carry is not ink: the stroke ends wherever
-                        // it actually got to.
+                        // it actually got to. A lasso's gesture ends the same way — a loop selects what
+                        // it enclosed and a drag is put down — because a lift that never arrived is no
+                        // reason to lose what the reader did.
+                        if self.active_tool == Tool::Lasso {
+                            self.end_lasso(None, sample, settings);
+                        }
+
                         self.finish_open();
                         changed = true;
                     }
@@ -1271,6 +1374,14 @@ impl InkDocument {
 
             self.last_sample = Some(*sample);
         }
+
+        // The flags and the strokes are one list in two halves, and a mismatch is a selection pointing at
+        // the wrong lines — which nothing else here would ever notice.
+        debug_assert_eq!(
+            self.selected.len(),
+            self.finished.len(),
+            "the selection and the stroke list must be the same length"
+        );
 
         changed
     }
@@ -1289,6 +1400,9 @@ impl InkDocument {
                 // `make_mut` reuses the existing vector when no frame is holding a snapshot, and
                 // copies it when one is — and that copy is of pointers, not of ink.
                 Arc::make_mut(&mut self.finished).push(Arc::new(stroke));
+                // A stroke that has just been written is not in hand: the flags follow the stroke list
+                // wherever it changes (see [`Self::trim_selection`]).
+                self.trim_selection();
 
                 // A stroke drawn after an undo makes the drawing a new one rather than a shortened
                 // one, so what was taken back is no longer something to put forward. Emptied here
@@ -1324,56 +1438,22 @@ impl InkDocument {
         }
     }
 
-    /// Adds a point to the open stroke, after smoothing and resampling.
-    ///
-    /// `force` bypasses the resampler and is used for the lift, which is the stroke's end: a
-    /// distance filter that applied its own rule to the last point would shorten every stroke
-    /// by up to one spacing.
+    /// Adds a point to the stroke being drawn, after smoothing and resampling.
     fn push_point(&mut self, x: f32, y: f32, sample: &PenSample, settings: &Settings, force: bool) {
         let alpha = self.alpha(sample, settings);
 
-        let Some(stroke) = self.open.as_mut() else {
-            return;
-        };
-
-        let (target_x, target_y) = match (stroke.points.last(), alpha < 1.0) {
-            (Some(last), true) => (last.x + (x - last.x) * alpha, last.y + (y - last.y) * alpha),
-            _ => (x, y),
-        };
-
-        if !force {
-            if let Some(last) = stroke.points.last() {
-                let dx = last.x - target_x;
-                let dy = last.y - target_y;
-                if dx * dx + dy * dy < settings.resample_spacing * settings.resample_spacing {
-                    self.stats.resampled += 1;
-                    return;
-                }
-            }
+        if let Some(stroke) = self.open.as_mut() {
+            add_point(
+                stroke,
+                &mut self.stats,
+                alpha,
+                x,
+                y,
+                sample,
+                settings,
+                force,
+            );
         }
-
-        // The lift reports no applied force (`applied_pressure()` is `None` off the surface),
-        // so an existing point's width is reused rather than letting the stroke change width
-        // in its last pixel.
-        let width = match sample.applied_pressure() {
-            Some(_) => settings.width_for_pressure(sample.applied_pressure()),
-            None => stroke
-                .points
-                .last()
-                .map(|point| point.width)
-                .unwrap_or_else(|| settings.width_for_pressure(None)),
-        };
-
-        stroke.points.push(InkPoint::new(target_x, target_y, width));
-
-        // Kept up to date as the stroke grows, rather than only when it closes: a frame asks
-        // whether the stroke being drawn is on screen before it has ever been closed.
-        stroke.bounds[0] = stroke.bounds[0].min(target_x);
-        stroke.bounds[1] = stroke.bounds[1].min(target_y);
-        stroke.bounds[2] = stroke.bounds[2].max(target_x);
-        stroke.bounds[3] = stroke.bounds[3].max(target_y);
-
-        self.stats.kept_points += 1;
     }
 
     /// Removes the finished strokes the eraser nib passes over.
@@ -1405,18 +1485,367 @@ impl InkDocument {
             return;
         }
 
-        let before = self.finished.len();
-        Arc::make_mut(&mut self.finished)
-            .retain(|stroke| !stroke.hits(x, y, settings.erase_radius));
-        let erased = before - self.finished.len();
+        // Which strokes survive, worked out once and then applied to *both* lists: the strokes, and the
+        // flags that say which of them are in hand. Two lists that have to stay the same length is one list
+        // too many to keep in step by hand, so the survivors are decided first and both are filtered with
+        // the same answers.
+        let keep: Vec<bool> = self
+            .finished
+            .iter()
+            .map(|stroke| !stroke.hits(x, y, settings.erase_radius))
+            .collect();
+        let erased = keep.iter().filter(|kept| !**kept).count();
 
-        if erased > 0 {
-            self.stats.erased_strokes += erased as u64;
-            // Erasing is a change of its own — the page it leaves is not the page undo takes back
-            // to — so it ends the redo branch exactly as new ink does.
-            self.undone.clear();
+        if erased == 0 {
+            return;
+        }
+
+        let mut strokes = keep.iter().copied();
+        let mut flags = keep.iter().copied();
+        Arc::make_mut(&mut self.finished).retain(|_| strokes.next().unwrap_or(true));
+        Arc::make_mut(&mut self.selected).retain(|_| flags.next().unwrap_or(false));
+
+        self.stats.erased_strokes += erased as u64;
+        // Erasing is a change of its own — the page it leaves is not the page undo takes back
+        // to — so it ends the redo branch exactly as new ink does.
+        self.undone.clear();
+    }
+
+    /// Which strokes are in hand: one flag per finished stroke, in the same order.
+    ///
+    /// Handed to a frame as it stands — an `Arc`, so a frame shares the flags rather than copying them —
+    /// and read by the layer to draw the ink in hand in the selection's colour.
+    pub fn selected(&self) -> &Arc<Vec<bool>> {
+        &self.selected
+    }
+
+    /// How many strokes are in hand.
+    pub fn selected_count(&self) -> usize {
+        self.selected.iter().filter(|flag| **flag).count()
+    }
+
+    /// Whether anything is in hand.
+    pub fn has_selection(&self) -> bool {
+        self.selected.iter().any(|flag| *flag)
+    }
+
+    /// The loop being swept, if the lasso is down and drawing one.
+    ///
+    /// What a frame draws as the ring: the same stroke machinery as the line under the pen, so a lasso
+    /// looks like something the reader drew rather than like an overlay the system painted.
+    pub fn lasso(&self) -> Option<&Stroke> {
+        match &self.lasso {
+            Some(Lasso::Sweeping(loop_stroke)) => Some(loop_stroke),
+            _ => None,
         }
     }
+
+    /// How far the selection is being dragged, in the paper's units. `(0.0, 0.0)` when it is not.
+    pub fn drag_offset(&self) -> (f32, f32) {
+        match &self.lasso {
+            Some(Lasso::Dragging { by, .. }) => *by,
+            _ => (0.0, 0.0),
+        }
+    }
+
+    /// How many times this page's ink has been shifted in place: see [`Self::shifted`].
+    pub fn shifted(&self) -> u64 {
+        self.shifted
+    }
+
+    /// Lets the selection go, answering whether there was one.
+    pub fn deselect(&mut self) -> bool {
+        if !self.has_selection() {
+            return false;
+        }
+
+        self.selected = Arc::new(vec![false; self.finished.len()]);
+        true
+    }
+
+    /// Deletes the strokes in hand, answering how many went.
+    ///
+    /// Whole strokes, in place: the rest of the page keeps its order, which is what keeps the surviving ink
+    /// the same ink. Not undoable, for the reason erasing is not — see the module docs.
+    pub fn delete_selected(&mut self) -> usize {
+        let removed = self.selected_count();
+        if removed == 0 {
+            return 0;
+        }
+
+        let mut flags = self.selected.iter().copied();
+        Arc::make_mut(&mut self.finished).retain(|_| !flags.next().unwrap_or(false));
+        self.selected = Arc::new(vec![false; self.finished.len()]);
+
+        // A deletion is a change of its own — the page it leaves is not the page undo takes back to — so
+        // it ends the redo branch exactly as new ink does.
+        self.undone.clear();
+        removed
+    }
+
+    /// Moves the strokes in hand by `by`, in the paper's units: what putting a drag down does.
+    ///
+    /// The points are moved *now*, and the derived geometry with them. A stroke's bounds and outline are
+    /// what the eraser hit-tests against and what a frame culls by, so ink whose points had moved while its
+    /// bounds had not would refuse to be erased where it is and be erased where it used to be.
+    pub fn move_selected(&mut self, by: (f32, f32)) -> bool {
+        if by.0 == 0.0 && by.1 == 0.0 {
+            return false;
+        }
+
+        // Taken before the loop: the stroke list is borrowed mutably inside it.
+        let selected = Arc::clone(&self.selected);
+        let detail = self.detail();
+        let mut moved = 0;
+
+        for (index, stroke) in Arc::make_mut(&mut self.finished).iter_mut().enumerate() {
+            if !selected.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+
+            let stroke = Arc::make_mut(stroke);
+            for point in &mut stroke.points {
+                point.x += by.0;
+                point.y += by.1;
+            }
+            stroke.freeze(detail, Tip::Curved);
+            moved += 1;
+        }
+
+        if moved == 0 {
+            return false;
+        }
+
+        self.shifted += 1;
+        // A move is an edit, so what was taken back is no longer something to put forward — the rule every
+        // other change to the drawing follows.
+        self.undone.clear();
+        true
+    }
+
+    /// Begins what the lasso's nib is doing: taking hold of the ink in hand, or sweeping a new loop.
+    ///
+    /// A press *on* the selected ink takes hold of it — the gesture every notebook has — and a press
+    /// anywhere else starts a new loop, which is also how a selection is let go: a reader pressing beside
+    /// the ink is drawing a region, not asking for the old one.
+    fn begin_lasso(&mut self, x: f32, y: f32) {
+        if self.takes_hold_at(x, y) {
+            self.lasso = Some(Lasso::Dragging {
+                from: (x, y),
+                by: (0.0, 0.0),
+            });
+            return;
+        }
+
+        self.selected = Arc::new(vec![false; self.finished.len()]);
+        self.lasso = Some(Lasso::Sweeping(Stroke::new(
+            InkPoint::new(x, y, LASSO_WIDTH),
+            0,
+        )));
+    }
+
+    /// Whether a reading is on the ink in hand: what takes hold of a selection rather than sweeping a loop.
+    fn takes_hold_at(&self, x: f32, y: f32) -> bool {
+        self.finished.iter().enumerate().any(|(index, stroke)| {
+            self.selected.get(index).copied().unwrap_or(false) && stroke.hits(x, y, GRAB_RADIUS)
+        })
+    }
+
+    /// Keeps up with what the lasso's nib is doing: a loop grows, and a drag follows the hand.
+    fn sweep_lasso(&mut self, x: f32, y: f32, sample: &PenSample, settings: &Settings) {
+        let alpha = self.alpha(sample, settings);
+
+        match self.lasso.as_mut() {
+            Some(Lasso::Sweeping(loop_stroke)) => {
+                add_point(
+                    loop_stroke,
+                    &mut self.stats,
+                    alpha,
+                    x,
+                    y,
+                    sample,
+                    settings,
+                    false,
+                );
+            }
+            Some(Lasso::Dragging { from, by }) => *by = (x - from.0, y - from.1),
+            None => {}
+        }
+    }
+
+    /// Ends what the lasso's nib was doing, at the position it ended at.
+    ///
+    /// A sweep *selects*: the loop is the region, and the strokes inside it are in hand. A drag is *put
+    /// down*: the ink moves once, and stays in hand, so it can be taken somewhere else.
+    fn end_lasso(&mut self, at: Option<(f32, f32)>, sample: &PenSample, settings: &Settings) {
+        let Some(lasso) = self.lasso.take() else {
+            return;
+        };
+
+        match lasso {
+            Lasso::Sweeping(mut loop_stroke) => {
+                if let Some((x, y)) = at {
+                    let alpha = self.alpha(sample, settings);
+                    add_point(
+                        &mut loop_stroke,
+                        &mut self.stats,
+                        alpha,
+                        x,
+                        y,
+                        sample,
+                        settings,
+                        true,
+                    );
+                }
+
+                self.select_inside(&loop_stroke);
+            }
+            Lasso::Dragging { from, mut by } => {
+                if let Some((x, y)) = at {
+                    by = (x - from.0, y - from.1);
+                }
+
+                self.move_selected(by);
+            }
+        }
+    }
+
+    /// Takes the strokes the loop encloses, and lets go of the ones it does not.
+    ///
+    /// The loop's own bounds answer most strokes in four comparisons — the same cheap first test the eraser
+    /// makes — and only the survivors are read point by point against the loop.
+    fn select_inside(&mut self, region: &Stroke) {
+        let selected: Vec<bool> = self
+            .finished
+            .iter()
+            .map(|stroke| {
+                stroke.visible_in(region.bounds)
+                    && stroke
+                        .points
+                        .iter()
+                        .any(|point| inside_loop((point.x, point.y), &region.points))
+            })
+            .collect();
+
+        self.selected = Arc::new(selected);
+    }
+
+    /// Keeps the mask exactly as long as the stroke list.
+    ///
+    /// A stroke that has just arrived is not in hand, and one that has been taken back takes its flag with
+    /// it: all "kept in step" means, and the reason every edit that changes the list calls this.
+    fn trim_selection(&mut self) {
+        let flags = Arc::make_mut(&mut self.selected);
+        flags.truncate(self.finished.len());
+
+        if flags.len() < self.finished.len() {
+            flags.resize(self.finished.len(), false);
+        }
+    }
+
+    /// Drops whatever the nib was in the middle of: a page turn ends a gesture rather than carrying it over.
+    ///
+    /// A lasso's loop is not ink, and a drag has not moved anything yet (see [`Lasso`]) — so there is nothing
+    /// to *finish*: the page being left keeps its selection exactly as it was, and the page being turned to
+    /// starts with none of somebody else's half-done gesture on it.
+    fn forget_gesture(&mut self) {
+        self.lasso = None;
+        self.active_pointer = None;
+    }
+}
+
+/// Adds a point to a stroke being drawn, after smoothing and resampling.
+///
+/// A free function rather than a method, because two strokes are drawn this way: the line under the pen and
+/// the loop the lasso is sweeping. What differs between them is only which stroke it is.
+///
+/// `force` bypasses the resampler, and is used for the end of a stroke — the lift, or the last reading of a
+/// loop: a distance filter that applied its own rule to the final point would shorten every stroke by up to
+/// one spacing.
+///
+/// The counters it updates count *readings* rather than ink: a lasso's loop is read by the same walk, so the
+/// status line says what the digitizer sent — which is what a person measuring a pen wants to know, whatever
+/// the readings are being turned into.
+fn add_point(
+    stroke: &mut Stroke,
+    stats: &mut InkStats,
+    alpha: f32,
+    x: f32,
+    y: f32,
+    sample: &PenSample,
+    settings: &Settings,
+    force: bool,
+) {
+    let (target_x, target_y) = match (stroke.points.last(), alpha < 1.0) {
+        (Some(last), true) => (last.x + (x - last.x) * alpha, last.y + (y - last.y) * alpha),
+        _ => (x, y),
+    };
+
+    if !force {
+        if let Some(last) = stroke.points.last() {
+            let dx = last.x - target_x;
+            let dy = last.y - target_y;
+            if dx * dx + dy * dy < settings.resample_spacing * settings.resample_spacing {
+                stats.resampled += 1;
+                return;
+            }
+        }
+    }
+
+    // The lift reports no applied force (`applied_pressure()` is `None` off the surface), so an existing
+    // point's width is reused rather than letting the stroke change width in its last pixel.
+    let width = match sample.applied_pressure() {
+        Some(_) => settings.width_for_pressure(sample.applied_pressure()),
+        None => stroke
+            .points
+            .last()
+            .map(|point| point.width)
+            .unwrap_or_else(|| settings.width_for_pressure(None)),
+    };
+
+    stroke.points.push(InkPoint::new(target_x, target_y, width));
+
+    // Kept up to date as the stroke grows, rather than only when it closes: a frame asks whether the
+    // stroke being drawn is on screen before it has ever been closed.
+    stroke.bounds[0] = stroke.bounds[0].min(target_x);
+    stroke.bounds[1] = stroke.bounds[1].min(target_y);
+    stroke.bounds[2] = stroke.bounds[2].max(target_x);
+    stroke.bounds[3] = stroke.bounds[3].max(target_y);
+
+    stats.kept_points += 1;
+}
+
+/// Whether a point is inside a closed loop of points, by the even-odd rule.
+///
+/// The rule a hand's loop is read by, and the standard way to read one: a ray cast from the point crosses
+/// the boundary an odd number of times when the point is inside. The loop is closed by the last edge back
+/// to the first point, because the reader's loop *is* closed even though the reading that ended it did not
+/// land where the sweep began.
+fn inside_loop(point: (f32, f32), loop_points: &[InkPoint]) -> bool {
+    if loop_points.len() < 3 {
+        // A line, or a dot: there is no region to be inside of.
+        return false;
+    }
+
+    let mut inside = false;
+    let mut previous = loop_points[loop_points.len() - 1];
+
+    for current in loop_points {
+        // The y comparison is half-open — `>` on one side of it and not the other — so a point level with
+        // a vertex is counted once rather than twice, or not at all.
+        if (current.y > point.1) != (previous.y > point.1) {
+            let crossing = current.x
+                + (point.1 - current.y) / (previous.y - current.y) * (previous.x - current.x);
+
+            if point.0 < crossing {
+                inside = !inside;
+            }
+        }
+
+        previous = *current;
+    }
+
+    inside
 }
 /// Every page's ink, and which page is being written on.
 ///
@@ -1518,7 +1947,11 @@ impl Notes {
             return;
         }
 
-        let leaving = std::mem::take(&mut self.current);
+        let mut leaving = std::mem::take(&mut self.current);
+        // Whatever the nib was in the middle of ends with the page: a half-swept loop belongs to the paper it
+        // was drawn on, and the page being turned to must not inherit a gesture nobody finished (see
+        // [`InkDocument::forget_gesture`]). The *selection* stays — it is a fact about the page's writing.
+        leaving.forget_gesture();
         // A page left with nothing on it is normally dropped — an empty document costs nothing to
         // make again — but one that can still be *redone* is not empty in the sense that matters
         // here: the strokes are gone from the page and still in the model, and a page turn is not an
@@ -3667,6 +4100,427 @@ mod tests {
         assert!(
             culled.as_micros() < 2_000,
             "culling a full page took {culled:?}"
+        );
+    }
+
+    /// A straight stroke written from one point to another, as one batch.
+    ///
+    /// Laid down with the pen, so the tests below start from a page of ordinary writing: the lasso's job is
+    /// to take ink that is already there. (The older `write` above is one tap, for the tests about which
+    /// page holds what.)
+    fn write_line(ink: &mut InkDocument, from: (f32, f32), to: (f32, f32), steps: usize) {
+        let mut samples = vec![reading(7, PenPhase::Down, from.0, from.1, Some(0.5))];
+
+        for step in 1..steps {
+            let t = step as f32 / steps as f32;
+            samples.push(reading(
+                7,
+                PenPhase::Move,
+                from.0 + (to.0 - from.0) * t,
+                from.1 + (to.1 - from.1) * t,
+                Some(0.5),
+            ));
+        }
+
+        samples.push(reading(7, PenPhase::Up, to.0, to.1, None));
+        ink.consume(&samples, &id(), &settings());
+    }
+
+    /// Sweeps a lasso around a rectangle: down at one corner, round the other three, lift.
+    ///
+    /// The loop is closed by its last edge back to the first point (see [`inside_loop`]), so three corners
+    /// are a rectangle. The lasso is put in hand first, because the readings alone cannot say which tool they
+    /// are: the *model's* mode decides that, exactly as a real pen's does.
+    fn sweep(ink: &mut InkDocument, from: (f32, f32), to: (f32, f32)) {
+        ink.set_mode(Tool::Lasso);
+
+        let (x0, y0) = from;
+        let (x1, y1) = to;
+        let corners = [(x1, y0), (x1, y1), (x0, y1)];
+
+        let mut samples = vec![reading(7, PenPhase::Down, x0, y0, Some(0.5))];
+        let mut at = from;
+
+        for corner in corners {
+            for step in 1..=20 {
+                let t = step as f32 / 20.0;
+                let x = at.0 + (corner.0 - at.0) * t;
+                let y = at.1 + (corner.1 - at.1) * t;
+                samples.push(reading(7, PenPhase::Move, x, y, Some(0.5)));
+            }
+
+            at = corner;
+        }
+
+        samples.push(reading(7, PenPhase::Up, x0, y1, None));
+        ink.consume(&samples, &id(), &settings());
+    }
+
+    /// A page with three strokes written side by side, and the lasso in hand.
+    fn three_strokes() -> InkDocument {
+        let mut ink = InkDocument::default();
+        write_line(&mut ink, (100.0, 100.0), (200.0, 140.0), 20);
+        write_line(&mut ink, (300.0, 100.0), (400.0, 140.0), 20);
+        write_line(&mut ink, (500.0, 100.0), (600.0, 140.0), 20);
+        ink.set_mode(Tool::Lasso);
+        ink
+    }
+
+    /// The lasso takes the ink its loop encloses, and only that ink.
+    #[test]
+    fn a_loop_takes_the_ink_it_encloses() {
+        let mut ink = InkDocument::default();
+        write_line(&mut ink, (100.0, 100.0), (200.0, 140.0), 20);
+        write_line(&mut ink, (400.0, 100.0), (500.0, 140.0), 20);
+        ink.set_mode(Tool::Lasso);
+
+        sweep(&mut ink, (80.0, 80.0), (300.0, 300.0));
+
+        assert_eq!(ink.selected_count(), 1, "the writing inside the loop");
+        assert!(ink.selected()[0], "which is the first stroke");
+        assert!(!ink.selected()[1], "and not the one beside it");
+        assert!(ink.lasso().is_none(), "the loop is gone once it is closed");
+    }
+
+    /// A second loop takes the place of the first, and a loop around nothing leaves nothing in hand.
+    #[test]
+    fn a_loop_replaces_the_selection_it_follows() {
+        let mut ink = three_strokes();
+
+        sweep(&mut ink, (80.0, 80.0), (250.0, 200.0));
+        assert_eq!(ink.selected_count(), 1, "the first stroke");
+
+        // Swept around the *last* stroke: what the first loop took is let go of, not added to.
+        sweep(&mut ink, (480.0, 80.0), (650.0, 200.0));
+        assert_eq!(ink.selected_count(), 1);
+        assert_eq!(
+            ink.selected().iter().position(|flag| *flag),
+            Some(2),
+            "and it is the third stroke now"
+        );
+
+        sweep(&mut ink, (900.0, 900.0), (1000.0, 1000.0));
+        assert_eq!(ink.selected_count(), 0, "a loop around nothing");
+        assert!(!ink.has_selection());
+    }
+
+    /// A press on the ink in hand takes hold of it, and a press beside it sweeps a new loop.
+    #[test]
+    fn a_press_on_the_selection_takes_hold_of_it() {
+        let mut ink = three_strokes();
+        sweep(&mut ink, (80.0, 80.0), (250.0, 200.0));
+        assert_eq!(ink.selected_count(), 1);
+
+        // Down on the selected stroke, and a hand that moves: the offset follows, the ink does not.
+        ink.consume(
+            &[reading(7, PenPhase::Down, 150.0, 120.0, Some(0.5))],
+            &id(),
+            &settings(),
+        );
+        assert_eq!(ink.drag_offset(), (0.0, 0.0), "a press is not yet a drag");
+
+        ink.consume(
+            &[reading(7, PenPhase::Move, 170.0, 130.0, Some(0.5))],
+            &id(),
+            &settings(),
+        );
+        assert_eq!(ink.drag_offset(), (20.0, 10.0), "the hand has moved");
+        assert_eq!(
+            (ink.finished()[0].points[0].x, ink.finished()[0].points[0].y),
+            (100.0, 100.0),
+            "and the ink has not moved at all: only where it is drawn"
+        );
+        assert_eq!(ink.shifted(), 0, "nothing has been put down yet");
+
+        // Beside the selected ink instead: a new loop, which lets the selection go.
+        ink.consume(
+            &[reading(7, PenPhase::Down, 550.0, 120.0, Some(0.5))],
+            &id(),
+            &settings(),
+        );
+        assert_eq!(ink.drag_offset(), (0.0, 0.0));
+        assert!(ink.lasso().is_some(), "a loop is being swept");
+        assert_eq!(
+            ink.selected_count(),
+            0,
+            "and the old selection is let go of"
+        );
+    }
+
+    /// Putting a drag down moves the ink once, keeps it in hand, and counts as an edit to save.
+    #[test]
+    fn putting_a_drag_down_moves_the_ink() {
+        let mut ink = three_strokes();
+        sweep(&mut ink, (80.0, 80.0), (250.0, 200.0));
+
+        let changed = ink.consume(
+            &[
+                reading(7, PenPhase::Down, 150.0, 120.0, Some(0.5)),
+                reading(7, PenPhase::Move, 170.0, 140.0, Some(0.5)),
+                reading(7, PenPhase::Up, 190.0, 160.0, None),
+            ],
+            &id(),
+            &settings(),
+        );
+
+        assert!(changed, "the readings changed the page");
+        assert_eq!(ink.drag_offset(), (0.0, 0.0), "the drag is over");
+        assert_eq!(ink.shifted(), 1, "and the page has been shifted once");
+
+        let stroke = &ink.finished()[0];
+        assert_eq!((stroke.points[0].x, stroke.points[0].y), (140.0, 140.0));
+        assert_eq!(
+            stroke.bounds,
+            [140.0, 140.0, 240.0, 180.0],
+            "the bounds moved with the points, which is what the eraser hit-tests"
+        );
+        assert_eq!(
+            ink.finished()[1].points[0].x,
+            300.0,
+            "and the ink beside it did not move"
+        );
+        assert_eq!(ink.selected_count(), 1, "what was dragged is still in hand");
+    }
+
+    /// A drag nobody finished is put down where the hand got to: a lift that never arrived loses nothing.
+    #[test]
+    fn a_drag_that_never_lifts_is_put_down_where_it_got_to() {
+        let mut ink = three_strokes();
+        sweep(&mut ink, (80.0, 80.0), (250.0, 200.0));
+
+        ink.consume(
+            &[
+                reading(7, PenPhase::Down, 150.0, 120.0, Some(0.5)),
+                reading(7, PenPhase::Move, 170.0, 140.0, Some(0.5)),
+                reading(7, PenPhase::Leave, 190.0, 160.0, None),
+            ],
+            &id(),
+            &settings(),
+        );
+
+        // Moved to where the hand *got* to — the last reading that moved it, by `(20.0, 20.0)` — and not to
+        // where the leaving reading says the pointer was: that position is not somewhere the reader took the
+        // ink, which is the rule the pen's own `Leave` follows too.
+        assert_eq!(ink.finished()[0].points[0].x, 120.0, "moved, not lost");
+        assert_eq!(ink.shifted(), 1);
+    }
+
+    /// Deleting the selection removes exactly those strokes, and leaves the rest in order.
+    #[test]
+    fn deleting_the_selection_removes_those_strokes() {
+        let mut ink = three_strokes();
+        sweep(&mut ink, (280.0, 80.0), (450.0, 200.0));
+        assert_eq!(ink.selected_count(), 1, "the second stroke");
+
+        assert_eq!(ink.delete_selected(), 1);
+        assert_eq!(ink.finished().len(), 2);
+        assert_eq!(
+            ink.finished()[0].points[0].x,
+            100.0,
+            "the first is untouched"
+        );
+        assert_eq!(
+            ink.finished()[1].points[0].x,
+            500.0,
+            "the third took its place"
+        );
+        assert!(!ink.has_selection(), "the selection went with the ink");
+        assert_eq!(
+            ink.delete_selected(),
+            0,
+            "and there is nothing to delete twice"
+        );
+
+        // Not undoable, and this is what that means: undo takes the most recent *surviving* stroke, which is
+        // not the one the selection removed. Written as a test because it is the rule a reader meets.
+        assert!(ink.can_undo());
+        assert!(ink.undo());
+        assert_eq!(ink.finished().len(), 1, "the last surviving stroke went");
+    }
+
+    /// The flags stay in step with the strokes through every edit that renumbers them.
+    ///
+    /// The whole point of a mask: it is one list in two halves, and a half that drifted would highlight — or
+    /// delete — the wrong lines. Every edit that changes the stroke list is walked here: a finished stroke, an
+    /// undo, a redo, an erase, and a delete.
+    #[test]
+    fn the_selection_is_kept_in_step_with_the_strokes() {
+        let mut ink = three_strokes();
+
+        // The *last* stroke in hand, so an undo of it has a flag to let go of.
+        sweep(&mut ink, (480.0, 80.0), (650.0, 200.0));
+        assert_eq!(ink.selected_count(), 1);
+
+        assert!(ink.undo());
+        assert_eq!(ink.selected().len(), 2, "a flag per stroke, still");
+        assert_eq!(ink.selected_count(), 0, "and the flag went with the stroke");
+
+        assert!(ink.redo());
+        assert_eq!(ink.selected().len(), 3);
+        assert_eq!(
+            ink.selected_count(),
+            0,
+            "a stroke put back is new ink, and not in hand"
+        );
+
+        // A stroke written afterwards grows both lists.
+        ink.set_mode(Tool::Pen);
+        write_line(&mut ink, (700.0, 300.0), (760.0, 320.0), 10);
+        assert_eq!(ink.selected().len(), 4, "the flags followed the new stroke");
+        assert_eq!(ink.selected_count(), 0);
+
+        // An erase filters both: the flags of the strokes that went go with them.
+        sweep(&mut ink, (80.0, 80.0), (650.0, 200.0));
+        assert_eq!(ink.selected_count(), 3, "everything but the newest stroke");
+        ink.set_mode(Tool::Eraser);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 150.0, 120.0, Some(0.5))],
+            &id(),
+            &settings(),
+        );
+        assert_eq!(ink.finished().len(), 3, "the first stroke was erased");
+        assert_eq!(ink.selected().len(), ink.finished().len());
+        assert_eq!(
+            ink.selected_count(),
+            2,
+            "and the flag of the erased stroke went with it"
+        );
+
+        // And a command lets the lot go.
+        assert!(ink.deselect());
+        assert_eq!(ink.selected_count(), 0);
+        assert!(!ink.deselect(), "asking twice does nothing");
+    }
+
+    /// A selection belongs to its page: turning away and back leaves the same strokes in hand.
+    #[test]
+    fn a_selection_belongs_to_its_page() {
+        let mut notes = Notes::default();
+        write_line(&mut notes, (100.0, 100.0), (200.0, 140.0), 20);
+        notes.set_mode(Tool::Lasso);
+        sweep(&mut notes, (80.0, 80.0), (250.0, 200.0));
+        assert_eq!(notes.selected_count(), 1);
+
+        notes.go_to(1);
+        assert_eq!(
+            notes.selected_count(),
+            0,
+            "the page turned to has nothing in hand"
+        );
+
+        notes.go_to(0);
+        assert_eq!(
+            notes.selected_count(),
+            1,
+            "and the one turned back to still has"
+        );
+    }
+
+    /// A page turned away from is left with its selection, and without a gesture nobody finished.
+    #[test]
+    fn a_page_turn_ends_a_gesture_in_flight() {
+        let mut notes = Notes::default();
+        write_line(&mut notes, (100.0, 100.0), (200.0, 140.0), 20);
+        notes.set_mode(Tool::Lasso);
+
+        // A *drag* in flight: the selection is in hand and has been taken somewhere.
+        sweep(&mut notes, (80.0, 80.0), (250.0, 200.0));
+        notes.consume(
+            &[
+                reading(7, PenPhase::Down, 150.0, 120.0, Some(0.5)),
+                reading(7, PenPhase::Move, 170.0, 140.0, Some(0.5)),
+            ],
+            &id(),
+            &settings(),
+        );
+        assert_eq!(notes.drag_offset(), (20.0, 20.0));
+
+        notes.go_to(1);
+        notes.go_to(0);
+
+        assert_eq!(
+            notes.drag_offset(),
+            (0.0, 0.0),
+            "a drag nobody put down did not come back with the page"
+        );
+        assert_eq!(
+            notes.selected_count(),
+            1,
+            "and the selection — which is a fact about the writing — did"
+        );
+        assert_eq!(
+            notes.finished()[0].points[0].x,
+            100.0,
+            "and nothing was moved by it either, because a drag moves nothing until it is put down"
+        );
+
+        // A *sweep* in flight, on its own page: the loop is not ink and did not come back. It had also already
+        // let the old selection go when it began — a press beside the ink starts a new region.
+        let mut notes = Notes::default();
+        write_line(&mut notes, (100.0, 100.0), (200.0, 140.0), 20);
+        notes.set_mode(Tool::Lasso);
+        sweep(&mut notes, (80.0, 80.0), (250.0, 200.0));
+        notes.consume(
+            &[reading(7, PenPhase::Down, 400.0, 400.0, Some(0.5))],
+            &id(),
+            &settings(),
+        );
+        assert!(notes.lasso().is_some(), "a loop is in flight");
+
+        notes.go_to(1);
+        notes.go_to(0);
+
+        assert!(
+            notes.lasso().is_none(),
+            "a half-swept loop did not come back with the page"
+        );
+        assert_eq!(
+            notes.selected_count(),
+            0,
+            "nor the selection it had let go of"
+        );
+    }
+
+    /// The loop's rule: a point inside is inside, a point outside is not, and the loop closes itself.
+    #[test]
+    fn a_point_is_inside_a_loop_by_the_even_odd_rule() {
+        // A square of four points: the closing edge runs from the last point back to the first.
+        let square: Vec<InkPoint> = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
+            .iter()
+            .map(|(x, y)| InkPoint::new(*x, *y, 1.0))
+            .collect();
+
+        assert!(inside_loop((50.0, 50.0), &square));
+        assert!(!inside_loop((150.0, 50.0), &square), "beside it");
+        assert!(!inside_loop((-10.0, 50.0), &square), "on the other side");
+        assert!(!inside_loop((50.0, 150.0), &square), "above it");
+        assert!(!inside_loop((50.0, -10.0), &square), "below it");
+
+        // A loop with a bite taken out of it: a point in the bite is outside, by the same rule.
+        let bitten: Vec<InkPoint> = [
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 100.0),
+            (60.0, 100.0),
+            (60.0, 40.0),
+            (40.0, 40.0),
+            (40.0, 100.0),
+            (0.0, 100.0),
+        ]
+        .iter()
+        .map(|(x, y)| InkPoint::new(*x, *y, 1.0))
+        .collect();
+
+        assert!(inside_loop((20.0, 20.0), &bitten));
+        assert!(inside_loop((80.0, 20.0), &bitten));
+        assert!(
+            !inside_loop((50.0, 80.0), &bitten),
+            "the bite is not enclosed"
+        );
+
+        assert!(
+            !inside_loop((50.0, 50.0), &square[..2]),
+            "a line is not a region"
         );
     }
 }

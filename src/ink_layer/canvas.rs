@@ -133,6 +133,26 @@ pub struct Ink {
     /// The paper's own size, in the paper's units — the un-turned shape, which is what `rotation`
     /// turns. `(0.0, 0.0)` means "no paper": see [`crate::ink::InkTransform::has_paper`].
     pub paper: (f32, f32),
+    /// Which strokes are in hand: one flag per stroke in [`Ink::strokes`], in the same order.
+    ///
+    /// Read to draw the ink in hand *again*, in the selection's colour, so the reader can see what a command
+    /// would act on. A mask shorter than the stroke list is not an error — a frame describes what it has —
+    /// and a missing flag reads as "not in hand", which is the safe way round: the ink is drawn in its own
+    /// colour and simply not highlighted.
+    pub selected: Arc<Vec<bool>>,
+    /// How far the ink in hand is being dragged, in the paper's own units.
+    ///
+    /// The whole of what a drag changes while it is happening: the ink is not touched until the drag is put
+    /// down (see [`crate::ink`]), so a frame draws the same strokes through a transform that has moved.
+    pub offset: (f32, f32),
+    /// The colour the ink in hand is shown in, or `None` when there is nothing to show.
+    ///
+    /// The app's design, like every other colour here: the layer knows how to put ink on a surface and nothing
+    /// about what "selected" ought to look like. It is the tint over the ink *and* the loop's own colour —
+    /// one number, because they are one idea.
+    pub selection: Option<Hsla>,
+    /// The lasso's loop, while one is being swept: an open stroke, drawn as the ring the reader is drawing.
+    pub lasso: Option<Arc<Stroke>>,
 }
 
 impl Default for Ink {
@@ -146,6 +166,10 @@ impl Default for Ink {
             visible: Ink::ALL_VISIBLE,
             rotation: 0,
             paper: (0.0, 0.0),
+            selected: Arc::new(Vec::new()),
+            offset: (0.0, 0.0),
+            selection: None,
+            lasso: None,
         }
     }
 }

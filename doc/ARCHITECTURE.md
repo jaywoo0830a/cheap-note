@@ -396,7 +396,7 @@ swallows the note's keys entirely (it did, from opening a note until a rename).
 |---|---|
 | **The hand** | |
 | `pen` | the capture, its worker thread, the batch tap, and the hand-off inbox |
-| `ink` | readings in, strokes out: edges, pointer identity, resampling, width, undo history |
+| `ink` | readings in, strokes out: edges, pointer identity, resampling, width, undo history, the lasso's selection |
 | `cursor` | the ghost's shape: where the pen is, and how it leans |
 | `cursor_overlay` | the ghost's own window, drawn from the pen thread |
 | `system_cursor` | hiding the system pointer while the ghost replaces it |
@@ -483,6 +483,12 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
     same mapping, and a test compares them. A page's own `/Rotate` is *Pdfium's*: it is in the size Pdfium
     reports for the page and in the pixels it draws, so the app hands Pdfium the reader's turn alone
     (`the_rotation_handed_to_pdfium_is_the_readers_turn` pins that down).
+14. **A page's selection belongs to the page too**, and to nothing else: a lasso's selection is a mask over
+    that page's strokes (`ink::InkDocument::selected`), kept in step with the stroke list by every edit that
+    changes it, and the ink it holds is *not touched* while it is being dragged — a drag is one offset in the
+    canvas description, exactly as a page's rotation is one number in the same description. The one thing this
+    costs is a second number in the write path: a note sees a page by counting strokes, and a *move* leaves the
+    count alone, so the page counts its shifts too (see [STORE.md](STORE.md), §6, and `page_owes_a_rewrite`).
 
 ## 12. Requirements, building, running
 

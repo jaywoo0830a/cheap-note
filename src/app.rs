@@ -33,16 +33,6 @@
 //! the page, rebuilding the counters — on a fixed [`HOUSEKEEPING_INTERVAL`] that owes nothing to
 //! the display, so that a rasterisation can never delay a stroke.
 //!
-//! ## The ink, and why a page of it is not redrawn
-//!
-//! An immediate-mode canvas pays for everything it draws on every frame, and the ink is the one thing
-//! on the sheet that grows without bound: several hundred strokes is several hundred ribbons built,
-//! submitted and thrown away again, on a page nobody is touching. The finished strokes are therefore
-//! drawn from a layer of their own ([`InkLayer`]), which a frame *reuses* until the ink changes or the
-//! sheet moves — so a page that is full costs a frame the stroke being written, and nothing else. The
-//! stroke being written stays in the frame, because a cache of it would be a cache of a line mid-draw;
-//! the status line's absent "layer" clause is what says a frame paid nothing for the rest.
-//!
 //! ## The top bar, and why it can be turned off
 //!
 //! The status line holds counters that move on every reading, and text that changes is text GPUI
@@ -76,7 +66,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui_kit::assets::IconName;
@@ -514,11 +504,6 @@ pub struct NoteApp {
     /// Held here rather than rebuilt in the paint callback: the callback runs once per frame and
     /// must not do geometry work.
     ruling: Ruling,
-    /// The finished ink of the page, drawn from a layer a frame reuses rather than rebuilds.
-    ///
-    /// The one thing on the sheet that grows without bound, taken out of the frame's own work: see
-    /// [`InkLayer`] for what that buys, and for the two rules the arrangement depends on.
-    ink_layer: Entity<InkLayer>,
     /// The status line as last composed, and when.
     ///
     /// Cached so that most frames draw the *same* text. A line rebuilt every frame is a line the
@@ -670,13 +655,6 @@ impl NoteApp {
         );
         let sheet_focus = cx.focus_handle();
 
-        // The finished ink's layer: a view of its own, so that GPUI can keep the subtree it rendered
-        // between frames and a page of ribbons is not rebuilt for every reading of the pen. Made here,
-        // before the app it belongs to, because the *handle* is what the app holds — and the counters
-        // first, so that the layer can report what its rebuilds cost.
-        let timings = Arc::new(Timings::default());
-        let ink_layer = cx.new(|_| InkLayer::new(Arc::clone(&timings)));
-
         let mut app = NoteApp {
             settings,
             ink: Notes::new(),
@@ -700,8 +678,7 @@ impl NoteApp {
             view,
             sheet: Sheet::default(),
             bar_bottom: Rc::new(Cell::new(None)),
-            timings: Arc::clone(&timings),
-            ink_layer,
+            timings: Arc::new(Timings::default()),
             last_pump: None,
             pending_pdf: None,
             last_ink_at: Instant::now(),
@@ -3914,165 +3891,6 @@ impl NoteApp {
     }
 }
 
-/// The finished ink of a page as one picture: the strokes, and the zoom their ribbons were built at.
-///
-/// Both halves are what a layer has to be *told about*, and neither is a copy of anything: the model
-/// hands the list out as an `Arc` and replaces it when the ink changes — every edit goes through
-/// `Arc::make_mut`, which reuses that vector when nothing is holding it and copies it when something
-/// is (see [`crate::ink::InkDocument::finish_open`]) — so holding a picture is also what keeps the next edit from
-/// writing through the geometry a cached frame is still showing.
-struct InkPicture {
-    /// The finished strokes, in the order they were drawn.
-    strokes: Arc<Vec<Arc<Stroke>>>,
-    /// The zoom those ribbons were detailed for, and the rest of the layer's cache key.
-    ///
-    /// The model's ribbons depend on the *detail rung* this zoom lands in, which is what says whether
-    /// the geometry in the snapshot is still the right geometry. It is also the second half of where
-    /// the ink belongs: the layer's bounds carry the sheet's rectangle, that rectangle is
-    /// `paper × zoom`, and so a zoom held beside it makes two sheets with the same rectangle *the
-    /// same sheet* — same placement, same paper — rather than two that merely happen to be drawn the
-    /// same size. Without it, a paper and a zoom that moved in opposite directions would leave a
-    /// replayed layer showing ink from a sheet that is no longer on screen.
-    zoom: f32,
-}
-
-/// The page's finished ink, in a layer a frame *reuses* instead of rebuilding.
-///
-/// An immediate-mode canvas pays for everything it draws on every frame, and the ink is the one thing
-/// on the sheet that grows without bound: several hundred strokes is several hundred ribbons built,
-/// cloned into the scene and submitted again, for a page nobody is touching. That is what "it starts
-/// to stutter once a page fills up" is made of — and unlike the cost of drawing the stroke under the
-/// pen, which is one stroke whatever the page holds, it repeats for as long as the ink is on screen.
-///
-/// The toolkit has the answer already: a view drawn with [`Entity::cached`] keeps the subtree it
-/// rendered — prepaint and paint both — and draws the previous frame's scene again until the view is
-/// notified or the element's bounds or its content mask change. So the finished ink moves into an
-/// entity of its own; the app tells it what to draw only when that is a *different* picture; and a
-/// frame that changes nothing about the ink draws the counters and the stroke under the pen, and
-/// nothing else.
-///
-/// Two consequences shape the rest of this, and both are deliberate:
-///
-/// - **The stroke being written is not in here.** It changes on every reading, so it is painted by
-///   the canvas drawn over this layer: a cached copy of it would be a cached lie, a line frozen one
-///   reading behind the pen. What makes the finished ink a new picture is the pen coming up, an edit,
-///   or a page turn — a handful of frames a second at most, and none of them while the pen is moving.
-/// - **Where the sheet is drawn is not something the app notifies about.** It is the layer's
-///   *bounds*, and a cached subtree whose bounds have moved is laid out and painted again — which is
-///   precisely the set of frames on which a page of ink has to be placed again anyway, because a pan,
-///   a zoom, a resize and a page turn all move the sheet's rectangle. One expression in the note
-///   screen keeps the two in step (see [`NoteApp::render`]) rather than a notify at every place that
-///   can move a sheet.
-struct InkLayer {
-    /// What to draw: taken when the ink changes, read when the layer is rebuilt.
-    picture: Arc<InkPicture>,
-    /// Where the sheet is drawn *now*.
-    ///
-    /// Published every frame and read only on a rebuild, which is what lets a pan say nothing: the
-    /// frame that moved the sheet is the frame that rebuilds, and it reads the sheet it just put
-    /// there.
-    sheet: Arc<Mutex<Sheet>>,
-    /// What a rebuild cost, for the one number that says whether any of this is working.
-    timings: Arc<Timings>,
-}
-
-impl InkLayer {
-    /// A layer with nothing in it, for the frames before the app has drawn one.
-    fn new(timings: Arc<Timings>) -> Self {
-        InkLayer {
-            picture: Arc::new(InkPicture {
-                strokes: Arc::new(Vec::new()),
-                zoom: 1.0,
-            }),
-            sheet: Arc::new(Mutex::new(Sheet::default())),
-            timings,
-        }
-    }
-
-    /// Publishes where the sheet is drawn now, without asking for a rebuild.
-    ///
-    /// A lock poisoned by a panic elsewhere is not worth a panic of this one: the sheet already held
-    /// is a frame old, and the next frame publishes again.
-    fn set_sheet(&self, sheet: Sheet) {
-        if let Ok(mut held) = self.sheet.lock() {
-            *held = sheet;
-        }
-    }
-
-    /// Takes the page's picture, and says whether that is a change the layer must be redrawn for.
-    ///
-    /// Two things make it one. The list of strokes, compared *by identity* — which is what the model
-    /// replaces whenever the ink changes, and what it copies rather than writes through while a frame
-    /// is holding this one. And the zoom the ribbons were built for, which is the one edit that can
-    /// leave the same list behind (see [`crate::ink::InkDocument::set_zoom`]).
-    fn retarget(&mut self, picture: Arc<InkPicture>) -> bool {
-        let same = Arc::ptr_eq(&self.picture.strokes, &picture.strokes)
-            && self.picture.zoom == picture.zoom;
-
-        if !same {
-            self.picture = picture;
-        }
-
-        !same
-    }
-}
-
-impl Render for InkLayer {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // The picture is captured, not borrowed: this render's paint callback runs after it, and a
-        // *cached* layer's callback runs on the frames after that — on a picture that is by
-        // definition the same one, which is what makes capturing it safe.
-        let picture = Arc::clone(&self.picture);
-        let sheet = Arc::clone(&self.sheet);
-        let timings = Arc::clone(&self.timings);
-
-        canvas(
-            |_, _, _| (),
-            move |_bounds, _, window: &mut Window, _cx: &mut App| {
-                // This is the frame the cache exists to stop paying for, so it is measured and
-                // counted: "the layer is working" is a claim the status line has to be able to check,
-                // and the number to look for is the one that is *absent* (see
-                // [`Timings::ink_layer_repaints`]).
-                let _timed = measure(&timings.ink_layer);
-                timings.count_ink_layer();
-
-                let Ok(sheet) = sheet.lock().map(|held| *held) else {
-                    return;
-                };
-
-                let visible = sheet.visible();
-                let mut scratch: Vec<Point<Pixels>> = Vec::new();
-
-                // Clipped to the sheet, exactly as the frame that draws the stroke being written
-                // clips it: the display half of the rule the model enforces, and the reason ink
-                // written before that rule existed is hidden rather than drawn on the desk.
-                window.with_content_mask(Some(ContentMask { bounds: sheet_rect(&sheet) }), |window| {
-                    for stroke in picture.strokes.iter() {
-                        if stroke.visible_in(visible) {
-                            paint_stroke(window, stroke, &sheet, &mut scratch);
-                        }
-                    }
-                });
-            },
-        )
-        .size_full()
-    }
-}
-
-/// The rectangle a sheet occupies in the window, as an element's bounds.
-///
-/// One expression, for two things that have to agree: the mask the ink is clipped by, and the bounds
-/// the layer is laid out over — which is its cache key. See [`InkLayer`] for why that second job
-/// matters as much as the first.
-fn sheet_rect(sheet: &Sheet) -> Bounds<Pixels> {
-    let (width, height) = sheet.drawn();
-
-    Bounds {
-        origin: point(px(sheet.origin.0), px(sheet.origin.1)),
-        size: size(px(width), px(height)),
-    }
-}
-
 impl Render for NoteApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Timed in a scope of its own, and *not* through `self.timings`: this guard holds a borrow
@@ -4250,27 +4068,6 @@ impl Render for NoteApp {
         let page_image = page.as_ref().map(|page| Arc::clone(&page.image));
         let page_color: Hsla = rgb(self.settings.page_color).into();
         let timings = Arc::clone(&self.timings);
-        // And a handle of its own for the frame's second canvas: both paint callbacks are built here
-        // and both outlive this function, so the counters are shared rather than borrowed.
-        let live_timings = Arc::clone(&timings);
-
-        // What the layer is told, once per frame: where the sheet is (always — it is read only when
-        // the layer is rebuilt, and a frame that moved the sheet *is* that frame), and what to draw
-        // (only when that is a different picture — the pen coming up, an edit, another page). The
-        // notify is the whole of the invalidation: GPUI keeps the subtree it rendered until the
-        // entity is notified or the bounds below move. See [`InkLayer`].
-        self.ink_layer.update(cx, |layer, cx| {
-            layer.set_sheet(sheet);
-
-            let picture = Arc::new(InkPicture {
-                strokes: Arc::clone(&finished),
-                zoom: sheet.zoom,
-            });
-
-            if layer.retarget(picture) {
-                cx.notify();
-            }
-        });
 
         // The pen's ghost cursor is *not* drawn here. It is a position rather than a stroke, and a
         // frame is one frame too late for a position: it has a window of its own, fed straight from
@@ -4355,36 +4152,6 @@ impl Render for NoteApp {
                                 )
                                 .ok();
                         }
-                    },
-                )
-                .size_full(),
-            )
-            // The finished ink, in a layer that a frame *reuses*: over the paper and the page image,
-            // under everything drawn with the pen now. Its bounds are the sheet's own rectangle — the
-            // same expression the mask above is built from — which is what makes a pan, a zoom, a
-            // resize and a page turn rebuilds without a line of bookkeeping, and what makes a frame
-            // that changed nothing about the sheet draw no ribbon at all. See [`InkLayer`].
-            .child({
-                let style = StyleRefinement::default()
-                    .absolute()
-                    .left(px(sheet.origin.0))
-                    .top(px(sheet.origin.1))
-                    .w(px(page_size.0))
-                    .h(px(page_size.1));
-
-                self.ink_layer.clone().cached(style)
-            })
-            // A handle of its own for the second canvas: both paint callbacks are built here and both
-            // outlive this function, so the counters are shared rather than borrowed.
-            .child({
-                // The frame's own ink: the counters, and the one stroke that is *changing*. A stroke
-                // is finished once, at the pen's lift, and until then it is a line growing under the
-                // nib — cached, it would be a line frozen a reading behind. Everything else on the
-                // page was drawn by the layer above, on this frame or on the one it was last rebuilt.
-                canvas(
-                    |_, _, _| (),
-                    move |_bounds, _, window: &mut Window, _cx: &mut App| {
-                        let _timed = measure(&live_timings.paint);
 
                         // Ink that is off the sheet is skipped before a polygon is built for it.
                         // This is where zooming in pays for itself: a page and a half of ink can
@@ -4411,13 +4178,9 @@ impl Render for NoteApp {
                                         continue;
                                     }
 
-                                    // Counted, not built: the layer above has this stroke, and a frame
-                                    // that reuses it does not walk the page to draw it. The walk is
-                                    // what keeps the counters about the *page* — how much ink is on it,
-                                    // and how much of it is off screen — rather than about the cache,
-                                    // and it is a comparison per stroke against a rectangle.
                                     painted += 1;
                                     vertices += stroke.outline.len() as u64;
+                                    paint_stroke(window, stroke, &sheet, &mut scratch);
                                 }
 
                                 // The stroke being drawn is never culled: it is by definition under
@@ -4431,11 +4194,11 @@ impl Render for NoteApp {
                             },
                         );
 
-                        live_timings.count_painted(painted, vertices, culled);
+                        timings.count_painted(painted, vertices, culled);
                     },
                 )
-                .size_full()
-            })
+                .size_full(),
+            )
             .child(bar)
             // The desk's own row: the page in the middle, the counters at the edge. Last, so it
             // paints over the sheet — a page pill *under* the paper would be no pill at all.
@@ -4657,13 +4420,11 @@ mod tests {
     // scope and shadow the attribute this module needs.
     use super::{
         file_label, file_stem, notch_in_pixels, pdf_render_due, pinch_zoom_factor, quantise_width,
-        sheet_matches, sheet_rect, solid_path, status_due, wheel_pan, wheel_zoom_factor, InkLayer,
-        InkPicture, Sheet, Timings, PDF_QUIET_INTERVAL, STATUS_INTERVAL, WHEEL_LINE_HEIGHT,
-        WHEEL_LINES_PER_NOTCH, WHEEL_ZOOM_STEP,
+        sheet_matches, solid_path, status_due, wheel_pan, wheel_zoom_factor, PDF_QUIET_INTERVAL,
+        STATUS_INTERVAL, WHEEL_LINE_HEIGHT, WHEEL_LINES_PER_NOTCH, WHEEL_ZOOM_STEP,
     };
     use crate::ink::{InkPoint, Stroke};
     use gpui_kit::{point, px, Path, PathBuilder, Pixels, Point};
-    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     /// How many triangles of a built path cover a point.
@@ -4896,80 +4657,6 @@ mod tests {
         assert!(
             !sheet_matches(sheet, (794.0, 1123.0 + 8.0)),
             "a taller sheet is a different sheet"
-        );
-    }
-
-    /// The ink layer is rebuilt when its picture is a *different* picture, and not otherwise.
-    ///
-    /// Identity rather than equality is the point: the model replaces the list for every edit, and
-    /// copies rather than writing through the one a frame is holding (see
-    /// [`crate::ink::InkDocument::finish_open`]). The zoom is the second half, because that is the one
-    /// edit that can leave the same list behind — the ribbons in it were built for a sheet drawn at a
-    /// particular size. Everything else about a frame — where the sheet is, what the counters say — is
-    /// deliberately *not* here: the sheet is the layer's bounds, and a moved sheet is a miss already.
-    #[test]
-    fn a_layer_is_retargeted_only_when_its_picture_changes() {
-        let mut layer = InkLayer::new(Arc::new(Timings::default()));
-        let page = Arc::new(Vec::new());
-        let picture = |strokes: Arc<Vec<Arc<Stroke>>>, zoom: f32| Arc::new(InkPicture { strokes, zoom });
-
-        assert!(
-            layer.retarget(picture(Arc::clone(&page), 1.0)),
-            "the first picture is a change: before it there was nothing to draw"
-        );
-        assert!(
-            !layer.retarget(picture(Arc::clone(&page), 1.0)),
-            "the same strokes at the same zoom are the same picture — this is the frame that is free"
-        );
-        assert!(
-            layer.retarget(picture(Arc::clone(&page), 2.0)),
-            "another zoom is another picture: the ribbons in this one were built for the first"
-        );
-        assert!(
-            layer.retarget(picture(Arc::new(Vec::new()), 2.0)),
-            "and another list is another picture, even one that is empty like the last"
-        );
-    }
-
-    /// The layer's bounds are the sheet's rectangle — the half of its cache key that a frame cannot set
-    /// for itself, since GPUI reuses a cached subtree exactly while its bounds are the same.
-    #[test]
-    fn a_moved_sheet_moves_the_layers_bounds() {
-        let sheet = |origin: (f32, f32), paper: (f32, f32), zoom: f32| Sheet {
-            paper,
-            origin,
-            window: (1200.0, 900.0),
-            zoom,
-        };
-
-        let there = sheet((10.0, 20.0), (800.0, 1000.0), 1.0);
-        assert_eq!(
-            sheet_rect(&there),
-            sheet_rect(&there),
-            "a sheet that did not move gives the same rectangle back"
-        );
-
-        for (what, moved) in [
-            ("a pan", sheet((11.0, 20.0), (800.0, 1000.0), 1.0)),
-            ("a zoom", sheet((10.0, 20.0), (800.0, 1000.0), 2.0)),
-            ("another paper", sheet((10.0, 20.0), (400.0, 500.0), 1.0)),
-        ] {
-            assert_ne!(
-                sheet_rect(&there),
-                sheet_rect(&moved),
-                "{what} has to rebuild the layer: with the same bounds a frame would reuse it"
-            );
-        }
-
-        // The one shape the bounds alone cannot answer: half the paper drawn twice as large is the same
-        // rectangle, and a point on the paper under the nib at 1:1 is somewhere else at 2x. That is
-        // what the zoom in the layer's key is for, so these two tests are two halves of one rule.
-        let doubled = sheet((10.0, 20.0), (400.0, 500.0), 2.0);
-        assert_eq!(sheet_rect(&there), sheet_rect(&doubled), "the same rectangle");
-        assert_ne!(
-            there.place(100.0, 100.0),
-            doubled.place(100.0, 100.0),
-            "and the same point on the paper in a different place"
         );
     }
 

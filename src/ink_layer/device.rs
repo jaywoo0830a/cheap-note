@@ -29,6 +29,8 @@
 //! Not this module's business: it makes the device, the swap chain and the visual, and hands the
 //! current buffer to whatever draws a frame (see [`crate::ink_layer::render`]).
 
+use std::time::{Duration, Instant};
+
 use anyhow::{anyhow, Context, Result};
 use windows::core::Interface as _;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, HWND, RECT, WAIT_OBJECT_0};
@@ -164,15 +166,43 @@ impl Device {
         // Nothing is holding a buffer: the renderer takes one per frame and lets it go before the
         // frame ends, so a resize never finds one alive (see [`Renderer::draw`]).
         let (width, height) = (size.0.max(1), size.1.max(1));
-        unsafe {
-            // A buffer count of zero keeps the count the chain was made with.
-            self.swap_chain.ResizeBuffers(
-                0,
-                width,
-                height,
-                DXGI_FORMAT_UNKNOWN,
-                DXGI_SWAP_CHAIN_FLAG(0),
-            )?;
+        // The context holds the frame it last drew, and a chain cannot be resized while anything
+        // holds its back buffers (see `IDXGISwapChain::ResizeBuffers`): the target is let go first.
+        self.renderer.release_target();
+
+        // The flags are the frame clock's own: a resize *resets* a chain's flags rather than keeping
+        // them, and the clock it takes away is the only signal that says a frame has been taken — a
+        // canvas that never draws again is what that costs (see [`FrameWait::flags`]).
+        let flags = self.frame.flags();
+        let mut resized = unsafe {
+            self.swap_chain
+                .ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, flags)
+        };
+
+        if resized.is_err() && self.frame.is_paced() {
+            // A driver that will not take the clock's flag through a resize gets the resize without
+            // it, and the canvas is drawn unpaced from here on: slower, and still a canvas (see
+            // [`FrameWait`]). Without this it would be a resize that fails on every frame, which is
+            // a canvas frozen behind a message.
+            self.frame.forget();
+            resized = unsafe {
+                self.swap_chain.ResizeBuffers(
+                    0,
+                    width,
+                    height,
+                    DXGI_FORMAT_UNKNOWN,
+                    DXGI_SWAP_CHAIN_FLAG(0),
+                )
+            };
+        }
+
+        resized.context("resizing the canvas")?;
+
+        // And the latency, if the clock is still there: a resize is a new chain in everything but
+        // name, and there is no promise that it keeps this.
+        if self.frame.is_paced() {
+            let chain: IDXGISwapChain2 = self.swap_chain.cast()?;
+            pace(&chain)?;
         }
 
         self.size = size;
@@ -216,9 +246,34 @@ impl Composition {
 
 /// The compositor's own clock: a handle that says the frame it was given last has been taken, or
 /// nothing at all on a chain that could not be made with one.
-struct FrameWait(Option<HANDLE>);
+///
+/// It gives itself up if it never answers. A handle that stopped signalling would stop the canvas
+/// being drawn *at all*, for as long as the window is open — which is what a resize did before the
+/// chain's flags were carried through it (see [`FrameWait::flags`]) — so [`FrameWait::ready`] stops
+/// asking after [`FRAME_WAIT_PATIENCE`] and the canvas is drawn unpaced from then on: a frame the
+/// compositor drops is a far cheaper mistake than a canvas that never updates.
+struct FrameWait {
+    /// The handle, or none when the chain has no clock.
+    handle: Option<HANDLE>,
+    /// When it was last seen ready, which is what the patience above is measured from.
+    seen: Instant,
+}
+
+/// How long a frame clock may go without answering before it is given up on.
+///
+/// A clock is answered by the compositor at the display's own rate, so a fifth of a second is a
+/// couple of dozen vblanks — long past the point where the answer is "this handle will never signal".
+const FRAME_WAIT_PATIENCE: Duration = Duration::from_millis(200);
 
 impl FrameWait {
+    /// A clock for a chain that has none.
+    fn unpaced() -> Self {
+        FrameWait {
+            handle: None,
+            seen: Instant::now(),
+        }
+    }
+
     /// Whether the compositor is ready for another frame.
     ///
     /// A zero timeout, because the answer wanted here is "now or at the next wake": the canvas is
@@ -226,23 +281,60 @@ impl FrameWait {
     /// instead of drawing it (see [`Device::render`]).
     ///
     /// A chain made without the handle is always ready: the compositor drops whatever it cannot
-    /// show, which is what it did before the handle existed.
-    fn ready(&self) -> bool {
-        let Some(handle) = self.0 else {
+    /// show, which is what it did before the handle existed — and so is one whose handle has stopped
+    /// answering (see this struct's own note).
+    fn ready(&mut self) -> bool {
+        let Some(handle) = self.handle else {
             return true;
         };
 
-        let waited = unsafe { WaitForSingleObject(handle, 0) };
+        if unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0 {
+            self.seen = Instant::now();
 
-        waited == WAIT_OBJECT_0
+            return true;
+        }
+
+        if self.seen.elapsed() > FRAME_WAIT_PATIENCE {
+            self.forget();
+
+            return true;
+        }
+
+        false
+    }
+
+    /// Gives up the clock: this chain is drawn unpaced from here on.
+    ///
+    /// The handle is the app's to close (see `GetFrameLatencyWaitableObject`), and the chain goes on
+    /// working without anyone waiting on it — which is what "unpaced" means here.
+    fn forget(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            unsafe { CloseHandle(handle) }.ok();
+        }
+    }
+
+    /// Whether this chain has a clock at all.
+    fn is_paced(&self) -> bool {
+        self.handle.is_some()
+    }
+
+    /// The swap chain flags that go with this clock.
+    ///
+    /// A resize *resets* a chain's flags rather than keeping them, so the one that made this waitable
+    /// has to be passed again on every resize: lose it and the chain loses its clock, and with the
+    /// clock the only signal that says a frame has been taken — which is a canvas that stops drawing
+    /// the moment the window is resized (see [`Device::resize`]).
+    fn flags(&self) -> DXGI_SWAP_CHAIN_FLAG {
+        match self.handle {
+            Some(_) => DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+            None => DXGI_SWAP_CHAIN_FLAG(0),
+        }
     }
 }
 
 impl Drop for FrameWait {
     fn drop(&mut self) {
-        if let Some(handle) = self.0 {
-            unsafe { CloseHandle(handle) }.ok();
-        }
+        self.forget();
     }
 }
 
@@ -301,7 +393,7 @@ fn create_swap_chain(
     if let Ok(chain) = unsafe { factory.CreateSwapChainForComposition(device, &desc, None) } {
         // A chain that cannot hand over its clock is still a chain: being paced is a favour the
         // compositor does, not a requirement of a canvas (see [`FrameWait`]).
-        let frame = frame_wait(&chain).unwrap_or(FrameWait(None));
+        let frame = frame_wait(&chain).unwrap_or_else(|_| FrameWait::unpaced());
 
         return Ok((chain, frame));
     }
@@ -310,22 +402,30 @@ fn create_swap_chain(
     let chain = unsafe { factory.CreateSwapChainForComposition(device, &desc, None) }
         .context("creating a composition swap chain")?;
 
-    Ok((chain, FrameWait(None)))
+    Ok((chain, FrameWait::unpaced()))
 }
 
 /// The frame clock of a chain, taken from it and set to one frame of latency.
-///
-/// One, because that is how many frames are being shown: more would let the canvas run ahead of the
-/// screen, which is the thing being avoided rather than a buffer to be filled.
 fn frame_wait(swap_chain: &IDXGISwapChain1) -> Result<FrameWait> {
     let chain: IDXGISwapChain2 = swap_chain
         .cast()
         .context("the swap chain's frame latency interface")?;
-    unsafe { chain.SetMaximumFrameLatency(1) }.context("setting the frame latency")?;
+    pace(&chain)?;
 
-    Ok(FrameWait(Some(unsafe {
-        chain.GetFrameLatencyWaitableObject()
-    })))
+    Ok(FrameWait {
+        handle: Some(unsafe { chain.GetFrameLatencyWaitableObject() }),
+        seen: Instant::now(),
+    })
+}
+
+/// One frame of latency on a chain that has a clock.
+///
+/// One, because that is how many frames are being shown: more would let the canvas run ahead of the
+/// screen, which is the thing being avoided rather than a buffer to be filled. Set again after a
+/// resize, because a resize is a new chain in everything but name and there is no promise that it
+/// keeps this.
+fn pace(chain: &IDXGISwapChain2) -> Result<()> {
+    unsafe { chain.SetMaximumFrameLatency(1) }.context("setting the frame latency")
 }
 
 /// The description a composition swap chain has to be made with.
@@ -425,12 +525,26 @@ mod tests {
     /// assumption the arrangement makes, and every screenshot of the app is what looks at it.
     #[test]
     fn a_canvas_is_installed_on_a_window_that_is_never_shown() {
-        use windows::core::w;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, WS_OVERLAPPED,
-        };
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
 
-        let hwnd = unsafe {
+        let hwnd = a_window();
+
+        {
+            let mut device = Device::new(hwnd).expect("a canvas for that window");
+            device
+                .render(&Canvas::default())
+                .expect("a frame of it");
+        }
+
+        unsafe { DestroyWindow(hwnd).expect("the window to close") };
+    }
+
+    /// The window the canvas's own tests draw into.
+    fn a_window() -> HWND {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, WS_OVERLAPPED};
+
+        unsafe {
             CreateWindowExW(
                 Default::default(),
                 w!("STATIC"),
@@ -446,13 +560,51 @@ mod tests {
                 None,
             )
         }
-        .expect("a window to draw in");
+        .expect("a window to draw in")
+    }
+
+    /// A resize keeps the frame clock.
+    ///
+    /// A resize is what a window is always doing — every drag of its edge, every maximize — and
+    /// `ResizeBuffers` *resets* a chain's flags rather than keeping them. Losing this one costs the
+    /// waitable that says a frame has been taken, and with it every frame after the resize: the
+    /// canvas stops drawing, and what the window then shows is a back buffer the resize left
+    /// undefined. That is a canvas that disappears rather than one that stutters, so it is a bug
+    /// worth a test that runs on a real device.
+    #[test]
+    fn a_resize_keeps_the_frame_clock() {
+        use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, MoveWindow};
+
+        let hwnd = a_window();
 
         {
             let mut device = Device::new(hwnd).expect("a canvas for that window");
-            device
-                .render(&Canvas::default())
-                .expect("a frame of it");
+
+            // The window changes size under the canvas, as it does when a user maximizes it.
+            unsafe { MoveWindow(hwnd, 0, 0, 400, 300, false) }
+                .expect("the window to change size");
+
+            device.render(&Canvas::default()).expect("a frame of it");
+            // The canvas follows the window's *client* area — its size less whatever the window's own
+            // frame takes — so what is asserted is that it left the size it was made for, and that it
+            // is the client area it left it for.
+            assert_ne!(
+                device.size,
+                (320, 240),
+                "the canvas followed the window's new size"
+            );
+            assert_eq!(
+                device.size,
+                client_size(hwnd).expect("the window's client area"),
+                "and it is the client area that it followed"
+            );
+
+            let desc = unsafe { device.swap_chain.GetDesc() }.expect("the chain's description");
+            assert_eq!(
+                desc.Flags,
+                DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
+                "and the frame clock survived it"
+            );
         }
 
         unsafe { DestroyWindow(hwnd).expect("the window to close") };

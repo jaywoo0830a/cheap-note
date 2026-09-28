@@ -29,17 +29,17 @@ use gpui_kit::*;
 
 use crate::bookmarks::{Bookmarks, MarkedPages, Marks};
 use crate::canvas::{
-    contrast_color, relative_luminance, CanvasSize, CanvasStyle, Ruling, Swatch, INK_COLORS,
-    PAPER_COLORS,
+    contrast_color, relative_luminance, CanvasSize, CanvasStyle, Ruling, RulingSheet, Swatch,
+    INK_COLORS, PAPER_COLORS,
 };
 use crate::cursor::PenCursor;
 use crate::cursor_overlay::{CursorFeed, Screen};
 use crate::home::Home;
-use crate::ink::{InkTransform, Notes, Stroke, Tool};
+use crate::ink::{paper_of_drawn, InkTransform, Notes, Stroke, Tool};
 use crate::ink_layer::{Canvas, Ink, InkLayer, Page, Rect};
 use crate::note::{self, Note, NoteWriter, Report};
 use crate::outline::{Outline, OutlinePages};
-use crate::pages::Pages;
+use crate::pages::{swaps_axes, Pages, Quarters};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
 use crate::pen::{capture_config, BatchTap, PenInbox, PenService};
 use crate::recent::{self, Recent};
@@ -173,7 +173,8 @@ fn page_of_write(ink: &Notes) -> u64 {
 /// The sheet as the last frame drew it: its size in paper units, and where that was placed.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Sheet {
-    /// The size the paper asks for, in logical pixels at 1:1.
+    /// The size the paper asks for, in logical pixels at 1:1 — *as it is drawn*, so a page the reader
+    /// has turned is the other way round here.
     paper: (f32, f32),
     /// Where the sheet's top-left corner was drawn, in window logical pixels.
     origin: (f32, f32),
@@ -181,6 +182,8 @@ struct Sheet {
     window: (f32, f32),
     /// The zoom it was drawn at.
     zoom: f32,
+    /// How far the page has been turned, in quarter turns clockwise.
+    rotation: Quarters,
 }
 
 impl Sheet {
@@ -189,18 +192,40 @@ impl Sheet {
         (self.paper.0 * self.zoom, self.paper.1 * self.zoom)
     }
 
+    /// The paper's own size, in the paper's units: what the ink is written in.
+    ///
+    /// The drawn size turned back, because the ink is in the page's coordinates and not the screen's:
+    /// a page turned a quarter is drawn `(h, w)` where its own paper is `(w, h)`, and the ink written
+    /// on it is measured on the paper. It is also the box a reading is checked against — see
+    /// [`InkTransform::on_paper`] — which is why getting it the wrong way round would put ink on the
+    /// desk at the ends of a turned page.
+    fn ink_paper(&self) -> (f32, f32) {
+        if swaps_axes(self.rotation) {
+            (self.paper.1, self.paper.0)
+        } else {
+            self.paper
+        }
+    }
+
     /// Where a reading in physical client pixels lands on the sheet.
     fn transform(&self, scale: f32, bar: f32) -> InkTransform {
         InkTransform {
             scale,
             zoom: self.zoom,
             origin: self.origin,
-            paper: self.paper,
+            paper: self.ink_paper(),
             bar,
+            rotation: self.rotation,
         }
     }
 
-    /// The part of the sheet that is on screen, in the sheet's own coordinates.
+    /// The part of the sheet that is on screen, in the paper's own coordinates.
+    ///
+    /// A *rectangle* of the paper, because that is what the culling test takes — and it is the box
+    /// around the window's four corners turned back onto the paper, because a page the reader has
+    /// turned puts the screen's rectangle at an angle to the paper's axes. A box and not a polygon:
+    /// what this decides is whether a stroke is worth *drawing*, and including a stroke that is only
+    /// near the screen costs one draw call while excluding one that is on it costs a missing line.
     fn visible(&self) -> [f32; 4] {
         let zoom = if self.zoom.is_finite() && self.zoom > 0.0 {
             self.zoom
@@ -208,11 +233,30 @@ impl Sheet {
             1.0
         };
 
+        let paper = self.ink_paper();
+        let corner = |window: (f32, f32)| {
+            paper_of_drawn(
+                (
+                    (window.0 - self.origin.0) / zoom,
+                    (window.1 - self.origin.1) / zoom,
+                ),
+                paper,
+                self.rotation,
+            )
+        };
+
+        let corners = [
+            corner((0.0, 0.0)),
+            corner((self.window.0, 0.0)),
+            corner((0.0, self.window.1)),
+            corner(self.window),
+        ];
+
         [
-            (0.0 - self.origin.0) / zoom,
-            (0.0 - self.origin.1) / zoom,
-            (self.window.0 - self.origin.0) / zoom,
-            (self.window.1 - self.origin.1) / zoom,
+            corners.iter().fold(f32::MAX, |low, at| low.min(at.0)),
+            corners.iter().fold(f32::MAX, |low, at| low.min(at.1)),
+            corners.iter().fold(f32::MIN, |high, at| high.max(at.0)),
+            corners.iter().fold(f32::MIN, |high, at| high.max(at.1)),
         ]
     }
 }
@@ -619,6 +663,10 @@ impl NoteApp {
             open,
             revision: self.ink_revision,
             visible: sheet.visible(),
+            // Which way up the page is, and the paper's own shape: the layer turns the ink with the
+            // page, because the ink is written *on* the page (see [`crate::ink::drawn_of_paper`]).
+            rotation: sheet.rotation,
+            paper: sheet.ink_paper(),
         };
     }
 
@@ -1253,6 +1301,50 @@ impl NoteApp {
             self.page_total().saturating_sub(1).max(1)
         ));
         cx.notify();
+    }
+
+    /// Turns the page being read, clockwise for `turns > 0`.
+    ///
+    /// The ink does not move: a rotation belongs to the *page* (see [`crate::pages::Quarters`]), so what
+    /// changes is where the page's own coordinates are drawn — the writing that was on the page before
+    /// the turn reads the same way after it, because it was always in the page's coordinates and the page
+    /// is what turned. Nothing is written to the note's ink for this: the pages are the note's own list
+    /// (see [`crate::pages::PageEntry`]), and the turn is a field of one row of it.
+    fn turn_page(&mut self, turns: i32, cx: &mut Context<Self>) {
+        self.pages.turn(self.page_index, turns);
+
+        // The sheet, the page's bitmap and the ink's transform all follow from the list on the next
+        // frame, so nothing here has to describe them again — but the note has to keep the turn, and the
+        // reader has to be told what it came to.
+        self.save_note_state();
+        self.report(self.turn_message(turns, false));
+        cx.notify();
+    }
+
+    /// Turns every page of the note, clockwise for `turns > 0`.
+    ///
+    /// One command over the whole list rather than a rotation of the window: each page keeps its own
+    /// turn, so turning the note round and then turning one page the other way leaves that page where
+    /// the reader put it — and turning the note back is the same command the other way.
+    fn turn_every_page(&mut self, turns: i32, cx: &mut Context<Self>) {
+        self.pages.turn_all(turns);
+        self.save_note_state();
+        self.report(self.turn_message(turns, true));
+        cx.notify();
+    }
+
+    /// What a turn says on the status line: which way, and how far the page in front ended up.
+    fn turn_message(&self, turns: i32, every: bool) -> String {
+        format!(
+            "turned {} {} — the page in front is {}° from upright",
+            if every { "every page" } else { "this page" },
+            if turns > 0 {
+                "clockwise"
+            } else {
+                "counter-clockwise"
+            },
+            self.pages.rotation(self.page_index) as u32 * 90
+        )
     }
 
     /// Puts a bookmark on the page in front of the reader, or takes the one there off.
@@ -2102,6 +2194,19 @@ impl NoteApp {
             return;
         }
 
+        // Turning a page: the key alone turns the page in front clockwise, Shift turns that page the
+        // other way, and Alt turns the same two for every page of the note. Four commands, one key — the
+        // same shape as the two bookmark chords, and the same four commands the bar's buttons are.
+        if keystroke.key.as_str() == "r" {
+            match (keystroke.modifiers.alt, keystroke.modifiers.shift) {
+                (false, false) => self.turn_page(1, cx),
+                (false, true) => self.turn_page(-1, cx),
+                (true, false) => self.turn_every_page(1, cx),
+                (true, true) => self.turn_every_page(-1, cx),
+            }
+            return;
+        }
+
         match keystroke.key.as_str() {
             // The document's own contents, under the letter that already means "open a file" — a table of
             // contents is what a document is opened *by*, so the two chords sit on one key as the two
@@ -2291,8 +2396,13 @@ impl NoteApp {
             return None;
         }
 
+        // The reader's turn is part of the request: it changes the pixels, so it belongs in the cache
+        // key and in the size the page is rasterised at, and a page turned after it was read once must
+        // not be served the bitmap from before (see [`crate::pdf::PageKey`]).
+        let turns = self.pages.rotation(self.page_index);
         let wanted = PageRequest::new(document_page, self.pdf_render_pixel_width())
-            .grayscale(self.settings.grayscale_pages);
+            .grayscale(self.settings.grayscale_pages)
+            .turned(turns);
 
         if let Some(page) = self.pdf.page_for_frame(wanted) {
             self.plan_pdf(wanted);
@@ -2302,7 +2412,8 @@ impl NoteApp {
         // Nothing for this page at any rung: pay for the cheapest one now, so the frame has
         // something to draw, then leave the rung the zoom wanted to the pump.
         let preview = PageRequest::new(document_page, PDF_PIXEL_WIDTHS[0])
-            .grayscale(self.settings.grayscale_pages);
+            .grayscale(self.settings.grayscale_pages)
+            .turned(turns);
         let page = match self.render_now(preview) {
             Ok(page) => Some(page),
             Err(error) => {
@@ -2329,7 +2440,7 @@ impl NoteApp {
         let started = Instant::now();
         let before = self.pdf.rasterised();
 
-        let page = self.pdf.render_page(request.page, request.pixels)?;
+        let page = self.pdf.render_page(request)?;
 
         self.timings
             .count_rasterised(self.pdf.rasterised() - before);
@@ -2409,14 +2520,30 @@ impl NoteApp {
 
     /// Where the sheet is drawn, in the window the frame is painting.
     fn page_layout(&self, window: (f32, f32), page: Option<&RenderedPage>) -> Sheet {
+        // Which way up the page is: the *note's* answer, and not the document's — a PDF page arrives
+        // with its own `/Rotate`, and that is already in the size below, because Pdfium reports a page
+        // the way it draws it.
+        let turns = self.pages.rotation(self.page_index);
+
         let paper = match page {
-            // A PDF brings its own shape; only how wide it is drawn is the app's choice.
+            // A PDF brings its own shape; only how wide it is drawn is the app's choice. A page the
+            // reader has turned comes back with the two swapped, which is the shape drawn.
             Some(page) => page.display_size(self.settings.page_display_width),
-            // The blank sheet takes both its shape and its scale from the chosen canvas size.
-            None => self
-                .settings
-                .canvas_size
-                .display_size(self.settings.page_display_width),
+            // The blank sheet takes both its shape and its scale from the chosen canvas size — and a
+            // page the reader has turned is that shape on its side, because the paper in hand is the
+            // same sheet either way: it is the *screen* that shows it the other way round.
+            None => {
+                let (width, height) = self
+                    .settings
+                    .canvas_size
+                    .display_size(self.settings.page_display_width);
+
+                if swaps_axes(turns) {
+                    (height, width)
+                } else {
+                    (width, height)
+                }
+            }
         };
 
         Sheet {
@@ -2424,6 +2551,7 @@ impl NoteApp {
             origin: self.view.origin(paper, window, PAGE_MARGIN),
             window,
             zoom: self.view.zoom(),
+            rotation: turns,
         }
     }
 
@@ -2443,6 +2571,13 @@ impl NoteApp {
             self.page_index + 1,
             self.page_total().max(1)
         ));
+
+        // Which way up the page in front is, said only when the reader has turned it: the right way up is
+        // the ordinary case, and a number on every page would be noise — the same rule the marks follow.
+        let turns = self.pages.rotation(self.page_index);
+        if turns > 0 {
+            parts.push(format!("turned {}°", turns as u32 * 90));
+        }
 
         // The marks, said only when there are any: it is the answer to "which pages did I keep", and a
         // zero on every frame is noise — the same rule the off-the-sheet readings follow below.
@@ -3128,6 +3263,47 @@ impl NoteApp {
             )
             .into_any_element(),
             toolbar_divider(hairline).into_any_element(),
+            // Turning the page: two buttons for the page in front and two for the whole note. The icons
+            // are the same arrows twice, a page's worth and a sheet's worth, because that is the whole of
+            // the difference between them — and the tooltips say the chords the same commands answer to.
+            icon_button(
+                "page-turn-ccw",
+                IconName::RotateCcw,
+                "Turn this page counter-clockwise (Ctrl+Shift+R)",
+                true,
+                cx,
+                |app, cx| app.turn_page(-1, cx),
+            )
+            .into_any_element(),
+            icon_button(
+                "page-turn-cw",
+                IconName::RotateCw,
+                "Turn this page clockwise (Ctrl+R)",
+                true,
+                cx,
+                |app, cx| app.turn_page(1, cx),
+            )
+            .into_any_element(),
+            toolbar_divider(hairline).into_any_element(),
+            icon_button(
+                "pages-turn-ccw",
+                IconName::RotateCcwSquare,
+                "Turn every page counter-clockwise (Ctrl+Alt+Shift+R)",
+                true,
+                cx,
+                |app, cx| app.turn_every_page(-1, cx),
+            )
+            .into_any_element(),
+            icon_button(
+                "pages-turn-cw",
+                IconName::RotateCwSquare,
+                "Turn every page clockwise (Ctrl+Alt+R)",
+                true,
+                cx,
+                |app, cx| app.turn_every_page(1, cx),
+            )
+            .into_any_element(),
+            toolbar_divider(hairline).into_any_element(),
             tool_button(
                 "page-mark",
                 if marked {
@@ -3357,12 +3533,17 @@ impl Render for NoteApp {
             self.ink_revision += 1;
         }
 
-        let (page_size, page_origin) =
-            (sheet.drawn(), point(px(sheet.origin.0), px(sheet.origin.1)));
+        let page_size = sheet.drawn();
 
-        let sheet_bounds = Bounds {
-            origin: page_origin,
-            size: size(px(page_size.0), px(page_size.1)),
+        // The paper's own rectangle, and the rectangle it is drawn in: the ruling is printed on the
+        // paper, so it is built on the first and placed in the second, turned with the page (see
+        // [`crate::canvas::RulingSheet`]). A page turned a quarter is drawn the other way round, so the
+        // two rectangles are each other's transpose — which is exactly the difference the ruling has to
+        // show.
+        let (ink_width, ink_height) = sheet.ink_paper();
+        let paper_bounds = Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(ink_width * sheet.zoom), px(ink_height * sheet.zoom)),
         };
         // Built here rather than in a paint callback: a full page of grid lines is several hundred
         // marks, and `Ruling` hands back the same set until the sheet itself changes — which
@@ -3373,7 +3554,16 @@ impl Render for NoteApp {
             let started = Instant::now();
             let before = self.ruling.rebuilds();
             let rules = self.ruling.rules(
-                sheet_bounds,
+                RulingSheet {
+                    paper: paper_bounds,
+                    drawn: Rect {
+                        x: sheet.origin.0,
+                        y: sheet.origin.1,
+                        width: page_size.0,
+                        height: page_size.1,
+                    },
+                    turns: sheet.rotation,
+                },
                 self.settings.canvas_style,
                 self.settings.page_color,
                 sheet.zoom,

@@ -312,6 +312,36 @@ A **deleted** page takes its ink with it: there is nowhere to show it afterwards
 mean keeping an identity for "the page that used to be here" that no later page could be confused with.
 On a note about a document the page leaves the *note*, not the file.
 
+### Turning a page
+
+A page's rotation belongs to the **page**, not to the view. It is stored with the page — one field of the
+note's own page list, see `meta('layout')` in [STORE.md](STORE.md) — so a page turned and left comes back
+turned, and a document's own `/Rotate` is the same fact about the same page. There are four commands
+because a page can only be turned in quarter turns: this page clockwise or counter-clockwise, and every
+page of the note the same two ways. "Turn the note round" is that second pair and not a rotation of the
+window: each page keeps its own turn, so turning the note and then turning one page back leaves that page
+where the reader put it.
+
+**The ink does not move.** A stroke is stored in the page's own coordinates, and a turn changes only
+*where those coordinates are drawn*: the pen's reading is turned back through the same mapping the layer
+draws the ink forward through — `ink::paper_of_drawn` and `ink::drawn_of_paper`, which a test holds
+together — so writing on a page the reader turned is stored the way it will be read, and turning the page
+back turns the writing with it. A turn is therefore free: no stroke is rewritten, no chunk is re-encoded,
+and the only row that changes is the page list's.
+
+Two rectangles are in play, and for a quarter turn they are each other's transpose: the **paper**'s own
+rectangle, which is what the ink is measured in and what a reading is checked against, and the rectangle
+the sheet is **drawn** in. The ruling is built on the first and placed in the second, so a page on its
+side has its lines running the other way — paper that was turned, rather than a grid painted over it. A
+reading is likewise checked against the paper and not the drawn rectangle: a page on its side has a strip
+of desk beside it that must not write.
+
+The interface offers the four as two pairs of buttons, and the page in front's two also answer to
+`Ctrl+R` and `Ctrl+Shift+R` (with `Alt` for every page). The status line says which way up the page is
+while it is not the right way up, and says nothing when it is.
+
+### A mark
+
 A **mark** is one page of the note and nothing else — no name, no colour, no text — so it is a page
 rather than a moment: inserting a page before a marked one renames the mark along with the page it is on,
 and deleting a page takes its mark with it, in the same transaction. It is written where it is made

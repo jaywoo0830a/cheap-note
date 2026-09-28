@@ -60,6 +60,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::ink::Stroke;
 use crate::ink_layer::canvas::{Canvas, Fill, Page, Rect};
+use crate::pages::Quarters;
 
 /// One unit in one pixel, whatever the display's own scale is (see the module docs).
 const DOTS_PER_INCH: f32 = 96.0;
@@ -511,18 +512,49 @@ fn flattening_tolerance(zoom: f32) -> f32 {
     (DEFAULT_FLATTENING / zoom.min(1.0)).max(DEFAULT_FLATTENING)
 }
 
-/// Where the paper's own units sit on the surface: how large it is drawn, times the display's
-/// scale, and where its origin is, likewise.
-fn ink_transform(canvas: &Canvas) -> Matrix3x2 {
-    let scale = canvas.scale * canvas.ink.zoom;
+/// Where the paper's own units sit on the surface: how large it is drawn, times the display's scale,
+/// where its origin is, and which way up the page is.
+///
+/// The rotation is the *mapping's* and not any stroke's: the ink never moves when a page is turned, so
+/// what changes is where the paper's coordinates land on the screen.
+///
+/// The matrix is derived from [`crate::ink::drawn_of_paper`] — the paper's origin and its two unit steps,
+/// mapped and scaled — rather than written out case by case. It is the same function the pen's readings
+/// are turned back through, so the layer and the ink model cannot come to disagree about which way is
+/// clockwise; a table here would be a second opinion about that, and the only way it would ever be
+/// noticed is ink that sits off the page it was written on.
+fn ink_matrix(
+    scale: f32,
+    zoom: f32,
+    origin: (f32, f32),
+    paper: (f32, f32),
+    turns: Quarters,
+) -> Matrix3x2 {
+    let drawn = scale * zoom;
+    let (ox, oy) = crate::ink::drawn_of_paper((0.0, 0.0), paper, turns);
+    let (xx, xy) = crate::ink::drawn_of_paper((1.0, 0.0), paper, turns);
+    let (yx, yy) = crate::ink::drawn_of_paper((0.0, 1.0), paper, turns);
 
     Matrix3x2 {
-        M11: scale,
-        M22: scale,
-        M31: canvas.ink.origin.0 * canvas.scale,
-        M32: canvas.ink.origin.1 * canvas.scale,
+        M11: (xx - ox) * drawn,
+        M12: (xy - oy) * drawn,
+        M21: (yx - ox) * drawn,
+        M22: (yy - oy) * drawn,
+        M31: origin.0 * scale + ox * drawn,
+        M32: origin.1 * scale + oy * drawn,
         ..Default::default()
     }
+}
+
+/// The transform the ink is drawn through, from what the app described.
+fn ink_transform(canvas: &Canvas) -> Matrix3x2 {
+    ink_matrix(
+        canvas.scale,
+        canvas.ink.zoom,
+        canvas.ink.origin,
+        canvas.ink.paper,
+        canvas.ink.rotation,
+    )
 }
 
 /// A rectangle as Direct2D takes it: two corners, in that order, in the surface's own pixels.
@@ -617,6 +649,77 @@ mod tests {
         assert_eq!(transform.M22, 3.0);
         assert_eq!(transform.M31, 200.0);
         assert_eq!(transform.M32, 100.0);
+    }
+
+    /// The layer's four transforms put the paper where the reader sees it.
+    ///
+    /// Written as literals rather than compared with the function the matrix is built from — a test of a
+    /// function against itself proves nothing. The convention: a page turned clockwise takes its own
+    /// top-left corner to the sheet's top-right, and every corner stays inside the sheet it is drawn in.
+    /// The ink model is turned back through the same function (see
+    /// [`crate::ink::paper_of_drawn`], and the round trip the ink tests check), so this is the half that
+    /// is pinned here.
+    #[test]
+    fn a_turned_page_is_drawn_where_the_reader_sees_it() {
+        let (scale, zoom) = (1.5f32, 2.0f32);
+        let origin = (37.0f32, 11.0f32);
+        let paper = (600.0f32, 800.0f32);
+        let drawn = scale * zoom;
+
+        // Where the paper's own origin lands in the sheet: the right way up, a quarter clockwise, upside
+        // down, and the other quarter — top-left, top-right, bottom-right, bottom-left.
+        let expected = [(0.0, 0.0), (800.0, 0.0), (600.0, 800.0), (0.0, 600.0)];
+
+        for (turns, (dx, dy)) in expected.iter().enumerate() {
+            let turns = turns as u8;
+            let matrix = ink_matrix(scale, zoom, origin, paper, turns);
+            let at = |point: (f32, f32)| {
+                (
+                    point.0 * matrix.M11 + point.1 * matrix.M21 + matrix.M31,
+                    point.0 * matrix.M12 + point.1 * matrix.M22 + matrix.M32,
+                )
+            };
+
+            let want = (origin.0 * scale + dx * drawn, origin.1 * scale + dy * drawn);
+            let got = at((0.0, 0.0));
+            assert!(
+                (got.0 - want.0).abs() < 0.01 && (got.1 - want.1).abs() < 0.01,
+                "turn {turns}: the paper's origin is drawn at {got:?}, not {want:?}"
+            );
+
+            // Every corner of the paper is inside the rectangle the sheet is drawn in — the whole of what
+            // the mapping has to get right, because ink drawn outside it is ink on the desk.
+            let (sheet_width, sheet_height) = if turns % 2 == 1 {
+                (paper.1 * drawn, paper.0 * drawn)
+            } else {
+                (paper.0 * drawn, paper.1 * drawn)
+            };
+
+            for corner in [(0.0, 0.0), (600.0, 0.0), (0.0, 800.0), (600.0, 800.0)] {
+                let (x, y) = at(corner);
+                assert!(
+                    x >= origin.0 * scale - 0.01
+                        && y >= origin.1 * scale - 0.01
+                        && x <= origin.0 * scale + sheet_width + 0.01
+                        && y <= origin.1 * scale + sheet_height + 0.01,
+                    "turn {turns}: {corner:?} is drawn outside the sheet at {x}, {y}"
+                );
+            }
+        }
+    }
+
+    /// A turn the whole way round comes back to the page it started as, in the matrix as in the model.
+    #[test]
+    fn four_turns_of_the_transform_are_the_identity() {
+        let paper = (600.0f32, 800.0f32);
+        let plain = ink_matrix(1.0, 1.0, (0.0, 0.0), paper, 0);
+        let round = ink_matrix(1.0, 1.0, (0.0, 0.0), paper, 4);
+
+        assert_eq!(
+            (round.M11, round.M12, round.M21, round.M22, round.M31, round.M32),
+            (plain.M11, plain.M12, plain.M21, plain.M22, plain.M31, plain.M32),
+            "a page turned four times is the page it was"
+        );
     }
 
     /// The cache's first rule, which is the one that decides whether a page of handwriting costs

@@ -838,12 +838,21 @@ pub struct RenderJob {
 impl RenderJob {
     /// Prepares a job for one page at a target *bitmap width*.
     ///
-    /// The height follows from the page's own aspect ratio, and the two are swapped for the quarter
-    /// turns: a rotated page needs its bitmap the other way round to fill it.
+    /// `turns` is the *reader's* turn, in quarter turns clockwise: how much the page is turned on top
+    /// of the way the document draws it. A page's own `/Rotate` is the document's business and Pdfium
+    /// applies it itself — to the size it reports for the page and to what it draws — so the sum is
+    /// *not* what goes here. Handing it the sum would draw a `/Rotate 90` page upside down; the test
+    /// `the_rotation_handed_to_pdfium_is_the_reader_s_turn` pins that down against a page that carries
+    /// one.
+    ///
+    /// The bitmap is the page as it is *drawn*, so `width` is the width it is drawn at: a page the
+    /// reader has turned is the other way round, and the height follows from that shape. The document's
+    /// size for the page already has its own `/Rotate` in it, so only the reader's turn is swapped for.
     pub fn new(
         document: &Document,
         index: usize,
         width: u32,
+        turns: crate::pages::Quarters,
         format: Format,
         annotations: bool,
     ) -> Result<Self> {
@@ -859,18 +868,20 @@ impl RenderJob {
             ))
         })?;
 
-        let rotation = document.page_rotation(index);
-        let width = width.max(1) as f32;
-        let scale = width / point_width.max(1.0);
-        let (mut pixel_width, mut pixel_height) = (width, point_height * scale);
+        // Which way up it is drawn: the shape the document reports for the page — its own `/Rotate` is
+        // already in it — or that shape on its side.
+        let (shown_width, shown_height) = if crate::pages::swaps_axes(turns) {
+            (point_height, point_width)
+        } else {
+            (point_width, point_height)
+        };
 
-        if rotation == 1 || rotation == 3 {
-            std::mem::swap(&mut pixel_width, &mut pixel_height);
-        }
+        let width = width.max(1) as f32;
+        let scale = width / shown_width.max(1.0);
 
         let (pixel_width, pixel_height) = (
-            pixel_width.round().max(1.0) as c_int,
-            pixel_height.round().max(1.0) as c_int,
+            width.round().max(1.0) as c_int,
+            (shown_height * scale).round().max(1.0) as c_int,
         );
 
         let page = unsafe { (api.load_page)(document.handle(), index as c_int) };
@@ -924,7 +935,7 @@ impl RenderJob {
             control,
             pause,
             size: (pixel_width as u32, pixel_height as u32),
-            rotation: rotation as c_int,
+            rotation: turns as c_int,
             flags: if annotations { RENDER_ANNOTATIONS } else { 0 },
             format,
             started: false,

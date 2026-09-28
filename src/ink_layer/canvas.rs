@@ -23,6 +23,7 @@ use std::sync::Arc;
 use gpui_kit::{Hsla, RenderImage};
 
 use crate::ink::Stroke;
+use crate::pages::Quarters;
 
 /// A rectangle in logical window pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -122,6 +123,16 @@ pub struct Ink {
     /// window has nothing honest to say and skipping a stroke that *is* on screen is the one mistake
     /// this can make.
     pub visible: [f32; 4],
+    /// How far the page has been turned, in quarter turns clockwise, and the paper's own size in its
+    /// own units.
+    ///
+    /// Both are here because the *transform* needs them: turning a page is not a property of any stroke
+    /// (the ink never moves), it is a property of the mapping between the paper and the screen, and the
+    /// layer is what draws through that mapping (see [`crate::ink::drawn_of_paper`]).
+    pub rotation: Quarters,
+    /// The paper's own size, in the paper's units — the un-turned shape, which is what `rotation`
+    /// turns. `(0.0, 0.0)` means "no paper": see [`crate::ink::InkTransform::has_paper`].
+    pub paper: (f32, f32),
 }
 
 impl Default for Ink {
@@ -133,6 +144,8 @@ impl Default for Ink {
             open: None,
             revision: 0,
             visible: Ink::ALL_VISIBLE,
+            rotation: 0,
+            paper: (0.0, 0.0),
         }
     }
 }

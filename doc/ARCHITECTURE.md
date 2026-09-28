@@ -256,9 +256,13 @@ Four decisions keep that from being the thing that makes writing stutter:
   when its budget does rather than when the page does. Cancellation needs no flag: a view that moved
   on simply stops advancing the job, and dropping it is what releases the page and the unfinished
   bitmap.
-* **The cache key is what the bitmap depends on**: page, rung, and whether it is grayscale. The
-  grayscale toggle therefore invalidates nothing by hand — the bitmaps it changed are simply not the
-  bitmaps the cache holds.
+* **The cache key is what the bitmap depends on**: page, rung, whether it is grayscale, and which way
+  the reader has turned the page. The grayscale toggle therefore invalidates nothing by hand — the
+  bitmaps it changed are simply not the bitmaps the cache holds — and a page turned after it was read
+  is a second bitmap beside the first rather than a replacement of it, so turning it back costs nothing.
+  The rotation in the key is the *drawn* one (the page's own `/Rotate` and the reader's turn, added),
+  while what Pdfium is handed to render is the reader's turn alone: Pdfium applies a page's `/Rotate`
+  itself, to the size it reports for the page and to the pixels it produces.
 * **A page render waits for the pen to stop** (120 ms of stillness), because the pump is on this
   thread and a stroke must not queue behind a rasterisation.
 
@@ -473,6 +477,12 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
     leaves a working app that says so in its status line.
 12. **A setting is added with four small edits and no migration** (`settings.rs`), and a fact a note
     carries that this build does not know is left in the file untouched.
+13. **A page's rotation belongs to the page.** It is a field of the note's own page list, not a transform
+    of the window, and the ink written on a turned page is stored in the page's own coordinates — so the
+    pen's mapping (`ink::paper_of_drawn`) and the layer's matrix (`ink_layer::render::ink_matrix`) are the
+    same mapping, and a test compares them. A page's own `/Rotate` is *Pdfium's*: it is in the size Pdfium
+    reports for the page and in the pixels it draws, so the app hands Pdfium the reader's turn alone
+    (`the_rotation_handed_to_pdfium_is_the_readers_turn` pins that down).
 
 ## 12. Requirements, building, running
 

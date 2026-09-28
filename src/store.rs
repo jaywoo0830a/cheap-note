@@ -121,10 +121,13 @@ pub const META_OPEN_PAGE: &str = "open_page";
 pub const META_SHEET_WIDTH: &str = "sheet_width";
 /// The other half of the sheet: see [`META_SHEET_WIDTH`].
 pub const META_SHEET_HEIGHT: &str = "sheet_height";
-/// What each page shows, in reading order, as JSON: a list of [`crate::pages::Page`]s.
+/// What each page shows, in reading order, as JSON: a list of [`crate::pages::PageEntry`]s.
 ///
 /// The one row that is a *list* rather than a value, and it is JSON so that page kinds can be added
-/// without either side having to agree on an order for them — see the module docs.
+/// without either side having to agree on an order for them — see the module docs. A page's rotation is
+/// part of the entry, so a note carries the pages the way the reader left them, and a page list written
+/// before a page could be turned is read as pages that are the right way up (see
+/// [`crate::pages::StoredPage`]).
 pub const META_LAYOUT: &str = "layout";
 /// The name the document had when the note was made, as UTF-8.
 pub const META_DOCUMENT: &str = "document";
@@ -866,7 +869,11 @@ impl NoteStore {
     }
 
     /// Records what each page shows, in reading order: the note's own page list.
-    pub fn set_layout(&mut self, layout: &[crate::pages::Page]) -> Result<()> {
+    ///
+    /// A page's rotation is part of the page here as it is everywhere else (see
+    /// [`crate::pages::PageEntry`]): this list is the note's answer to "what is page 4", and "which
+    /// way up is it" is part of that answer rather than a property of the window.
+    pub fn set_layout(&mut self, layout: &[crate::pages::PageEntry]) -> Result<()> {
         let text = serde_json::to_string(layout).map_err(|error| {
             AppError::Note(format!(
                 "the note's page list could not be written: {error}"
@@ -880,15 +887,23 @@ impl NoteStore {
     /// are the ones that hold ink — see [`crate::pages::Pages::restore`].
     ///
     /// A row that is not a list of pages is reported rather than replaced, as everything else here is:
-    /// the alternative is a note whose pages are silently rearranged.
-    pub fn layout(&self) -> Result<Vec<crate::pages::Page>> {
+    /// the alternative is a note whose pages are silently rearranged. A row written *before* a page
+    /// could be turned is a list of pages with nothing about a rotation in it, and is read as pages
+    /// that are the right way up — see [`crate::pages::StoredPage`].
+    pub fn layout(&self) -> Result<Vec<crate::pages::PageEntry>> {
         let Some(text) = row_text(&self.conn, META_LAYOUT)? else {
             return Ok(Vec::new());
         };
 
-        serde_json::from_str(&text).map_err(|error| {
-            AppError::Note(format!("the note's page list could not be read: {error}"))
-        })
+        let stored: Vec<crate::pages::StoredPage> =
+            serde_json::from_str(&text).map_err(|error| {
+                AppError::Note(format!("the note's page list could not be read: {error}"))
+            })?;
+
+        Ok(stored
+            .into_iter()
+            .map(crate::pages::StoredPage::entry)
+            .collect())
     }
 
     /// Reads the note's settings into `into`.
@@ -1445,7 +1460,7 @@ fn open_dirty(blob: &[u8]) -> Result<Vec<Stroke>> {
 mod tests {
     use super::*;
     use crate::ink::InkPoint;
-    use crate::pages::Page;
+    use crate::pages::{Page, PageEntry};
 
     /// A note file in the temp directory, named after the test that wants it.
     fn store_for(name: &str) -> (NoteStore, PathBuf) {
@@ -1597,6 +1612,59 @@ mod tests {
         fn run(&self, sql: &str) {
             self.conn.execute_batch(sql).expect("a statement");
         }
+    }
+
+    /// A page list written by an older build — one with nothing about a rotation in it — is read as
+    /// pages that are the right way up, and what this build writes keeps its rotation.
+    ///
+    /// The compatibility is one `serde` attribute away from being a note that cannot be opened, so it
+    /// is checked here against the *bytes* such a note has rather than against the type: the shape is
+    /// the whole of what an older note and this build have to agree on.
+    #[test]
+    fn a_page_list_from_an_older_build_is_read_the_right_way_up() {
+        let (store, path) = store_for("layout-shapes");
+
+        store.run(
+            "INSERT INTO meta (key, value) VALUES ('layout', '[\"blank\",{\"document\":3}]')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        );
+
+        assert_eq!(
+            store.layout().expect("a layout"),
+            vec![
+                PageEntry::new(Page::Blank),
+                PageEntry::new(Page::Document(3))
+            ],
+            "an older note's pages are pages, the right way up"
+        );
+
+        cleanup(&path);
+    }
+
+    /// A rotation is part of the page, so the note's own list carries it through the file.
+    #[test]
+    fn a_page_list_keeps_the_rotation_of_each_page() {
+        let (mut store, path) = store_for("layout-rotations");
+
+        store
+            .set_layout(&[
+                PageEntry::new(Page::Document(0)).turned(1),
+                PageEntry::new(Page::Blank),
+                PageEntry::new(Page::Blank).turned(-1),
+            ])
+            .expect("a layout");
+
+        assert_eq!(
+            store.layout().expect("the layout read back"),
+            vec![
+                PageEntry::new(Page::Document(0)).turned(1),
+                PageEntry::new(Page::Blank),
+                PageEntry::new(Page::Blank).turned(3),
+            ],
+            "each page came back the way up it was written"
+        );
+
+        cleanup(&path);
     }
 
     /// A note is a file with the tables, the view and the journal mode the design asks for.
@@ -1915,13 +1983,16 @@ mod tests {
         let (mut store, path) = store_for("meta");
 
         assert_eq!(store.open_page().expect("a page"), None);
-        assert_eq!(store.layout().expect("a layout"), Vec::<Page>::new());
+        assert_eq!(store.layout().expect("a layout"), Vec::<PageEntry>::new());
         assert_eq!(store.sheet().expect("a sheet"), None);
 
         store.set_open_page(4).expect("a page");
         store.set_sheet(Some((794.0, 1123.0))).expect("a sheet");
         store
-            .set_layout(&[Page::Blank, Page::Document(3)])
+            .set_layout(&[
+                PageEntry::new(Page::Blank),
+                PageEntry::new(Page::Document(3)),
+            ])
             .expect("a layout");
         store.set_document("chapter-3.pdf").expect("a name");
 
@@ -1929,7 +2000,10 @@ mod tests {
         assert_eq!(store.sheet().expect("a sheet"), Some((794.0, 1123.0)));
         assert_eq!(
             store.layout().expect("a layout"),
-            vec![Page::Blank, Page::Document(3)]
+            vec![
+                PageEntry::new(Page::Blank),
+                PageEntry::new(Page::Document(3))
+            ]
         );
         assert_eq!(
             store.document().expect("a name").as_deref(),
@@ -2189,7 +2263,12 @@ mod tests {
 
         // A note's own page list is what a reader can turn to, and it is what a summary reports.
         store
-            .set_layout(&[Page::Blank, Page::Blank, Page::Document(0), Page::Blank])
+            .set_layout(&[
+                PageEntry::new(Page::Blank),
+                PageEntry::new(Page::Blank),
+                PageEntry::new(Page::Document(0)),
+                PageEntry::new(Page::Blank),
+            ])
             .expect("a list");
         store.set_sheet(Some((794.0, 1123.0))).expect("a sheet");
         store.compact(0).expect("a compaction");

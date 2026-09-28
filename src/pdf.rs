@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::RenderImage;
 
 use crate::error::{AppError, Result};
+use crate::pages::{swaps_axes, Quarters};
 use crate::pdfium::{Document, OutlineEntry, RenderJob};
 
 /// What one slice of a render did, re-exported because it is part of this module's own API.
@@ -128,27 +129,49 @@ impl PdfStats {
 pub struct RenderedPage {
     /// The rendered bitmap.
     pub image: Arc<RenderImage>,
-    /// The page's width in PDF points.
+    /// The page's width in PDF points, as the *document* has it — which already has the page's own
+    /// `/Rotate` in it, because Pdfium reports a page's size the way it draws it (`/Rotate 90` on an
+    /// A4 page answers `842 × 595`). It is the size the *reader's* turn is not in yet.
     pub point_width: f32,
-    /// The page's height in PDF points.
+    /// The page's height in PDF points, likewise.
     pub point_height: f32,
     /// The width this bitmap was actually rendered at, in pixels.
     ///
     /// The requested width when the cache had it, and a *different* one when this is standing in
     /// for a rung that is not ready yet: the caller compares the two to know whether what it is
     /// drawing is the real thing.
+    ///
+    /// The width of the *drawn* page, so it is the width a page the reader has turned is drawn at (see
+    /// [`RenderedPage::display_size`]) and matches the bitmap Pdfium produced for that turn.
     pub pixels: u32,
+    /// How far the reader has turned the page, in quarter turns clockwise.
+    ///
+    /// The *reader's* turn and not the sum: a page's own `/Rotate` is already in `point_width` and
+    /// `point_height`, and Pdfium applied it to the pixels. This is the half that is the app's, and it
+    /// is what says whether the page it describes is the other way round.
+    pub rotation: Quarters,
 }
 
 impl RenderedPage {
     /// The logical size to draw this page at when it is shown `logical_width` logical pixels
-    /// wide, preserving the page's own aspect ratio.
+    /// wide, preserving the aspect ratio of the page *as it is drawn*.
+    ///
+    /// The width asked for is the width of the drawn page, so a page the reader has turned comes back
+    /// taller than it is wide: the shape the reader sees is the shape these two numbers describe, and
+    /// the bitmap behind them was rendered at the same turn.
     pub fn display_size(&self, logical_width: f32) -> (f32, f32) {
-        if self.point_width <= 0.0 {
+        let (width, height) = if swaps_axes(self.rotation) {
+            (self.point_height, self.point_width)
+        } else {
+            (self.point_width, self.point_height)
+        };
+
+        if width <= 0.0 {
             return (logical_width, logical_width);
         }
-        let scale = logical_width / self.point_width;
-        (logical_width, self.point_height * scale)
+
+        let scale = logical_width / width;
+        (logical_width, height * scale)
     }
 }
 
@@ -160,8 +183,11 @@ impl RenderedPage {
 pub struct PageRequest {
     /// The page index.
     pub page: usize,
-    /// The bitmap width, in pixels, on the quality ladder.
+    /// The bitmap width, in pixels, on the quality ladder. The width of the page *as it is drawn*.
     pub pixels: u32,
+    /// Which way up the reader has this page, in quarter turns clockwise. The page's own `/Rotate`
+    /// belongs to the document and is added to this where the key is made and the render started.
+    pub rotation: Quarters,
     /// Whether annotations are drawn into the bitmap.
     pub annotations: bool,
     /// The colour format the bytes should be in.
@@ -174,6 +200,9 @@ impl PageRequest {
         PageRequest {
             page,
             pixels,
+            // The right way up: the reader has not turned it. A page's own `/Rotate` belongs to the
+            // document, and is added to this where the key is made and the render is started.
+            rotation: 0,
             // Annotations are not drawn *into* the page: the ink the user writes is the app's own
             // layer above it, and a page's own annotations belong there too — on top, not baked in.
             // Baking them in would also make a rasterised page wrong the moment one changed.
@@ -190,13 +219,33 @@ impl PageRequest {
         self.colour = if on { Colour::Grayscale } else { Colour::Bgra };
         self
     }
+
+    /// The same request with the reader's turn on it.
+    ///
+    /// A render option like the one above, and part of the key for the same reason: a bitmap of a page
+    /// the right way up is not the bitmap of that page on its side, and a page is turned *after* it has
+    /// been read once, so the two live in the cache together.
+    pub fn turned(mut self, turns: Quarters) -> Self {
+        self.rotation = turns;
+        self
+    }
 }
 
 /// What one cached bitmap weighs: its pixels, four bytes each.
+///
+/// The height is derived from the point size at the turn the bitmap was rendered at: the same relation
+/// [`crate::pdfium::RenderJob`] sizes the bitmap with, which is what keeps this a budget rather than a
+/// guess.
 fn weight(page: &RenderedPage) -> u64 {
     let width = page.pixels as u64;
-    let height = if page.point_width > 0.0 {
-        (width as f32 * page.point_height / page.point_width) as u64
+    let (point_width, point_height) = if swaps_axes(page.rotation) {
+        (page.point_height, page.point_width)
+    } else {
+        (page.point_width, page.point_height)
+    };
+
+    let height = if point_width > 0.0 {
+        (width as f32 * point_height / point_width) as u64
     } else {
         width
     };
@@ -328,7 +377,7 @@ impl PdfDocumentView {
         // Render the first page now, so an open PDF shows something other than a blank page. This
         // is the one blocking render left in the app, and it is deliberate: the frame that follows
         // an open has nothing to show until it has happened.
-        view.render_page(0, render_pixel_width)?;
+        view.render_page(PageRequest::new(0, render_pixel_width))?;
         Ok(view)
     }
 
@@ -389,7 +438,7 @@ impl PdfDocumentView {
     /// A miss is *recorded* here but nothing is scheduled: what is missing is
     /// [`Self::plan`]'s answer, and that separation is what lets the caller decide when to pay.
     pub fn page_for_frame(&mut self, request: PageRequest) -> Option<RenderedPage> {
-        let key = self.key_for(request.page, request.pixels)?;
+        let key = self.key_for(request)?;
 
         // Cloned before the counters move: a `RenderedPage` is an `Arc` and two floats, and the
         // alternative is holding a borrow of the map across a mutation of its owner.
@@ -414,7 +463,7 @@ impl PdfDocumentView {
     ///
     /// `None` means the frame already has the bitmap it asked for.
     pub fn plan(&mut self, request: PageRequest) -> Option<PageRequest> {
-        let key = self.key_for(request.page, request.pixels)?;
+        let key = self.key_for(request)?;
         (!self.cache.contains_key(&key)).then_some(request)
     }
 
@@ -434,6 +483,9 @@ impl PdfDocumentView {
             document,
             request.page,
             request.pixels,
+            // The reader's turn alone: a page's own `/Rotate` is the document's, and Pdfium applies
+            // that itself (see [`crate::pdfium::RenderJob::new`]).
+            request.rotation,
             match request.colour {
                 Colour::Bgra => crate::pdfium::Format::Bgra,
                 Colour::Grayscale => crate::pdfium::Format::Grayscale,
@@ -462,7 +514,7 @@ impl PdfDocumentView {
             Progress::Finished => {
                 let request = self.job_request.take().expect("a job always has a request");
                 let key = self
-                    .key_for(request.page, request.pixels)
+                    .key_for(request)
                     .expect("a job is only started for an open document");
 
                 match self.page_from_job(&job, request) {
@@ -526,18 +578,18 @@ impl PdfDocumentView {
             point_width,
             point_height,
             pixels: width,
+            rotation: request.rotation,
         })
     }
 
-    /// The rendered page at `index`, rasterising it if the cache does not have it.
+    /// The rendered page a request asks for, rasterising it if the cache does not have it.
     ///
     /// Blocking, and deliberately so: it runs on the calling thread *inside* a frame, which is what
     /// the `pdf` timing measures. The frame path uses [`Self::page_for_frame`] and [`Self::plan`]
     /// instead, so a rasterisation that is not ready shows the previous rung of the ladder rather
     /// than stalling the frame that asked for it.
-    pub fn render_page(&mut self, index: usize, pixel_width: u32) -> Result<RenderedPage> {
-        let request = PageRequest::new(index, pixel_width);
-        let Some(key) = self.key_for(request.page, request.pixels) else {
+    pub fn render_page(&mut self, request: PageRequest) -> Result<RenderedPage> {
+        let Some(key) = self.key_for(request) else {
             return Err(AppError::Other(String::from("no PDF is open")));
         };
 
@@ -577,22 +629,36 @@ impl PdfDocumentView {
 
     /// The key for a request against the open document, or `None` when nothing is open.
     ///
-    /// The page's own rotation is part of the key, and reading it is a Pdfium call: cheap, but not
-    /// free, and a page's rotation does not change under the app's feet — so it is read once per
-    /// page and remembered.
-    fn key_for(&mut self, page: usize, pixels: u32) -> Option<PageKey> {
+    /// **Everything in the request that changes the pixels is in the key**, which is why this takes
+    /// the *request* rather than a field or two of it: a render option left out of the key is a bitmap
+    /// served for a request that asked for something else, and every such failure is a quiet one (see
+    /// [`PageKey`]).
+    ///
+    /// The rotation in the key is the *drawn* rotation — the page's own `/Rotate` and the reader's
+    /// turn, added — and reading the page's own is a Pdfium call: cheap, but not free, and it does not
+    /// change under the app's feet, so it is read once per page and remembered.
+    fn key_for(&mut self, request: PageRequest) -> Option<PageKey> {
         if self.document.is_none() {
             return None;
         }
 
         Some(PageKey {
             document: self.document_id,
-            page,
-            pixels: pixels.max(1),
-            rotation: self.rotation_of(page),
-            annotations: false,
-            colour: Colour::Bgra,
+            page: request.page,
+            pixels: request.pixels.max(1),
+            rotation: self.effective_rotation(request.page, request.rotation),
+            annotations: request.annotations,
+            colour: request.colour,
         })
+    }
+
+    /// Which way up a page is drawn: the document's own rotation for it, and the reader's turn, added.
+    ///
+    /// One place, because the same answer is needed three times — by the cache key, by the render, and
+    /// by the sheet the app lays out — and two ways of adding them is a page drawn one way up, cached
+    /// as another, and laid out as a third.
+    fn effective_rotation(&mut self, page: usize, turns: Quarters) -> Quarters {
+        crate::pages::turned(self.rotation_of(page), turns as i32)
     }
 
     /// The rotation of a page, in quarter turns clockwise, remembered after the first read.
@@ -698,7 +764,7 @@ impl PdfDocumentView {
 
         // `advance` has just filed it under the key this request makes.
         let key = self
-            .key_for(request.page, request.pixels)
+            .key_for(request)
             .ok_or_else(|| AppError::Other(String::from("no PDF is open")))?;
 
         self.cache
@@ -950,7 +1016,9 @@ mod tests {
         assert_eq!(view.page_count(), 1);
         assert_eq!(view.file_name(), "from-memory.pdf");
 
-        let page = view.render_page(0, 200).expect("the page renders");
+        let page = view
+            .render_page(PageRequest::new(0, 200))
+            .expect("the page renders");
         assert_eq!(page.pixels, 200, "the rung it was asked for");
         assert!(page.point_height > page.point_width, "A4 is portrait");
     }
@@ -1012,12 +1080,17 @@ mod tests {
         };
 
         let mut view = open_fixture(&path, 1_024).expect("the document opens");
-        view.render_page(0, 1_536).expect("the second rung");
+        view.render_page(PageRequest::new(0, 1_536))
+            .expect("the second rung");
         let rendered = view.stats().rendered;
 
         // Out to the first rung, and back to the second: neither is a rasterisation.
-        let first = view.render_page(0, 1_024).expect("the first rung again");
-        let second = view.render_page(0, 1_536).expect("the second rung again");
+        let first = view
+            .render_page(PageRequest::new(0, 1_024))
+            .expect("the first rung again");
+        let second = view
+            .render_page(PageRequest::new(0, 1_536))
+            .expect("the second rung again");
 
         assert_eq!(
             view.stats().rendered,
@@ -1076,15 +1149,19 @@ mod tests {
         let mut view = open_fixture(&path, 200).expect("the document opens");
 
         // Room for about two of these bitmaps, rather than the 128 MB the app allows.
-        let rung = weight(&view.render_page(0, 200).expect("a rung"));
+        let rung = weight(&view.render_page(PageRequest::new(0, 200)).expect("a rung"));
         view.budget = rung * 2;
 
-        view.render_page(0, 300).expect("a second rung");
-        view.render_page(0, 400).expect("a third rung");
+        view.render_page(PageRequest::new(0, 300))
+            .expect("a second rung");
+        view.render_page(PageRequest::new(0, 400))
+            .expect("a third rung");
 
         assert!(view.stats().evicted >= 1, "the oldest bitmap went");
 
-        let newest = view.render_page(0, 400).expect("the newest rung");
+        let newest = view
+            .render_page(PageRequest::new(0, 400))
+            .expect("the newest rung");
         assert_eq!(newest.pixels, 400, "the bitmap in use stays");
         assert!(
             view.stats().bytes <= view.budget + weight(&newest),
@@ -1128,7 +1205,9 @@ mod tests {
                 .to_string_lossy()
         );
 
-        let page = view.render_page(0, 300).expect("the page renders");
+        let page = view
+            .render_page(PageRequest::new(0, 300))
+            .expect("the page renders");
         assert!(page.point_width > 0.0, "an A4 page has a width");
         assert!(page.point_height > page.point_width, "A4 is portrait");
         assert_eq!(
@@ -1137,7 +1216,9 @@ mod tests {
         );
 
         // A second request at the same width must be served from the cache, not re-rasterised.
-        let cached = view.render_page(0, 300).expect("the cached page");
+        let cached = view
+            .render_page(PageRequest::new(0, 300))
+            .expect("the cached page");
         assert_eq!(
             Arc::as_ptr(&page.image),
             Arc::as_ptr(&cached.image),
@@ -1187,7 +1268,8 @@ mod tests {
 
         let whole = {
             let mut view = open_fixture(&path, 1_200).expect("the document opens");
-            view.render_page(0, 1_200).expect("the page renders")
+            view.render_page(PageRequest::new(0, 1_200))
+                .expect("the page renders")
         };
 
         let mut view = open_fixture(&path, 1_200).expect("the document opens");
@@ -1208,7 +1290,7 @@ mod tests {
         }
 
         let sliced = view
-            .render_page(0, 1_200)
+            .render_page(PageRequest::new(0, 1_200))
             .expect("the finished page is cached");
         assert_eq!(sliced.pixels, whole.pixels);
         assert_eq!(
@@ -1318,7 +1400,9 @@ mod tests {
             let mut view = open_fixture(&path, 100).expect("the document reopens");
 
             let started = std::time::Instant::now();
-            let page = view.render_page(0, width).expect("the page renders");
+            let page = view
+                .render_page(PageRequest::new(0, width))
+                .expect("the page renders");
             let rasterised = started.elapsed();
 
             // And the same page in slices of the pump's budget, counting what it takes. The setup is
@@ -1352,7 +1436,10 @@ mod tests {
             let started = std::time::Instant::now();
             let rounds = 1_000;
             for _ in 0..rounds {
-                std::hint::black_box(view.render_page(0, width).expect("the cached page"));
+                std::hint::black_box(
+                    view.render_page(PageRequest::new(0, width))
+                        .expect("the cached page"),
+                );
             }
             let cached = started.elapsed() / rounds;
 
@@ -1381,7 +1468,7 @@ mod tests {
         let mut view = open_fixture(&path, 100).expect("the document reopens");
         let started = std::time::Instant::now();
         let preview = view
-            .render_page(0, 1_024)
+            .render_page(PageRequest::new(0, 1_024))
             .expect("the cheapest rung renders");
         let preview_time = started.elapsed();
 
@@ -1473,5 +1560,155 @@ mod tests {
         let view = open_fixture(&path, 200).expect("the document opens");
         assert!(!view.has_outline());
         assert!(view.outline().is_empty());
+    }
+
+    /// A PDF file built object by object, with a real cross-reference table.
+    ///
+    /// The offsets are the bytes they claim to be, because a table Pdfium silently repairs would let
+    /// a broken fixture pass for the wrong reason.
+    fn a_pdf(objects: &[String]) -> Vec<u8> {
+        let mut out = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+        }
+
+        let xref = out.len();
+        out.push_str(&format!("xref\n0 {}\n", objects.len() + 1));
+        out.push_str("0000000000 65535 f \n");
+        for offset in &offsets {
+            out.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        out.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        ));
+
+        out.into_bytes()
+    }
+
+    /// A one-page A4 PDF whose page is turned on its side by its own `/Rotate`, with one corner marked.
+    ///
+    /// The mark is a black square in the page's own bottom-left corner — the corner that a quarter turn
+    /// clockwise takes to the top-left — so a render says which way up the page came out.
+    fn a_page_turned_by_the_document() -> Vec<u8> {
+        let content = String::from("0 0 0 rg\n0 0 120 120 re f\n");
+
+        a_pdf(&[
+            String::from("<< /Type /Catalog /Pages 2 0 R >>"),
+            String::from("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            String::from(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Rotate 90 /Contents 4 0 R >>",
+            ),
+            format!(
+                "<< /Length {} >>\nstream\n{content}endstream",
+                content.len()
+            ),
+        ])
+    }
+
+    /// What Pdfium does with the rotation it is handed, and what a page's own `/Rotate` already is.
+    ///
+    /// Two facts the app's page turning rests on, and neither can be settled by reading the header:
+    ///
+    /// 1. **A page's size is reported the way it is drawn.** `/Rotate 90` on an A4 page answers
+    ///    `842 × 595`, so the document's own rotation is *in* the size — which is why the app swaps only
+    ///    for the reader's turn.
+    /// 2. **The rotation argument is *added* to it.** A `/Rotate 90` page rendered at `0` comes out the
+    ///    way the document says (the marked corner at the top-left); at `1` it is a quarter further
+    ///    round. Handing Pdfium the *sum* of the two rotations would therefore turn a `/Rotate 90` page
+    ///    upside down, which is why the app hands it the reader's turn alone.
+    #[test]
+    fn the_rotation_handed_to_pdfium_is_the_readers_turn() {
+        let _pdfium = exclusive();
+        if !crate::pdfium::available() {
+            eprintln!("skipping: pdfium.dll is not available");
+            return;
+        }
+
+        let document = crate::pdfium::Document::open(
+            String::from("turned.pdf"),
+            a_page_turned_by_the_document(),
+        )
+        .expect("the document opens");
+
+        assert_eq!(
+            document.page_point_size(0),
+            Some((842.0, 595.0)),
+            "the document's size for the page has the page's own /Rotate in it"
+        );
+        assert_eq!(
+            document.page_rotation(0),
+            1,
+            "and it says the page is on its side"
+        );
+
+        // The mark, read at the four corners of the bitmap: top-left, top-right, bottom-left, and
+        // bottom-right. The page's mark is in its own bottom-left corner, which a quarter turn
+        // clockwise takes to the top-left.
+        let marked_corners = |turns: crate::pages::Quarters| {
+            let mut job =
+                RenderJob::new(&document, 0, 400, turns, crate::pdfium::Format::Bgra, false)
+                    .expect("a job");
+
+            // Advanced in slices until it is done, the way the app does it: Pdfium finishes when it
+            // finishes, and what this test is about is *which way up* the page came out rather than a
+            // budget — so a loaded machine must not be able to fail it.
+            let give_up_at = Instant::now() + Duration::from_secs(60);
+            let mut progress = Progress::Unfinished;
+            while progress == Progress::Unfinished && Instant::now() < give_up_at {
+                progress = job.advance(Duration::from_secs(1));
+            }
+
+            assert_eq!(progress, Progress::Finished, "the fixture renders");
+            let (width, height, pixels) = job.pixels().expect("the page's pixels");
+            let (width, height) = (width as usize, height as usize);
+
+            // The shape the app sizes the bitmap with: the document's size for the page, swapped for
+            // an odd turn. Pdfium stretched the page into exactly this, which is what makes the bitmap
+            // the shape of the page the reader sees.
+            assert_eq!(width, 400, "the width asked for is the bitmap's width");
+            assert_eq!(
+                height,
+                if crate::pages::swaps_axes(turns) {
+                    566
+                } else {
+                    283
+                },
+                "and its height is the drawn page's shape"
+            );
+
+            let marked = |x: usize, y: usize| pixels[y * width * 4 + x * 4] < 128;
+
+            [
+                marked(width / 8, height / 8),
+                marked(width * 7 / 8, height / 8),
+                marked(width / 8, height * 7 / 8),
+                marked(width * 7 / 8, height * 7 / 8),
+            ]
+        };
+
+        assert_eq!(
+            marked_corners(0),
+            [true, false, false, false],
+            "no turn from the reader is the page the document draws"
+        );
+        assert_eq!(
+            marked_corners(1),
+            [false, true, false, false],
+            "one turn is added to the page's own /Rotate, not taken instead of it"
+        );
+        assert_eq!(
+            marked_corners(2),
+            [false, false, false, true],
+            "upside down from the document's own"
+        );
+        assert_eq!(
+            marked_corners(3),
+            [false, false, true, false],
+            "and the other quarter turn"
+        );
     }
 }

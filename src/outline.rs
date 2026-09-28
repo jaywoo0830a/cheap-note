@@ -613,7 +613,7 @@ mod tests {
     // scope and shadow the attribute this module needs.
     use super::OutlinePages;
     use crate::bookmarks::Bookmarks;
-    use crate::pages::{Page, Pages};
+    use crate::pages::{Page, PageEntry, Pages};
     use crate::pdfium::OutlineEntry;
 
     /// An entry with a title, the page it opens, and whatever is under it.
@@ -687,7 +687,11 @@ mod tests {
     fn a_row_maps_the_documents_page_to_the_notes() {
         // A note holding the document's first and third pages, with a blank sheet between them.
         let note = Pages::restore(
-            Some(vec![Page::Document(0), Page::Blank, Page::Document(2)]),
+            Some(vec![
+                PageEntry::new(Page::Document(0)),
+                PageEntry::new(Page::Blank),
+                PageEntry::new(Page::Document(2)),
+            ]),
             3,
             3,
         );

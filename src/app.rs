@@ -29,6 +29,12 @@
 //! [`crate::cursor_overlay`]). So a batch that laid no ink has nothing to show, and no frame is
 //! drawn for it.
 //!
+//! The wake draws the canvas itself rather than waiting for a frame to: the ink is the one part of a
+//! canvas that changes between frames, and a frame on this stack is redrawn on every vblank and
+//! carries the whole interface with it. The pump hands the canvas to its layer and the compositor
+//! paces the present (see [`crate::ink_layer`]), so the line lands at the display's rate rather than
+//! at the interface's, and a frame is left to redraw the chrome and the sheet's own geometry.
+//!
 //! A second task ([`NoteApp::start_display_pump`]) does the work that is not the ink — rasterising
 //! the page, rebuilding the counters — on a fixed [`HOUSEKEEPING_INTERVAL`] that owes nothing to
 //! the display, so that a rasterisation can never delay a stroke.
@@ -481,6 +487,10 @@ pub struct NoteApp {
     /// any stroke's identity. This is how the layer is told: it is part of the canvas it is handed
     /// (see [`crate::ink_layer::canvas::Ink`]).
     ink_revision: u64,
+    /// When the canvas layer last presented, for the gap between two presentations: the rate the ink
+    /// reaches the screen at, which is not the frame rate and is the one the writing is judged by
+    /// (see [`crate::timing::Timings::present_gap`]).
+    last_present: Option<Instant>,
     /// The canvas as the last frame described it: the desk, the page's shadow, and the sheet.
     ///
     /// Described by the app and drawn by the layer — or, when there is no layer, painted by the
@@ -721,6 +731,7 @@ impl NoteApp {
             cursor,
             ink_layer,
             ink_revision: 0,
+            last_present: None,
             canvas: Canvas::default(),
             page_index: 0,
             scale: window.scale_factor(),
@@ -920,6 +931,16 @@ impl NoteApp {
                     return;
                 }
 
+                // The canvas draws itself here, on the pen's own wake rather than in a frame: this
+                // app describes the canvas and its layer draws it, and the ink is the one part of a
+                // canvas that changes between frames. What only a frame can give it is the display's
+                // own rate — a frame is redrawn on every vblank and carries the interface with it, at
+                // several times the cost of the ink, so ink that waited for one would reach the screen
+                // at a fraction of the rate the display can show (see [`Self::draw_canvas`]).
+                {
+                    app.draw_canvas();
+                }
+
                 // The counters have moved too, but the line is not rebuilt for them: it waits for a
                 // change the user made, and the counters a person actually reads are the ones a session
                 // reports. Re-shaping text is still work a frame drawn to show ink does not have to
@@ -933,6 +954,78 @@ impl NoteApp {
             }
         })
         .detach();
+    }
+
+    /// Re-describes the ink for the canvas layer, from the sheet the last frame drew.
+    ///
+    /// The stroke under the pen is closed here, for the sheet as it is drawn now: an in-progress one
+    /// has no cached ribbon outline yet. Its newest segment is left straight — the reading after the
+    /// tip has not arrived, and a curve drawn without it would move ink the user has already seen,
+    /// under the nib, as they write (see `Stroke::close_live`).
+    ///
+    /// Called by a frame, which is where the sheet's own geometry is decided, and by the pen's pump
+    /// before it draws the canvas itself. Both, because the ink is the one part of a canvas that
+    /// changes between frames: the desk, the paper, its ruling and the document's page change only
+    /// when the user changes them, and ink that waited for a frame would reach the screen at the
+    /// frame rate rather than at the display's (see [`Self::draw_canvas`]).
+    fn describe_ink(&mut self) {
+        let sheet = self.sheet;
+        let open = self.ink.open().cloned().map(|mut stroke| {
+            stroke.close_live(sheet.zoom);
+            Arc::new(stroke)
+        });
+
+        self.canvas.ink = Ink {
+            origin: sheet.origin,
+            zoom: sheet.zoom,
+            strokes: Arc::clone(self.ink.finished()),
+            open,
+            revision: self.ink_revision,
+            visible: sheet.visible(),
+        };
+    }
+
+    /// Hands the canvas to its layer, and forgets the layer if it fails.
+    ///
+    /// Called by the pen's pump — where the ink is newest — and by a frame, which is what draws the
+    /// chrome and what knows where the sheet is. A layer that fails is reported rather than drawn
+    /// around: it is dropped, the desk below comes back to the frame, and the canvas keeps its last
+    /// frame. Both callers go through here so that is one path.
+    fn draw_canvas(&mut self) {
+        // Nothing has described a canvas yet: this is a reading that arrived before the first frame,
+        // and a layer handed an empty description would paint an empty desk over the window.
+        if self.canvas.sheet.is_none() {
+            return;
+        }
+
+        self.describe_ink();
+
+        // Timed by hand rather than with a guard: a guard would hold a borrow of the counters across
+        // the layer's own borrow of the app. This is the draw, and what the status line's `canvas`
+        // clause is about (see [`crate::timing`]); the description above it is arithmetic on a few
+        // rectangles and one `Arc` per frame.
+        let started = Instant::now();
+        let drawn = match self.ink_layer.as_mut() {
+            Some(ink) => ink.draw(&self.canvas),
+            None => Ok(false),
+        };
+        self.timings.canvas.record(started.elapsed());
+
+        match drawn {
+            Ok(true) => {
+                // The ink reached the screen. The gap between two of those is the rate it reaches it
+                // at — the ink's own rate, drawn by whichever wake asked for it — and it is the number
+                // a session that reads only frames cannot show (see [`crate::timing`]).
+                if let Some(previous) = self.last_present.replace(started) {
+                    self.timings.present_gap.record(started - previous);
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.ink_layer = None;
+                self.message = format!("canvas layer: {error}");
+            }
+        }
     }
 
     /// Keeps the counters and the page being rasterised up to date.
@@ -4178,28 +4271,17 @@ impl Render for NoteApp {
             rules
         });
 
-        // The stroke under the pen: an in-progress one has no cached ribbon outline yet, so it is
-        // closed here, for the sheet as it is drawn now. Its newest segment is left straight — the
-        // reading after the tip has not arrived, and a curve drawn without it would move ink the
-        // user has already seen, under the nib, as they write (see `Stroke::close_live`).
-        let open = self.ink.open().cloned().map(|mut stroke| {
-            stroke.close_live(sheet.zoom);
-            Arc::new(stroke)
-        });
+        // The stroke under the pen is closed for the ink description, and where the sheet is: see
+        // [`Self::describe_ink`], which the pen's pump calls for the same reason.
 
         let page_color: Hsla = rgb(self.settings.page_color).into();
 
-        // One measurement for the whole of the canvas's cost, rather than one for describing it and
-        // another for drawing it: what the status line's `canvas` clause means is what a frame pays
-        // for the page and its ink, and that is both halves. It is the one number that grows with the
-        // amount of ink on a page, and so the one that says whether the layer is keeping its promise
-        // — a page of 316 strokes costing what a page of 29 does (see [`crate::ink_layer::render`]).
+        // What the canvas is, described for its own renderer (see [`crate::ink_layer::canvas`]): the
+        // desk, the page's shadow and the sheet; then what is printed on the paper, the document's
+        // page, and the ink. The drawing itself is timed where it happens — in [`Self::draw_canvas`]
+        // — because the pen's pump draws the canvas too, and a number that only counted the frame's
+        // half of the draws would be half a number (see [`crate::timing`]).
         {
-            let _timed = measure(&self.timings.canvas);
-
-            // What the canvas is, described for its own renderer (see [`crate::ink_layer::canvas`]):
-            // the desk, the page's shadow and the sheet; then what is printed on the paper, the
-            // document's page, and the ink.
             describe_canvas(&mut self.canvas, &sheet, self.scale, page_color, background);
 
             for rule in rules.iter().flat_map(|rules| rules.iter()) {
@@ -4216,20 +4298,12 @@ impl Render for NoteApp {
                 },
             });
 
-            // The part of the sheet that is on screen: what the layer culls the ink against, and the
-            // rectangle the counters below are counted in. Computed once, because both halves of a
-            // frame have to agree about it — a stroke the layer skips as invisible and the status
-            // line counts as drawn would be a number nobody could trust.
             let visible = sheet.visible();
 
-            self.canvas.ink = Ink {
-                origin: sheet.origin,
-                zoom: sheet.zoom,
-                strokes: Arc::clone(self.ink.finished()),
-                open,
-                revision: self.ink_revision,
-                visible,
-            };
+            // The ink, from the same description the pen's pump draws with: a frame re-describes it
+            // rather than leaving it to the pump, because this is where the sheet it is drawn on was
+            // decided.
+            self.describe_ink();
 
             // What the canvas was asked to draw, counted for the status line: the layer draws it and
             // this does not touch a polygon, but the numbers a person reads are the numbers they read
@@ -4252,18 +4326,11 @@ impl Render for NoteApp {
 
             self.timings.count_painted(painted, vertices, culled);
 
-            // The canvas draws itself, on this thread and inside this frame: the layer is bound to
-            // the window's swap chain, so there is nothing to hand it to and nothing to wait for.
-            // A layer that fails is reported rather than drawn around: it is dropped, the desk below
-            // comes back to this element, and the canvas keeps its last frame.
-            let failure = match self.ink_layer.as_mut() {
-                Some(ink) => ink.draw(&self.canvas).err(),
-                None => None,
-            };
-            if let Some(error) = failure {
-                self.ink_layer = None;
-                self.message = format!("canvas layer: {error}");
-            }
+            // The canvas draws itself: the same call the pen's pump makes, on the same thread, with
+            // the same description (see [`Self::draw_canvas`]). A frame draws it because a frame is
+            // what changed the *sheet* — the zoom, the pan, the page, the paper — and the ink is
+            // redrawn along with it rather than waiting for the next reading.
+            self.draw_canvas();
         }
 
         // The desk belongs to the canvas layer when it is there: this element leaves those pixels to

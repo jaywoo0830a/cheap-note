@@ -4769,6 +4769,15 @@ fn describe_canvas(canvas: &mut Canvas, sheet: &Sheet, scale: f32, paper: Hsla, 
     let (width, height) = sheet.drawn();
     let (x, y) = sheet.origin;
 
+    // The sheet's own rectangle, which is what the layer clips the ink to: the display half of the
+    // rule the ink model enforces on every reading (see [`crate::ink::InkTransform::on_paper`]).
+    canvas.sheet = Some(Rect {
+        x,
+        y,
+        width,
+        height,
+    });
+
     for (spread, drop, tint) in PAGE_SHADOW {
         canvas.fill(
             Rect {

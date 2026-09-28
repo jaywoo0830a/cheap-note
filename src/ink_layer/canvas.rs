@@ -125,6 +125,12 @@ pub struct Canvas {
     pub scale: f32,
     /// The page's shadow and the sheet, in the order they are painted.
     pub fills: Vec<Fill>,
+    /// The sheet's own rectangle, in logical window pixels: what the ink is clipped to.
+    ///
+    /// A ribbon at the paper's edge spills a couple of pixels past it, and ink written before the
+    /// model refused off-paper readings can lie well outside it; both are ink the paper cannot hold
+    /// (see [`crate::ink::InkTransform::on_paper`]).
+    pub sheet: Option<Rect>,
     /// The ruling, printed on the sheet.
     pub rules: Vec<Fill>,
     /// The document's page, when the sheet is one.
@@ -142,6 +148,7 @@ impl Canvas {
     pub fn clear(&mut self) {
         self.fills.clear();
         self.rules.clear();
+        self.sheet = None;
         self.page = None;
         self.ink = Ink::default();
     }

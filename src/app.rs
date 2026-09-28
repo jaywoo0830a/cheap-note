@@ -204,6 +204,21 @@ const BAR_HEIGHT: f32 = 148.0;
 /// line is the only text in the interface that changes on its own.
 const STATUS_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How much of the window's width the status pill may take, as a fraction of it.
+///
+/// A fraction rather than a width, because the line is longer than any pill at any size: the pill
+/// wraps, and what it is given decides how many lines it wraps into. Not the whole window, because a
+/// readout that runs the width of the desk is a bar rather than a pill — see
+/// [`NoteApp::status_pill`] for the arithmetic, and [`STATUS_LIFT`] for where it sits.
+const STATUS_PILL_WIDTH: f32 = 0.6;
+
+/// How far above the desk's bottom row the status pill floats, in logical pixels.
+///
+/// The pill is wide, and the page pill sits in the middle of that row: a readout drawn over the
+/// control a person is reaching for is worse than one floating a row higher. The number is the page
+/// pill's own height plus [`BAR_MARGIN`], which is what "clear of it" comes to.
+const STATUS_LIFT: f32 = 40.0;
+
 /// Whether the status line is due to be rebuilt.
 ///
 /// A free function rather than a method so the pacing can be tested without a window: this clock
@@ -3574,7 +3589,9 @@ impl NoteApp {
                 div()
                     .absolute()
                     .left_0()
-                    .bottom_0()
+                    // A row higher than the page pill, because the line wraps into a wide box and the
+                    // page pill is in the middle of this one: see [`STATUS_LIFT`].
+                    .bottom(px(STATUS_LIFT))
                     .child(self.status_pill(cx)),
             );
         }
@@ -3841,6 +3858,15 @@ impl NoteApp {
     /// Out of the bar and over the desk, because it is a readout rather than a control, and because
     /// the line changes four times a second: text in the bar would re-lay-out the bar, while text in
     /// a pill of its own re-lays-out the pill.
+    ///
+    /// It **wraps**, and it is allowed most of the window's width, because of what the line has grown
+    /// into: the pen's readings, the ink's counts, the page cache's hit ratio, the zoom and the frame's
+    /// own timings are some three hundred characters, which is more than fifteen hundred logical
+    /// pixels at this size — several times any window. Set on one nowrap line of 460 pixels (which is
+    /// what this pill used to do) the timings were the part that fell off the end of it, and the
+    /// timings are the whole reason to read the line while something is being measured. A pill that
+    /// wraps costs a strip of the desk along the bottom of the sheet and shows all of it, and it grows
+    /// *upward* from the corner it is anchored to rather than down off the edge of the window.
     fn status_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
@@ -3851,9 +3877,7 @@ impl NoteApp {
             .bg(theme.title_bar.opacity(0.92))
             .text_size(px(11.0))
             .text_color(theme.muted_foreground)
-            .whitespace_nowrap()
-            .truncate()
-            .max_w(px(460.0))
+            .max_w(relative(STATUS_PILL_WIDTH))
             .child(self.status.clone())
     }
 

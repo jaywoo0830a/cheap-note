@@ -517,10 +517,24 @@ impl NoteStore {
     }
 }
 
-/// Starts a transaction, reporting failure the way every other failure here is reported.
+/// Starts a transaction that is going to write, reporting failure the way every other failure here is
+/// reported.
+///
+/// `BEGIN IMMEDIATE` rather than the deferred transaction `rusqlite` opens by default, and that is the
+/// difference between a note that saves and one that reports "database is locked". The writer thread
+/// and the app each hold their own connection to one file (see the module docs), and every write here
+/// reads before it writes — the page's row, then the next sequence number, then the insert. A deferred
+/// transaction takes its write lock at that first write, so a commit on the other connection in between
+/// leaves this one holding a snapshot it can no longer write over; SQLite answers that with
+/// `SQLITE_BUSY_SNAPSHOT`, which reaches the user as "database is locked", and the busy timeout does not
+/// apply to it, because waiting cannot change the snapshot the transaction is holding. Taking the lock
+/// at the start turns the wait back into one the timeout covers: the transaction is queued behind the
+/// other writer rather than failing for being late.
 impl NoteStore {
     fn begin(&mut self) -> Result<rusqlite::Transaction<'_>> {
-        self.conn.transaction().map_err(sql)
+        self.conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(sql)
     }
 }
 
@@ -1434,6 +1448,62 @@ mod tests {
         if let Some(dir) = path.parent() {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    /// A transaction that reads before it writes is refused if another connection commits in between —
+    /// and taking the lock at the start is what makes it wait instead.
+    ///
+    /// It is pinned down here as a hazard rather than as a feature of this store, because what decides
+    /// it is SQLite's behaviour with two connections on one file — the arrangement the app runs (the
+    /// writer thread owns one connection to `note.db`, the app owns another) — and because it is the
+    /// reason [`NoteStore::begin`] asks for `BEGIN IMMEDIATE`. The busy timeout is set on both
+    /// connections here, deliberately: the refusal is the point, and it is one that waiting cannot fix.
+    #[test]
+    fn a_deferred_transaction_cannot_write_over_another_connection() {
+        let (store, path) = store_for("snapshot-upgrade");
+        // The file is created, and its schema with it, before these two open it.
+        drop(store);
+
+        let deferred = Connection::open(&path).expect("a connection");
+        let other = Connection::open(&path).expect("a second connection");
+        for conn in [&deferred, &other] {
+            conn.execute_batch("PRAGMA busy_timeout = 5000;")
+                .expect("a timeout to wait with");
+        }
+
+        deferred
+            .execute_batch("BEGIN DEFERRED;")
+            .expect("a deferred transaction");
+        // The read that fixes the snapshot this transaction will later try to write over. Every write in
+        // this store starts with one of these.
+        let _: i64 = deferred
+            .query_row("SELECT COUNT(*) FROM pages", [], |row| row.get(0))
+            .expect("a read");
+
+        // The other connection commits in the meantime — the app saving a page while the writer thread is
+        // halfway through a page of ink.
+        other
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('touched', 'yes')
+                 ON CONFLICT(key) DO UPDATE SET value = 'yes'",
+                [],
+            )
+            .expect("the other connection writes while the first only reads");
+
+        // And now the deferred transaction's own write: refused, with the timeout unable to help.
+        let refused = deferred.execute(
+            "INSERT INTO meta (key, value) VALUES ('late', 'no')
+             ON CONFLICT(key) DO UPDATE SET value = 'no'",
+            [],
+        );
+
+        assert!(
+            refused.is_err(),
+            "a snapshot taken before the other commit cannot be written over: {refused:?}"
+        );
+        let _ = deferred.execute_batch("ROLLBACK;");
+
+        cleanup(&path);
     }
 
     /// A stroke of `points` points walking across the page, in `color`.

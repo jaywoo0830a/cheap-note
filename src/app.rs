@@ -525,10 +525,16 @@ pub struct NoteApp {
     name_input: Entity<InputState>,
     /// The keyboard the sheet gets back when the field goes away.
     ///
-    /// A screen with nothing focused still hears the keys it paints (see [`Self::note_key_down`]), but a
-    /// *field* that has just gone away is a window that thinks something is still focused — so finishing
-    /// a name puts the focus somewhere real.
+    /// The note screen's keys are caught by the element being *painted* (see [`Self::note_key_down`]), and
+    /// GPUI dispatches a keystroke along the path from the window's root to whatever is **focused** — so
+    /// the sheet hears its own keys only while this handle holds the focus. What gives it back is the rule
+    /// in [`Self::claim_sheet_keyboard`].
     sheet_focus: FocusHandle,
+    /// Whether the note screen held the keyboard on the last frame it was in front.
+    ///
+    /// The rule's memory, and the whole of why it is a field: the keyboard is claimed when a *screen*
+    /// changes, not on every frame — a list that is up must keep the focus its own arrow keys need.
+    sheet_has_keyboard: bool,
     /// What the field being typed into says — Enter keeps the name, a click away leaves it as it was.
     ///
     /// Held rather than dropped: dropping a subscription is how a listener stops listening.
@@ -659,6 +665,7 @@ impl NoteApp {
             naming_asked: false,
             name_input,
             sheet_focus,
+            sheet_has_keyboard: false,
             _name_events,
             sheet_select,
             rule_select,
@@ -2072,6 +2079,45 @@ impl NoteApp {
         self.home.is_open()
     }
 
+    /// Gives the keyboard to the screen in front, on the frame that screen changes.
+    ///
+    /// ## Why this is needed at all
+    ///
+    /// A keystroke in GPUI is dispatched along one path: the window's root, down to whatever element has
+    /// the **focus** (see `dispatch_path` in the framework's key dispatch). Every screen here catches its
+    /// own keys with a listener on the element it paints, so a screen hears a key only if the focus is
+    /// inside it. The lists — the home screen, the bookmarks, the contents — focus themselves when they
+    /// appear, which is why they always hear their arrows. The note screen does not: it is the *fallback*
+    /// screen, the one that is left when every list is closed, so nothing hands it the keyboard — and a
+    /// window whose focus is left on a screen that has just gone away resolves that focus to *no node at
+    /// all*, which leaves the path as the window's root and the note screen's keys **swallowed**: no
+    /// arrows, no `Ctrl+S`, no `Escape`, from opening a note until something else gives the sheet the
+    /// keyboard back (a rename does, which is what made this look like it depended on writing).
+    ///
+    /// ## What it does
+    ///
+    /// Focuses the sheet when the *screen in front* changes to the note screen. Not every frame: a list
+    /// that is up needs the focus for its own arrow keys, and taking it away once per frame would break
+    /// exactly the screens this fixes the fallback from. The flag is what remembers the last answer, so
+    /// this costs a comparison per frame and a focus only on a transition — the same arrangement as
+    /// [`crate::bookmarks::Marks::settle`], from the other direction.
+    fn claim_sheet_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let in_front = !self.home_is_open()
+            && !self.marks.is_open()
+            && !self.outline.is_open()
+            && self.naming.is_none();
+
+        if in_front == self.sheet_has_keyboard {
+            return;
+        }
+
+        self.sheet_has_keyboard = in_front;
+
+        if in_front {
+            self.sheet_focus.focus(window, cx);
+        }
+    }
+
     /// Shows the home screen: where the app starts, and where Esc goes from a note.
     ///
     /// Nothing can be lost by leaving a note — the ink is in it as it is laid (see [`crate::store`])
@@ -2233,16 +2279,18 @@ impl NoteApp {
     ///
     /// A note opened by a double click is the note a person is *in*, and naming it is the same act
     /// whether the list is in front of it or not — which is why both fields end here.
-    fn commit_note_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn commit_note_name(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(folder) = self.naming.take() else {
             return;
         };
 
         let name = self.name_input.read(cx).value().to_string();
         self.keep_name(folder, &name, cx);
-        // The field goes away with the name; the keyboard has to go somewhere, and on the sheet that is
-        // the sheet itself.
-        self.sheet_focus.focus(window, cx);
+        // The field goes away with the name, and the keyboard goes back to whatever is in front — the sheet,
+        // or a list that is up — on the next frame, through the one rule that knows which screen that is.
+        // Handed back rather than focused here: this is reached from the field's own event, and a field does
+        // not know what is behind it. See [`Self::claim_sheet_keyboard`].
+        self.sheet_has_keyboard = false;
         self.touch_status();
         cx.notify();
     }
@@ -2295,12 +2343,14 @@ impl NoteApp {
     }
 
     /// Leaves the name as it was, and gives the keyboard back to the sheet.
-    fn stop_note_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn stop_note_name(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.naming.take().is_none() {
             return;
         }
 
-        self.sheet_focus.focus(window, cx);
+        // As when a name is kept: the keyboard goes back to the screen in front on the next frame, and this
+        // is what makes that frame re-claim it (see [`Self::claim_sheet_keyboard`]).
+        self.sheet_has_keyboard = false;
         self.touch_status();
         cx.notify();
     }
@@ -2443,6 +2493,12 @@ impl NoteApp {
         self.loaded.insert(0);
         self.home.hide();
         self.remember_page();
+
+        // And the *name* goes with the note: the bar's title, the window's title and what `Save` writes the
+        // export out as all come from this one string (see [`Self::save`]), and a blank sheet that still
+        // says the name of the note that was open would be a sheet named after a document it does not
+        // have — and, on its first stroke, a new note filed under that name.
+        self.note_title.clear();
 
         self.message =
             String::from("a blank sheet — the first stroke makes a note, and Save writes it out");
@@ -3798,6 +3854,12 @@ impl Render for NoteApp {
         // the boxes are the only control that changes them back. See [`Self::sync_choosers`].
         self.sync_choosers(window, cx);
 
+        // The keyboard goes with the screen in front. Done here, before any of the screens is built,
+        // because this is the one place every transition passes through — opening a note, closing a list,
+        // coming back from the home screen, closing a name field — and the arrangement it replaces was one
+        // that every transition had to remember. See [`Self::claim_sheet_keyboard`].
+        self.claim_sheet_keyboard(window, cx);
+
         // The window's own title bar is the one place a person can see, from outside the app, which
         // note they are in — and it is set when it *changes*, not every frame.
         let wanted = if self.home_is_open() || self.note_title.is_empty() {
@@ -3971,17 +4033,21 @@ impl Render for NoteApp {
             .on_pinch(cx.listener(|app, event: &PinchEvent, _, cx| app.on_pinch(event, cx)))
             // The note's keyboard, on the screen being painted: Esc for the home screen, the two
             // arrows for the page, and the three commands a person expects to reach without letting
-            // go of the pen. Registered here rather than as bindings because a screen with nothing
-            // focused is a screen whose keys have to be caught as they are painted — see
-            // [`crate::home`].
+            // go of the pen. Registered here rather than as bindings because a *list* of rows wants
+            // the same keys for itself (see [`crate::home`]), and because a listener reads next to
+            // what it does. What makes it heard is the focus: this element is the sheet's, and the
+            // sheet holds the keyboard whenever it is the screen in front — see
+            // [`Self::claim_sheet_keyboard`], which is the rule that hands it over, and without which
+            // these keys are swallowed (they were, from opening a note until a rename).
             .on_key_down(
                 cx.listener(|app, event: &KeyDownEvent, window, cx| {
                     app.note_key_down(event, window, cx)
                 }),
             )
-            // The sheet is what the keyboard goes back to when a field goes away: a name field that has
-            // just closed is a window that still thinks something is focused, and keys would go to a
-            // box that is no longer drawn.
+            // The sheet is what the keyboard goes back to when a field goes away — and this is the element
+            // that *is* the sheet's keyboard, so a name field that has just closed leaves the focus on a
+            // handle that is no longer drawn, which is what [`Self::claim_sheet_keyboard`] fixes on the next
+            // frame. The handle is tracked here so that the focus has somewhere in this element to land.
             .track_focus(&self.sheet_focus)
             .child(
                 canvas(

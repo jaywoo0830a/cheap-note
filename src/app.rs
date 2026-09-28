@@ -2996,7 +2996,13 @@ impl NoteApp {
             }
         }
 
-        match self.pdf.advance(crate::pdf::SLICE_BUDGET) {
+        // Timed like a page render, because it is the same work paid for in pieces: the number that
+        // matters is whether a slice runs past its budget, which is a frame's time (see `pdf_slice`).
+        let slice = Instant::now();
+        let progress = self.pdf.advance(crate::pdf::SLICE_BUDGET);
+        self.timings.pdf_slice.record(slice.elapsed());
+
+        match progress {
             Progress::Finished => {
                 self.pending_pdf = None;
                 true
@@ -3146,7 +3152,7 @@ impl NoteApp {
             parts.push(measured.summary());
         }
 
-        parts.push(self.timings.summary(HOUSEKEEPING_INTERVAL));
+        parts.push(self.timings.summary());
 
         if !self.message.is_empty() {
             parts.push(self.message.clone());

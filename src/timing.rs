@@ -485,6 +485,14 @@ pub struct Timings {
     /// Rasterising a PDF page. Pdfium runs on this thread, so this is time the frame spent
     /// waiting rather than drawing.
     pub pdf: Meter,
+    /// One slice of that: a slow page is rendered a few milliseconds at a time, between frames
+    /// (see [`crate::pdf::SLICE_BUDGET`]).
+    ///
+    /// A meter of its own rather than the same one as `pdf`, because the two are different work: a whole
+    /// page is paid for on a wake of its own, and a slice is paid for *between* frames, which is where it
+    /// can take a frame's time. Averaging them together is how the page render's number came to stand for
+    /// work that was not being measured at all.
+    pub pdf_slice: Meter,
     /// Building the rule geometry for a sheet that changed.
     pub ruling: Meter,
     /// The wait between the digitizer and this process acting on a reading.
@@ -540,21 +548,21 @@ impl Timings {
 
     /// The whole measurement as one line of the status bar.
     ///
-    /// Shaped for a line that is read at a glance: the mean, then the worst since this was last
-    /// called in brackets, then the counters that make sense of the two. `pump` is reported
-    /// against the interval the loop asked for, because "4 ms" only means anything next to
-    /// "4 ms wanted".
-    pub fn summary(&self, pump_interval: Duration) -> String {
-        let wanted = pump_interval.as_secs_f64() * 1000.0;
-
+    /// Shaped for a line that is read at a glance: the mean, then the worst since this was last called
+    /// in brackets, then the counters that make sense of the two. `pump` is the pen's own rate — the gap
+    /// between two wakes is how often the pen handed over a batch — so it is reported as the rate it
+    /// works out to rather than against a timer this app set. There is no timer: the pump is woken by the
+    /// readings themselves, and comparing its gap with the housekeeping loop's interval (which is what
+    /// this used to do) compared the pen against the wrong clock entirely.
+    pub fn summary(&self) -> String {
         format!(
-            "ink {}  render {}  paint {}  pdf {} ms  ·  pump {} (of {:.2})  ·  pen→app {}  ·  {} strokes {} px{}",
+            "ink {}  render {}  paint {}  pdf {} ms  ·  pump {} ms ({} /s)  ·  pen→app {}  ·  {} strokes {} px{}",
             span(&self.ink),
             span(&self.render),
             span(&self.paint),
-            span(&self.pdf),
+            pdf_clause(&self.pdf, &self.pdf_slice),
             span_mean(&self.pump_gap),
-            wanted,
+            rate(&self.pump_gap),
             span_mean(&self.pen_latency),
             self.painted.load(Ordering::Relaxed),
             self.vertices.load(Ordering::Relaxed),
@@ -563,6 +571,27 @@ impl Timings {
                 culled => format!(" ({culled} culled)"),
             },
         )
+    }
+}
+
+/// What PDF work has cost, split by the two kinds of it.
+///
+/// They are not the same number and must not be averaged into one. A whole page is rendered in one go
+/// when a page is opened or zoomed, on a wake of its own; a *slice* is a few milliseconds of a slow page
+/// paid for between frames (see [`crate::pdf::SLICE_BUDGET`]), which is the one that can take a frame's
+/// time. The count is printed with each because a page and thirty-seven slices are the same mean and
+/// nothing like each other, and each kind is named only when it has happened, so a note without a PDF
+/// carries no zeros.
+fn pdf_clause(page: &Meter, slice: &Meter) -> String {
+    let parts: Vec<String> = [(page, "page"), (slice, "slice")]
+        .into_iter()
+        .filter(|(meter, _)| meter.samples() > 0)
+        .map(|(meter, label)| format!("{label} {} ×{}", span(meter), meter.samples()))
+        .collect();
+
+    match parts.is_empty() {
+        true => String::from("—"),
+        false => parts.join(", "),
     }
 }
 
@@ -586,6 +615,17 @@ fn span_mean(meter: &Meter) -> String {
     match meter.mean() {
         Some(mean) => format!("{:.2}", millis(mean)),
         None => String::from("—"),
+    }
+}
+
+/// How often a mean gap happens, as a whole number per second, or `—` when nothing was measured.
+///
+/// A rate rather than a period, because the two intervals it is used for are rates in everything but
+/// name: how often the pen handed the app a batch, and how often the app answered it.
+fn rate(meter: &Meter) -> String {
+    match meter.mean() {
+        Some(mean) if !mean.is_zero() => format!("{:.0}", 1000.0 / millis(mean)),
+        _ => String::from("—"),
     }
 }
 
@@ -685,19 +725,19 @@ mod tests {
     fn the_summary_names_every_path() {
         let timings = Timings::default();
 
-        let unmeasured = timings.summary(Duration::from_micros(4166));
+        let unmeasured = timings.summary();
         assert!(
             unmeasured.contains("ink —"),
             "an unmeasured path is not a zero: {unmeasured}"
         );
         assert!(
-            unmeasured.contains("of 4.17"),
-            "the wanted interval is reported: {unmeasured}"
+            unmeasured.contains("pump — ms (— /s)"),
+            "and neither is an unmeasured rate: {unmeasured}"
         );
 
         timings.ink.record(Duration::from_micros(250));
         timings.count_painted(12, 240, 3);
-        let measured = timings.summary(Duration::from_micros(4166));
+        let measured = timings.summary();
 
         assert!(
             measured.contains("ink 0.25"),
@@ -724,8 +764,8 @@ mod tests {
         let timings = Timings::default();
         timings.ink.record(Duration::from_millis(9));
 
-        let first = timings.summary(Duration::from_micros(4166));
-        let second = timings.summary(Duration::from_micros(4166));
+        let first = timings.summary();
+        let second = timings.summary();
 
         assert!(first.contains("(9.00)"), "the spike is reported: {first}");
         assert!(
@@ -873,6 +913,38 @@ mod tests {
         assert!(
             line.contains("pen→app 1 · 0.40 avg (0.40-0.40) ms"),
             "and the pen's own wait, counted the same way: {line}"
+        );
+    }
+
+    /// PDF work is reported by kind, and a note with no PDF carries no zeros.
+    ///
+    /// A whole page and a few slices are the same mean and nothing like each other — one is paid for on a
+    /// wake of its own and the other between frames, where it can take a frame's time — and the count is
+    /// what says which of the two a number came from. This is the clause that used to report the page
+    /// render alone, which is how a session that rendered no page at all still showed a page's cost.
+    #[test]
+    fn pdf_work_is_reported_by_kind() {
+        let timings = Timings::default();
+
+        assert_eq!(
+            pdf_clause(&timings.pdf, &timings.pdf_slice),
+            "—",
+            "nothing rendered is nothing said"
+        );
+
+        timings.pdf.record(Duration::from_micros(9500));
+        assert_eq!(
+            pdf_clause(&timings.pdf, &timings.pdf_slice),
+            "page 9.50 (9.50) ×1",
+            "the whole page is named, and counted"
+        );
+
+        timings.pdf_slice.record(Duration::from_micros(4000));
+        timings.pdf_slice.record(Duration::from_micros(4000));
+        assert_eq!(
+            pdf_clause(&timings.pdf, &timings.pdf_slice),
+            "page 9.50 ×1, slice 4.00 (4.00) ×2",
+            "and the slices sit beside it rather than being averaged into it"
         );
     }
 }

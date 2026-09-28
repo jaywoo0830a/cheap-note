@@ -46,6 +46,13 @@
 //! | [`theme`]   | the palette, the bundled font, and the icons' asset source         |
 //! | [`error`]   | the error type every fallible boundary returns                     |
 //!
+//! ## The documents
+//!
+//! [`doc/ARCHITECTURE.md`](../doc/ARCHITECTURE.md) is the picture of the whole program: which thread
+//! owns what, what crosses a thread boundary, and what may wait for what. [`doc/VIEW.md`](../doc/VIEW.md)
+//! is why the view is the way it is, and [`doc/STORE.md`](../doc/STORE.md) follows one stroke to the
+//! disk and back.
+//!
 //! ## Running
 //!
 //! ```text

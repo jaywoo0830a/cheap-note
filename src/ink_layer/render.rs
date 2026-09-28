@@ -148,10 +148,16 @@ impl Renderer {
             self.context.SetTarget(&target);
             self.context.BeginDraw();
 
-            // Everything but the ink is placed in the surface's own pixels; the ink is placed in the
-            // paper's own units and moves by the transform (see [`ink_transform`]).
-            self.context
-                .SetTransform(&Matrix3x2::scale(canvas.scale, canvas.scale));
+            // Nothing but the ink is drawn through a transform (see [`Renderer::draw_ink`]): the
+            // desk, the sheet, the ruling and the page are placed in the surface's own pixels, and
+            // `rect_of` is the one place a canvas coordinate becomes a surface one. Scaling them
+            // here *as well* would place the sheet at its origin times the scale squared — which is
+            // a sheet pushed off centre, further the larger the scale and the further from the
+            // window's corner the paper sits, and ink that no longer lands on it.
+            //
+            // Set rather than assumed: a context keeps its transform, so this clears the one the
+            // frame before left.
+            self.context.SetTransform(&Matrix3x2::identity());
             self.context
                 .Clear(Some(std::ptr::from_ref(&colour_of(canvas.desk))));
 
@@ -169,9 +175,22 @@ impl Renderer {
                     None,
                 );
             }
-        }
 
-        self.draw_ink(canvas)?;
+            // The ink is clipped to the sheet, which is the display half of the rule the ink model
+            // enforces: a reading off the paper is not ink, so ink off the paper is not *drawn*
+            // either. The clip is pushed before the ink's transform is set, and so is in the
+            // surface's own pixels like everything else here.
+            if let Some(sheet) = canvas.sheet {
+                self.context.PushAxisAlignedClip(
+                    std::ptr::from_ref(&rect_of(sheet, canvas.scale)),
+                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                );
+                self.draw_ink(canvas)?;
+                self.context.PopAxisAlignedClip();
+            } else {
+                self.draw_ink(canvas)?;
+            }
+        }
 
         let result = unsafe { self.context.EndDraw(None, None) };
 
@@ -234,6 +253,10 @@ impl Renderer {
                 self.brush.SetColor(&colour_of(rgb(stroke.color).into()));
                 self.context.FillGeometry(&geometry, &self.brush, None);
             }
+
+            // The transform is the ink's alone and does not outlive this call: a context keeps it,
+            // and the next frame's sheet is placed in the surface's own pixels.
+            self.context.SetTransform(&Matrix3x2::identity());
         }
 
         Ok(())

@@ -254,7 +254,9 @@ impl NoteStore {
         if version < SCHEMA_VERSION {
             self.conn
                 .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
-                .map_err(|error| AppError::Note(format!("the note could not be stamped: {error}")))?;
+                .map_err(|error| {
+                    AppError::Note(format!("the note could not be stamped: {error}"))
+                })?;
         }
 
         Ok(())
@@ -407,9 +409,7 @@ impl NoteStore {
 
             for stroke in strokes {
                 let blob = sealed_dirty(&chunk::encode(std::slice::from_ref(stroke))?);
-                insert
-                    .execute(params![id, seq, blob, now])
-                    .map_err(sql)?;
+                insert.execute(params![id, seq, blob, now]).map_err(sql)?;
                 seq += 1;
             }
         }
@@ -868,7 +868,9 @@ impl NoteStore {
     /// Records what each page shows, in reading order: the note's own page list.
     pub fn set_layout(&mut self, layout: &[crate::pages::Page]) -> Result<()> {
         let text = serde_json::to_string(layout).map_err(|error| {
-            AppError::Note(format!("the note's page list could not be written: {error}"))
+            AppError::Note(format!(
+                "the note's page list could not be written: {error}"
+            ))
         })?;
 
         put_row(&self.conn, META_LAYOUT, text)
@@ -911,11 +913,24 @@ impl NoteStore {
         into.page_color = row_value(conn, "page_color", into.page_color, colour_of)?;
         into.pen_weight = row_value(conn, "pen_weight", into.pen_weight, PenWeight::from_label)?;
         into.grayscale_pages = row_value(conn, "grayscale_pages", into.grayscale_pages, flag_of)?;
-        into.canvas_size = row_value(conn, "canvas_size", into.canvas_size, CanvasSize::from_label)?;
-        into.canvas_style =
-            row_value(conn, "canvas_style", into.canvas_style, CanvasStyle::from_label)?;
-        into.page_display_width =
-            row_value(conn, "page_display_width", into.page_display_width, number_of)?;
+        into.canvas_size = row_value(
+            conn,
+            "canvas_size",
+            into.canvas_size,
+            CanvasSize::from_label,
+        )?;
+        into.canvas_style = row_value(
+            conn,
+            "canvas_style",
+            into.canvas_style,
+            CanvasStyle::from_label,
+        )?;
+        into.page_display_width = row_value(
+            conn,
+            "page_display_width",
+            into.page_display_width,
+            number_of,
+        )?;
         into.zoom = row_value(conn, "zoom", into.zoom, number_of)?;
         into.resample_spacing =
             row_value(conn, "resample_spacing", into.resample_spacing, number_of)?;
@@ -1654,7 +1669,9 @@ mod tests {
     #[test]
     fn a_page_written_in_two_batches_keeps_its_order() {
         let (mut store, path) = store_for("batches");
-        store.append(0, &[stroke(5, 0.0, 0x11_11_11)]).expect("the first batch");
+        store
+            .append(0, &[stroke(5, 0.0, 0x11_11_11)])
+            .expect("the first batch");
         store.compact(0).expect("the page is closed");
 
         store
@@ -1683,7 +1700,11 @@ mod tests {
         store
             .append(
                 0,
-                &[stroke(5, 0.0, 0x1), stroke(5, 10.0, 0x1), stroke(5, 20.0, 0x1)],
+                &[
+                    stroke(5, 0.0, 0x1),
+                    stroke(5, 10.0, 0x1),
+                    stroke(5, 20.0, 0x1),
+                ],
             )
             .expect("ink");
         store.compact(0).expect("the page is closed");
@@ -1774,7 +1795,9 @@ mod tests {
         assert_eq!(store.bookmarks().expect("marks"), vec![1]);
 
         store.set_bookmark(1, false).expect("the mark goes");
-        store.set_bookmark(1, false).expect("the mark is already gone");
+        store
+            .set_bookmark(1, false)
+            .expect("the mark is already gone");
         assert!(store.bookmarks().expect("marks").is_empty());
 
         cleanup(&path);
@@ -2032,7 +2055,9 @@ mod tests {
         store.read_settings(&mut read).expect("settings");
 
         assert_eq!(
-            row_text(&store.conn, "brushes_from_the_future").expect("a row").as_deref(),
+            row_text(&store.conn, "brushes_from_the_future")
+                .expect("a row")
+                .as_deref(),
             Some("42")
         );
         assert_eq!(
@@ -2098,7 +2123,9 @@ mod tests {
             "a new note has no name of its own, and the list derives one"
         );
 
-        store.set_title("3\u{c7a5} \u{c694}\u{c57d}").expect("a name");
+        store
+            .set_title("3\u{c7a5} \u{c694}\u{c57d}")
+            .expect("a name");
         assert_eq!(
             store.title().expect("a name").as_deref(),
             Some("3\u{c7a5} \u{c694}\u{c57d}"),
@@ -2168,8 +2195,14 @@ mod tests {
         store.compact(0).expect("a compaction");
 
         let listed = store.facts().expect("the facts").summary;
-        assert_eq!(listed.pages, 4, "the list, not the pages that happen to hold ink");
-        assert_eq!(listed.strokes, 3, "compaction moved the ink, it did not lose it");
+        assert_eq!(
+            listed.pages, 4,
+            "the list, not the pages that happen to hold ink"
+        );
+        assert_eq!(
+            listed.strokes, 3,
+            "compaction moved the ink, it did not lose it"
+        );
         assert_eq!(listed.sheet, Some((794.0, 1123.0)));
 
         cleanup(&path);

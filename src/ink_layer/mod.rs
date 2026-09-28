@@ -58,8 +58,8 @@
 
 use gpui_kit::base::{Root, RootPlugin};
 use gpui_kit::{
-    div, rgba, App, Context, Div, IntoElement, Refineable as _, Render, Stateful, Styled as _,
-    StyleRefinement, Window,
+    div, rgba, App, Context, Div, IntoElement, Refineable as _, Render, Stateful, StyleRefinement,
+    Styled as _, Window,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::HWND;

@@ -40,8 +40,8 @@ use crate::ink_layer::{Canvas, Ink, InkLayer, Page, Rect};
 use crate::note::{self, Note, NoteWriter, Report};
 use crate::outline::{Outline, OutlinePages};
 use crate::pages::Pages;
-use crate::pen::{capture_config, BatchTap, PenInbox, PenService};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
+use crate::pen::{capture_config, BatchTap, PenInbox, PenService};
 use crate::recent::{self, Recent};
 use crate::settings::{PenWeight, Settings};
 use crate::system_cursor::SystemCursor;
@@ -155,6 +155,19 @@ fn file_stem(title: &str) -> String {
 /// Whether the pen has been quiet long enough to spend a rasterisation on it.
 fn pdf_render_due(last_ink_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(last_ink_at) >= PDF_QUIET_INTERVAL
+}
+
+/// The page a write belongs to, given the ink in hand: the ink's own page, never the view's index.
+///
+/// The two numbers are the same everywhere except in the middle of the two commands that move the
+/// page list itself — an inserted page and a deleted one. Those close the page they are leaving
+/// *before* the list moves, so for a moment [`NoteApp::page_index`] is a page nobody is on, while
+/// the ink is still on the page it was written on. A write that read the index there filed that
+/// page's whole ink under the page that took its place, which the reader met as the writing of the
+/// page before appearing on the new one — sometimes the next time the note was opened (see
+/// [`crate::ink::Notes::page`]).
+fn page_of_write(ink: &Notes) -> u64 {
+    ink.page() as u64
 }
 
 /// The sheet as the last frame drew it: its size in paper units, and where that was placed.
@@ -697,7 +710,10 @@ impl NoteApp {
         // The pen is not a pen while something is in front of the sheet: a name being typed, or a screen
         // drawn over a sheet nobody can see. This is why the lists are screens rather than panels — the pen
         // obeys an app state, not a rectangle (see [`crate::bookmarks`]).
-        if self.naming.is_some() || self.home_is_open() || self.marks.is_open() || self.outline.is_open()
+        if self.naming.is_some()
+            || self.home_is_open()
+            || self.marks.is_open()
+            || self.outline.is_open()
         {
             return false;
         }
@@ -724,7 +740,11 @@ impl NoteApp {
             }
         }
 
-        let page = self.page_index as u64;
+        // The page this ink belongs to, asked of the ink and never of `page_index`: `add_page` and
+        // `delete_page` move the page list before the view follows it, and an index read here is
+        // how the page being left once wrote its whole ink under the page that took its place. The
+        // two numbers agree everywhere else, which is exactly why it went unnoticed.
+        let page = page_of_write(&self.ink);
         let count = self.ink.finished().len();
         let sent = self.saved.get(&page).copied().unwrap_or(0);
 
@@ -817,7 +837,9 @@ impl NoteApp {
         self.home.hide();
         self.remember_opened(None);
 
-        self.report(String::from("a new note on a blank sheet — Save writes it out as one file"));
+        self.report(String::from(
+            "a new note on a blank sheet — Save writes it out as one file",
+        ));
         Ok(())
     }
 
@@ -907,10 +929,7 @@ impl NoteApp {
     fn fit_sheet(&mut self, which: Fit, cx: &mut Context<Self>) {
         let sheet = self.sheet;
 
-        if self
-            .view
-            .fit(which, sheet.paper, sheet.window, PAGE_MARGIN)
-        {
+        if self.view.fit(which, sheet.paper, sheet.window, PAGE_MARGIN) {
             self.finish_zoom(cx);
         }
     }
@@ -933,13 +952,10 @@ impl NoteApp {
             let factor = wheel_zoom_factor(amount, in_pixels);
             let sheet = self.sheet;
 
-            if self.view.zoom_around(
-                factor,
-                pointer,
-                sheet.paper,
-                sheet.window,
-                PAGE_MARGIN,
-            ) {
+            if self
+                .view
+                .zoom_around(factor, pointer, sheet.paper, sheet.window, PAGE_MARGIN)
+            {
                 self.finish_zoom(cx);
             }
             return;
@@ -1123,26 +1139,40 @@ impl NoteApp {
     /// Turns to a page: what is being left is written out, and what is being turned to is read in.
     fn turn_to(&mut self, page: usize) {
         self.close_page();
-
-        self.page_index = page;
-        self.ink.go_to(page);
-
-        if let Err(error) = self.load_page_ink(page) {
-            self.report(error.to_string());
-        }
+        self.show_page(page);
 
         self.remember_page();
         // The status line names the page, so it is stale as soon as the page changes.
         self.touch_status();
     }
 
+    /// Shows a page and reads its ink in: the half of a turn that closes nothing.
+    ///
+    /// Split from [`Self::turn_to`] because the two commands that move the *page list* itself —
+    /// `add_page` and `delete_page` — close the page they are leaving **before** the pages are
+    /// renamed, which is the order the design states (see [VIEW.md](../../doc/VIEW.md), "Turning a
+    /// page"). A close that ran after the rename closed a page nobody was on: it compacted the page
+    /// that took the place of the one being left, and — while a write was filed under the view's
+    /// index rather than the ink's page — it wrote the ink of the page being left under that page's
+    /// name, which is what put one page's writing on the next page's sheet.
+    fn show_page(&mut self, page: usize) {
+        self.page_index = page;
+        self.ink.go_to(page);
+
+        if let Err(error) = self.load_page_ink(page) {
+            self.report(error.to_string());
+        }
+    }
+
     /// Writes what a page still owes the note, and folds its ink into chunks: the page is closing.
     fn close_page(&mut self) {
         self.persist(Instant::now(), true);
 
-        let page = self.page_index as u64;
-        let touched = self.rewritten.remove(&page)
-            || self.saved.get(&page).copied().unwrap_or(0) > 0;
+        // The page being closed is the one the ink is on, for the reason [`Self::persist`] reads it
+        // from there: an index that had already moved would compact a page nobody is leaving.
+        let page = page_of_write(&self.ink);
+        let touched =
+            self.rewritten.remove(&page) || self.saved.get(&page).copied().unwrap_or(0) > 0;
 
         if touched {
             if let Some(writer) = &self.writer {
@@ -1172,8 +1202,9 @@ impl NoteApp {
         }
         self.rename_pages(at as u64, 1);
 
-        self.page_index = at;
-        self.turn_to(at);
+        // The page left behind was closed above, *before* the pages were renamed — that is the order
+        // the design asks for — so the turn here is only the half that shows the page that was made.
+        self.show_page(at);
         self.save_note_state();
 
         self.report(format!(
@@ -1212,8 +1243,9 @@ impl NoteApp {
         // And the mark, if the page had one: what was deleted is a page, so the mark for the page that
         // used to be at this position is gone with it rather than pointing at its neighbour.
         self.bookmarks.removed_at(self.page_index);
-        self.page_index = show;
-        self.turn_to(show);
+        // As in `add_page`: the page being left was closed before the pages were renamed, so this is
+        // the showing half of a turn rather than another close of a page nobody is on.
+        self.show_page(show);
         self.save_note_state();
 
         self.report(format!(
@@ -1445,7 +1477,11 @@ impl NoteApp {
             }
         };
 
-        self.loaded = self.loaded.iter().map(|page| rename(*page as u64) as usize).collect();
+        self.loaded = self
+            .loaded
+            .iter()
+            .map(|page| rename(*page as u64) as usize)
+            .collect();
         self.saved = std::mem::take(&mut self.saved)
             .into_iter()
             .map(|(page, count)| (rename(page), count))
@@ -2032,12 +2068,7 @@ impl NoteApp {
     }
 
     /// The note screen's keyboard: the way into the home screen, and Save.
-    fn note_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn note_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
 
         if !keystroke.modifiers.control {
@@ -2145,20 +2176,15 @@ impl NoteApp {
         let source = source
             .map(Path::to_path_buf)
             .or_else(|| note.store().source().ok().flatten().map(PathBuf::from));
-        let title = note
-            .store()
-            .title()
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| {
-                document
-                    .as_deref()
-                    .map(|name| match name.rsplit_once('.') {
-                        Some((stem, _)) if !stem.is_empty() => stem.to_string(),
-                        _ => name.to_string(),
-                    })
-                    .unwrap_or_else(|| Recent::title_for(&folder))
-            });
+        let title = note.store().title().ok().flatten().unwrap_or_else(|| {
+            document
+                .as_deref()
+                .map(|name| match name.rsplit_once('.') {
+                    Some((stem, _)) if !stem.is_empty() => stem.to_string(),
+                    _ => name.to_string(),
+                })
+                .unwrap_or_else(|| Recent::title_for(&folder))
+        });
 
         self.note_title = title.clone();
         let entry = Recent::note(folder, source, title, document, recent::now_ms());
@@ -2305,7 +2331,8 @@ impl NoteApp {
 
         let page = self.pdf.render_page(request.page, request.pixels)?;
 
-        self.timings.count_rasterised(self.pdf.rasterised() - before);
+        self.timings
+            .count_rasterised(self.pdf.rasterised() - before);
         if self.pdf.rasterised() != before {
             self.timings.pdf.record(started.elapsed());
         }
@@ -2381,11 +2408,7 @@ impl NoteApp {
     }
 
     /// Where the sheet is drawn, in the window the frame is painting.
-    fn page_layout(
-        &self,
-        window: (f32, f32),
-        page: Option<&RenderedPage>,
-    ) -> Sheet {
+    fn page_layout(&self, window: (f32, f32), page: Option<&RenderedPage>) -> Sheet {
         let paper = match page {
             // A PDF brings its own shape; only how wide it is drawn is the app's choice.
             Some(page) => page.display_size(self.settings.page_display_width),
@@ -2428,7 +2451,10 @@ impl NoteApp {
         }
         match self.pen.stats() {
             Some(stats) => {
-                parts.push(format!("{stats}  {:.1} readings/message", stats.mean_batch()));
+                parts.push(format!(
+                    "{stats}  {:.1} readings/message",
+                    stats.mean_batch()
+                ));
 
                 // What the digitizer can report is worth showing: a pen whose mask never
                 // mentions pressure is a pen to judge by its line, not by its force.
@@ -2589,9 +2615,14 @@ impl NoteApp {
         let tool = self.ink.mode();
 
         let tools = vec![
-            tool_button("tool-pen", IconName::Pen, "Pen", tool == Tool::Pen, cx, |app, cx| {
-                app.set_tool(Tool::Pen, cx)
-            })
+            tool_button(
+                "tool-pen",
+                IconName::Pen,
+                "Pen",
+                tool == Tool::Pen,
+                cx,
+                |app, cx| app.set_tool(Tool::Pen, cx),
+            )
             .into_any_element(),
             tool_button(
                 "tool-eraser",
@@ -2730,7 +2761,9 @@ impl NoteApp {
         } else if named {
             Label::new(self.note_title.clone()).into_any_element()
         } else {
-            Label::new("Untitled note").text_color(muted).into_any_element()
+            Label::new("Untitled note")
+                .text_color(muted)
+                .into_any_element()
         };
 
         div()
@@ -2935,11 +2968,8 @@ impl NoteApp {
     /// Which page is on the desk, and the way to the others.
     fn page_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (surface, hairline, foreground) = (
-            theme.title_bar,
-            theme.title_bar_border,
-            theme.foreground,
-        );
+        let (surface, hairline, foreground) =
+            (theme.title_bar, theme.title_bar_border, theme.foreground);
 
         // One page is still one page: a document with a single page, or no document at all, reads
         // as "1 / 1" rather than as a count of nothing.
@@ -3017,14 +3047,9 @@ impl NoteApp {
                 .into_any_element(),
         );
         controls.push(
-            icon_button(
-                "zoom-in",
-                IconName::Plus,
-                "Zoom in",
-                true,
-                cx,
-                |app, cx| app.zoom_in(cx),
-            )
+            icon_button("zoom-in", IconName::Plus, "Zoom in", true, cx, |app, cx| {
+                app.zoom_in(cx)
+            })
             .into_any_element(),
         );
         // A hairline between stepping and fitting: one changes the number, the other works it out
@@ -3038,9 +3063,14 @@ impl NoteApp {
                 Fit::Height => IconName::MoveVertical,
             };
             controls.push(
-                icon_button(fit.button_id(), icon, fit.label(), true, cx, move |app, cx| {
-                    app.fit_sheet(fit, cx)
-                })
+                icon_button(
+                    fit.button_id(),
+                    icon,
+                    fit.label(),
+                    true,
+                    cx,
+                    move |app, cx| app.fit_sheet(fit, cx),
+                )
                 .into_any_element(),
             );
         }
@@ -3327,10 +3357,8 @@ impl Render for NoteApp {
             self.ink_revision += 1;
         }
 
-        let (page_size, page_origin) = (
-            sheet.drawn(),
-            point(px(sheet.origin.0), px(sheet.origin.1)),
-        );
+        let (page_size, page_origin) =
+            (sheet.drawn(), point(px(sheet.origin.0), px(sheet.origin.1)));
 
         let sheet_bounds = Bounds {
             origin: page_origin,
@@ -3461,11 +3489,9 @@ impl Render for NoteApp {
             // because a *list* of rows wants the same keys (see [`crate::home`]); it is heard because this
             // element is the sheet's, and the sheet holds the keyboard whenever it is the screen in front
             // (see [`Self::claim_sheet_keyboard`]).
-            .on_key_down(
-                cx.listener(|app, event: &KeyDownEvent, window, cx| {
-                    app.note_key_down(event, window, cx)
-                }),
-            )
+            .on_key_down(cx.listener(|app, event: &KeyDownEvent, window, cx| {
+                app.note_key_down(event, window, cx)
+            }))
             // A name field that has just closed leaves the focus on a handle that is no longer drawn, which
             // is what [`Self::claim_sheet_keyboard`] fixes on the next frame: the handle is tracked here so
             // the focus has somewhere in this element to land.
@@ -3646,10 +3672,11 @@ mod tests {
     // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
     // scope and shadow the attribute this module needs.
     use super::{
-        file_label, file_stem, notch_in_pixels, pdf_render_due, pinch_zoom_factor, quantise_width,
-        sheet_matches, wheel_pan, wheel_zoom_factor, PDF_QUIET_INTERVAL, WHEEL_LINE_HEIGHT,
-        WHEEL_LINES_PER_NOTCH, WHEEL_ZOOM_STEP,
+        file_label, file_stem, notch_in_pixels, page_of_write, pdf_render_due, pinch_zoom_factor,
+        quantise_width, sheet_matches, wheel_pan, wheel_zoom_factor, PDF_QUIET_INTERVAL,
+        WHEEL_LINES_PER_NOTCH, WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
     };
+    use crate::ink::Notes;
     use std::time::{Duration, Instant};
 
     /// One notch of a wheel is one zoom step, however many lines the platform reports it as.
@@ -3674,7 +3701,10 @@ mod tests {
         let twice = wheel_zoom_factor(WHEEL_LINES_PER_NOTCH * 2.0, false);
 
         assert!((twice - WHEEL_ZOOM_STEP * WHEEL_ZOOM_STEP).abs() < 1e-6);
-        assert!(twice < WHEEL_ZOOM_STEP * 2.0, "a roll is not a multiplication");
+        assert!(
+            twice < WHEEL_ZOOM_STEP * 2.0,
+            "a roll is not a multiplication"
+        );
     }
 
     /// A trackpad reports pixels, and the same distance zooms the same either way it is reported:
@@ -3714,8 +3744,14 @@ mod tests {
     /// A pinch reports a fraction of the current size, and a nonsense one is refused.
     #[test]
     fn a_pinch_reports_a_fraction_of_the_size() {
-        assert!((pinch_zoom_factor(0.1) - 1.1).abs() < 1e-6, "ten percent closer");
-        assert!((pinch_zoom_factor(-0.1) - 0.9).abs() < 1e-6, "and ten percent back");
+        assert!(
+            (pinch_zoom_factor(0.1) - 1.1).abs() < 1e-6,
+            "ten percent closer"
+        );
+        assert!(
+            (pinch_zoom_factor(-0.1) - 0.9).abs() < 1e-6,
+            "and ten percent back"
+        );
         assert_eq!(pinch_zoom_factor(0.0), 1.0, "three fingers held still");
         assert_eq!(pinch_zoom_factor(100.0), 5.0, "clamped");
         assert_eq!(pinch_zoom_factor(f32::NAN), 1.0, "refused");
@@ -3728,7 +3764,11 @@ mod tests {
         // The rungs themselves, and everything between them rounded up to the next one.
         assert_eq!(quantise_width(100.0), 1_024);
         assert_eq!(quantise_width(1_024.0), 1_024);
-        assert_eq!(quantise_width(1_025.0), 1_536, "just past a rung is the next rung");
+        assert_eq!(
+            quantise_width(1_025.0),
+            1_536,
+            "just past a rung is the next rung"
+        );
         assert_eq!(quantise_width(1_500.0), 1_536);
         assert_eq!(quantise_width(2_000.0), 2_304);
         assert_eq!(quantise_width(3_000.0), 3_456);
@@ -3796,11 +3836,18 @@ mod tests {
     /// A name a person gave a note becomes a file name, with what Windows refuses turned into dashes.
     #[test]
     fn a_note_s_name_becomes_a_file_name() {
-        assert_eq!(file_stem("3\u{c7a5} \u{c694}\u{c57d}"), "3\u{c7a5} \u{c694}\u{c57d}");
+        assert_eq!(
+            file_stem("3\u{c7a5} \u{c694}\u{c57d}"),
+            "3\u{c7a5} \u{c694}\u{c57d}"
+        );
         assert_eq!(file_stem("  chapter   3  "), "chapter 3");
         assert_eq!(file_stem("a/b\\c:d*e?f\"g<h>i|j"), "a-b-c-d-e-f-g-h-i-j");
         assert_eq!(file_stem("report."), "report", "a trailing dot is dropped");
-        assert_eq!(file_stem("..."), "", "and a name that was only dots is nothing");
+        assert_eq!(
+            file_stem("..."),
+            "",
+            "and a name that was only dots is nothing"
+        );
         assert_eq!(
             file_stem("\u{2026}"),
             "\u{2026}",
@@ -3834,6 +3881,28 @@ mod tests {
         );
     }
 
+    /// A write belongs to the page the *ink* is on, not to the index the view happens to be at.
+    ///
+    /// The two are the same number everywhere except in the middle of a page-list move, and that one
+    /// moment is the whole of the bug this pins down: `add_page` closes the page being left, moves
+    /// the list, and only then turns, so a write that read the view's index put the page being left
+    /// onto the sheet of the page that took its place — ink the note kept, which is why it came back
+    /// the next time the note was opened.
+    #[test]
+    fn a_write_belongs_to_the_page_the_ink_is_on() {
+        let mut ink = Notes::new();
+        ink.go_to(2);
+        assert_eq!(page_of_write(&ink), 2, "the page in hand");
+
+        // A page put in before this one, which is the move `add_page` makes: the pages move, and the
+        // ink moves with the page it was written on rather than staying at the number it was at.
+        ink.insert_at(2);
+        assert_eq!(
+            page_of_write(&ink),
+            3,
+            "and the write follows the ink, which is now page 3"
+        );
+    }
 }
 
 /// The shadow a sheet casts on the desk: spread, offset beyond the spread, and colour, widest first.
@@ -3873,7 +3942,15 @@ fn describe_canvas(canvas: &mut Canvas, sheet: &Sheet, scale: f32, paper: Hsla, 
         );
     }
 
-    canvas.fill(Rect { x, y, width, height }, paper);
+    canvas.fill(
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        },
+        paper,
+    );
 }
 
 /// How much a scroll zooms, as a factor to multiply the current zoom by.

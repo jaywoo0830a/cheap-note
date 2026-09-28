@@ -183,10 +183,14 @@ pub fn decode(
     let raw = match codec {
         Codec::Raw => data.to_vec(),
         Codec::Lz4 => lz4_flex::decompress(data, raw_len).map_err(|error| {
-            AppError::Note(format!("a chunk of this note could not be unpacked: {error}"))
+            AppError::Note(format!(
+                "a chunk of this note could not be unpacked: {error}"
+            ))
         })?,
         Codec::Zstd => zstd::bulk::decompress(data, raw_len).map_err(|error| {
-            AppError::Note(format!("a chunk of this note could not be unpacked: {error}"))
+            AppError::Note(format!(
+                "a chunk of this note could not be unpacked: {error}"
+            ))
         })?,
     };
 
@@ -613,7 +617,11 @@ mod tests {
         );
 
         let long = encode(&[hand_stroke(11, 120)]).expect("the stroke encodes");
-        assert_eq!(long.codec, Codec::Zstd, "a long stroke is worth compressing");
+        assert_eq!(
+            long.codec,
+            Codec::Zstd,
+            "a long stroke is worth compressing"
+        );
     }
 
     /// A hand-written page is many times smaller than the JSON it used to be.
@@ -674,7 +682,9 @@ mod tests {
             let step = 1.0 + random();
             x += heading.cos() * step;
             y += heading.sin() * step;
-            stroke.points.push(InkPoint::new(x, y, 1.25 + random() * 1.5));
+            stroke
+                .points
+                .push(InkPoint::new(x, y, 1.25 + random() * 1.5));
         }
 
         stroke.close();

@@ -198,12 +198,36 @@ pub struct Swatch {
 /// picker would also let someone choose a sheet the same colour as their ink, which is the one
 /// combination that cannot be written in.
 pub const PAPER_COLORS: [Swatch; 6] = [
-    Swatch { name: "white", id: "paper-white", color: 0xFF_FF_FF },
-    Swatch { name: "cream", id: "paper-cream", color: 0xFB_F3_E4 },
-    Swatch { name: "yellow", id: "paper-yellow", color: 0xFC_F1_C4 },
-    Swatch { name: "grey", id: "paper-grey", color: 0xE9_EA_ED },
-    Swatch { name: "slate", id: "paper-slate", color: 0x2C_2F_36 },
-    Swatch { name: "black", id: "paper-black", color: 0x15_17_1B },
+    Swatch {
+        name: "white",
+        id: "paper-white",
+        color: 0xFF_FF_FF,
+    },
+    Swatch {
+        name: "cream",
+        id: "paper-cream",
+        color: 0xFB_F3_E4,
+    },
+    Swatch {
+        name: "yellow",
+        id: "paper-yellow",
+        color: 0xFC_F1_C4,
+    },
+    Swatch {
+        name: "grey",
+        id: "paper-grey",
+        color: 0xE9_EA_ED,
+    },
+    Swatch {
+        name: "slate",
+        id: "paper-slate",
+        color: 0x2C_2F_36,
+    },
+    Swatch {
+        name: "black",
+        id: "paper-black",
+        color: 0x15_17_1B,
+    },
 ];
 
 /// The ink colours offered.
@@ -213,18 +237,66 @@ pub const PAPER_COLORS: [Swatch; 6] = [
 /// they are read as a palette and not picked from a wheel: two rows of six is a set a person can
 /// learn, and the toolbar wraps them anyway.
 pub const INK_COLORS: [Swatch; 12] = [
-    Swatch { name: "black", id: "ink-black", color: 0x1C_1C_1E },
-    Swatch { name: "grey", id: "ink-grey", color: 0x7A_7A_80 },
-    Swatch { name: "light grey", id: "ink-light-grey", color: 0xC7_C7_CC },
-    Swatch { name: "white", id: "ink-white", color: 0xFF_FF_FF },
-    Swatch { name: "red", id: "ink-red", color: 0xE5_48_4D },
-    Swatch { name: "orange", id: "ink-orange", color: 0xF0_8A_24 },
-    Swatch { name: "yellow", id: "ink-yellow", color: 0xFF_C4_00 },
-    Swatch { name: "green", id: "ink-green", color: 0x2F_A8_4F },
-    Swatch { name: "teal", id: "ink-teal", color: 0x1F_A8_A0 },
-    Swatch { name: "blue", id: "ink-blue", color: 0x0A_84_FF },
-    Swatch { name: "purple", id: "ink-purple", color: 0x8E_5B_F0 },
-    Swatch { name: "pink", id: "ink-pink", color: 0xE8_50_8C },
+    Swatch {
+        name: "black",
+        id: "ink-black",
+        color: 0x1C_1C_1E,
+    },
+    Swatch {
+        name: "grey",
+        id: "ink-grey",
+        color: 0x7A_7A_80,
+    },
+    Swatch {
+        name: "light grey",
+        id: "ink-light-grey",
+        color: 0xC7_C7_CC,
+    },
+    Swatch {
+        name: "white",
+        id: "ink-white",
+        color: 0xFF_FF_FF,
+    },
+    Swatch {
+        name: "red",
+        id: "ink-red",
+        color: 0xE5_48_4D,
+    },
+    Swatch {
+        name: "orange",
+        id: "ink-orange",
+        color: 0xF0_8A_24,
+    },
+    Swatch {
+        name: "yellow",
+        id: "ink-yellow",
+        color: 0xFF_C4_00,
+    },
+    Swatch {
+        name: "green",
+        id: "ink-green",
+        color: 0x2F_A8_4F,
+    },
+    Swatch {
+        name: "teal",
+        id: "ink-teal",
+        color: 0x1F_A8_A0,
+    },
+    Swatch {
+        name: "blue",
+        id: "ink-blue",
+        color: 0x0A_84_FF,
+    },
+    Swatch {
+        name: "purple",
+        id: "ink-purple",
+        color: 0x8E_5B_F0,
+    },
+    Swatch {
+        name: "pink",
+        id: "ink-pink",
+        color: 0xE8_50_8C,
+    },
 ];
 
 /// The colour a rule is drawn in on the given paper.
@@ -346,7 +418,12 @@ impl Ruling {
         };
 
         if self.built_for != Some(key) {
-            self.rules = Arc::new(build_ruling(sheet, style, rgb(rule_color(paper)).into(), zoom));
+            self.rules = Arc::new(build_ruling(
+                sheet,
+                style,
+                rgb(rule_color(paper)).into(),
+                zoom,
+            ));
             self.built_for = Some(key);
             self.rebuilds += 1;
         }
@@ -360,12 +437,7 @@ impl Ruling {
 /// Everything about it — how far apart the rules are, and how thick — is scaled by the zoom, so
 /// the ruling behaves like something printed on the paper rather than a screen overlay that happens
 /// to be the same colour.
-fn build_ruling(
-    sheet: Bounds<Pixels>,
-    style: CanvasStyle,
-    color: Hsla,
-    zoom: f32,
-) -> Vec<Fill> {
+fn build_ruling(sheet: Bounds<Pixels>, style: CanvasStyle, color: Hsla, zoom: f32) -> Vec<Fill> {
     let Some(spacing) = style.spacing() else {
         return Vec::new();
     };
@@ -540,7 +612,10 @@ mod tests {
             (CanvasSize::Square.aspect() - 1.0).abs() < 1e-6,
             "a square sheet is square"
         );
-        assert!(CanvasSize::Wide.aspect() < 1.0, "the wide sheet is landscape");
+        assert!(
+            CanvasSize::Wide.aspect() < 1.0,
+            "the wide sheet is landscape"
+        );
 
         let (width, height) = a4.display_size(500.0);
         assert!(

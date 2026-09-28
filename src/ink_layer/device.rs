@@ -33,11 +33,12 @@ use anyhow::{anyhow, Context, Result};
 use windows::core::Interface as _;
 use windows::Win32::Foundation::{HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
+    D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
+    D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-    ID3D11DeviceContext,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_SDK_VERSION,
 };
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
@@ -316,8 +317,7 @@ mod tests {
         assert_eq!(desc.AlphaMode, DXGI_ALPHA_MODE_PREMULTIPLIED, "alpha mode");
         assert_eq!(desc.Scaling, DXGI_SCALING_STRETCH, "scaling");
         assert_eq!(
-            desc.SwapEffect,
-            DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+            desc.SwapEffect, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
             "swap effect"
         );
         assert_eq!(desc.BufferCount, BUFFERS, "buffer count");
@@ -355,9 +355,7 @@ mod tests {
 
         {
             let mut device = Device::new(hwnd).expect("a canvas for that window");
-            device
-                .render(&Canvas::default())
-                .expect("a frame of it");
+            device.render(&Canvas::default()).expect("a frame of it");
         }
 
         unsafe { DestroyWindow(hwnd).expect("the window to close") };
@@ -404,8 +402,7 @@ mod tests {
             let mut device = Device::new(hwnd).expect("a canvas for that window");
 
             // The window changes size under the canvas, as it does when a user maximizes it.
-            unsafe { MoveWindow(hwnd, 0, 0, 400, 300, false) }
-                .expect("the window to change size");
+            unsafe { MoveWindow(hwnd, 0, 0, 400, 300, false) }.expect("the window to change size");
 
             device.render(&Canvas::default()).expect("a frame of it");
             // The canvas follows the window's *client* area — its size less whatever the window's own

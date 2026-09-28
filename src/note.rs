@@ -272,7 +272,12 @@ impl Note {
             AppError::Note(format!("{} could not be read: {error}", path.display()))
         })?;
 
-        Ok(Some((self.store.document()?.unwrap_or_else(|| String::from(NOTE_PDF)), bytes)))
+        Ok(Some((
+            self.store
+                .document()?
+                .unwrap_or_else(|| String::from(NOTE_PDF)),
+            bytes,
+        )))
     }
 
     /// Copies `from` into the note as its document, and records the name it had.
@@ -349,9 +354,8 @@ fn unpack(source: &Path, dir: &Path) -> Result<()> {
     }
 
     let _ = std::fs::remove_dir_all(dir);
-    std::fs::create_dir_all(dir).map_err(|error| {
-        AppError::Note(format!("{} could not be made: {error}", dir.display()))
-    })?;
+    std::fs::create_dir_all(dir)
+        .map_err(|error| AppError::Note(format!("{} could not be made: {error}", dir.display())))?;
 
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| {
@@ -374,7 +378,10 @@ fn unpack(source: &Path, dir: &Path) -> Result<()> {
         let destination = dir.join(&name);
         if entry.is_dir() {
             std::fs::create_dir_all(&destination).map_err(|error| {
-                AppError::Note(format!("{} could not be made: {error}", destination.display()))
+                AppError::Note(format!(
+                    "{} could not be made: {error}",
+                    destination.display()
+                ))
             })?;
             continue;
         }
@@ -404,9 +411,8 @@ fn unpack(source: &Path, dir: &Path) -> Result<()> {
 /// Starts a note on a document: the PDF is copied in, and the ink starts empty.
 fn start_on_document(source: &Path, dir: &Path) -> Result<()> {
     let _ = std::fs::remove_dir_all(dir);
-    std::fs::create_dir_all(dir).map_err(|error| {
-        AppError::Note(format!("{} could not be made: {error}", dir.display()))
-    })?;
+    std::fs::create_dir_all(dir)
+        .map_err(|error| AppError::Note(format!("{} could not be made: {error}", dir.display())))?;
 
     let mut note = Note::open(dir)?;
     note.copy_document(source)?;
@@ -423,7 +429,10 @@ fn start_on_document(source: &Path, dir: &Path) -> Result<()> {
 /// put there and is often text or a plain image.
 fn pack(database: &Path, dir: &Path, target: &Path) -> Result<()> {
     let file = std::fs::File::create(target).map_err(|error| {
-        AppError::Note(format!("{} could not be written: {error}", target.display()))
+        AppError::Note(format!(
+            "{} could not be written: {error}",
+            target.display()
+        ))
     })?;
 
     let mut zip = ZipWriter::new(std::io::BufWriter::new(file));
@@ -460,8 +469,9 @@ fn add_file(
     path: &Path,
     options: SimpleFileOptions,
 ) -> Result<()> {
-    let mut file = std::fs::File::open(path)
-        .map_err(|error| AppError::Note(format!("{} could not be read: {error}", path.display())))?;
+    let mut file = std::fs::File::open(path).map_err(|error| {
+        AppError::Note(format!("{} could not be read: {error}", path.display()))
+    })?;
 
     zip.start_file(entry, options)
         .map_err(|error| AppError::Note(format!("the note could not be written: {error}")))?;
@@ -685,7 +695,9 @@ mod tests {
         let mut stroke = Stroke::new(InkPoint::new(from, 5.0, 2.0), Stroke::DEFAULT_COLOR);
 
         for step in 1..points {
-            stroke.points.push(InkPoint::new(from + step as f32 * 2.0, 5.0, 2.0));
+            stroke
+                .points
+                .push(InkPoint::new(from + step as f32 * 2.0, 5.0, 2.0));
         }
 
         stroke.close();
@@ -720,7 +732,10 @@ mod tests {
         // A fresh connection agrees, and the folder keeps the name it was made with: the folder is
         // the note's *identity*, and the name is only what it is called.
         let store = NoteStore::open(&folder.join(NOTE_DB)).expect("the note");
-        assert_eq!(store.title().expect("a name").as_deref(), Some("3\u{c7a5} \u{c694}\u{c57d}"));
+        assert_eq!(
+            store.title().expect("a name").as_deref(),
+            Some("3\u{c7a5} \u{c694}\u{c57d}")
+        );
         assert_eq!(
             folder,
             root.join("notes"),
@@ -758,7 +773,9 @@ mod tests {
         let scratch = scratch("listing");
 
         assert!(
-            notes_in(&scratch.join("nowhere")).expect("a listing").is_empty(),
+            notes_in(&scratch.join("nowhere"))
+                .expect("a listing")
+                .is_empty(),
             "a notes folder that does not exist yet is no notes, not an error"
         );
 
@@ -812,7 +829,10 @@ mod tests {
             arrived.store().layout().expect("a list"),
             vec![Page::Document(0), Page::Blank]
         );
-        let (name, bytes) = arrived.document().expect("the document").expect("it is there");
+        let (name, bytes) = arrived
+            .document()
+            .expect("the document")
+            .expect("it is there");
         assert_eq!(name, "chapter-3.pdf");
         assert_eq!(bytes, a_pdf());
 

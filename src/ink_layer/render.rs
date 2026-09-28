@@ -45,15 +45,15 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
     D2D1_FIGURE_END_CLOSED, D2D1_FILL_MODE_WINDING, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
+use windows::Win32::Graphics::Direct2D::ID2D1GeometrySink;
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT,
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1DeviceContext1,
     ID2D1Factory1, ID2D1Geometry, ID2D1GeometryRealization, ID2D1Image, ID2D1PathGeometry1,
-    ID2D1SolidColorBrush,
+    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+    D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT,
 };
-use windows::Win32::Graphics::Direct2D::ID2D1GeometrySink;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISurface};
 use windows_numerics::{Matrix3x2, Vector2};
@@ -113,8 +113,8 @@ impl Renderer {
         let factory: ID2D1Factory1 =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }
                 .context("creating a Direct2D factory")?;
-        let device: ID2D1Device = unsafe { factory.CreateDevice(dxgi_device) }
-            .context("creating a Direct2D device")?;
+        let device: ID2D1Device =
+            unsafe { factory.CreateDevice(dxgi_device) }.context("creating a Direct2D device")?;
         let context = unsafe { device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE) }
             .context("creating a Direct2D context")?;
 
@@ -158,9 +158,11 @@ impl Renderer {
             ..Default::default()
         };
 
-        let target: ID2D1Bitmap1 =
-            unsafe { self.context.CreateBitmapFromDxgiSurface(&buffer, Some(&properties)) }
-                .context("binding the swap chain's buffer")?;
+        let target: ID2D1Bitmap1 = unsafe {
+            self.context
+                .CreateBitmapFromDxgiSurface(&buffer, Some(&properties))
+        }
+        .context("binding the swap chain's buffer")?;
 
         // The page's pixels are uploaded before the batch opens: an upload is work on the device,
         // and doing it between `BeginDraw` and `EndDraw` would be work inside a recording.
@@ -341,8 +343,8 @@ impl Renderer {
     /// pixels of paper inside the ink, in stripes. A realization keeps it: the fill rule is the
     /// geometry's, and the API that bakes one takes no other.
     fn outline_geometry(&self, stroke: &Stroke) -> Result<ID2D1PathGeometry1> {
-        let geometry = unsafe { self.factory.CreatePathGeometry() }
-            .context("creating a stroke's geometry")?;
+        let geometry =
+            unsafe { self.factory.CreatePathGeometry() }.context("creating a stroke's geometry")?;
 
         let Some((first, rest)) = stroke.outline.split_first() else {
             return Ok(geometry);
@@ -387,9 +389,7 @@ impl Renderer {
         let outline = self.outline_geometry(stroke)?;
         // The geometry as the interface every geometry has: a realization is made *from* a geometry,
         // whatever kind it was built as.
-        let geometry: ID2D1Geometry = outline
-            .cast()
-            .context("a stroke's geometry, as geometry")?;
+        let geometry: ID2D1Geometry = outline.cast().context("a stroke's geometry, as geometry")?;
 
         unsafe {
             self.context1
@@ -645,7 +645,11 @@ mod tests {
     /// unit is smaller than the pixel showing it — and never finer, which the API does not take.
     #[test]
     fn the_flattening_tolerance_follows_the_zoom_down_to_the_api_floor() {
-        assert_eq!(flattening_tolerance(1.0), DEFAULT_FLATTENING, "1:1 is the default");
+        assert_eq!(
+            flattening_tolerance(1.0),
+            DEFAULT_FLATTENING,
+            "1:1 is the default"
+        );
         assert_eq!(
             flattening_tolerance(4.0),
             DEFAULT_FLATTENING,
@@ -659,7 +663,11 @@ mod tests {
 
         // A zoom that makes no sense is not a reason to ask Direct2D for a tolerance it refuses.
         for zoom in [0.0, -2.0, f32::NAN, f32::INFINITY] {
-            assert_eq!(flattening_tolerance(zoom), DEFAULT_FLATTENING, "zoom {zoom}");
+            assert_eq!(
+                flattening_tolerance(zoom),
+                DEFAULT_FLATTENING,
+                "zoom {zoom}"
+            );
         }
     }
 }

@@ -239,7 +239,6 @@ impl Marks {
         }
     }
 
-
     /// Whether the screen is in front of the note.
     pub fn is_open(&self) -> bool {
         self.open
@@ -319,11 +318,9 @@ impl Marks {
             // The chords that are the app's rather than the list's: `Ctrl+B` still marks the page the
             // list is pointing at. Everything else the keyboard does here belongs to the list, which has
             // the focus.
-            .on_key_down(
-                cx.listener(|app, event: &KeyDownEvent, window, cx| {
-                    app.marks_key_down(event, window, cx)
-                }),
-            )
+            .on_key_down(cx.listener(|app, event: &KeyDownEvent, window, cx| {
+                app.marks_key_down(event, window, cx)
+            }))
             .child(self.header(title, cx))
             // The rows are a card on the desk, as they are on the home screen: one surface with a
             // hairline round it, so a list of places reads as a page rather than as another menu.
@@ -409,7 +406,6 @@ impl Marks {
         bar.into_any_element()
     }
 }
-
 
 /// What the list draws: one row per marked page of the note.
 ///
@@ -510,11 +506,13 @@ impl ListDelegate for MarksDelegate {
                 h_flex()
                     .items_center()
                     .gap_3()
-                    .child(Icon::new(IconName::BookmarkCheck).text_color(if highlighted {
-                        theme.accent_foreground
-                    } else {
-                        accent
-                    }))
+                    .child(
+                        Icon::new(IconName::BookmarkCheck).text_color(if highlighted {
+                            theme.accent_foreground
+                        } else {
+                            accent
+                        }),
+                    )
                     .child(
                         v_flex()
                             .gap_1()
@@ -524,7 +522,11 @@ impl ListDelegate for MarksDelegate {
             )
             // Said only for the page the reader is on: it is the one row of the list that is not about
             // somewhere else.
-            .child(Label::new(if here { "you are here" } else { "" }).text_sm().text_color(muted));
+            .child(
+                Label::new(if here { "you are here" } else { "" })
+                    .text_sm()
+                    .text_color(muted),
+            );
 
         Some(ListItem::new(ix).selected(highlighted).child(row))
     }
@@ -554,9 +556,7 @@ impl ListDelegate for MarksDelegate {
             return;
         };
 
-        self.app
-            .update(cx, |app, cx| app.go_to_mark(page, cx))
-            .ok();
+        self.app.update(cx, |app, cx| app.go_to_mark(page, cx)).ok();
     }
 
     /// There is nothing marked: say what the list is for.
@@ -576,7 +576,6 @@ impl ListDelegate for MarksDelegate {
             .into_any_element()
     }
 }
-
 
 /// What a marked page's row can do, on the menu a right-click opens.
 ///
@@ -611,7 +610,6 @@ fn row_menu(menu: PopupMenu, app: WeakEntity<NoteApp>, page: usize) -> PopupMenu
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     // Imported by name rather than by glob: `use super::*` would bring GPUI's own `test` macro into
@@ -628,7 +626,11 @@ mod tests {
     fn the_marks_are_the_pages_in_reading_order() {
         let marks = Bookmarks::of([7, 1, 3, 1]);
 
-        assert_eq!(marks.pages(), &[1, 3, 7], "sorted, and a repeat is one mark");
+        assert_eq!(
+            marks.pages(),
+            &[1, 3, 7],
+            "sorted, and a repeat is one mark"
+        );
         assert_eq!(marks.len(), 3);
         assert!(marks.contains(3));
         assert!(!marks.contains(4));
@@ -659,7 +661,11 @@ mod tests {
         );
 
         marks.inserted_at(0);
-        assert_eq!(marks.pages(), &[1, 4], "and an insertion at a mark pushes it along too");
+        assert_eq!(
+            marks.pages(),
+            &[1, 4],
+            "and an insertion at a mark pushes it along too"
+        );
     }
 
     /// Deleting a page takes its mark with it, and the marks after it close the gap.
@@ -681,9 +687,21 @@ mod tests {
     fn the_step_from_a_page_looks_either_way() {
         let marks = Bookmarks::of([1, 5, 9]);
 
-        assert_eq!(marks.next_from(0), Some(1), "the first mark after the page in front");
-        assert_eq!(marks.next_from(5), Some(9), "the mark in front is not the next one");
-        assert_eq!(marks.next_from(9), None, "and there is nothing after the last");
+        assert_eq!(
+            marks.next_from(0),
+            Some(1),
+            "the first mark after the page in front"
+        );
+        assert_eq!(
+            marks.next_from(5),
+            Some(9),
+            "the mark in front is not the next one"
+        );
+        assert_eq!(
+            marks.next_from(9),
+            None,
+            "and there is nothing after the last"
+        );
 
         assert_eq!(marks.previous_from(9), Some(5));
         assert_eq!(marks.previous_from(5), Some(1));
@@ -719,4 +737,3 @@ mod tests {
         assert_eq!(blank.count(), 1, "one row per marked page");
     }
 }
-

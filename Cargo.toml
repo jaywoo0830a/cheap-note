@@ -92,6 +92,8 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Direct2D_Common",
     "Foundation_Numerics",
 ] }
+# Direct2D's geometry is placed with a matrix, and that matrix type is this crate's.
+windows-numerics = "0.3"
 # Named types for the raw window handle GPUI hands out (used to bind the pen capture).
 raw-window-handle = "0.6"
 

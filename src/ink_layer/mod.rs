@@ -53,12 +53,11 @@ use gpui_kit::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::HWND;
 
-mod canvas;
+pub mod canvas;
 mod device;
 mod render;
 
-pub use canvas::Canvas;
-pub use canvas::Rect;
+pub use canvas::{Canvas, Fill, Ink, Page, Rect};
 
 use device::Device;
 

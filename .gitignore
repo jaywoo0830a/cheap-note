@@ -6,3 +6,4 @@ vendor/*
 cheap-note.settings.json
 *.txt
 *.log
+*.ps1

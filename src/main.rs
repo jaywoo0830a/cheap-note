@@ -29,6 +29,7 @@
 //! | [`cursor`]  | the pen's ghost cursor: where it is and how it leans               |
 //! | [`cursor_overlay`] | the ghost's own window, drawn without waiting for a frame     |
 //! | [`system_cursor`] | hiding the system pointer while the pen is in range          |
+//! | [`ink_layer`] | the canvas's own renderer: the desk, the paper and the ink, outside the frame |
 //! | [`pdf`]     | the Pdfium document, page rendering, and the page cache            |
 //! | [`pages`]   | what a note's pages are, and what each one shows                   |
 //! | [`bookmarks`] | the pages a note has marked, and the screen that lists them      |
@@ -73,6 +74,7 @@ mod cursor_overlay;
 mod error;
 mod home;
 mod ink;
+mod ink_layer;
 mod note;
 mod outline;
 mod pdf;
@@ -103,6 +105,12 @@ fn main() {
     application.run(move |cx| {
         // GPUI Kit must be initialized before any of its components or theme tokens are used.
         gpui_kit::init(cx);
+
+        // And, immediately after that, the one thing the canvas needs from the window itself: a
+        // surface with no background of its own, so that the desk the canvas paints is visible
+        // through it. Registered here — before the window — because a window's plugins are read
+        // when it is created (see [`ink_layer`]).
+        ink_layer::leave_the_surface_unpainted(cx);
 
         // The app's own look, before the first element is built: the bundled font and the palette.
         // After `init`, because that is what creates the theme this writes into, and before the
@@ -143,6 +151,13 @@ fn main() {
                     title: Some("cheap-note".into()),
                     ..Default::default()
                 }),
+                // The window is not opaque, because the desk is not painted by it: the canvas is a
+                // renderer of its own, composed *behind* what GPUI draws (see [`ink_layer`]), and
+                // the only way to see it through is to leave the pixels GPUI does not paint
+                // transparent. What this costs is subpixel text rendering, which a window with a
+                // background it does not own cannot have — the interface is drawn in grayscale
+                // antialiasing instead.
+                window_background: WindowBackgroundAppearance::Transparent,
                 ..Default::default()
             };
 

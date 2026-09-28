@@ -77,6 +77,14 @@ windows = { version = "0.62", features = [
     # memory device context to hold it, and `UpdateLayeredWindow` to put it on screen — the pen's
     # cursor, drawn outside the frame.
     "Win32_Graphics_Gdi",
+    # The canvas's own renderer (see `src/ink_layer`): a Direct3D 11 device of the app's own, a
+    # composition swap chain to present, and the DirectComposition visual that places it *under*
+    # GPUI's, in the one window both draw in.
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
 ] }
 # Named types for the raw window handle GPUI hands out (used to bind the pen capture).
 raw-window-handle = "0.6"

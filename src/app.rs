@@ -91,6 +91,7 @@ use crate::cursor::PenCursor;
 use crate::cursor_overlay::{CursorFeed, Screen};
 use crate::home::Home;
 use crate::ink::{InkTransform, Notes, Stroke, Tool};
+use crate::ink_layer::InkLayer;
 use crate::note::{self, Note, NoteWriter, Report};
 use crate::outline::{Outline, OutlinePages};
 use crate::pages::Pages;
@@ -475,6 +476,12 @@ pub struct NoteApp {
     /// the system pointer stays, and the app is what it was before the overlay existed. See
     /// [`crate::cursor_overlay`] for why the ghost is not part of a frame.
     cursor: Option<CursorFeed>,
+    /// The canvas, drawn by a renderer of the app's own rather than by a frame.
+    ///
+    /// `None` when it could not be installed — a machine whose graphics processor will not give
+    /// Direct3D 11 a device — in which case the app says so once and draws the canvas the way it
+    /// did before this existed. See [`crate::ink_layer`].
+    ink_layer: Option<InkLayer>,
     /// The page being shown.
     page_index: usize,
     /// The window's DPI scale factor, captured each frame.
@@ -639,6 +646,21 @@ impl NoteApp {
         // answer `WM_SETCURSOR` before anything else can put a cursor back.
         let system_cursor = SystemCursor::install(window);
 
+        // The canvas's own renderer. From this phase it draws a probe and nothing else, so what it
+        // is here for is to be *looked at* before anything is built on it (see
+        // [`crate::ink_layer`]). Until the canvas is finished, failing to install one falls back to
+        // the frame's own painting; a machine with no graphics processor is not meant to run this
+        // app at all, so this is a report rather than a resting place.
+        let ink_layer = match InkLayer::install(window) {
+            Ok(layer) => Some(layer),
+            Err(reason) => {
+                if message.is_empty() {
+                    message = format!("canvas layer: {reason}");
+                }
+                None
+            }
+        };
+
         if message.is_empty() {
             message = pen.status().to_string();
         }
@@ -701,6 +723,7 @@ impl NoteApp {
             pen,
             system_cursor,
             cursor,
+            ink_layer,
             page_index: 0,
             scale: window.scale_factor(),
             view,
@@ -4101,6 +4124,25 @@ impl Render for NoteApp {
                 .into_any_element();
         }
 
+        // The canvas's own renderer, called once per frame while the note screen is the one
+        // showing: the place, in later phases, where the desk, the paper and the ink are handed
+        // over. From this phase it draws a probe and nothing else (see [`crate::ink_layer`]).
+        if let Some(ink) = self.ink_layer.as_mut() {
+            ink.probe();
+        }
+
+        // The desk belongs to the canvas layer when there is one: this element leaves those pixels
+        // to it, and the layer's own background shows through them. Without a layer the desk is
+        // this element's, which is what the app drew before the layer existed.
+        //
+        // Resolved here rather than where the element is built: the theme is a borrow of `cx`, and
+        // the bar below is built from `cx` mutably.
+        let desk = if self.ink_layer.is_some() {
+            theme.transparent
+        } else {
+            background
+        };
+
         let page = self.current_page();
         let sheet = self.page_layout(window_size, page.as_ref());
         // Stored for the pump, which has no window to ask: a reading has to land on the sheet the
@@ -4184,7 +4226,7 @@ impl Render for NoteApp {
         div()
             .relative()
             .size_full()
-            .bg(background)
+            .bg(desk)
             .text_color(foreground)
             // A trackpad's pinch, and a wheel with `Ctrl` held, both arrive here: the canvas is the
             // whole window's only interactive element, so it is what the gestures hit.

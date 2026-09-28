@@ -89,6 +89,12 @@ windows = { version = "0.62", features = [
     # command batch per frame rather than one multisampled pass per batch.
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
+    # Not called into: the Direct2D *1.1* interface — the one that bakes a stroke's geometry into a
+    # shape the device keeps triangles for (see `src/ink_layer/render.rs`) — is only declared by the
+    # bindings when these two are on as well, and a geometry that is outlined on every frame is what
+    # this whole canvas was written to stop doing.
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Imaging",
 ] }
 # Direct2D's geometry is placed with a matrix, and that matrix type is this crate's.
 windows-numerics = "0.3"

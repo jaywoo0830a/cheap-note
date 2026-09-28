@@ -93,7 +93,7 @@ pub struct Page {
 /// canvas can pan and zoom without rebuilding anything: the layer keeps each stroke's geometry and
 /// moves it, and geometry is built only when the ink changes or the *detail* the zoom asks for
 /// moves (see [`Canvas::ink`]).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Ink {
     /// Where the paper's own origin is drawn, in logical window pixels.
     pub origin: (f32, f32),
@@ -113,6 +113,42 @@ pub struct Ink {
     /// changes every stroke's outline without changing any of their identities, and this is what
     /// says so.
     pub revision: u64,
+    /// The part of the sheet that is on screen, in the paper's own units: what a frame culls against
+    /// (see [`Stroke::visible_in`]).
+    ///
+    /// The ink is *placed* in the paper's units and drawn through the transform, so a stroke the
+    /// reader has scrolled past is a draw call the device does not need — and when zoomed in, most
+    /// of a page is off screen. Everything is visible in the default, because a caller with no
+    /// window has nothing honest to say and skipping a stroke that *is* on screen is the one mistake
+    /// this can make.
+    pub visible: [f32; 4],
+}
+
+impl Default for Ink {
+    fn default() -> Self {
+        Ink {
+            origin: (0.0, 0.0),
+            zoom: 0.0,
+            strokes: Arc::new(Vec::new()),
+            open: None,
+            revision: 0,
+            visible: Ink::ALL_VISIBLE,
+        }
+    }
+}
+
+impl Ink {
+    /// The sheet in full, as a culling rectangle.
+    ///
+    /// Written down because the two infinities have to be: a rectangle of zeroes — what a derived
+    /// `Default` would leave here — is the one value that means "nothing on this sheet is on screen"
+    /// (see [`Ink::visible`]).
+    const ALL_VISIBLE: [f32; 4] = [
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+        f32::INFINITY,
+        f32::INFINITY,
+    ];
 }
 
 /// One frame of canvas: the desk, what is printed on it, and the ink in front of it.

@@ -6,14 +6,17 @@
 //! work that makes one is *tessellation*: turning an outline into triangles, with antialiasing at
 //! the edges. Direct3D offers no such thing, so a renderer built on it directly has to tessellate
 //! the outlines itself, keep its own vertex buffers, and run its own multisampled pass. Direct2D
-//! does all of that, and — the part that matters here — it keeps the result per *geometry* rather
-//! than per frame.
+//! does all of that, and — the part that matters here — it can keep the result: a *realization* is
+//! the shape an outline was flattened and filled into, held on the device, and drawing one outlines
+//! nothing again (see [`Renderer::realization_for`]).
 //!
 //! GPUI's own renderer does the other thing: lyon tessellates every path into the scene *every
 //! frame*, and the geometry is thrown away when the frame ends. A page of handwriting held ~33 fps
 //! with `paint` at 9.3 ms because of it, and a cached layer moved `paint` to 0.00 without moving the
 //! frame rate, because the engine replays whatever the cache hands it. Here a stroke is turned into
-//! geometry once — when it is closed — and every frame after that just draws it.
+//! geometry once — when it is closed — and baked once: measured on this app, a page of 29 strokes
+//! rendered in 1.69 ms and one of 316 in 7.87, which is 21 µs a stroke, and every one of those
+//! microseconds was a path geometry being outlined all over again.
 //!
 //! ## What a stroke's geometry is kept under
 //!
@@ -36,6 +39,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use gpui_kit::{rgb, Hsla, ImageId, Rgba};
+// `cast`: asking a context for the later interface whose method bakes a geometry into a realization.
+use windows::core::Interface as _;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
     D2D1_FIGURE_END_CLOSED, D2D1_FILL_MODE_WINDING, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
@@ -44,8 +49,9 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
     D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT,
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1Image,
-    ID2D1PathGeometry1, ID2D1SolidColorBrush,
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1DeviceContext1,
+    ID2D1Factory1, ID2D1Geometry, ID2D1GeometryRealization, ID2D1Image, ID2D1PathGeometry1,
+    ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct2D::ID2D1GeometrySink;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -57,6 +63,14 @@ use crate::ink_layer::canvas::{Canvas, Fill, Page, Rect};
 
 /// One unit in one pixel, whatever the display's own scale is (see the module docs).
 const DOTS_PER_INCH: f32 = 96.0;
+
+/// Direct2D's own default flattening tolerance, in the geometry's units.
+///
+/// `D2D1_DEFAULT_FLATTENING_TOLERANCE`, which the headers define and the bindings do not: it is the
+/// coarsest a curve may be turned into straight edges without the difference being visible, and the
+/// smallest tolerance `CreateFilledGeometryRealization` documents taking (see
+/// [`flattening_tolerance`]).
+const DEFAULT_FLATTENING: f32 = 0.25;
 
 /// How many bytes one pixel of a page takes: BGRA.
 const BYTES_PER_PIXEL: u32 = 4;
@@ -71,18 +85,26 @@ pub(crate) struct Renderer {
     brush: ID2D1SolidColorBrush,
     /// The finished strokes' geometry, and what it was built from.
     ink: InkCache,
+    /// The same context, asked for the one interface that can bake a geometry into a realization.
+    ///
+    /// The same object as [`Renderer::context`] — Direct2D's device context answers for 1.1 on any
+    /// system this app runs on — but a separate handle, because the method that draws a realization
+    /// is declared on the later interface and the ones that place and fill everything else are not.
+    context1: ID2D1DeviceContext1,
     /// The document page's bitmap, and the image it was uploaded from.
     page: Option<(ImageId, ID2D1Bitmap1)>,
 }
 
-/// The geometry of the finished strokes, index-aligned with the app's list of them.
+/// The finished strokes' geometry, index-aligned with the app's list of them.
 #[derive(Default)]
 struct InkCache {
     /// Each cached stroke, by identity — the address of its `Arc` — and the revision of every
     /// outline it was built at.
     identities: Vec<usize>,
     revision: u64,
-    geometry: Vec<ID2D1PathGeometry1>,
+    /// One baked geometry per stroke: the outline flattened, filled and antialiased *once*, at the
+    /// zoom it was built for (see [`Renderer::realization_for`]).
+    realizations: Vec<ID2D1GeometryRealization>,
 }
 
 impl Renderer {
@@ -103,12 +125,18 @@ impl Renderer {
 
         let brush = unsafe { context.CreateSolidColorBrush(&colour_of(Hsla::default()), None) }
             .context("creating a brush")?;
+        // A second handle rather than a second object: what a realization needs is a method on
+        // Direct2D 1.1, and everything else this renderer calls is on the interface it already has.
+        let context1: ID2D1DeviceContext1 = context
+            .cast()
+            .context("asking the context for Direct2D 1.1")?;
 
         Ok(Renderer {
             factory,
             context,
             brush,
             ink: InkCache::default(),
+            context1,
             page: None,
         })
     }
@@ -234,24 +262,37 @@ impl Renderer {
 impl Renderer {
     /// Draws the ink: the finished strokes, then the one under the pen.
     ///
-    /// The finished strokes' geometry is kept between frames and rebuilt only for strokes this
-    /// renderer has not seen. The stroke being written is rebuilt every frame, because it is still
-    /// moving — and it is one stroke.
+    /// A finished stroke is a realization — a shape its outline was flattened and filled into once —
+    /// so the device draws it from a cache rather than outlining it again (see
+    /// [`Renderer::realization_for`]). The stroke being written is still moving, so it is a plain
+    /// path geometry built for this frame; it is one stroke, and the frame after it will not be.
     fn draw_ink(&mut self, canvas: &Canvas) -> Result<()> {
         self.refresh_ink(canvas)?;
 
         unsafe {
             self.context.SetTransform(&ink_transform(canvas));
 
-            for (stroke, geometry) in canvas.ink.strokes.iter().zip(self.ink.geometry.iter()) {
+            // What is off the sheet's visible part is skipped, not drawn: it is the same test the
+            // app counts its `culled` figure with, so the number on the status line is what happened,
+            // and it is what makes zooming in on a page of handwriting cheap (see
+            // [`Stroke::visible_in`]).
+            let visible = canvas.ink.visible;
+
+            for (stroke, realization) in canvas.ink.strokes.iter().zip(self.ink.realizations.iter())
+            {
+                if !stroke.visible_in(visible) {
+                    continue;
+                }
+
                 self.brush.SetColor(&colour_of(rgb(stroke.color).into()));
-                self.context.FillGeometry(geometry, &self.brush, None);
+                self.context1
+                    .DrawGeometryRealization(realization, &self.brush);
             }
 
             if let Some(stroke) = &canvas.ink.open {
-                let geometry = self.geometry_for(stroke)?;
+                let outline = self.outline_geometry(stroke)?;
                 self.brush.SetColor(&colour_of(rgb(stroke.color).into()));
-                self.context.FillGeometry(&geometry, &self.brush, None);
+                self.context.FillGeometry(&outline, &self.brush, None);
             }
 
             // The transform is the ink's alone and does not outlive this call: a context keeps it,
@@ -263,6 +304,10 @@ impl Renderer {
     }
 
     /// Brings the cached geometry up to date with the app's strokes.
+    ///
+    /// The zoom travels with the strokes because a realization is flattened for a size, not for a
+    /// shape: every outline it is built from was rebuilt when the zoom crossed into another detail
+    /// rung, and the flattening has to be as well (see [`Renderer::realization_for`]).
     fn refresh_ink(&mut self, canvas: &Canvas) -> Result<()> {
         let strokes = &canvas.ink.strokes;
 
@@ -274,26 +319,28 @@ impl Renderer {
         );
 
         self.ink.identities.truncate(keep);
-        self.ink.geometry.truncate(keep);
+        self.ink.realizations.truncate(keep);
         self.ink.revision = canvas.ink.revision;
 
         for stroke in strokes.iter().skip(keep) {
-            let geometry = self.geometry_for(stroke)?;
+            let realization = self.realization_for(stroke, canvas.ink.zoom)?;
             self.ink.identities.push(identity(stroke));
-            self.ink.geometry.push(geometry);
+            self.ink.realizations.push(realization);
         }
 
         Ok(())
     }
 
-    /// A stroke's ribbon outline as geometry Direct2D can draw.
+    /// A stroke's ribbon outline as Direct2D geometry: the shape a realization is made from, and the
+    /// shape the stroke under the pen is filled from, frame by frame.
     ///
     /// Filled with the **winding** rule, which is what a pen does: an outline that crosses itself —
     /// a loop, a sharp turn, a scribble over its own line — fills everything it winds around, where
     /// the even-odd rule would leave a hole at every crossing. The frame's own renderer set the same
     /// rule on lyon for the same reason, and the measured symptom of getting it wrong was 3,145
-    /// pixels of paper inside the ink, in stripes.
-    fn geometry_for(&self, stroke: &Stroke) -> Result<ID2D1PathGeometry1> {
+    /// pixels of paper inside the ink, in stripes. A realization keeps it: the fill rule is the
+    /// geometry's, and the API that bakes one takes no other.
+    fn outline_geometry(&self, stroke: &Stroke) -> Result<ID2D1PathGeometry1> {
         let geometry = unsafe { self.factory.CreatePathGeometry() }
             .context("creating a stroke's geometry")?;
 
@@ -320,6 +367,35 @@ impl Renderer {
         }
 
         Ok(geometry)
+    }
+
+    /// A stroke baked into a shape the device keeps triangles for.
+    ///
+    /// A path geometry is not that shape: filling one flattens every curve and triangulates the fill
+    /// on the way to the frame, so a page of handwriting pays for all of its outlines again every
+    /// time the screen refreshes. That is the last thing this canvas's whole design was for, and the
+    /// measurements say so — a page of 29 strokes rendered in 1.69 ms and a page of 316 in 7.87,
+    /// which is 21 µs a stroke, and nothing in this renderer touches a stroke per frame but this.
+    /// A realization is what Direct2D 1.1 offers for static geometry: the flattening, the
+    /// triangulation and the antialiasing done once, kept on the device, and drawn again and again.
+    ///
+    /// It is flattened for a *size*, not for a shape (see [`flattening_tolerance`]), which is why
+    /// one is built per stroke per detail rung rather than per stroke: the outlines it came from are
+    /// the rung's too, and both are rebuilt together when the zoom crosses into another (see
+    /// [`Renderer::refresh_ink`]).
+    fn realization_for(&self, stroke: &Stroke, zoom: f32) -> Result<ID2D1GeometryRealization> {
+        let outline = self.outline_geometry(stroke)?;
+        // The geometry as the interface every geometry has: a realization is made *from* a geometry,
+        // whatever kind it was built as.
+        let geometry: ID2D1Geometry = outline
+            .cast()
+            .context("a stroke's geometry, as geometry")?;
+
+        unsafe {
+            self.context1
+                .CreateFilledGeometryRealization(&geometry, flattening_tolerance(zoom))
+        }
+        .context("baking a stroke's geometry")
     }
 
     /// The document page's bitmap, uploaded when the image it comes from changes.
@@ -402,6 +478,27 @@ fn keep(
         .zip(now)
         .take_while(|(cached, now)| *cached == now)
         .count()
+}
+
+/// How coarsely a stroke's curves may be turned into straight edges, in the paper's own units.
+///
+/// What the screen wants is a fraction of a *pixel* of error, and a geometry's numbers are in paper
+/// units, so the two are one zoom apart: at 1:1 Direct2D's own default — a quarter of a unit — is a
+/// quarter of a pixel, and the case worth being coarser than that on is the paper drawn *smaller*
+/// than its own size, where a paper unit is less than the pixel showing it.
+///
+/// Finer is not possible: the default is documented as the smallest tolerance
+/// `CreateFilledGeometryRealization` takes, so a paper drawn larger than its own size is flattened at
+/// the same quarter of a paper unit — a pixel of chord error on a curve at 4x, which is where the
+/// difference stops showing on the width of a pen.
+fn flattening_tolerance(zoom: f32) -> f32 {
+    let zoom = if zoom.is_finite() && zoom > 0.0 {
+        zoom
+    } else {
+        1.0
+    };
+
+    (DEFAULT_FLATTENING / zoom.min(1.0)).max(DEFAULT_FLATTENING)
 }
 
 /// Where the paper's own units sit on the surface: how large it is drawn, times the display's
@@ -532,5 +629,27 @@ mod tests {
     #[test]
     fn another_revision_costs_every_geometry() {
         assert_eq!(keep(&[1, 2, 3], [1, 2, 3].into_iter(), 7, 8), 0);
+    }
+
+    /// The flattening tolerance is in the paper's units, coarser than the default only where a paper
+    /// unit is smaller than the pixel showing it — and never finer, which the API does not take.
+    #[test]
+    fn the_flattening_tolerance_follows_the_zoom_down_to_the_api_floor() {
+        assert_eq!(flattening_tolerance(1.0), DEFAULT_FLATTENING, "1:1 is the default");
+        assert_eq!(
+            flattening_tolerance(4.0),
+            DEFAULT_FLATTENING,
+            "and nothing finer than the default is asked for"
+        );
+        assert_eq!(
+            flattening_tolerance(0.25),
+            DEFAULT_FLATTENING * 4.0,
+            "zoomed out, four times as coarse in paper units is the same on screen"
+        );
+
+        // A zoom that makes no sense is not a reason to ask Direct2D for a tolerance it refuses.
+        for zoom in [0.0, -2.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(flattening_tolerance(zoom), DEFAULT_FLATTENING, "zoom {zoom}");
+        }
     }
 }

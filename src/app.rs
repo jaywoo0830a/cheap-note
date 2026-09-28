@@ -4189,6 +4189,11 @@ impl Render for NoteApp {
 
         let page_color: Hsla = rgb(self.settings.page_color).into();
 
+        // One measurement for the whole of the canvas's cost, rather than one for describing it and
+        // another for drawing it: what the status line's `canvas` clause means is what a frame pays
+        // for the page and its ink, and that is both halves. It is the one number that grows with the
+        // amount of ink on a page, and so the one that says whether the layer is keeping its promise
+        // — a page of 316 strokes costing what a page of 29 does (see [`crate::ink_layer::render`]).
         {
             let _timed = measure(&self.timings.canvas);
 
@@ -4211,20 +4216,24 @@ impl Render for NoteApp {
                 },
             });
 
+            // The part of the sheet that is on screen: what the layer culls the ink against, and the
+            // rectangle the counters below are counted in. Computed once, because both halves of a
+            // frame have to agree about it — a stroke the layer skips as invisible and the status
+            // line counts as drawn would be a number nobody could trust.
+            let visible = sheet.visible();
+
             self.canvas.ink = Ink {
                 origin: sheet.origin,
                 zoom: sheet.zoom,
                 strokes: Arc::clone(self.ink.finished()),
                 open,
                 revision: self.ink_revision,
+                visible,
             };
-        }
 
-        // What the canvas was asked to draw, counted for the status line: the layer draws it and
-        // this does not touch a polygon, but the numbers a person reads are the numbers they read
-        // before — strokes on the sheet, the outline points they cost, and how many were off it.
-        {
-            let visible = sheet.visible();
+            // What the canvas was asked to draw, counted for the status line: the layer draws it and
+            // this does not touch a polygon, but the numbers a person reads are the numbers they read
+            // before — strokes on the sheet, the outline points they cost, and how many were off it.
             let (mut painted, mut vertices, mut culled) = (0u64, 0u64, 0u64);
 
             for stroke in self.canvas.ink.strokes.iter() {
@@ -4242,17 +4251,19 @@ impl Render for NoteApp {
             }
 
             self.timings.count_painted(painted, vertices, culled);
-        }
 
-        // The canvas draws itself. A layer that fails is reported rather than drawn around: it is
-        // dropped, the desk below comes back to this element, and the canvas keeps its last frame.
-        let failure = match self.ink_layer.as_mut() {
-            Some(ink) => ink.draw(&self.canvas).err(),
-            None => None,
-        };
-        if let Some(error) = failure {
-            self.ink_layer = None;
-            self.message = format!("canvas layer: {error}");
+            // The canvas draws itself, on this thread and inside this frame: the layer is bound to
+            // the window's swap chain, so there is nothing to hand it to and nothing to wait for.
+            // A layer that fails is reported rather than drawn around: it is dropped, the desk below
+            // comes back to this element, and the canvas keeps its last frame.
+            let failure = match self.ink_layer.as_mut() {
+                Some(ink) => ink.draw(&self.canvas).err(),
+                None => None,
+            };
+            if let Some(error) = failure {
+                self.ink_layer = None;
+                self.message = format!("canvas layer: {error}");
+            }
         }
 
         // The desk belongs to the canvas layer when it is there: this element leaves those pixels to

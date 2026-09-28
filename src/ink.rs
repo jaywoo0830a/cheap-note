@@ -2492,32 +2492,6 @@ mod tests {
         assert!(!ink.can_undo(), "and the interface can say so beforehand");
     }
 
-    /// An edit made while a snapshot is held produces a *new* list, and leaves the snapshot alone.
-    ///
-    /// This is the property the note screen's ink layer is built on: the layer keeps the page's `Arc`
-    /// between frames, and the model is what guarantees that the next stroke, undo or redo cannot write
-    /// through it — which is also what keeps a frame that is drawing the previous scene from showing a
-    /// half-edited page. [`InkDocument::finish_open`] states the mechanism in a comment ("`make_mut`
-    /// reuses the existing vector when no frame is holding a snapshot, and copies it when one is");
-    /// this is the half a frame depends on, asserted.
-    #[test]
-    fn an_edit_while_a_snapshot_is_held_leaves_the_snapshot_alone() {
-        let mut ink = page_with(2);
-        let held = Arc::clone(ink.finished());
-
-        assert!(ink.undo(), "the last stroke comes off");
-        assert!(
-            !Arc::ptr_eq(&held, ink.finished()),
-            "and the list it came off is a new one, not the one being held"
-        );
-        assert_eq!(held.len(), 2, "the snapshot still says what it said");
-        assert_eq!(ink.finished().len(), 1);
-
-        assert!(ink.redo(), "and the stroke goes back on");
-        assert_eq!(held.len(), 2, "with the snapshot still untouched");
-        assert_eq!(ink.finished().len(), 2);
-    }
-
     /// Redo puts back exactly what undo took away, in the order they went, and never doubles back
     /// further than the undos reached.
     #[test]

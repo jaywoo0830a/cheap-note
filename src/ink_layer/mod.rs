@@ -38,12 +38,12 @@
 //! window itself, since GPUI asks for the same device and has no software path either. What
 //! [`InkLayer::install`] reports in that case is why, once, at startup.
 //!
-//! ## This phase
+//! ## What it draws
 //!
-//! The device, the visual and a probe: an opaque red rectangle over the whole canvas, so that the
-//! one assumption the arrangement makes — that a `topmost = false` composition target lands behind
-//! a window whose content is a topmost one — can be *looked at* before anything is built on it.
-//! What it should look like: red where the desk shows, and no red anywhere over the interface.
+//! Everything the note screen's canvas is: the desk, the page's shadow, the sheet, the ruling, the
+//! document's page, and the ink — the finished strokes as geometry this layer keeps, and the stroke
+//! under the pen as the one piece it rebuilds per frame. The app describes all of it (see
+//! [`canvas`]) and paints none of it itself.
 
 use gpui_kit::base::{Root, RootPlugin};
 use gpui_kit::{
@@ -57,7 +57,7 @@ pub mod canvas;
 mod device;
 mod render;
 
-pub use canvas::{Canvas, Fill, Ink, Page, Rect};
+pub use canvas::{Canvas, Ink, Page, Rect};
 
 use device::Device;
 

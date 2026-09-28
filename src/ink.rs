@@ -19,9 +19,10 @@
 //!
 //! ## Why the finished strokes are behind an `Arc`
 //!
-//! GPUI's canvas paint callback is `FnOnce`, so each frame hands the renderer an owned
-//! snapshot of the ink. Cloning a `Vec<Stroke>` every frame would be O(strokes) per frame at
-//! the display's rate; cloning an `Arc` is a pointer copy. The strokes are behind an `Arc` of
+//! A frame hands the canvas layer the *list* of finished strokes rather than a copy of them, and
+//! the layer reads their outlines where they are and keeps geometry of its own (see
+//! [`crate::ink_layer::render`]). Cloning a `Vec<Stroke>` every frame would be O(strokes) per frame
+//! at the display's rate; cloning an `Arc` is a pointer copy. The strokes are behind an `Arc` of
 //! their own for the same reason one level down: a vector of pointers can be appended to,
 //! undone and filtered without touching the strokes themselves.
 //!

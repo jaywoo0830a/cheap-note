@@ -374,14 +374,6 @@ impl Sheet {
         }
     }
 
-    /// Where a point on the sheet is drawn, in window logical pixels.
-    fn place(&self, x: f32, y: f32) -> Point<Pixels> {
-        point(
-            px(self.origin.0 + x * self.zoom),
-            px(self.origin.1 + y * self.zoom),
-        )
-    }
-
     /// The part of the sheet that is on screen, in the sheet's own coordinates.
     ///
     /// This is what a frame culls against: ink outside it costs nothing to skip and a great deal
@@ -520,7 +512,7 @@ pub struct NoteApp {
     /// `None` until a frame has laid the bar out: nothing is refused on the strength of a
     /// measurement that has not been made.
     bar_bottom: Rc<Cell<Option<f32>>>,
-    /// What every hot path costs, shared with the paint callback.
+    /// What every hot path costs, shared with the canvas's renderer.
     timings: Arc<Timings>,
     /// When the pump last woke, for the gap it reports against its own interval.
     last_pump: Option<Instant>,
@@ -533,8 +525,8 @@ pub struct NoteApp {
     last_ink_at: Instant,
     /// The rule geometry for the current sheet.
     ///
-    /// Held here rather than rebuilt in the paint callback: the callback runs once per frame and
-    /// must not do geometry work.
+    /// Held here rather than rebuilt every frame: a frame must not do geometry work, and a grid
+    /// over a full page is several hundred marks.
     ruling: Ruling,
     /// The status line as last composed.
     ///
@@ -4007,7 +3999,8 @@ impl Render for NoteApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Timed in a scope of its own, and *not* through `self.timings`: this guard holds a borrow
         // of what it measures, and the rest of this function needs the view mutably. It ends when
-        // the element tree is built — the paint callback, which runs later, is measured separately.
+        // the element tree is built. Describing the canvas, which happens at the end of this
+        // function, has a meter of its own (`canvas`).
         let for_render = Arc::clone(&self.timings);
         let _render_timed = measure(&for_render.render);
         // The counters describe one frame, so this frame's are its own.
@@ -4544,109 +4537,10 @@ mod tests {
     // scope and shadow the attribute this module needs.
     use super::{
         file_label, file_stem, notch_in_pixels, pdf_render_due, pinch_zoom_factor, quantise_width,
-        sheet_matches, solid_path, wheel_pan, wheel_zoom_factor, PDF_QUIET_INTERVAL,
-        WHEEL_LINE_HEIGHT, WHEEL_LINES_PER_NOTCH, WHEEL_ZOOM_STEP,
+        sheet_matches, wheel_pan, wheel_zoom_factor, PDF_QUIET_INTERVAL, WHEEL_LINE_HEIGHT,
+        WHEEL_LINES_PER_NOTCH, WHEEL_ZOOM_STEP,
     };
-    use crate::ink::{InkPoint, Stroke};
-    use gpui_kit::{point, px, Path, PathBuilder, Pixels, Point};
     use std::time::{Duration, Instant};
-
-    /// How many triangles of a built path cover a point.
-    ///
-    /// A path's vertices are a triangle list — the renderer draws them as `TRIANGLELIST` — so this
-    /// is the coverage that would be accumulated at that pixel. Zero means the paper shows through.
-    fn coverage(path: &Path<Pixels>, x: f32, y: f32) -> usize {
-        let cross = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| {
-            (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
-        };
-
-        path.vertices
-            .chunks_exact(3)
-            .filter(|triangle| {
-                let corner = |index: usize| {
-                    let vertex = triangle[index].xy_position;
-                    (f32::from(vertex.x), f32::from(vertex.y))
-                };
-                let (a, b, c) = (corner(0), corner(1), corner(2));
-
-                let (d1, d2, d3) = (cross(a, b, (x, y)), cross(b, c, (x, y)), cross(c, a, (x, y)));
-
-                // Inside whichever way the triangle is wound: the list holds both orientations.
-                (d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0) || (d1 <= 0.0 && d2 <= 0.0 && d3 <= 0.0)
-            })
-            .count()
-    }
-
-    /// A stroke whose ribbon crosses itself: a circle drawn all the way round and a fifth of the
-    /// way past where it started, which is the shape a cursive loop or a scribble-over makes.
-    fn self_crossing_stroke() -> Stroke {
-        let mut stroke = Stroke::new(InkPoint::new(60.0, 0.0, 24.0), Stroke::DEFAULT_COLOR);
-
-        for step in 1..=190 {
-            // A full turn and a fifth of the way past it: `TAU` and not `PI`, or the "circle" is
-            // half of one and never crosses itself.
-            let angle = step as f32 / 180.0 * std::f32::consts::TAU;
-            stroke.points.push(InkPoint::new(
-                60.0 * angle.cos(),
-                60.0 * angle.sin(),
-                24.0,
-            ));
-        }
-
-        stroke.close();
-        stroke
-    }
-
-    /// A stroke that crosses itself must be painted solid.
-    ///
-    /// This is the bug the fill rule in [`solid_path`] fixes, pinned from both sides: the default
-    /// *even-odd* rule leaves the crossing empty — a white diamond where two lines cross, and a
-    /// striped mesh where a scribble doubles back — and *non-zero* fills it. The last assertion is
-    /// the other half: neither rule loses the ordinary, uncrossed part of the ribbon, so the fix
-    /// costs nothing anywhere else.
-    #[test]
-    fn a_crossing_stroke_is_filled_and_not_holed() {
-        let stroke = self_crossing_stroke();
-        let outline: Vec<Point<Pixels>> = stroke
-            .outline
-            .iter()
-            .map(|[x, y]| point(px(*x), px(*y)))
-            .collect();
-
-        // What the app used to paint with: the builder's own default options.
-        let mut default_builder = PathBuilder::fill();
-        default_builder.add_polygon(&outline, true);
-        let even_odd = default_builder.build().expect("a path");
-
-        // What it paints with now.
-        let mut ink_builder = solid_path();
-        ink_builder.add_polygon(&outline, true);
-        let non_zero = ink_builder.build().expect("a path");
-
-        // The loop closes over its own start, so the overlap is the strip just inside the circle
-        // between where it began and where it came back round to.
-        let (crossing_x, crossing_y) = (57.0, 10.0);
-        assert_eq!(
-            coverage(&even_odd, crossing_x, crossing_y),
-            0,
-            "even-odd leaves the crossing empty: that is the white diamond"
-        );
-        assert!(
-            coverage(&non_zero, crossing_x, crossing_y) > 0,
-            "non-zero fills the crossing"
-        );
-
-        // The top of the circle, which no part of the stroke crosses.
-        let (plain_x, plain_y) = (0.0, -60.0);
-        assert!(
-            coverage(&even_odd, plain_x, plain_y) > 0,
-            "even-odd fills the ordinary part of the ribbon"
-        );
-        assert!(
-            coverage(&non_zero, plain_x, plain_y) > 0,
-            "and so does non-zero"
-        );
-    }
 
     /// One notch of a wheel is one zoom step — and a notch arrives as several lines, which is the
     /// part that is easy to get wrong: it made a notch of a real wheel zoom three times too fast
@@ -4842,42 +4736,15 @@ mod tests {
 
 }
 
-/// The path builder every solid shape the canvas draws is filled with: the ink, and the ghost
-/// cursor's body.
-///
-/// ## Why the fill rule is set, when the default is one line shorter
-///
-/// `PathBuilder::fill()` uses lyon's default fill options, and lyon's default *fill rule* is
-/// **even-odd**: a pixel the outline crosses an even number of times is left empty. That is the
-/// right rule for a glyph with a counter in it — the hole in an "o" — and the wrong one for a pen.
-///
-/// A stroke is a ribbon filled as one outline, and that outline crosses *itself* wherever the pen
-/// doubles back: a loop, a sharp turn, a scribble over its own line, or a single stroke that
-/// crosses itself. Every one of those places was left empty — a white diamond at a crossing, and a
-/// striped mesh wherever the user scribbled back and forth. Measured against a real drawing
-/// captured from the screen: 3,145 pixels of paper enclosed inside the ink, in stripes.
-///
-/// Non-zero fills everything the outline winds around, crossing or not, which is what a pen does.
-/// The tessellation is otherwise the same work — the same vertices, the same cost — so this is one
-/// option and nothing else changes.
-///
-/// [`tests::a_crossing_stroke_is_filled_and_not_holed`] pins both halves of that: that the default
-/// rule really does leave a hole in a self-crossing stroke, and that this rule does not.
-fn solid_path() -> PathBuilder {
-    PathBuilder::fill().with_style(PathStyle::Fill(
-        FillOptions::default().with_fill_rule(FillRule::NonZero),
-    ))
-}
-
 /// The shadow a sheet casts on the desk: spread, vertical offset beyond the spread, and colour —
 /// widest and faintest first.
 ///
 /// Three translucent rectangles, each a little wider than the last and a little fainter, painted in
 /// that order: they accumulate into one soft edge. The renderer's own shadows are for *elements* —
 /// they cost a layer, and they are painted behind an element's own background, which a rectangle on
-/// the desk does not have. A page is drawn by the canvas layer or by a paint callback, so its shadow
-/// is three rectangles in the same description either way, and three steps read as one blurred edge
-/// at the sizes a page is drawn at.
+/// the desk does not have. A page is drawn by the canvas layer, so its shadow is three rectangles in
+/// the canvas it is handed, and three steps read as one blurred edge at the sizes a page is drawn
+/// at.
 ///
 /// The sheet is lifted *and* offset downward, the way a sheet of paper lies on a desk: a shadow
 /// centred on the paper reads as a glow, and one that is only offset reads as a hard edge.
@@ -4889,10 +4756,8 @@ const PAGE_SHADOW: [(f32, f32, u32); 3] = [
 
 /// Describes a frame's canvas: the desk, the page's shadow, and the sheet — in the order painted.
 ///
-/// One description for both renderers. The canvas layer draws it (see [`crate::ink_layer`]); when
-/// there is no layer the frame walks the same list, which is what keeps the two from drifting
-/// apart: a change to the shadow is a change to one array, and neither renderer can be the one that
-/// knows about it.
+/// The canvas layer draws it and nothing else does (see [`crate::ink_layer`]): a shadow is three
+/// rectangles in the description, and the renderer is the only thing that knows how to paint one.
 ///
 /// In logical window pixels, which is what the app has: the display's scale travels with the
 /// description and the layer applies it (see [`crate::ink_layer::canvas`]).
@@ -4919,77 +4784,6 @@ fn describe_canvas(canvas: &mut Canvas, sheet: &Sheet, scale: f32, paper: Hsla, 
     canvas.fill(Rect { x, y, width, height }, paper);
 }
 
-/// Paints one rectangle of a described canvas, for the frames the layer does not draw.
-fn paint_fill(window: &mut Window, rect: Rect, colour: Hsla) {
-    paint_rect(
-        window,
-        point(px(rect.x), px(rect.y)),
-        rect.width,
-        rect.height,
-        colour,
-    );
-}
-
-/// Fills a rectangle given in window coordinates.
-///
-/// A rectangle drawn as a path — rather than as a component — is what lets the page sheet and
-/// the ink share one paint pass, in one coordinate system, with no layout involved.
-fn paint_rect(window: &mut Window, origin: Point<Pixels>, width: f32, height: f32, color: Hsla) {
-    if width <= 0.0 || height <= 0.0 {
-        return;
-    }
-
-    let mut builder = PathBuilder::fill();
-    builder.move_to(origin);
-    builder.line_to(point(origin.x + px(width), origin.y));
-    builder.line_to(point(origin.x + px(width), origin.y + px(height)));
-    builder.line_to(point(origin.x, origin.y + px(height)));
-    builder.close();
-
-    if let Ok(path) = builder.build() {
-        window.paint_path(path, color);
-    }
-}
-
-/// Fills a stroke's ribbon outline.
-///
-/// A stroke is a filled polygon rather than a stroked polyline, because that is the only shape
-/// that can carry a width that changes along the line: the pen's force is baked into the
-/// outline's two edges, and a single stroke-width would flatten it.
-///
-/// The colour comes from the stroke itself and not from the palette: a page can hold ink written
-/// with several pens, and a frame has no business knowing which one is in hand.
-///
-/// The outline is in the sheet's coordinates, so it is scaled and placed on the way out, and the
-/// `points` scratch buffer is handed in rather than allocated per stroke: a frame with three
-/// hundred strokes on it would otherwise make — and free — three hundred vectors.
-fn paint_stroke(
-    window: &mut Window,
-    stroke: &Stroke,
-    sheet: &Sheet,
-    points: &mut Vec<Point<Pixels>>,
-) {
-    // Fewer than three points cannot enclose an area.
-    if stroke.outline.len() < 3 {
-        return;
-    }
-
-    points.clear();
-    points.extend(
-        stroke
-            .outline
-            .iter()
-            .map(|[x, y]| sheet.place(*x, *y)),
-    );
-
-    let mut builder = solid_path();
-    builder.add_polygon(points, true);
-
-    if let Ok(path) = builder.build() {
-        let color: Hsla = rgb(stroke.color).into();
-        window.paint_path(path, color);
-    }
-}
 
 /// How much a scroll zooms, as a factor to multiply the current zoom by.
 ///

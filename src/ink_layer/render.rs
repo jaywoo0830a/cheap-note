@@ -291,7 +291,9 @@ impl Renderer {
                 sink.AddLines(&points);
             }
             sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-            sink.Close();
+            // The last call of the four, and the one with a result worth keeping: a sink that could
+            // not be closed left the geometry unfinished, and it would be drawn as what it has.
+            sink.Close().ok();
         }
 
         Ok(geometry)

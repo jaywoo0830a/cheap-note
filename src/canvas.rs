@@ -10,10 +10,10 @@
 //!
 //! ## Why the ruling is cached
 //!
-//! Ruling is pure geometry derived from the sheet's rectangle and style. Rebuilding it in the
-//! paint callback would put a per-frame cost on the one loop this application cares about — and
-//! a grid over a full page is several hundred quads — so it is built once per sheet and handed
-//! to the frame as an `Arc`, the same way finished strokes are.
+//! Ruling is pure geometry derived from the sheet's rectangle and style. Rebuilding it every frame
+//! would put a per-frame cost on the one loop this application cares about — and a grid over a full
+//! page is several hundred marks — so it is built once per sheet and handed to the canvas as an
+//! `Arc`, the same way the finished strokes are.
 //!
 //! ## What the ruling applies to
 //!

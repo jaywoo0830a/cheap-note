@@ -3410,6 +3410,13 @@ impl Render for NoteApp {
         // user was looking at, and that is this one.
         self.sheet = sheet;
 
+        // The ink in front of the reader follows the sheet it is drawn on: a zoom magnifies the pieces
+        // a stroke is made of as well as the stroke, so the outlines a frame walks are rebuilt when
+        // the *detail* the zoom asks for moves, rather than on every frame a pinch is on. This keeps a
+        // cache in step and edits nothing — the strokes themselves are what they were (see
+        // `InkDocument::set_zoom`).
+        self.ink.set_zoom(sheet.zoom);
+
         let (page_size, page_origin) = (
             sheet.drawn(),
             point(px(sheet.origin.0), px(sheet.origin.1)),
@@ -3450,8 +3457,11 @@ impl Render for NoteApp {
         let finished = Arc::clone(self.ink.finished());
         let open = self.ink.open().cloned().map(|mut stroke| {
             // An in-progress stroke has no cached ribbon outline yet; computing it here keeps
-            // the paint callback free of geometry work.
-            stroke.close();
+            // the paint callback free of geometry work. It is detailed for the sheet as it is drawn
+            // now, and its newest segment is left straight: the reading after the tip has not
+            // arrived, and a curve drawn without it would move ink the user has already seen, under
+            // the nib, as they write (see `Stroke::close_live`).
+            stroke.close_live(sheet.zoom);
             stroke
         });
         let page_image = page.as_ref().map(|page| Arc::clone(&page.image));

@@ -48,6 +48,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::error::{AppError, Result};
+use crate::history::HistoryUpdate;
 use crate::ink::Stroke;
 use crate::store::{Facts, NoteStore};
 
@@ -247,15 +248,6 @@ impl Note {
     /// turned, a page inserted, a page deleted.
     pub fn store_mut(&mut self) -> &mut NoteStore {
         &mut self.store
-    }
-
-    /// The strokes of one page, as the note holds them.
-    ///
-    /// The page is read when it is turned to rather than when the note is opened — a thousand-page
-    /// note opens as fast as a one-page one — and this is that read: the page's chunks and its dirty
-    /// strokes, in the order it was drawn.
-    pub fn page_strokes(&self, page: u64) -> Result<Vec<Stroke>> {
-        self.store.load(page)
     }
 
     /// The document the note was written on: the name it had, and its bytes.
@@ -531,6 +523,8 @@ pub enum Job {
         page: u64,
         /// The strokes, in the order they were drawn.
         strokes: Vec<Stroke>,
+        /// What the page's history did, told to the note in the same job as the ink it describes.
+        history: HistoryUpdate,
     },
     /// A page to write again from scratch, because it was undone, erased or cleared.
     Rewrite {
@@ -538,6 +532,8 @@ pub enum Job {
         page: u64,
         /// The ink it holds now.
         strokes: Vec<Stroke>,
+        /// What its history did.
+        history: HistoryUpdate,
     },
     /// A page to fold into chunks, because it is being closed.
     Compact {
@@ -606,14 +602,22 @@ impl NoteWriter {
         Ok(NoteWriter { jobs, reports })
     }
 
-    /// Adds ink to a page. Nothing waits for it.
-    pub fn append(&self, page: u64, strokes: Vec<Stroke>) {
-        let _ = self.jobs.send(Job::Append { page, strokes });
+    /// Adds ink to a page, and tells the note what its history did. Nothing waits for it.
+    pub fn append(&self, page: u64, strokes: Vec<Stroke>, history: HistoryUpdate) {
+        let _ = self.jobs.send(Job::Append {
+            page,
+            strokes,
+            history,
+        });
     }
 
-    /// Writes a page again from scratch.
-    pub fn rewrite(&self, page: u64, strokes: Vec<Stroke>) {
-        let _ = self.jobs.send(Job::Rewrite { page, strokes });
+    /// Writes a page again from scratch, with what its history did.
+    pub fn rewrite(&self, page: u64, strokes: Vec<Stroke>, history: HistoryUpdate) {
+        let _ = self.jobs.send(Job::Rewrite {
+            page,
+            strokes,
+            history,
+        });
     }
 
     /// Folds a page's ink into chunks, because the page is being closed.
@@ -648,8 +652,16 @@ impl NoteWriter {
 /// waiting for, and "the note was written" is a claim this app makes to their face.
 fn run(store: &mut NoteStore, dir: &Path, job: Job, reports: &Sender<Report>) -> Result<()> {
     match job {
-        Job::Append { page, strokes } => store.append(page, &strokes),
-        Job::Rewrite { page, strokes } => store.rewrite(page, &strokes),
+        Job::Append {
+            page,
+            strokes,
+            history,
+        } => store.append(page, &strokes, &history),
+        Job::Rewrite {
+            page,
+            strokes,
+            history,
+        } => store.rewrite(page, &strokes, &history),
         Job::Compact { page } => store.compact(page).map(|_| ()),
         Job::Checkpoint => store.checkpoint(),
 
@@ -802,7 +814,11 @@ mod tests {
         note.put_document("chapter-3.pdf", &a_pdf())
             .expect("a document");
         note.store_mut()
-            .rewrite(1, &[stroke(4, 0.0), stroke(4, 40.0)])
+            .rewrite(
+                1,
+                &[stroke(4, 0.0), stroke(4, 40.0)],
+                &crate::history::HistoryUpdate::default(),
+            )
             .expect("ink");
         note.store_mut()
             .set_layout(&[
@@ -878,10 +894,10 @@ mod tests {
         Note::open(&home).expect("a note");
 
         let writer = NoteWriter::spawn(&home).expect("a writer");
-        writer.append(0, vec![stroke(5, 0.0)]);
-        writer.append(0, vec![stroke(5, 60.0)]);
+        writer.append(0, vec![stroke(5, 0.0)], HistoryUpdate::default());
+        writer.append(0, vec![stroke(5, 60.0)], HistoryUpdate::default());
         writer.compact(0);
-        writer.rewrite(1, vec![stroke(3, 200.0)]);
+        writer.rewrite(1, vec![stroke(3, 200.0)], HistoryUpdate::default());
 
         let carried = scratch.join("carried.zip");
         writer.export(carried.clone());

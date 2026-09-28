@@ -367,10 +367,9 @@ hit-tests and what a frame culls by.
 The one thing this costs the file is a second number. A note writes a page out again when an append cannot
 express what happened to it, and it tells that by *counting* strokes: an undo, an erase, or a deleted
 selection leaves fewer than the note holds. A **move** leaves the count exactly as it was and every stroke
-changed, so the page counts its shifts as well (see [STORE.md](STORE.md), §6). Neither a move nor a deletion
-is undoable, for the reason erasing is not: the history is a list of strokes, and an edit that moves or
-removes several of them at once has no single stroke for undo to take back — what a move does leave behind is
-the selection, so it can be dragged back.
+changed, so the page counts its shifts as well (see [STORE.md](STORE.md), §6). Moving and deleting are edits
+like any other, so both can be taken back — and a move leaves the selection in hand as well, so it can be
+dragged back by hand.
 
 Showing it: the ink in hand is drawn once more in the theme's accent, translucent, and the loop being swept is
 drawn as the ring it is — thin, over the ink, so the writing can be read through it while it is being chosen.
@@ -388,10 +387,20 @@ to do that rather than the opposite of what it finds there.
 
 **Undo and redo** are offered by the bar only when the page's history says they would do something — a
 button that is always there and sometimes does nothing is the one thing a user cannot tell apart from a
-broken command — and the bar asks the same question the command will, so a stroke is only ever taken back
-by a command that said it could. An undo is written to the note at once rather than on the batch clock:
-it is a deliberate act, and leaving it in memory for half a second is how it is lost if the app is closed
-in that half-second.
+broken command — and the bar asks the same question the command will, so an edit is only ever taken back
+by a command that said it could. What can be taken back is **everything a command does**: a stroke written,
+the eraser's sweep, a selection deleted, a page cleared, a lasso's drag. There are no exceptions left to
+remember, because an edit *is* the record of what was done (`history::Edit`): undo is not "give me the last
+stroke back", it is "put back what I did".
+
+**A page's history outlives the session.** The edits are written down beside the ink, in the same
+transaction, so a note opened on Friday still has a way back through what was written on Monday — up to the
+note's own depth of them (4096, cut back by the idle housekeeping, see [STORE.md](STORE.md), §3). The
+session keeps a few hundred in memory, and an undo that runs out of *those* reads one more out of the note
+rather than stopping: the status line says how far back the page can go (`history 12 back, 3 forward`), and
+the reader never meets the seam between the two. An undo is written to the note at once rather than on the
+batch clock: it is a deliberate act, and leaving it in memory for half a second is how it is lost if the app
+is closed in that half-second.
 
 ## 8. The document
 

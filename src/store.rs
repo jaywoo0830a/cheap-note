@@ -1181,6 +1181,8 @@ impl NoteStore {
         let conn = &self.conn;
 
         into.ink_color = row_value(conn, "ink_color", into.ink_color, colour_of)?;
+        into.highlighter_color =
+            row_value(conn, "highlighter_color", into.highlighter_color, colour_of)?;
         into.page_color = row_value(conn, "page_color", into.page_color, colour_of)?;
         into.pen_weight = row_value(conn, "pen_weight", into.pen_weight, PenWeight::from_label)?;
         into.grayscale_pages = row_value(conn, "grayscale_pages", into.grayscale_pages, flag_of)?;
@@ -1240,6 +1242,7 @@ impl NoteStore {
         let tx = self.begin()?;
 
         put_row(&tx, "ink_color", settings.ink_color)?;
+        put_row(&tx, "highlighter_color", settings.highlighter_color)?;
         put_row(&tx, "page_color", settings.page_color)?;
         put_row(&tx, "pen_weight", settings.pen_weight.label())?;
         put_flag(&tx, "grayscale_pages", settings.grayscale_pages)?;
@@ -2297,6 +2300,7 @@ mod tests {
 
         let ruled_settings = Settings {
             ink_color: 0xDC_26_26,
+            highlighter_color: 0xFF_8F_B1,
             page_color: 0xF5_F0_E6,
             pen_weight: PenWeight::Fine,
             grayscale_pages: true,
@@ -2317,6 +2321,7 @@ mod tests {
         };
         let grid_settings = Settings {
             ink_color: 0x1D_4E_D8,
+            highlighter_color: 0x7F_C4_FF,
             page_color: 0x20_20_24,
             pen_weight: PenWeight::Heavy,
             grayscale_pages: false,

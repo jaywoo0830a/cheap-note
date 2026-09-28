@@ -153,6 +153,13 @@ pub struct Ink {
     pub selection: Option<Hsla>,
     /// The lasso's loop, while one is being swept: an open stroke, drawn as the ring the reader is drawing.
     pub lasso: Option<Arc<Stroke>>,
+    /// The text a highlighter has hold of right now: the ink it will be laid down in, and one band per line its
+    /// span crosses, in the paper's own units.
+    ///
+    /// A *preview* rather than ink: nothing is written until the lift (see `ink::InkDocument::end_highlight`), and
+    /// what the reader is deciding about is exactly this — the bands the span will take, in the colour it will take
+    /// them in. Drawn through the ink's own transform, because that is where the text is.
+    pub highlight: Option<(Hsla, Vec<Rect>)>,
 }
 
 impl Default for Ink {
@@ -170,6 +177,7 @@ impl Default for Ink {
             offset: (0.0, 0.0),
             selection: None,
             lasso: None,
+            highlight: None,
         }
     }
 }

@@ -374,6 +374,31 @@ dragged back by hand.
 Showing it: the ink in hand is drawn once more in the theme's accent, translucent, and the loop being swept is
 drawn as the ring it is — thin, over the ink, so the writing can be read through it while it is being chosen.
 
+### The highlighter
+
+The marker is the pen's *sibling* rather than a fourth kind of gesture: it lays a **band** where the pen lays a
+line. Two numbers make it that — one fixed width, and a colour with an alpha in it — and both are stamped into the
+stroke when the nib goes down, exactly as the pen's colour and weight are. Nothing else in the app knows what a
+highlighter is: a highlight *is* an ordinary stroke, so it can be erased, taken in a lasso's loop, dragged, undone,
+and stored with the page, and no part of the file format had to change for it.
+
+Its colours are a palette of their own, and the bar's ink row follows the tool: four pale ones, because a band is
+read *through* — a pen's black at the same alpha would be a grey smear over the page. A band does not respond to
+pressure at all (a marker has one tip, and a translucent band that thinned under a light touch would show the
+writing through in stripes), and the eraser takes it like any other ink.
+
+**Over a document's own text, the marker snaps to the text.** A press within about a line's height of a character
+takes hold of *characters* rather than laying a band: the drag's span is the text between the two ends, in reading
+order whichever way it was dragged, and the highlight is one band per line the span crosses — trailing whitespace
+left out, so a band ends at the last letter of the word rather than running off into the margin. That is what a
+reader expects of a highlighter in a PDF, and it is also where the marker stops being freehand: a press away from
+any character — a margin, a scan, a blank sheet — lays a band as the hand moves, exactly as it would on paper.
+
+The text is read once, when a page is turned to (or when a setting changes how wide the page is drawn), and handed
+to the page in the paper's own coordinates. A page's text and the ink are then in the same space, which is why a
+highlight lands *on* the sentence it marks even on a page the reader has turned, and why a highlight is written in
+the same place whether the page is turned or not.
+
 ### A mark
 
 A **mark** is one page of the note and nothing else — no name, no colour, no text — so it is a page

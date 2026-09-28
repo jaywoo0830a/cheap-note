@@ -30,7 +30,7 @@ use gpui_kit::RenderImage;
 
 use crate::error::{AppError, Result};
 use crate::pages::{swaps_axes, Quarters};
-use crate::pdfium::{Document, OutlineEntry, RenderJob};
+use crate::pdfium::{Document, OutlineEntry, RenderJob, TextChar};
 
 /// What one slice of a render did, re-exported because it is part of this module's own API.
 pub use crate::pdfium::Progress;
@@ -425,6 +425,28 @@ impl PdfDocumentView {
     /// any page, which is what the app needs to describe the sheet it is writing on.
     pub fn page_point_size(&self, index: usize) -> Option<(f32, f32)> {
         self.document.as_ref()?.page_point_size(index)
+    }
+
+    /// The text of one page of the document, as Pdfium reads it: character boxes in the page's own points.
+    ///
+    /// Read for a page when it is turned to, and never while a pen is moving: it loads the page and its text, which
+    /// is cheap but not free, and a frame must not wait on Pdfium (see [`crate::ink::TextLayout`]).
+    pub fn page_text_chars(&self, index: usize) -> Result<Vec<TextChar>> {
+        match self.document.as_ref() {
+            Some(document) => document.text_chars(index),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The page's own `/Rotate`, in quarter turns clockwise.
+    ///
+    /// The corollary of the fixture test in this module: a page's *size* comes back turned and its *text* does not,
+    /// so a caller putting one on the other needs this (see [`crate::ink::paper_of_page_point`]).
+    pub fn page_document_rotation(&self, index: usize) -> u8 {
+        match self.document.as_ref() {
+            Some(document) => document.page_rotation(index),
+            None => 0,
+        }
     }
 
     /// The best bitmap available *now* for a request, without rasterising anything.
@@ -1607,6 +1629,100 @@ mod tests {
                 content.len()
             ),
         ])
+    }
+
+    /// A one-page A4 PDF with one word of text at a known place, and optionally turned by its own `/Rotate`.
+    ///
+    /// The word is drawn at `72 700`: a PDF's y grows *up* from the bottom-left corner, so that is near the top of
+    /// the page — which is the fact the test below is about.
+    fn a_page_with_text(turn: Option<u16>) -> Vec<u8> {
+        let content = String::from("BT /F1 24 Tf 72 700 Td (Hi) Tj ET\n");
+        let rotate = turn.map(|t| format!(" /Rotate {t}")).unwrap_or_default();
+
+        a_pdf(&[
+            String::from("<< /Type /Catalog /Pages 2 0 R >>"),
+            String::from("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]{rotate} \
+                   /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+            ),
+            format!(
+                "<< /Length {} >>\nstream\n{content}endstream",
+                content.len()
+            ),
+            String::from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+        ])
+    }
+
+    /// Where a page's text is, and which way up: what a highlighter snapping to it has to know.
+    ///
+    /// Two facts the app's text highlight rests on, and neither one is written down anywhere:
+    ///
+    /// 1. **The boxes are in the page's own points, with the y growing *up* from the bottom-left.** The word is
+    ///    drawn at `72 700` of a 595 × 842 page, so its box is up near the top in PDF units — and the paper's y
+    ///    grows *down*, which is the flip the app makes when it hands the boxes to the ink.
+    /// 2. **A page's own `/Rotate` is not in them.** Such a page reports its *size* turned (see
+    ///    `the_rotation_handed_to_pdfium_is_the_readers_turn`), and the second half of this test is what says
+    ///    whether the text turns with it. If it did, a highlight built from these boxes would land a quarter turn
+    ///    away from the word it was meant for — which is exactly the kind of thing that is invisible until someone
+    ///    marks a turned page.
+    #[test]
+    fn a_pages_text_is_in_the_pages_own_points() {
+        let _pdfium = exclusive();
+        if !crate::pdfium::available() {
+            eprintln!("skipping: pdfium.dll is not available");
+            return;
+        }
+
+        let document =
+            crate::pdfium::Document::open(String::from("text.pdf"), a_page_with_text(None))
+                .expect("the document opens");
+
+        let chars = document.text_chars(0).expect("the text reads");
+        let word: String = chars.iter().map(|entry| entry.ch).collect();
+        assert!(word.contains("Hi"), "the page's text came back: {word:?}");
+
+        let h = chars
+            .iter()
+            .find(|entry| entry.ch == 'H')
+            .expect("the H of it");
+
+        assert!(
+            (70.0..=76.0).contains(&h.left),
+            "the box begins where the text was drawn: {h:?}"
+        );
+        assert!(
+            (696.0..=702.0).contains(&h.bottom),
+            "and its bottom is the baseline, in a y that grows up from the page's foot: {h:?}"
+        );
+        assert!(
+            (702.0..=722.0).contains(&h.top),
+            "with the cap height above it: {h:?}"
+        );
+
+        // The same word, on a page the *document* has turned. Its size comes back turned; its text does not.
+        let turned = crate::pdfium::Document::open(
+            String::from("turned-text.pdf"),
+            a_page_with_text(Some(90)),
+        )
+        .expect("the document opens");
+
+        assert_eq!(
+            turned.page_point_size(0),
+            Some((842.0, 595.0)),
+            "the page's size is reported turned"
+        );
+
+        let chars = turned.text_chars(0).expect("the text reads");
+        let h = chars
+            .iter()
+            .find(|entry| entry.ch == 'H')
+            .expect("the H of it");
+
+        assert!(
+            (70.0..=76.0).contains(&h.left) && (696.0..=722.0).contains(&h.bottom),
+            "and its text is where the file drew it, not where the `/Rotate` put it: {h:?}"
+        );
     }
 
     /// What Pdfium does with the rotation it is handed, and what a page's own `/Rotate` already is.

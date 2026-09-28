@@ -66,7 +66,10 @@ use windows::Win32::Foundation::HWND;
 
 pub mod canvas;
 mod device;
-mod render;
+/// The canvas's own renderer. `pub(crate)` rather than private because a *colour* crosses the other way: the app
+/// describes a highlight in the one conversion the brush understands ([`render::ink_colour`]), so that a preview
+/// and the ink it previews cannot come out two different colours.
+pub(crate) mod render;
 
 pub use canvas::{Canvas, Ink, Page, Rect};
 

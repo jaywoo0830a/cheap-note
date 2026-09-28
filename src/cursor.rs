@@ -37,11 +37,15 @@
 //!
 //! ## How it is drawn
 //!
+//! Not by a frame: the ghost is drawn in a window of its own, straight from the pen thread, by
+//! [`crate::cursor_overlay`] — a cursor is a *position*, and a frame is one frame too late for one.
+//! What this module owns is the shape, and it is the same shape either way.
+//!
 //! Two shapes, each with a soft edge: the pen's body — a slender spindle that swells away from the
 //! nib and ends in a round cap, drawn as three quadratic curves — and a small mark at the nib.
 //! Both are painted twice, the wider and fainter copy first, so the ghost sits *in* the page rather
 //! than on top of it. That is the same trick the sheet's own shadow uses, done in one step rather
-//! than three, because this shape is small and is rebuilt on every frame the hand moves.
+//! than three, because this shape is small and is rebuilt on every reading the hand moves.
 //!
 //! The two shapes say different things, and are weighted for it: the nib mark is exact and nearly
 //! opaque, because it is where the ink will land, while the body is a hint about the angle, and is
@@ -55,7 +59,10 @@ use pen_windows::{PenPhase, PenSample, Tilt};
 /// so the length is chosen for the eye and only the lean scales it. It is deliberately shorter than
 /// a pen *and* fainter than the nib mark: the body is a hint about the angle, and a long dark one
 /// competes with the page it is drawn on.
-const BODY_LENGTH: f32 = 88.0;
+/// Public because the ghost cursor is no longer drawn by the frame: the window it is drawn in has
+/// to be big enough for the body, and that is the longest this number can be (see
+/// [`crate::cursor_overlay`]).
+pub const BODY_LENGTH: f32 = 88.0;
 
 /// The least lean that draws a body, in degrees.
 ///

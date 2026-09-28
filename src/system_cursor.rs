@@ -33,8 +33,9 @@
 //!
 //! ## What it does not do
 //!
-//! It does not render anything: the pen's ghost cursor is what replaces the pointer, and it lives
-//! in [`crate::cursor`]. This module only takes the platform's pointer out of the way.
+//! It does not render anything: the pen's ghost cursor is what replaces the pointer, and it is drawn
+//! by [`crate::cursor_overlay`] — in a window of its own, so that a cursor does not wait for a frame.
+//! This module only takes the platform's pointer out of the way.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

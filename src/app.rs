@@ -23,9 +23,11 @@
 //! whatever the digitizer sends, with no ceiling taken from any display. The app is idle, and
 //! spends nothing, otherwise.
 //!
-//! "Something new" is two things: ink that changed, and a cursor that moved. A pen held in range
-//! without touching lays no ink at all, and it is the ghost cursor (see [`crate::cursor`]) that has
-//! to follow it.
+//! "Something new" is one thing: ink that changed. The pen's ghost cursor used to be the other, and
+//! it has left the frame altogether — a pen held in range without touching lays no ink and draws its
+//! cursor in a window of its own, fed from the pen thread rather than from here (see
+//! [`crate::cursor_overlay`]). So a batch that laid no ink has nothing to show, and no frame is
+//! drawn for it.
 //!
 //! A second task ([`NoteApp::start_display_pump`]) does the work that is not the ink — rasterising
 //! the page, rebuilding the counters — on a fixed [`HOUSEKEEPING_INTERVAL`] that owes nothing to
@@ -82,16 +84,14 @@ use crate::canvas::{
     contrast_color, relative_luminance, CanvasSize, CanvasStyle, Ruling, Swatch, INK_COLORS,
     PAPER_COLORS,
 };
-use crate::cursor::{
-    PenCursor, BODY_ALPHA, BODY_HALO_ALPHA, BODY_HALO_GROW, NIB_ALPHA, NIB_BLOOM_ALPHA,
-    NIB_BLOOM_RADIUS, NIB_RADIUS,
-};
+use crate::cursor::PenCursor;
+use crate::cursor_overlay::{CursorFeed, Screen};
 use crate::home::Home;
 use crate::ink::{InkTransform, Notes, Stroke, Tool};
 use crate::note::{self, Note, NoteWriter, Report};
 use crate::outline::{Outline, OutlinePages};
 use crate::pages::Pages;
-use crate::pen::{capture_config, PenInbox, PenService};
+use crate::pen::{capture_config, BatchTap, PenInbox, PenService};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
 use crate::recent::{self, Recent};
 use crate::settings::{PenWeight, Settings};
@@ -180,12 +180,16 @@ const BAR_MARGIN: f32 = 12.0;
 
 /// How tall the top bar is, in logical pixels, as an estimate.
 ///
-/// Used for exactly one decision: whether the pen is over the bar, where the ghost cursor is drawn
-/// behind the bar's opaque background and the system pointer therefore has to stay. The estimate is
-/// the bar at its tallest — its margin, its padding and two rows of controls, the second of which
-/// may have wrapped — and it errs upward deliberately: being wrong upward leaves a strip of sheet
-/// still showing the pointer (a small surprise), while being wrong downward would leave part of the
-/// bar with no cursor at all, and the pen is how those controls get clicked.
+/// Used for two decisions: whether the pen is over the bar, where a reading is a press on a control
+/// rather than ink — and where the ghost cursor hides, since a ghost drawn over the controls would be
+/// a ghost over a control. The window it is drawn in hides it and cuts the body's lean at this line,
+/// so a pen just below the bar does not lean a body across it. See [`NoteApp::bar_edge`], which is
+/// the *measured* edge the ink rule uses; this is the estimate the two cursor rules share.
+///
+/// The estimate is the bar at its tallest — its margin, its padding and two rows of controls, the
+/// second of which may have wrapped — and it errs upward deliberately: being wrong upward leaves a
+/// strip of sheet still showing the pointer (a small surprise), while being wrong downward would
+/// leave part of the bar with no cursor at all, and the pen is how those controls get clicked.
 ///
 /// Ink is not asked that favour, which is why it does not use this number: a reading refused in a
 /// strip of page *below* the bar is a pen that does not write where the user can see it. The rule
@@ -454,6 +458,12 @@ pub struct NoteApp {
     ///
     /// `None` when the platform would not give one, which costs nothing but a second cursor.
     system_cursor: Option<SystemCursor>,
+    /// The window the pen's ghost cursor is drawn in, outside the frame.
+    ///
+    /// `None` when the platform would not give one, which costs the pen its ghost and nothing else:
+    /// the system pointer stays, and the app is what it was before the overlay existed. See
+    /// [`crate::cursor_overlay`] for why the ghost is not part of a frame.
+    cursor: Option<CursorFeed>,
     /// The page being shown.
     page_index: usize,
     /// The window's DPI scale factor, captured each frame.
@@ -564,6 +574,17 @@ pub struct NoteApp {
     home: Home,
 }
 
+/// The pen thread's tap on the readings: every batch goes to the ghost cursor's window.
+///
+/// A named function rather than a closure inline, because there is nothing for it to capture: the
+/// feed carries what the frame publishes — the scale, the colour, the sheet's edge — and the pen
+/// thread only says *when* something arrived. See [`crate::pen::BatchTap`].
+fn cursor_tap(feed: &CursorFeed) -> BatchTap {
+    let feed = feed.clone();
+
+    Arc::new(move |samples: &[pen_windows::PenSample]| feed.offer(samples))
+}
+
 impl NoteApp {
     /// Builds the view, attaches the pen, and starts the frame loop.
     ///
@@ -578,8 +599,13 @@ impl NoteApp {
         let settings = Settings::default();
         let mut message = String::new();
 
+        // The ghost cursor's window, installed before the capture: the pen thread is handed the tap
+        // that feeds it, and that tap has to exist when the thread starts. Failing to install one is
+        // not an error — the app keeps the system pointer, and the pen has no ghost of its own.
+        let cursor = CursorFeed::install(window);
+
         // The capture must be attached on the thread that owns the window, which is this one.
-        let pen = PenService::attach(window, capture_config());
+        let pen = PenService::attach(window, capture_config(), cursor.as_ref().map(cursor_tap));
 
         // Installed after the capture, so this hook runs first in the subclass chain and gets to
         // answer `WM_SETCURSOR` before anything else can put a cursor back.
@@ -646,6 +672,7 @@ impl NoteApp {
             pdf: PdfDocumentView::empty(),
             pen,
             system_cursor,
+            cursor,
             page_index: 0,
             scale: window.scale_factor(),
             view,
@@ -814,13 +841,11 @@ impl NoteApp {
                 // is the whole path from the pen to the frame that shows it.
                 app.timings.pen_latency.record(batch.waited);
 
-                // The cursor is read on both sides of the batch because a pen in range but not
-                // touching lays no ink and still has to be followed around the window: `consume`
-                // reports the ink, and the comparison reports the cursor. A frame is scheduled
-                // when either of them moved.
-                let cursor = app.pen_cursor();
+                // The ink is the frame's business, and it is now the only part of a reading that is:
+                // a pen in range but not touching lays none, and the ghost cursor follows it without
+                // a frame at all (see [`crate::cursor_overlay`]). `consume` is the whole of what a
+                // batch has to say here.
                 let laid_ink = app.consume_ink(&batch.samples);
-                let cursor_moved = app.pen_cursor() != cursor;
                 if laid_ink {
                     // The clock the page render waits on: see `serve_pdf`.
                     app.last_ink_at = woke;
@@ -833,10 +858,11 @@ impl NoteApp {
                 // about whether the pen has a cursor of its own.
                 app.follow_pen_with_pointer();
 
-                if !laid_ink && !cursor_moved {
-                    // Nothing on screen changed: a reading the resampler and the pointer gate both
-                    // dropped, or a hover that moved nothing. Repainting an identical scene on each
-                    // of those is what made the top of the window look like it was flickering.
+                if !laid_ink {
+                    // Nothing on screen changed: a reading the resampler dropped, or a hover that
+                    // moved the ghost and nothing else. Repainting an identical scene on each of
+                    // those is what made the top of the window look like it was flickering — and the
+                    // ghost, which is drawn elsewhere, has already moved by now.
                     return;
                 }
 
@@ -1320,12 +1346,45 @@ impl NoteApp {
     /// meant to be tapped: a hidden system pointer with nothing drawn in its place is a list no
     /// pen can click.
     fn pen_has_its_own_cursor(&self) -> bool {
+        // The ghost is drawn in a window of its own now, so this is first a question about that
+        // window: with no overlay there is nothing to put in the pointer's place, and hiding the
+        // pointer would leave the window with no cursor at all. The frame publishes the same answer
+        // to the overlay — see [`Self::publish_screen`] — so the two can never disagree.
+        if !self.cursor.as_ref().is_some_and(CursorFeed::is_alive) {
+            return false;
+        }
+
         if self.home_is_open() {
             return false;
         }
 
         self.pen_cursor()
             .is_some_and(|cursor| cursor.position()[1] > BAR_HEIGHT)
+    }
+
+    /// Tells the ghost cursor's window what this frame knows about the screen it is drawn on.
+    ///
+    /// Four things, and each of them is something a reading cannot say: the scale its pixels are in,
+    /// the colour it is drawn in on this paper, where the bar ends, and whether this screen wants a
+    /// ghost at all. Publishing is what makes a switch take effect at once — the Tilt switch, the
+    /// home list — rather than at the next reading.
+    ///
+    /// With no overlay this is nothing at all, which is why the caller does not check for one.
+    fn publish_screen(&self) {
+        let Some(cursor) = &self.cursor else {
+            return;
+        };
+
+        cursor.set_screen(Screen {
+            scale: self.scale,
+            // The colour the frame used to draw the ghost in before it moved out: not the ink's, so
+            // that it is visible on a sheet of any colour, including one where ink would disappear.
+            colour: contrast_color(self.settings.page_color) & 0x00FF_FFFF,
+            // The line above which a reading belongs to a control rather than to the page. The same
+            // estimate the pointer rule uses ([`Self::pen_has_its_own_cursor`]), in physical pixels.
+            sheet_top: BAR_HEIGHT * self.scale,
+            suppressed: self.home_is_open() || !self.settings.show_tilt_cursor,
+        });
     }
 
     /// Keeps the system pointer in step with the ghost cursor, hiding it exactly while the ghost
@@ -3877,6 +3936,16 @@ impl Render for NoteApp {
         // captured before anything that depends on it.
         self.scale = window.scale_factor();
 
+        // The ghost cursor is not in this frame and does not wait for one: what it needs from the
+        // frame is this — the screen it is drawn on, published once per frame rather than sampled
+        // per reading (see [`crate::cursor_overlay`]).
+        self.publish_screen();
+
+        // And the pointer, for the same reason. The pump hands it over on every reading, but the
+        // switch that turns the ghost off can be flipped while the pen is away, and a screen can be
+        // left while it is away too: no reading will arrive to notice either.
+        self.follow_pen_with_pointer();
+
         let theme = cx.theme();
         let (background, foreground) = (theme.background, theme.foreground);
 
@@ -4000,13 +4069,9 @@ impl Render for NoteApp {
         let page_color: Hsla = rgb(self.settings.page_color).into();
         let timings = Arc::clone(&self.timings);
 
-        // The ghost cursor: a mark at the nib with the pen's body leaning away from it. Drawn last,
-        // because a cursor belongs on top of everything, and only while the pen is in range — the
-        // ink model drops the cursor the moment it hears the pen leave.
-        let cursor = self.pen_cursor();
-        // Its own colour rather than the ink's: it is not ink, and it has to be visible on a sheet
-        // of any colour, including one where the ink would disappear.
-        let cursor_color: Hsla = rgb(contrast_color(self.settings.page_color)).into();
+        // The pen's ghost cursor is *not* drawn here. It is a position rather than a stroke, and a
+        // frame is one frame too late for a position: it has a window of its own, fed straight from
+        // the pen thread, and this frame never hears about it — see [`crate::cursor_overlay`].
 
         // The bar floats over the desk, so pen coordinates need no offset and the ink can run the
         // full height of the window. When it is hidden, the handle that brings it back takes its
@@ -4130,10 +4195,6 @@ impl Render for NoteApp {
                         );
 
                         timings.count_painted(painted, vertices, culled);
-
-                        if let Some(cursor) = cursor {
-                            paint_cursor(window, cursor, cursor_color);
-                        }
                     },
                 )
                 .size_full(),
@@ -4776,85 +4837,6 @@ fn paint_rect(window: &mut Window, origin: Point<Pixels>, width: f32, height: f3
     if let Ok(path) = builder.build() {
         window.paint_path(path, color);
     }
-}
-
-/// Draws the pen's ghost cursor: a soft mark at the nib, and the pen's body leaning away from it.
-///
-/// The body is curves rather than a quad — a quad cannot be rotated, and pointing somewhere is the
-/// entire point of the shape, but a quad *drawn as* straight edges is a wedge. Three quadratic
-/// curves swell its flanks and round its far end, which is what makes it read as a body seen at an
-/// angle rather than as an arrowhead painted over the page.
-///
-/// Each shape is painted twice: a copy pushed out by a pixel or two, faint, and the shape itself
-/// over it. That is the trick the page's shadow uses, in one step rather than three, and it is what
-/// stops the cursor reading as a sticker on the sheet. The nib mark is the exception to how faint
-/// it all is, because it is the one part that says where the ink will land.
-///
-/// It is rebuilt whenever the pen moves — there is no way to draw something whose position and
-/// angle are both new each frame — which is affordable because it is three curves, not a stroke.
-fn paint_cursor(window: &mut Window, cursor: PenCursor, color: Hsla) {
-    let [x, y] = cursor.position();
-    let here = |p: [f32; 2]| point(px(p[0]), px(p[1]));
-
-    // The body is absent for a pen with no tilt sensor, and for one held straight up. It fades in
-    // as the lean grows, so the threshold is not a shape appearing out of nothing.
-    if let Some(body) = cursor.body_shape() {
-        let fade = cursor.body_fade();
-
-        // The soft edge first, then the body over it: widest and faintest first, which is the order
-        // the page's shadow is painted in.
-        for (grow, alpha) in [
-            (BODY_HALO_GROW, BODY_HALO_ALPHA * fade),
-            (0.0, BODY_ALPHA * fade),
-        ] {
-            let [nib_left, flank_left, far_left, cap, far_right, flank_right, nib_right] =
-                body.outline(grow);
-
-            // The same rule the ink uses. This outline is convex, so the default rule would do —
-            // but a filled shape that can show a hole is one degenerate tilt away from being a bug.
-            let mut builder = solid_path();
-            builder.move_to(here(nib_left));
-            builder.curve_to(here(far_left), here(flank_left));
-            builder.curve_to(here(far_right), here(cap));
-            builder.curve_to(here(nib_right), here(flank_right));
-            builder.close();
-
-            if let Ok(path) = builder.build() {
-                window.paint_path(path, color.opacity(alpha));
-            }
-        }
-    }
-
-    // The nib: a small circle, always, so there is a fixed point that says exactly where the ink
-    // will land. The faint bloom around it is what lets it sit in the page rather than on it.
-    for (radius, alpha) in [(NIB_BLOOM_RADIUS, NIB_BLOOM_ALPHA), (NIB_RADIUS, NIB_ALPHA)] {
-        paint_dot(window, point(px(x), px(y)), radius, color.opacity(alpha));
-    }
-}
-
-/// Fills a circle centred on a point: a square rounded by half its own side.
-///
-/// A quad rather than a path, because a quad is a handful of numbers the renderer places directly —
-/// there is nothing here to build and nothing to curve.
-fn paint_dot(window: &mut Window, centre: Point<Pixels>, radius: f32, color: Hsla) {
-    let radius = px(radius);
-    let corner = point(centre.x - radius, centre.y - radius);
-
-    window.paint_quad(
-        fill(
-            Bounds {
-                origin: corner,
-                size: size(radius * 2.0, radius * 2.0),
-            },
-            color,
-        )
-        .corner_radii(Corners {
-            top_left: radius,
-            top_right: radius,
-            bottom_right: radius,
-            bottom_left: radius,
-        }),
-    );
 }
 
 /// Fills a stroke's ribbon outline.

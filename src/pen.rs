@@ -12,7 +12,14 @@
 //!   ────────────────────          ──────────                ────────────────
 //!   WM_POINTER -> capture ──ring──> stream.read ──queue──> take_samples()
 //!   (~2-5 us/message)              (parks on data)          (woken by the queue)
+//!                                        │
+//!                                        └──tap──> the ghost cursor's own window
+//!                                                  (see `cursor_overlay`)
 //! ```
+//!
+//! The tap is the second reader, and it is not a second queue: the pen thread offers each batch to
+//! whoever taps before it fills the queue above, because a cursor is waiting on a screen and the ink
+//! is waiting on a stroke.
 //!
 //! ## Why a worker thread at all
 //!
@@ -152,6 +159,14 @@ impl PenInbox {
     }
 }
 
+/// A tap on the readings, called on the pen thread as each batch lands.
+///
+/// The ink pump runs on the UI thread, because that is where strokes are built; the pen's cursor
+/// does not have to wait for that (see [`crate::cursor_overlay`]), so every batch is offered here
+/// first — on the thread that already has the readings in hand — and the caller decides what to do
+/// with it.
+pub type BatchTap = Arc<dyn Fn(&[PenSample]) + Send + Sync>;
+
 /// The application's handle on the pen.
 pub struct PenService {
     /// The capture, which must outlive the stream and stay on the window's thread.
@@ -171,13 +186,20 @@ impl PenService {
     ///
     /// The capture must be created on the thread that owns the window, which is why this is
     /// called from the view's constructor on GPUI's main thread.
-    pub fn attach<W: HasWindowHandle>(window: &W, config: CaptureConfig) -> Self {
+    ///
+    /// `tap`, when there is one, is called on the pen thread for every batch — before the ink queue
+    /// is filled, because whoever taps is waiting on a screen rather than on a stroke.
+    pub fn attach<W: HasWindowHandle>(
+        window: &W,
+        config: CaptureConfig,
+        tap: Option<BatchTap>,
+    ) -> Self {
         match PenCapture::attach_window(window, config) {
             Ok(capture) => {
                 let stream = capture.stream();
                 let inbox = Arc::new(PenInbox::default());
                 let quit = Arc::new(AtomicBool::new(false));
-                let worker = spawn_pen_thread(stream, Arc::clone(&inbox), Arc::clone(&quit));
+                let worker = spawn_pen_thread(stream, Arc::clone(&inbox), Arc::clone(&quit), tap);
 
                 PenService {
                     capture: Some(capture),
@@ -254,6 +276,7 @@ fn spawn_pen_thread(
     mut stream: PenStream,
     inbox: Arc<PenInbox>,
     quit: Arc<AtomicBool>,
+    tap: Option<BatchTap>,
 ) -> Option<JoinHandle<()>> {
     std::thread::Builder::new()
         .name(String::from("cheap-note-pen"))
@@ -267,6 +290,11 @@ fn spawn_pen_thread(
                 stream.read(&mut buffer, Duration::from_millis(8));
 
                 if !buffer.is_empty() {
+                    // Whoever taps first: the queue is the ink's, and the ink is the slow half.
+                    if let Some(tap) = &tap {
+                        tap(&buffer);
+                    }
+
                     inbox.push(&buffer);
                     buffer.clear();
                 }

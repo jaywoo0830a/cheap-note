@@ -187,11 +187,7 @@ impl PageRequest {
     /// A render *option*, which is why it is a method on the request rather than a detail of the
     /// rasteriser: it is part of what identifies the pixels, and the cache key is built from this.
     pub fn grayscale(mut self, on: bool) -> Self {
-        self.colour = if on {
-            Colour::Grayscale
-        } else {
-            Colour::Bgra
-        };
+        self.colour = if on { Colour::Grayscale } else { Colour::Bgra };
         self
     }
 }
@@ -663,7 +659,8 @@ impl PdfDocumentView {
             .min_by(|left, right| {
                 let left = ratio(left.pixels, key.pixels);
                 let right = ratio(right.pixels, key.pixels);
-                left.partial_cmp(&right).unwrap_or(std::cmp::Ordering::Equal)
+                left.partial_cmp(&right)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .copied()
     }
@@ -710,7 +707,6 @@ impl PdfDocumentView {
             .ok_or_else(|| AppError::Pdf(String::from("the rendered page was not cached")))
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -762,7 +758,10 @@ mod tests {
             String::from("<< /Type /Catalog /Pages 2 0 R >>"),
             String::from("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
             String::from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R >>"),
-            format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+            format!(
+                "<< /Length {} >>\nstream\n{content}endstream",
+                content.len()
+            ),
         ];
 
         let mut out = String::from("%PDF-1.4\n");
@@ -812,7 +811,9 @@ mod tests {
             String::from("<< /Type /Outlines /First 6 0 R /Last 7 0 R /Count 4 >>"),
             String::from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>"),
             // 6: a chapter that names its page, with a title written as UTF-16 — "1장".
-            String::from("<< /Title <FEFF0031C7A5> /Parent 4 0 R /Dest [3 0 R /Fit] /Next 7 0 R >>"),
+            String::from(
+                "<< /Title <FEFF0031C7A5> /Parent 4 0 R /Dest [3 0 R /Fit] /Next 7 0 R >>",
+            ),
             // 7: a chapter that has a section under it, where the section is a *later* page.
             String::from(
                 "<< /Title (Chapter two) /Parent 4 0 R /Dest [5 0 R /Fit] /Prev 6 0 R \
@@ -905,10 +906,8 @@ mod tests {
             return path.clone();
         }
 
-        let path = std::env::temp_dir().join(format!(
-            "cheap-note-{name}-{}.pdf",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("cheap-note-{name}-{}.pdf", std::process::id()));
 
         let path = std::fs::write(&path, build()).ok().map(|()| path);
         written.push((name.to_string(), path.clone()));
@@ -1046,11 +1045,20 @@ mod tests {
         // is left owed to the caller.
         let wanted = PageRequest::new(0, 3_456);
         let before = view.stats();
-        let page = view.page_for_frame(wanted).expect("the cached rung stands in");
+        let page = view
+            .page_for_frame(wanted)
+            .expect("the cached rung stands in");
 
         assert_eq!(page.pixels, 1_024, "a placeholder, not the rung asked for");
-        assert!(view.plan(wanted).is_some(), "and the rung asked for is owed");
-        assert_eq!(view.stats().rendered, rendered, "the frame rasterised nothing");
+        assert!(
+            view.plan(wanted).is_some(),
+            "and the rung asked for is owed"
+        );
+        assert_eq!(
+            view.stats().rendered,
+            rendered,
+            "the frame rasterised nothing"
+        );
         assert_eq!(view.stats().placeholders, before.placeholders + 1);
         assert_eq!(view.stats().misses, before.misses + 1);
     }
@@ -1089,7 +1097,6 @@ mod tests {
         );
     }
 
-
     use super::*;
 
     /// The whole PDF path end to end: find the library, open a document through the same function
@@ -1116,13 +1123,18 @@ mod tests {
         assert_eq!(view.page_count(), 1);
         assert_eq!(
             view.file_name(),
-            path.file_name().expect("the fixture has a name").to_string_lossy()
+            path.file_name()
+                .expect("the fixture has a name")
+                .to_string_lossy()
         );
 
         let page = view.render_page(0, 300).expect("the page renders");
         assert!(page.point_width > 0.0, "an A4 page has a width");
         assert!(page.point_height > page.point_width, "A4 is portrait");
-        assert_eq!(page.pixels, 300, "the bitmap is the width that was asked for");
+        assert_eq!(
+            page.pixels, 300,
+            "the bitmap is the width that was asked for"
+        );
 
         // A second request at the same width must be served from the cache, not re-rasterised.
         let cached = view.render_page(0, 300).expect("the cached page");
@@ -1157,7 +1169,6 @@ mod tests {
             corner.0 > 240 && corner.1 > 240 && corner.2 > 240,
             "and so is the corner: got {corner:?}"
         );
-
     }
 
     /// A render sliced across several calls is the same page as one that was not.
@@ -1180,7 +1191,8 @@ mod tests {
         };
 
         let mut view = open_fixture(&path, 1_200).expect("the document opens");
-        view.begin(PageRequest::new(0, 1_200)).expect("the render starts");
+        view.begin(PageRequest::new(0, 1_200))
+            .expect("the render starts");
 
         // Four milliseconds at a time: several slices for a page this size, and the same budget the
         // pump uses between frames.
@@ -1264,9 +1276,14 @@ mod tests {
 
         view.abandon();
         assert!(!view.rendering(), "the job is gone");
-        assert_eq!(view.stats().cancelled, before.cancelled + 1, "and it was counted");
         assert_eq!(
-            view.stats().rendered, before.rendered,
+            view.stats().cancelled,
+            before.cancelled + 1,
+            "and it was counted"
+        );
+        assert_eq!(
+            view.stats().rendered,
+            before.rendered,
             "an abandoned render is not a rendered page"
         );
     }
@@ -1308,7 +1325,8 @@ mod tests {
             // measured apart from the slices, because it is the part no budget can interrupt: it
             // allocates the bitmap and writes the paper into it.
             let started = std::time::Instant::now();
-            view.begin(PageRequest::new(0, width)).expect("a sliced render");
+            view.begin(PageRequest::new(0, width))
+                .expect("a sliced render");
             let setup = started.elapsed();
 
             let started = std::time::Instant::now();
@@ -1384,7 +1402,6 @@ mod tests {
             preview_time < std::time::Duration::from_millis(5),
             "the preview rung took {preview_time:?}; it is meant to be the cheap one"
         );
-
     }
 
     /// A document's own table of contents is read as a tree, with the page each entry opens.
@@ -1410,13 +1427,21 @@ mod tests {
         assert_eq!(outline.len(), 2, "two top-level chapters");
 
         assert_eq!(outline[0].title, "1장", "a title read out of UTF-16");
-        assert_eq!(outline[0].page, Some(0), "the chapter that opens the first page");
+        assert_eq!(
+            outline[0].page,
+            Some(0),
+            "the chapter that opens the first page"
+        );
         assert!(outline[0].children.is_empty(), "with nothing under it");
 
         let second = &outline[1];
         assert_eq!(second.title, "Chapter two");
         assert_eq!(second.page, Some(1));
-        assert_eq!(second.children.len(), 2, "a section and a link, in that order");
+        assert_eq!(
+            second.children.len(),
+            2,
+            "a section and a link, in that order"
+        );
 
         assert_eq!(second.children[0].title, "Two, part one");
         assert_eq!(
@@ -1449,6 +1474,4 @@ mod tests {
         assert!(!view.has_outline());
         assert!(view.outline().is_empty());
     }
-
 }
-

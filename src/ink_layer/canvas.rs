@@ -204,7 +204,6 @@ impl Canvas {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

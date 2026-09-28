@@ -333,8 +333,8 @@ mod tests {
     #[test]
     fn a_batch_wakes_the_task_parked_on_the_queue() {
         use super::Waker;
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
         use std::task::{Context, Wake};
 
         /// A waker that counts how many times it was woken.

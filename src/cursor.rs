@@ -291,7 +291,10 @@ impl Body {
         // A point beside `base`: `side` is which flank, and the width is measured from the body's
         // own axis at that place.
         let beside = |base: [f32; 2], half: f32, side: f32| {
-            [base[0] + across[0] * half * side, base[1] + across[1] * half * side]
+            [
+                base[0] + across[0] * half * side,
+                base[1] + across[1] * half * side,
+            ]
         };
 
         // Where the flank swells: most of the way along, already at the far end's width. The curve
@@ -304,7 +307,10 @@ impl Body {
 
         // A quadratic reaches half of the distance to its control point, so a control twice the
         // cap's radius puts the drawn end exactly one radius beyond the far end.
-        let cap = [far[0] + along[0] * tail_half * 2.0, far[1] + along[1] * tail_half * 2.0];
+        let cap = [
+            far[0] + along[0] * tail_half * 2.0,
+            far[1] + along[1] * tail_half * 2.0,
+        ];
 
         [
             beside(self.nib, nib_half, 1.0),
@@ -418,7 +424,10 @@ mod tests {
         assert!((direction[1] - diagonal).abs() < 1e-4);
 
         let length = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
-        assert!((length - 1.0).abs() < 1e-4, "the direction is a unit vector");
+        assert!(
+            (length - 1.0).abs() < 1e-4,
+            "the direction is a unit vector"
+        );
     }
 
     /// A pen standing straight up has no body to draw: an upright stick projects to a point.
@@ -446,7 +455,11 @@ mod tests {
         let cursor = cursor(PenPhase::Hover, None).expect("a hovering pen has a cursor");
 
         assert!(cursor.tilt().is_none());
-        assert_eq!(cursor.lean_degrees(), 0.0, "nothing measured is a zero lean");
+        assert_eq!(
+            cursor.lean_degrees(),
+            0.0,
+            "nothing measured is a zero lean"
+        );
         assert!(cursor.body_shape().is_none());
         assert_eq!(cursor.position(), [100.0, 200.0]);
     }
@@ -595,7 +608,10 @@ mod tests {
         assert!(NIB_BLOOM_ALPHA < NIB_ALPHA, "and the fainter one");
         assert!(BODY_HALO_GROW > 0.0, "the body's edge reaches outward");
         assert!(BODY_HALO_ALPHA < BODY_ALPHA, "and is fainter than the body");
-        assert!(BODY_ALPHA < NIB_ALPHA, "the body never competes with the nib");
+        assert!(
+            BODY_ALPHA < NIB_ALPHA,
+            "the body never competes with the nib"
+        );
 
         for alpha in [NIB_ALPHA, NIB_BLOOM_ALPHA, BODY_ALPHA, BODY_HALO_ALPHA] {
             assert!(

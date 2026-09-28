@@ -164,7 +164,11 @@ impl SystemCursor {
         self.hidden.store(pen_has_its_own_cursor, Ordering::Relaxed);
 
         unsafe {
-            SetCursor(if pen_has_its_own_cursor { None } else { arrow() });
+            SetCursor(if pen_has_its_own_cursor {
+                None
+            } else {
+                arrow()
+            });
         }
     }
 }

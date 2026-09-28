@@ -160,7 +160,10 @@ fn matches(entry: &Recent, query: &str) -> bool {
 /// how to open: `note.db` may be in WAL mode, whose readers need the `-shm` file to exist. Nothing
 /// is written — the store is dropped as soon as its summary is taken, and a summary is two counts
 /// and one small read.
-pub fn scan(root: &Path, known: &[(PathBuf, Option<Stamp>)]) -> (Vec<PathBuf>, Vec<(PathBuf, Stamp, Facts)>) {
+pub fn scan(
+    root: &Path,
+    known: &[(PathBuf, Option<Stamp>)],
+) -> (Vec<PathBuf>, Vec<(PathBuf, Stamp, Facts)>) {
     let found = note::notes_in(root).unwrap_or_default();
     let mut articles = Vec::new();
 
@@ -198,7 +201,8 @@ fn row_menu(menu: PopupMenu, app: WeakEntity<NoteApp>, entry: Recent) -> PopupMe
         let app = app.clone();
         let entry = entry.clone();
         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            app.update(cx, |app, cx| app.open_entry(entry.clone(), cx)).ok();
+            app.update(cx, |app, cx| app.open_entry(entry.clone(), cx))
+                .ok();
         }
     };
 
@@ -206,7 +210,8 @@ fn row_menu(menu: PopupMenu, app: WeakEntity<NoteApp>, entry: Recent) -> PopupMe
         let app = app.clone();
         let entry = entry.clone();
         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            app.update(cx, |app, cx| app.rename_entry(entry.clone(), cx)).ok();
+            app.update(cx, |app, cx| app.rename_entry(entry.clone(), cx))
+                .ok();
         }
     };
 
@@ -214,7 +219,8 @@ fn row_menu(menu: PopupMenu, app: WeakEntity<NoteApp>, entry: Recent) -> PopupMe
         let app = app.clone();
         let entry = entry.clone();
         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            app.update(cx, |app, cx| app.forget_entry(entry.clone(), cx)).ok();
+            app.update(cx, |app, cx| app.forget_entry(entry.clone(), cx))
+                .ok();
         }
     };
 
@@ -357,7 +363,12 @@ impl RecentsDelegate {
     /// What it holds is the name the *list shows*, which may be the derived one ("Blank sheet",
     /// "chapter-3"). That is deliberate: a person renaming a note is editing the words they can see,
     /// not an empty box they have to recreate them in.
-    pub fn start_rename(&mut self, folder: &Path, window: &mut Window, cx: &mut Context<ListState<Self>>) {
+    pub fn start_rename(
+        &mut self,
+        folder: &Path,
+        window: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) {
         let Some(entry) = self.all.iter().find(|entry| entry.folder == folder) else {
             return;
         };
@@ -595,7 +606,9 @@ impl ListDelegate for RecentsDelegate {
         } else {
             (
                 format!("Nothing matches \u{201c}{}\u{201d}", self.query),
-                String::from("A word finds a note by its name, its document, its file, or its folder."),
+                String::from(
+                    "A word finds a note by its name, its document, its file, or its folder.",
+                ),
             )
         };
 
@@ -656,9 +669,8 @@ impl Home {
             |app, _, event: &InputEvent, window, cx| app.home_name_event(event, window, cx),
         );
 
-        let list = cx.new(|cx| {
-            ListState::new(RecentsDelegate::new(entries, name_input, app), window, cx)
-        });
+        let list =
+            cx.new(|cx| ListState::new(RecentsDelegate::new(entries, name_input, app), window, cx));
         list.update(cx, |state, cx| {
             // The search box is the list's own; see `ListDelegate::perform_search`.
             state.set_searchable(true, cx);
@@ -724,7 +736,8 @@ impl Home {
 
     /// The folder being renamed, and what the field holds.
     pub fn take_rename(&mut self, cx: &mut Context<NoteApp>) -> Option<(PathBuf, String)> {
-        self.list.update(cx, |state, cx| state.delegate_mut().take_rename(cx))
+        self.list
+            .update(cx, |state, cx| state.delegate_mut().take_rename(cx))
     }
 
     /// Puts the row back to a row, and the keyboard back on the list.
@@ -769,8 +782,9 @@ impl Home {
         // A rename that was asked for by a menu, carried out now that there is a window to put the
         // keyboard in the field with.
         if let Some(folder) = self.asked.take() {
-            self.list
-                .update(cx, |state, cx| state.delegate_mut().start_rename(&folder, window, cx));
+            self.list.update(cx, |state, cx| {
+                state.delegate_mut().start_rename(&folder, window, cx)
+            });
         }
 
         if let Some(folder) = self.reveal.take() {
@@ -851,10 +865,7 @@ impl Home {
         let total = self.entries().len();
         let gone = self.entries().iter().filter(|entry| entry.gone).count();
 
-        let mut parts = vec![format!(
-            "{total} note{}",
-            if total == 1 { "" } else { "s" }
-        )];
+        let mut parts = vec![format!("{total} note{}", if total == 1 { "" } else { "s" })];
 
         if gone > 0 {
             parts.push(format!("{gone} not on disk"));
@@ -894,11 +905,9 @@ impl Home {
             // The chords that are the app's rather than the list's. Everything else the keyboard does
             // here — arrows, Enter, Escape, typing — belongs to the list, which has the focus, and the
             // gestures that are not the keyboard at all belong to the rows themselves.
-            .on_key_down(
-                cx.listener(|app, event: &KeyDownEvent, window, cx| {
-                    app.home_key_down(event, window, cx)
-                }),
-            )
+            .on_key_down(cx.listener(|app, event: &KeyDownEvent, window, cx| {
+                app.home_key_down(event, window, cx)
+            }))
             .child(self.header(cx))
             // The list is a card on the desk, like the bar over the sheet: one white surface with a
             // hairline round it, so what was written reads as *paper* rather than as another menu.
@@ -980,7 +989,13 @@ impl Home {
         let muted = theme.muted_foreground;
         let hairline = theme.border;
 
-        let mut bar = StatusBar::new().w_full().px(px(SIDE_MARGIN)).py(px(8.0)).bg(theme.transparent).border_t_1().border_color(hairline)
+        let mut bar = StatusBar::new()
+            .w_full()
+            .px(px(SIDE_MARGIN))
+            .py(px(8.0))
+            .bg(theme.transparent)
+            .border_t_1()
+            .border_color(hairline)
             .left(Label::new(self.status()).text_sm().text_color(muted));
 
         if !message.is_empty() {
@@ -1084,7 +1099,10 @@ mod tests {
             1_000,
         );
         assert!(matches(&unnamed, "blank sheet"), "the derived name");
-        assert!(matches(&unnamed, "1712345678901"), "and the folder's own name");
+        assert!(
+            matches(&unnamed, "1712345678901"),
+            "and the folder's own name"
+        );
         assert!(!matches(&unnamed, "chapter"));
 
         // A note that *was* named is searched by the name a person gave it.
@@ -1107,7 +1125,10 @@ mod tests {
     fn the_first_click_chooses_and_the_second_opens() {
         assert!(!opens_on_click(1), "one click chooses");
         assert!(opens_on_click(2), "two open");
-        assert!(opens_on_click(3), "and a third click is not a reason to stop");
+        assert!(
+            opens_on_click(3),
+            "and a third click is not a reason to stop"
+        );
     }
 
     /// A query keeps the entries it matches, in the order they were given, and an empty query keeps

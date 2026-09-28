@@ -554,7 +554,10 @@ mod tests {
         recents.learn(&dir, stamp, &facts);
 
         let entry = found(&recents, &dir);
-        assert_eq!(entry.title, "3\u{c7a5} \u{c694}\u{c57d}", "the note's own name");
+        assert_eq!(
+            entry.title, "3\u{c7a5} \u{c694}\u{c57d}",
+            "the note's own name"
+        );
         assert_eq!(entry.document.as_deref(), Some("chapter-3.pdf"));
         assert_eq!(entry.summary.strokes, 12);
         assert_eq!(entry.stamp, Some(stamp));
@@ -792,7 +795,13 @@ mod tests {
             Some(String::from("chapter-3.pdf")),
             10,
         );
-        let blank = Recent::note(folder("origin-blank"), None, String::from("Blank sheet"), None, 10);
+        let blank = Recent::note(
+            folder("origin-blank"),
+            None,
+            String::from("Blank sheet"),
+            None,
+            10,
+        );
 
         assert!(
             placed.origin().ends_with("chapter-3.pdf"),

@@ -51,21 +51,21 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     ClientToScreen, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject,
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, AC_SRC_ALPHA,
-    AC_SRC_OVER, BLENDFUNCTION,
+    AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
+    HBITMAP, HDC, HGDIOBJ,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage,
     RegisterClassW, ShowWindow, UnregisterClassW, UpdateLayeredWindow, HTTRANSPARENT,
-    MA_NOACTIVATE, MSG, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_APP, WM_DESTROY, WM_MOUSEACTIVATE,
-    WM_NCHITTEST, WNDCLASSW, WS_DISABLED, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    MA_NOACTIVATE, MSG, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_APP, WM_DESTROY,
+    WM_MOUSEACTIVATE, WM_NCHITTEST, WNDCLASSW, WS_DISABLED, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::cursor::{
-    PenCursor, BODY_ALPHA, BODY_HALO_ALPHA, BODY_HALO_GROW, BODY_LENGTH, NIB_ALPHA, NIB_BLOOM_ALPHA,
-    NIB_BLOOM_RADIUS, NIB_RADIUS,
+    PenCursor, BODY_ALPHA, BODY_HALO_ALPHA, BODY_HALO_GROW, BODY_LENGTH, NIB_ALPHA,
+    NIB_BLOOM_ALPHA, NIB_BLOOM_RADIUS, NIB_RADIUS,
 };
 
 /// The message the pen thread uses to wake the overlay's own thread.
@@ -278,7 +278,13 @@ impl Surface {
     /// lies between a pair. Each row is sampled [`SUB_ROWS`] times down its height, which is what
     /// softens the flanks and the cap. The coverage is accumulated per row and composited once, so
     /// the sub-rows of one pixel add up instead of painting the pixel twice.
-    fn fill_polygon(&mut self, points: &[[f32; 2]], clip: Option<f32>, alpha: f32, colour: [u8; 3]) {
+    fn fill_polygon(
+        &mut self,
+        points: &[[f32; 2]],
+        clip: Option<f32>,
+        alpha: f32,
+        colour: [u8; 3],
+    ) {
         if points.len() < 3 || alpha <= 0.0 {
             return;
         }
@@ -1208,7 +1214,10 @@ mod tests {
             })
             .count();
 
-        assert!(partial > 0, "the rim is part-covered: {partial} such pixels");
+        assert!(
+            partial > 0,
+            "the rim is part-covered: {partial} such pixels"
+        );
     }
 
     /// The ghost is asked for only where there is a sheet to draw it on.
@@ -1322,8 +1331,11 @@ mod tests {
         assert_eq!(row_bounds(-40.0, -10.0, 8), None, "above the surface");
         assert_eq!(row_bounds(20.0, 30.0, 8), None, "below it");
         assert_eq!(row_bounds(f32::NAN, 4.0, 8), None, "and nothing finite");
-        assert_eq!(row_bounds(0.0, 100.0, 8), Some((0, 7)), "clamped to the rows");
+        assert_eq!(
+            row_bounds(0.0, 100.0, 8),
+            Some((0, 7)),
+            "clamped to the rows"
+        );
         assert_eq!(row_bounds(-10.0, 3.0, 8), Some((0, 3)));
     }
 }
-

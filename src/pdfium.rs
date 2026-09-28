@@ -85,7 +85,6 @@
 //! dropped: it is a line of the contents, and a table of contents that quietly loses lines is worse than
 //! one that shows a line it cannot follow.
 
-
 use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void, CString};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -232,7 +231,6 @@ const BITMAP_GRAY: c_int = 1;
 /// Blue-green-red-alpha, the format GPUI's renderer uploads.
 const BITMAP_BGRA: c_int = 4;
 
-
 /// A loaded shared library, as an opaque handle.
 type Library = *mut c_void;
 
@@ -358,8 +356,8 @@ fn load_api() -> Result<Api> {
 fn open_library() -> Result<Library> {
     use std::os::windows::ffi::OsStrExt as _;
 
-    use windows::Win32::System::LibraryLoader::LoadLibraryW;
     use windows::core::PCWSTR;
+    use windows::Win32::System::LibraryLoader::LoadLibraryW;
 
     let candidates = library_candidates();
     let mut tried: Vec<String> = Vec::new();
@@ -455,9 +453,9 @@ fn candidates_for(executable: Option<&Path>, working_directory: Option<&Path>) -
 /// once, in [`load_api`], and checked for existence as it is resolved.
 #[cfg(windows)]
 unsafe fn resolve<T: Copy>(library: Library, name: &str) -> Result<T> {
+    use windows::core::PCSTR;
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::System::LibraryLoader::GetProcAddress;
-    use windows::core::PCSTR;
 
     let spelled = CString::new(name)
         .map_err(|_| AppError::PdfiumLibrary(format!("{name} is not a valid symbol name")))?;
@@ -558,7 +556,6 @@ mod tests {
         );
     }
 }
-
 
 /// Pdfium's `FS_SIZEF`: a width and a height, in points.
 ///
@@ -802,7 +799,6 @@ impl Drop for Document {
 /// What a page's bitmap is filled with before anything is drawn on it: opaque white, in the
 /// bitmap's own byte order (which is why no channel can be told from another here).
 const PAPER: c_uint = 0xffff_ffff;
-
 
 /// A page being rendered in pieces.
 ///

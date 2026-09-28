@@ -525,9 +525,8 @@ fn steadied(points: &[InkPoint]) -> Vec<InkPoint> {
     let mut line = points.to_vec();
     // The distance between two readings, which is what decides whether they are close enough for a
     // pass to be a steadying rather than a redraw.
-    let spacing = |from: InkPoint, to: InkPoint| {
-        ((to.x - from.x).powi(2) + (to.y - from.y).powi(2)).sqrt()
-    };
+    let spacing =
+        |from: InkPoint, to: InkPoint| ((to.x - from.x).powi(2) + (to.y - from.y).powi(2)).sqrt();
 
     for _ in 0..STEADYING {
         let mut pass = line.clone();
@@ -616,7 +615,11 @@ fn densified(points: &[InkPoint], detail: f32, tip: Tip) -> Vec<InkPoint> {
             } else {
                 (from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t)
             };
-            line.push(InkPoint::new(x, y, from.width + (to.width - from.width) * t));
+            line.push(InkPoint::new(
+                x,
+                y,
+                from.width + (to.width - from.width) * t,
+            ));
         }
 
         // The end of a segment is the point itself rather than the curve's value at the end of it:
@@ -656,7 +659,10 @@ fn ribbon_outline(points: &[InkPoint], detail: f32, tip: Tip) -> Vec<[f32; 2]> {
         return (0..SEGMENTS)
             .map(|step| {
                 let angle = step as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
-                [point.x + radius * angle.cos(), point.y + radius * angle.sin()]
+                [
+                    point.x + radius * angle.cos(),
+                    point.y + radius * angle.sin(),
+                ]
             })
             .collect();
     }
@@ -1130,7 +1136,8 @@ impl InkDocument {
                         self.stats.off_paper += 1;
                         changed = true;
                     } else {
-                        let tool = if self.mode == Tool::Eraser || sample.eraser || sample.inverted {
+                        let tool = if self.mode == Tool::Eraser || sample.eraser || sample.inverted
+                        {
                             Tool::Eraser
                         } else {
                             Tool::Pen
@@ -1259,14 +1266,7 @@ impl InkDocument {
     /// `force` bypasses the resampler and is used for the lift, which is the stroke's end: a
     /// distance filter that applied its own rule to the last point would shorten every stroke
     /// by up to one spacing.
-    fn push_point(
-        &mut self,
-        x: f32,
-        y: f32,
-        sample: &PenSample,
-        settings: &Settings,
-        force: bool,
-    ) {
+    fn push_point(&mut self, x: f32, y: f32, sample: &PenSample, settings: &Settings, force: bool) {
         let alpha = self.alpha(sample, settings);
 
         let Some(stroke) = self.open.as_mut() else {
@@ -1274,10 +1274,7 @@ impl InkDocument {
         };
 
         let (target_x, target_y) = match (stroke.points.last(), alpha < 1.0) {
-            (Some(last), true) => (
-                last.x + (x - last.x) * alpha,
-                last.y + (y - last.y) * alpha,
-            ),
+            (Some(last), true) => (last.x + (x - last.x) * alpha, last.y + (y - last.y) * alpha),
             _ => (x, y),
         };
 
@@ -1346,7 +1343,8 @@ impl InkDocument {
         }
 
         let before = self.finished.len();
-        Arc::make_mut(&mut self.finished).retain(|stroke| !stroke.hits(x, y, settings.erase_radius));
+        Arc::make_mut(&mut self.finished)
+            .retain(|stroke| !stroke.hits(x, y, settings.erase_radius));
         let erased = before - self.finished.len();
 
         if erased > 0 {
@@ -1422,6 +1420,18 @@ impl Notes {
     /// A note with one blank page.
     pub fn new() -> Self {
         Notes::default()
+    }
+
+    /// Which page the ink in hand belongs to: the page a write is *about*.
+    ///
+    /// The app asks this rather than its own idea of where the view is, and the two are the same
+    /// number everywhere except in the middle of the two commands that move the page list itself —
+    /// an inserted page and a deleted one. Those close the page they are leaving *before* the list
+    /// moves (see `NoteApp::add_page`), so for one moment the view's index is a page nobody is on,
+    /// and a write that read the index there is how the page being left once filed its whole ink
+    /// under the page that took its place.
+    pub fn page(&self) -> usize {
+        self.page
     }
 
     /// Tells the note what the sheet is drawn at, so the page in front of the reader is detailed for
@@ -1534,8 +1544,6 @@ impl Notes {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1593,10 +1601,7 @@ mod tests {
     /// That paper with the bar in front of it: the bar reaches down `bar` logical pixels of the
     /// window, so the page it hides is from the top of the window to that line.
     fn barred(bar: f32) -> InkTransform {
-        InkTransform {
-            bar,
-            ..papered()
-        }
+        InkTransform { bar, ..papered() }
     }
 
     /// A curved stroke as the resampler leaves one: points a little under a pixel apart, walking a
@@ -1618,9 +1623,11 @@ mod tests {
         let mut stroke = Stroke::new(InkPoint::new(RADIUS, 0.0, 2.0), Stroke::DEFAULT_COLOR);
         for index in 1..POINTS {
             let angle = index as f32 * step;
-            stroke
-                .points
-                .push(InkPoint::new(RADIUS * angle.cos(), RADIUS * angle.sin(), 2.0));
+            stroke.points.push(InkPoint::new(
+                RADIUS * angle.cos(),
+                RADIUS * angle.sin(),
+                2.0,
+            ));
         }
         stroke
     }
@@ -1648,7 +1655,9 @@ mod tests {
             stroke.points.push(InkPoint::new(0.0, index as f32, 4.0));
         }
         for index in 1..=20 {
-            stroke.points.push(InkPoint::new(0.0, 20.0 - index as f32, 4.0));
+            stroke
+                .points
+                .push(InkPoint::new(0.0, 20.0 - index as f32, 4.0));
         }
         stroke
     }
@@ -1878,7 +1887,10 @@ mod tests {
         let (from, to) = (points[1], points[2]);
 
         let steps = steps_for(from, to, detail);
-        assert!(steps > 4, "the test needs a segment cut into pieces: {steps}");
+        assert!(
+            steps > 4,
+            "the test needs a segment cut into pieces: {steps}"
+        );
 
         let live = densified(&points, detail, Tip::Straight);
         let finished = densified(&points, detail, Tip::Curved);
@@ -1886,7 +1898,10 @@ mod tests {
         let finished_tip = &finished[finished.len() - steps..];
 
         let straight = bulge(from, to, live_tip);
-        assert!(straight < 1e-3, "the live tip is the straight line: {straight}");
+        assert!(
+            straight < 1e-3,
+            "the live tip is the straight line: {straight}"
+        );
 
         let curved = bulge(from, to, finished_tip);
         assert!(curved > 0.5, "and the finished one is a curve: {curved}");
@@ -1937,8 +1952,16 @@ mod tests {
         let mut ink = InkDocument::default();
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
-        ink.consume(&[reading(7, PenPhase::Move, 14.0, 10.0, Some(0.5))], &id(), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))],
+            &id(),
+            &s,
+        );
+        ink.consume(
+            &[reading(7, PenPhase::Move, 14.0, 10.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         ink.consume(&[reading(7, PenPhase::Up, 18.0, 10.0, None)], &id(), &s);
 
         assert_eq!(ink.stroke_count(), 1);
@@ -1962,7 +1985,10 @@ mod tests {
         let at_eight = page.finished()[0].outline.len();
         assert!(at_eight > at_one, "{at_eight} vertices against {at_one}");
 
-        assert!(!page.set_zoom(8.3), "inside the same rung there is nothing to build");
+        assert!(
+            !page.set_zoom(8.3),
+            "inside the same rung there is nothing to build"
+        );
         assert_eq!(page.finished()[0].outline.len(), at_eight);
 
         // Nothing was edited: the page's ink is exactly the ink it holds.
@@ -2000,15 +2026,27 @@ mod tests {
         let mut s = settings();
 
         s.ink_color = 0xDC_26_26;
-        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         ink.consume(&[reading(7, PenPhase::Up, 18.0, 10.0, None)], &id(), &s);
 
         s.ink_color = 0x1D_4E_D8;
-        ink.consume(&[reading(7, PenPhase::Down, 10.0, 40.0, Some(0.5))], &id(), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 10.0, 40.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         ink.consume(&[reading(7, PenPhase::Up, 18.0, 40.0, None)], &id(), &s);
 
         assert_eq!(ink.finished().len(), 2);
-        assert_eq!(ink.finished()[0].color, 0xDC_26_26, "the red line stays red");
+        assert_eq!(
+            ink.finished()[0].color,
+            0xDC_26_26,
+            "the red line stays red"
+        );
         assert_eq!(ink.finished()[1].color, 0x1D_4E_D8, "the blue line is blue");
     }
 
@@ -2021,8 +2059,15 @@ mod tests {
         let points = &written.points;
         let line = steadied(points);
 
-        assert_eq!(line.len(), points.len(), "a pass moves points, never adds one");
-        assert_eq!(line[0], points[0], "where a stroke starts is where it was written");
+        assert_eq!(
+            line.len(),
+            points.len(),
+            "a pass moves points, never adds one"
+        );
+        assert_eq!(
+            line[0], points[0],
+            "where a stroke starts is where it was written"
+        );
         assert_eq!(
             line[points.len() - 1],
             points[points.len() - 1],
@@ -2071,9 +2116,7 @@ mod tests {
                     grid(&as_it_is, centre, zoom, WIDTH, HEIGHT),
                 );
 
-                for (label, outline) in
-                    [("as it was:", &as_it_was), ("as it is: ", &as_it_is)]
-                {
+                for (label, outline) in [("as it was:", &as_it_was), ("as it is: ", &as_it_is)] {
                     let side = &outline[..outline.len() / 2];
                     eprintln!(
                         "    {zoom:>4.0}x {label} {:>5} vertices · longest piece {:>5.1} px · \
@@ -2211,9 +2254,21 @@ mod tests {
         let mut ink = InkDocument::default();
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
-        ink.consume(&[reading(7, PenPhase::Move, 20.0, 10.0, Some(0.5))], &id(), &s);
-        ink.consume(&[reading(7, PenPhase::Cancel, 999.0, 999.0, None)], &id(), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))],
+            &id(),
+            &s,
+        );
+        ink.consume(
+            &[reading(7, PenPhase::Move, 20.0, 10.0, Some(0.5))],
+            &id(),
+            &s,
+        );
+        ink.consume(
+            &[reading(7, PenPhase::Cancel, 999.0, 999.0, None)],
+            &id(),
+            &s,
+        );
 
         assert_eq!(ink.stroke_count(), 1);
         assert_eq!(ink.finished()[0].points.len(), 2);
@@ -2230,13 +2285,25 @@ mod tests {
         let mut ink = InkDocument::default();
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
-        ink.consume(&[reading(9, PenPhase::Move, 500.0, 10.0, Some(0.5))], &id(), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))],
+            &id(),
+            &s,
+        );
+        ink.consume(
+            &[reading(9, PenPhase::Move, 500.0, 10.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         ink.consume(&[reading(7, PenPhase::Up, 20.0, 10.0, None)], &id(), &s);
 
         assert_eq!(ink.stroke_count(), 1);
         let xs: Vec<f32> = ink.finished()[0].points.iter().map(|p| p.x).collect();
-        assert_eq!(xs, [10.0, 20.0], "the second pointer's reading is not ink here");
+        assert_eq!(
+            xs,
+            [10.0, 20.0],
+            "the second pointer's reading is not ink here"
+        );
     }
 
     /// Hover readings move a cursor but never lay ink, and a stray lift closes nothing.
@@ -2267,9 +2334,15 @@ mod tests {
 
         assert!(t.on_paper((0.0, 0.0)), "the corner is on the paper");
         assert!(t.on_paper((595.0, 842.0)), "so is the far one");
-        assert!(!t.on_paper((-0.5, 10.0)), "a point past the left edge is not");
+        assert!(
+            !t.on_paper((-0.5, 10.0)),
+            "a point past the left edge is not"
+        );
         assert!(!t.on_paper((10.0, 842.5)), "nor one past the bottom");
-        assert!(!t.on_paper((f32::NAN, 10.0)), "and a point that is nowhere is not");
+        assert!(
+            !t.on_paper((f32::NAN, 10.0)),
+            "and a point that is nowhere is not"
+        );
 
         assert_eq!(
             t.onto_paper((-50.0, 900.0)),
@@ -2301,13 +2374,25 @@ mod tests {
 
         // Down on the desk and then dragged across the page: no stroke was opened, so the drag across
         // it is not one either.
-        ink.consume(&[reading(7, PenPhase::Down, 900.0, 400.0, Some(0.5))], &t, &s);
-        ink.consume(&[reading(7, PenPhase::Move, 300.0, 400.0, Some(0.5))], &t, &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 900.0, 400.0, Some(0.5))],
+            &t,
+            &s,
+        );
+        ink.consume(
+            &[reading(7, PenPhase::Move, 300.0, 400.0, Some(0.5))],
+            &t,
+            &s,
+        );
         ink.consume(&[reading(7, PenPhase::Up, 300.0, 400.0, None)], &t, &s);
 
         assert_eq!(ink.stroke_count(), 0, "the desk is not paper");
         assert!(ink.open().is_none());
-        assert_eq!(ink.stats().off_paper, 1, "and the nib that landed there is counted");
+        assert_eq!(
+            ink.stats().off_paper,
+            1,
+            "and the nib that landed there is counted"
+        );
     }
 
     /// A line that leaves the paper is pulled back to its edge, rather than drawn beside it.
@@ -2317,10 +2402,22 @@ mod tests {
         let s = settings();
         let t = papered();
 
-        ink.consume(&[reading(7, PenPhase::Down, 100.0, 100.0, Some(0.5))], &t, &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 100.0, 100.0, Some(0.5))],
+            &t,
+            &s,
+        );
         // Past the right edge by 300 px, then back on the page at the same height.
-        ink.consume(&[reading(7, PenPhase::Move, 900.0, 100.0, Some(0.5))], &t, &s);
-        ink.consume(&[reading(7, PenPhase::Move, 400.0, 100.0, Some(0.5))], &t, &s);
+        ink.consume(
+            &[reading(7, PenPhase::Move, 900.0, 100.0, Some(0.5))],
+            &t,
+            &s,
+        );
+        ink.consume(
+            &[reading(7, PenPhase::Move, 400.0, 100.0, Some(0.5))],
+            &t,
+            &s,
+        );
         ink.consume(&[reading(7, PenPhase::Up, 400.0, 100.0, None)], &t, &s);
 
         let strokes = ink.finished();
@@ -2351,10 +2448,18 @@ mod tests {
         let t = barred(100.0);
 
         // A tap on a control: down and up, both on the bar.
-        ink.consume(&[reading(7, PenPhase::Down, 200.0, 40.0, Some(0.5))], &t, &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 200.0, 40.0, Some(0.5))],
+            &t,
+            &s,
+        );
         ink.consume(&[reading(7, PenPhase::Up, 200.0, 40.0, None)], &t, &s);
 
-        assert_eq!(ink.stroke_count(), 0, "the tap leaves no dot behind the bar");
+        assert_eq!(
+            ink.stroke_count(),
+            0,
+            "the tap leaves no dot behind the bar"
+        );
         assert!(ink.is_blank());
         assert_eq!(
             ink.stats().off_paper,
@@ -2363,10 +2468,18 @@ mod tests {
         );
 
         // The same nib, below the bar, is a pen again.
-        ink.consume(&[reading(7, PenPhase::Down, 200.0, 140.0, Some(0.5))], &t, &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 200.0, 140.0, Some(0.5))],
+            &t,
+            &s,
+        );
         ink.consume(&[reading(7, PenPhase::Up, 200.0, 140.0, None)], &t, &s);
 
-        assert_eq!(ink.stroke_count(), 1, "the page below the bar still takes ink");
+        assert_eq!(
+            ink.stroke_count(),
+            1,
+            "the page below the bar still takes ink"
+        );
     }
 
     /// A line that runs up behind the bar keeps the ink it has: only a `Down` on the bar is refused,
@@ -2377,8 +2490,16 @@ mod tests {
         let s = settings();
         let t = barred(100.0);
 
-        ink.consume(&[reading(7, PenPhase::Down, 200.0, 140.0, Some(0.5))], &t, &s);
-        ink.consume(&[reading(7, PenPhase::Move, 200.0, 40.0, Some(0.5))], &t, &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 200.0, 140.0, Some(0.5))],
+            &t,
+            &s,
+        );
+        ink.consume(
+            &[reading(7, PenPhase::Move, 200.0, 40.0, Some(0.5))],
+            &t,
+            &s,
+        );
         ink.consume(&[reading(7, PenPhase::Up, 200.0, 20.0, None)], &t, &s);
 
         assert_eq!(ink.stroke_count(), 1);
@@ -2399,7 +2520,11 @@ mod tests {
         let t = barred(100.0);
 
         // A line written up behind the bar, where a stroke to be erased has to be.
-        ink.consume(&[reading(7, PenPhase::Down, 200.0, 140.0, Some(0.5))], &t, &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 200.0, 140.0, Some(0.5))],
+            &t,
+            &s,
+        );
         ink.consume(&[reading(7, PenPhase::Up, 200.0, 20.0, None)], &t, &s);
         assert_eq!(ink.stroke_count(), 1);
 
@@ -2408,7 +2533,11 @@ mod tests {
         eraser.eraser = true;
         ink.consume(&[eraser], &t, &s);
 
-        assert_eq!(ink.stroke_count(), 1, "the stroke behind the bar is still there");
+        assert_eq!(
+            ink.stroke_count(),
+            1,
+            "the stroke behind the bar is still there"
+        );
         assert_eq!(ink.stats().erased_strokes, 0);
     }
 
@@ -2454,7 +2583,11 @@ mod tests {
             ..Settings::default()
         };
 
-        ink.consume(&[reading(7, PenPhase::Down, 0.0, 0.0, Some(0.5))], &id(), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 0.0, 0.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         for step in 1..=9 {
             // Each reading is 1 px from the last: all of them are below the spacing.
             ink.consume(
@@ -2528,7 +2661,11 @@ mod tests {
         ink.undo();
         assert!(ink.can_redo());
 
-        ink.consume(&[reading(7, PenPhase::Down, 900.0, 0.0, Some(0.5))], &id(), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 900.0, 0.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         ink.consume(&[reading(7, PenPhase::Up, 940.0, 0.0, None)], &id(), &s);
 
         assert!(
@@ -2546,8 +2683,16 @@ mod tests {
         let mut ink = page_with(1);
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 500.0, 0.0, Some(0.5))], &id(), &s);
-        ink.consume(&[reading(7, PenPhase::Move, 600.0, 0.0, Some(0.5))], &id(), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 500.0, 0.0, Some(0.5))],
+            &id(),
+            &s,
+        );
+        ink.consume(
+            &[reading(7, PenPhase::Move, 600.0, 0.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         assert!(ink.open().is_some(), "the pen is drawing");
 
         assert!(ink.undo());
@@ -2559,7 +2704,11 @@ mod tests {
         );
 
         // The stroke keeps growing: an undo must not leave the model thinking the pen was lifted.
-        ink.consume(&[reading(7, PenPhase::Move, 700.0, 0.0, Some(0.5))], &id(), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Move, 700.0, 0.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         assert_eq!(
             ink.open().map(|open| open.points.len()),
             Some(3),
@@ -2581,7 +2730,11 @@ mod tests {
         let mut ink = InkDocument::default();
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))],
+            &id(),
+            &s,
+        );
 
         assert!(!ink.can_undo());
         assert!(!ink.undo(), "the pen's own line is not history");
@@ -2603,7 +2756,11 @@ mod tests {
         eraser.eraser = true;
         ink.consume(&[eraser], &id(), &s);
 
-        assert_eq!(ink.stroke_count(), 0, "the stroke the eraser touched is gone");
+        assert_eq!(
+            ink.stroke_count(),
+            0,
+            "the stroke the eraser touched is gone"
+        );
         assert!(!ink.can_redo(), "and the eraser ended the branch");
     }
 
@@ -2631,7 +2788,11 @@ mod tests {
         let mut notes = Notes::new();
         let s = settings();
 
-        notes.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+        notes.consume(
+            &[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         notes.consume(&[reading(7, PenPhase::Up, 30.0, 30.0, None)], &id(), &s);
         notes.undo();
         assert!(notes.is_blank(), "the page it was drawn on is empty again");
@@ -2655,8 +2816,16 @@ mod tests {
         let mut ink = InkDocument::default();
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 150.0, 90.0, Some(0.5))], &scaled(1.5), &s);
-        ink.consume(&[reading(7, PenPhase::Up, 300.0, 180.0, None)], &scaled(1.5), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 150.0, 90.0, Some(0.5))],
+            &scaled(1.5),
+            &s,
+        );
+        ink.consume(
+            &[reading(7, PenPhase::Up, 300.0, 180.0, None)],
+            &scaled(1.5),
+            &s,
+        );
 
         assert_eq!(ink.finished()[0].points[0].x, 100.0);
         assert_eq!(ink.finished()[0].points[1].y, 120.0);
@@ -2668,9 +2837,17 @@ mod tests {
         let mut ink = InkDocument::default();
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 0.0, 0.0, Some(0.5))], &id(), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 0.0, 0.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         ink.consume(&[reading(7, PenPhase::Up, 40.0, 0.0, None)], &id(), &s);
-        ink.consume(&[reading(7, PenPhase::Down, 500.0, 0.0, Some(0.5))], &id(), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 500.0, 0.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         ink.consume(&[reading(7, PenPhase::Up, 540.0, 0.0, None)], &id(), &s);
         assert_eq!(ink.stroke_count(), 2);
 
@@ -2693,14 +2870,22 @@ mod tests {
 
         // A sheet drawn at 2x, its top-left corner 100 px into the window.
         let sheet = zoomed(2.0, (100.0, 60.0));
-        ink.consume(&[reading(7, PenPhase::Down, 300.0, 160.0, Some(0.5))], &sheet, &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 300.0, 160.0, Some(0.5))],
+            &sheet,
+            &s,
+        );
 
         let point = ink.open().expect("a stroke").points[0];
         assert_eq!((point.x, point.y), (100.0, 50.0), "(300-100)/2, (160-60)/2");
 
         // The same reading on a sheet at its own size, drawn at the origin, is the reading.
         let mut flat = InkDocument::default();
-        flat.consume(&[reading(7, PenPhase::Down, 300.0, 160.0, Some(0.5))], &id(), &s);
+        flat.consume(
+            &[reading(7, PenPhase::Down, 300.0, 160.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         let point = flat.open().expect("a stroke").points[0];
         assert_eq!((point.x, point.y), (300.0, 160.0));
     }
@@ -2725,13 +2910,27 @@ mod tests {
         let mut ink = InkDocument::default();
         let s = settings();
 
-        ink.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
-        ink.consume(&[reading(7, PenPhase::Move, 90.0, 70.0, Some(0.5))], &id(), &s);
+        ink.consume(
+            &[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))],
+            &id(),
+            &s,
+        );
+        ink.consume(
+            &[reading(7, PenPhase::Move, 90.0, 70.0, Some(0.5))],
+            &id(),
+            &s,
+        );
 
         let open = ink.open().expect("a stroke");
         assert_eq!(open.bounds, [10.0, 10.0, 90.0, 70.0]);
-        assert!(open.visible_in([0.0, 0.0, 50.0, 50.0]), "the corner overlaps");
-        assert!(!open.visible_in([200.0, 200.0, 300.0, 300.0]), "and away does not");
+        assert!(
+            open.visible_in([0.0, 0.0, 50.0, 50.0]),
+            "the corner overlaps"
+        );
+        assert!(
+            !open.visible_in([200.0, 200.0, 300.0, 300.0]),
+            "and away does not"
+        );
     }
 
     /// Off-screen ink is rejected by four comparisons rather than turned into a polygon.
@@ -2742,7 +2941,10 @@ mod tests {
         stroke.close();
 
         assert!(stroke.visible_in([400.0, 400.0, 600.0, 600.0]));
-        assert!(stroke.visible_in([520.0, 480.0, 700.0, 700.0]), "overlapping counts");
+        assert!(
+            stroke.visible_in([520.0, 480.0, 700.0, 700.0]),
+            "overlapping counts"
+        );
         assert!(!stroke.visible_in([0.0, 0.0, 100.0, 100.0]));
         assert!(!stroke.visible_in([600.0, 0.0, 700.0, 100.0]), "beside it");
     }
@@ -2810,7 +3012,11 @@ mod tests {
         let mut notes = Notes::new();
         let s = settings();
 
-        notes.consume(&[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+        notes.consume(
+            &[reading(7, PenPhase::Down, 10.0, 10.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         notes.consume(&[reading(7, PenPhase::Up, 30.0, 30.0, None)], &id(), &s);
 
         assert_eq!(notes.stroke_count(), 1, "page one has the stroke");
@@ -2819,18 +3025,30 @@ mod tests {
         assert!(notes.is_blank(), "page two is empty");
         assert_eq!(notes.stroke_count(), 0);
 
-        notes.consume(&[reading(7, PenPhase::Down, 50.0, 50.0, Some(0.5))], &id(), &s);
+        notes.consume(
+            &[reading(7, PenPhase::Down, 50.0, 50.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         notes.consume(&[reading(7, PenPhase::Up, 70.0, 70.0, None)], &id(), &s);
         assert_eq!(notes.stroke_count(), 1, "page two has its own stroke");
 
         notes.go_to(0);
-        assert_eq!(notes.stroke_count(), 1, "page one still has exactly its own");
+        assert_eq!(
+            notes.stroke_count(),
+            1,
+            "page one still has exactly its own"
+        );
         assert_eq!(inked(&notes), vec![0, 1], "and both pages are written on");
 
         // The stroke on page two is the one that starts at (50, 50): erasing where page one's ink
         // is must leave page two alone, and vice versa.
         let first = notes.finished()[0].points[0];
-        assert_eq!((first.x, first.y), (10.0, 10.0), "page one's stroke is its own");
+        assert_eq!(
+            (first.x, first.y),
+            (10.0, 10.0),
+            "page one's stroke is its own"
+        );
     }
 
     /// A page that was written on and left keeps its ink; a page that was never touched stays out
@@ -2842,7 +3060,11 @@ mod tests {
 
         notes.go_to(3);
         assert!(notes.is_blank());
-        notes.consume(&[reading(7, PenPhase::Down, 5.0, 5.0, Some(0.5))], &id(), &s);
+        notes.consume(
+            &[reading(7, PenPhase::Down, 5.0, 5.0, Some(0.5))],
+            &id(),
+            &s,
+        );
         notes.consume(&[reading(7, PenPhase::Up, 9.0, 9.0, None)], &id(), &s);
 
         // Visiting pages that are not written on must not invent pages.
@@ -2893,6 +3115,52 @@ mod tests {
         assert_eq!(notes.finished()[0].points[0].x, 50.0);
     }
 
+    /// The page the ink is on is the page a write is *about*, and it moves with the pages rather
+    /// than staying at the number the view used to be at.
+    ///
+    /// This is the number `NoteApp::persist` reads when it asks the ink which page it holds. The two
+    /// commands that move the page list close the page they are leaving *before* the list moves, so
+    /// between the move and the turn the view's index is a page nobody is on while the ink is still
+    /// on the page it was written on: a write that trusted the index filed that page's whole ink
+    /// under the page that took its place, and the reader met it as the previous page's writing on
+    /// the new page's sheet.
+    #[test]
+    fn a_write_follows_the_ink_and_not_the_page_that_took_its_place() {
+        let mut notes = Notes::new();
+        let s = settings();
+
+        // A page written on, and a page put in *before* it: the two moves `add_page` makes.
+        write(&mut notes, &s, 1.0);
+        notes.insert_at(0);
+
+        assert_eq!(
+            notes.page(),
+            1,
+            "the ink says page 1, which is where the note moved it to"
+        );
+        assert_eq!(
+            inked(&notes),
+            vec![1],
+            "and it is the only page that holds ink"
+        );
+        assert_eq!(
+            notes.stroke_count(),
+            1,
+            "which is still the stroke that page holds"
+        );
+
+        // The page that took its place is a page of its own: blank paper, and a write on it belongs
+        // to it rather than to the page that moved along.
+        notes.go_to(0);
+        assert!(notes.is_blank(), "the page now at 0 is blank paper");
+        assert_eq!(notes.page(), 0, "and it is the page the pen is on");
+        assert_eq!(
+            inked(&notes),
+            vec![1],
+            "the ink is still only on the page it was written on"
+        );
+    }
+
     /// Deleting a page takes its ink with it, and shows the page that followed.
     #[test]
     fn deleting_a_page_takes_its_ink_and_shows_the_next_one() {
@@ -2910,7 +3178,11 @@ mod tests {
         notes.remove_at(1);
 
         assert_eq!(inked(&notes), vec![0, 1]);
-        assert_eq!(notes.stroke_count(), 1, "the page that followed is on screen");
+        assert_eq!(
+            notes.stroke_count(),
+            1,
+            "the page that followed is on screen"
+        );
         assert_eq!(
             notes.finished()[0].points[0].x,
             40.0,
@@ -3112,7 +3384,11 @@ mod tests {
         let rounds = 100;
         let started = std::time::Instant::now();
         for _ in 0..rounds {
-            page.consume(&[reading(7, PenPhase::Down, 5.0, 5.0, Some(0.5))], &id(), &s);
+            page.consume(
+                &[reading(7, PenPhase::Down, 5.0, 5.0, Some(0.5))],
+                &id(),
+                &s,
+            );
             page.consume(&[reading(7, PenPhase::Up, 9.0, 5.0, None)], &id(), &s);
         }
         let appended = started.elapsed() / rounds;

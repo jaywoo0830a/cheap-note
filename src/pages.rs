@@ -172,7 +172,11 @@ mod tests {
         assert_eq!(pages.len(), 3);
         assert_eq!(pages.layout()[0], Page::Document(0));
         assert_eq!(pages.layout()[1], Page::Blank);
-        assert_eq!(pages.layout()[2], Page::Document(1), "the document's order held");
+        assert_eq!(
+            pages.layout()[2],
+            Page::Document(1),
+            "the document's order held"
+        );
 
         let before = pages.insert(2, true);
         assert_eq!(before, 2);
@@ -186,7 +190,11 @@ mod tests {
     fn a_deleted_document_page_leaves_the_documents_own_pages_alone() {
         let mut pages = Pages::of_document(3);
 
-        assert_eq!(pages.remove(1), Some(1), "the page that followed takes its place");
+        assert_eq!(
+            pages.remove(1),
+            Some(1),
+            "the page that followed takes its place"
+        );
         assert_eq!(pages.len(), 2);
         assert_eq!(pages.layout(), &[Page::Document(0), Page::Document(2)]);
     }
@@ -258,6 +266,9 @@ mod tests {
 
         // A saved layout is kept, and extended only as far as the ink needs.
         let saved = Pages::restore(Some(vec![Page::Document(1), Page::Blank]), 3, 3);
-        assert_eq!(saved.layout(), &[Page::Document(1), Page::Blank, Page::Blank]);
+        assert_eq!(
+            saved.layout(),
+            &[Page::Document(1), Page::Blank, Page::Blank]
+        );
     }
 }

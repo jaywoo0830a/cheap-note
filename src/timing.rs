@@ -311,7 +311,11 @@ impl Moments {
         let mut said: Vec<String> = Vec::new();
 
         if self.slow > 0 {
-            said.push(format!("{} over {:.1} ms", self.slow, millis(SLOW_INTERVAL)));
+            said.push(format!(
+                "{} over {:.1} ms",
+                self.slow,
+                millis(SLOW_INTERVAL)
+            ));
         }
 
         if self.idle > 0 {
@@ -712,7 +716,11 @@ mod tests {
 
         {
             let _timed = measure(&meter);
-            assert_eq!(meter.samples(), 0, "nothing is recorded until the scope ends");
+            assert_eq!(
+                meter.samples(),
+                0,
+                "nothing is recorded until the scope ends"
+            );
         }
 
         assert_eq!(meter.samples(), 1);
@@ -805,7 +813,11 @@ mod tests {
 
         let measured = session.stop(Duration::from_secs(2));
 
-        assert_eq!(measured.over, Duration::from_secs(2), "the window it covered");
+        assert_eq!(
+            measured.over,
+            Duration::from_secs(2),
+            "the window it covered"
+        );
         assert_eq!(measured.frames.samples, 3, "every interval is counted");
         assert_eq!(measured.frames.fastest, Duration::from_millis(6));
         assert_eq!(measured.frames.slowest, Duration::from_millis(16));
@@ -859,7 +871,10 @@ mod tests {
         session.record_frame(Duration::from_secs(3));
 
         let measured = session.stop(Duration::from_secs(4));
-        assert_eq!(measured.frames.samples, 1, "a three-second gap is not a frame");
+        assert_eq!(
+            measured.frames.samples, 1,
+            "a three-second gap is not a frame"
+        );
         assert_eq!(measured.frames.slowest, Duration::from_millis(8));
         assert_eq!(measured.frames.idle, 1, "and it is not lost either");
 
@@ -895,7 +910,10 @@ mod tests {
 
         assert_eq!(measured.frames.samples, 3);
         assert_eq!(measured.frames.slow, 1, "only the one over the line");
-        assert_eq!(measured.frames.idle, 1, "the three-second gap is not a frame");
+        assert_eq!(
+            measured.frames.idle, 1,
+            "the three-second gap is not a frame"
+        );
         assert_eq!(measured.frames.longest_idle, Duration::from_secs(3));
         assert!(
             measured.summary().contains("1 over 16.7 ms"),

@@ -264,11 +264,9 @@ impl Outline {
             // is pointing at. Everything else the keyboard does here belongs to the list, which has the
             // focus. `title` is the note's name, which the app passes in rather than this screen reaching
             // for it: the same arrangement the other screen uses.
-            .on_key_down(
-                cx.listener(|app, event: &KeyDownEvent, window, cx| {
-                    app.outline_key_down(event, window, cx)
-                }),
-            )
+            .on_key_down(cx.listener(|app, event: &KeyDownEvent, window, cx| {
+                app.outline_key_down(event, window, cx)
+            }))
             .child(self.header(title, cx))
             .child(
                 div()
@@ -364,7 +362,6 @@ impl Outline {
     }
 }
 
-
 /// What the list draws: one row per entry of the document's contents.
 ///
 /// The list asks this for a count, for a row, and for what opening a row means; the highlight, the
@@ -424,7 +421,6 @@ impl OutlineDelegate {
         row.note_page
     }
 }
-
 
 impl ListDelegate for OutlineDelegate {
     type Item = ListItem;
@@ -490,7 +486,11 @@ impl ListDelegate for OutlineDelegate {
             )
             // Said only for the page the reader is on, as on the bookmark screen: the one row of the
             // contents that is not about somewhere else.
-            .child(Label::new(if here { "you are here" } else { "" }).text_sm().text_color(muted));
+            .child(
+                Label::new(if here { "you are here" } else { "" })
+                    .text_sm()
+                    .text_color(muted),
+            );
 
         Some(ListItem::new(ix).selected(highlighted).child(row))
     }
@@ -545,7 +545,6 @@ impl ListDelegate for OutlineDelegate {
             .into_any_element()
     }
 }
-
 
 /// What a contents row can do, on the menu a right-click opens.
 ///
@@ -607,8 +606,6 @@ fn row_menu(
 
     menu
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -743,7 +740,10 @@ mod tests {
         let pages = OutlinePages::of(&outline, &note, &marks, 1, String::from("book.pdf"));
 
         assert!(pages.rows[0].marked, "the note's page 2 is marked");
-        assert!(pages.rows[0].is_here(1), "and it is the page the reader is on");
+        assert!(
+            pages.rows[0].is_here(1),
+            "and it is the page the reader is on"
+        );
 
         // The same entry against a note that has nothing to do with the document: no page to go to, no
         // mark, and a row that says so rather than pretending to point somewhere.

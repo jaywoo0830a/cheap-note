@@ -157,7 +157,9 @@ pub fn install(cx: &mut App) {
     if !installed {
         // Said out loud rather than swallowed: the palette names this family unconditionally, so a
         // font that did not register means every string in the window is in the fallback font.
-        eprintln!("cheap-note: {FONT_FAMILY:?} did not register; text falls back to the system font");
+        eprintln!(
+            "cheap-note: {FONT_FAMILY:?} did not register; text falls back to the system font"
+        );
     }
 }
 

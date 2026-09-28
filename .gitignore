@@ -1,5 +1,8 @@
 target
-vendor
+# The downloaded Pdfium build: the library itself is never in git, and the note that says where it
+# comes from is the one thing in this folder that is (see `vendor/README.md`).
+vendor/*
+!vendor/README.md
 cheap-note.settings.json
 *.txt
 *.log

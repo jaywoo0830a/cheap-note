@@ -47,8 +47,9 @@
 //! cargo run --release
 //! ```
 //!
-//! Pdfium is loaded at run time from `vendor/lib/pdfium.dll` (or next to the executable). The
-//! app starts and draws without it; only opening a PDF needs it.
+//! Pdfium is loaded at run time from `vendor/lib/pdfium.dll`, which a build copies next to the
+//! executable it produces (`build.rs`; `vendor/README.md` says where the library comes from). The app
+//! starts and draws without it; only opening a PDF needs it.
 //!
 //! A note is a folder under `%LOCALAPPDATA%\cheap-note\notes` — a SQLite file, the document, and
 //! anything attached to it — and it is written as the pen moves; `Save` writes the single file a

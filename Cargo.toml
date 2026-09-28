@@ -8,9 +8,9 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-# UI framework. GPUI Kit 0.6.6 pulls in GPUI + gpui-base + gpui-component; the app never
+# UI framework. GPUI Kit 0.7.0 pulls in GPUI + gpui-base + gpui-component; the app never
 # lists GPUI itself. `component` and `assets` are on by default.
-gpui-kit = "=0.6.6"
+gpui-kit = "=0.7.0"
 
 # Low-latency pen input on Windows. This crate is not published on crates.io, so it is
 # pinned to the 0.2.0 git tag requested by the project.

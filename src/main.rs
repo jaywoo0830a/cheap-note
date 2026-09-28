@@ -7,7 +7,8 @@
 //! * pen input comes from `pen-windows` (WM_POINTER: pressure, tilt, coalesced batches);
 //! * the pen's tilt is drawn as a ghost cursor — a nib mark with the pen's body leaning away from
 //!   it — because a system cursor cannot be rotated, and the system pointer is hidden while it is
-//!   drawn;
+//!   drawn. It is drawn *outside* the frame, in a window of its own, because a cursor is a position
+//!   and a frame is one frame too late for one (see [`cursor_overlay`]);
 //! * the interface is built with GPUI Kit (theme tokens, components, a GPU-accelerated scene), in
 //!   the app's own palette and its own font: see [`theme`];
 //! * PDF pages are rasterised by Pdfium, which the app drives through its own C entry points so
@@ -26,6 +27,7 @@
 //! | [`canvas`]  | the sheet's size, colour and ruling                                |
 //! | [`view`]    | zoom, fit, and where the sheet sits in the window                  |
 //! | [`cursor`]  | the pen's ghost cursor: where it is and how it leans               |
+//! | [`cursor_overlay`] | the ghost's own window, drawn without waiting for a frame     |
 //! | [`system_cursor`] | hiding the system pointer while the pen is in range          |
 //! | [`pdf`]     | the Pdfium document, page rendering, and the page cache            |
 //! | [`pages`]   | what a note's pages are, and what each one shows                   |
@@ -67,6 +69,7 @@ mod bookmarks;
 mod canvas;
 mod chunk;
 mod cursor;
+mod cursor_overlay;
 mod error;
 mod home;
 mod ink;

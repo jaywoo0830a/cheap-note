@@ -130,6 +130,13 @@ pub fn measure(meter: &Meter) -> Measured<'_> {
     }
 }
 
+/// How long an interval has to be before the frame it ends is a frame the screen did not get.
+///
+/// A 60 Hz present period: a reader on a 60 Hz panel sees anything longer than this as a dropped frame.
+/// Fixed rather than worked out from the session, and printed beside the count it makes, so that the
+/// number means the same thing in every session and can be compared between two of them.
+pub const SLOW_INTERVAL: Duration = Duration::from_micros(16_700);
+
 /// How long an interval has to be before it is called idle rather than slow.
 ///
 /// A session is measured by a person who is writing, and writing includes thinking: the pause between
@@ -155,8 +162,12 @@ pub struct Intervals {
     min_nanos: AtomicU64,
     /// The longest, in nanoseconds.
     max_nanos: AtomicU64,
+    /// How many measured intervals were longer than [`SLOW_INTERVAL`].
+    slow: AtomicU64,
     /// How many intervals were left out for being idle rather than slow.
     idle: AtomicU64,
+    /// The longest of those, in nanoseconds.
+    longest_idle_nanos: AtomicU64,
 }
 
 impl Default for Intervals {
@@ -168,7 +179,9 @@ impl Default for Intervals {
             // able to replace it.
             min_nanos: AtomicU64::new(u64::MAX),
             max_nanos: AtomicU64::new(0),
+            slow: AtomicU64::new(0),
             idle: AtomicU64::new(0),
+            longest_idle_nanos: AtomicU64::new(0),
         }
     }
 }
@@ -176,17 +189,25 @@ impl Default for Intervals {
 impl Intervals {
     /// Folds in one interval, or counts it as idle.
     pub fn record(&self, interval: Duration, idle: Duration) {
+        let nanos = interval.as_nanos() as u64;
+
         if interval >= idle {
             self.idle.fetch_add(1, Ordering::Relaxed);
+            // The longest of them is kept, because "three gaps" says nothing on its own: three quarters
+            // of a second each is a window with thinking in it, and three of a second and a half each is
+            // a window with something wrong in it.
+            self.longest_idle_nanos.fetch_max(nanos, Ordering::Relaxed);
             return;
         }
-
-        let nanos = interval.as_nanos() as u64;
 
         self.samples.fetch_add(1, Ordering::Relaxed);
         self.total_nanos.fetch_add(nanos, Ordering::Relaxed);
         self.min_nanos.fetch_min(nanos, Ordering::Relaxed);
         self.max_nanos.fetch_max(nanos, Ordering::Relaxed);
+
+        if interval >= SLOW_INTERVAL {
+            self.slow.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Forgets everything measured so far.
@@ -195,7 +216,9 @@ impl Intervals {
         self.total_nanos.store(0, Ordering::Relaxed);
         self.min_nanos.store(u64::MAX, Ordering::Relaxed);
         self.max_nanos.store(0, Ordering::Relaxed);
+        self.slow.store(0, Ordering::Relaxed);
         self.idle.store(0, Ordering::Relaxed);
+        self.longest_idle_nanos.store(0, Ordering::Relaxed);
     }
 
     /// What has been measured so far.
@@ -205,6 +228,7 @@ impl Intervals {
     pub fn moments(&self) -> Moments {
         let samples = self.samples.load(Ordering::Relaxed);
         let idle = self.idle.load(Ordering::Relaxed);
+        let longest_idle = Duration::from_nanos(self.longest_idle_nanos.load(Ordering::Relaxed));
 
         if samples == 0 {
             return Moments {
@@ -212,7 +236,9 @@ impl Intervals {
                 fastest: Duration::ZERO,
                 slowest: Duration::ZERO,
                 mean: Duration::ZERO,
+                slow: 0,
                 idle,
+                longest_idle,
             };
         }
 
@@ -221,12 +247,14 @@ impl Intervals {
             fastest: Duration::from_nanos(self.min_nanos.load(Ordering::Relaxed)),
             slowest: Duration::from_nanos(self.max_nanos.load(Ordering::Relaxed)),
             mean: Duration::from_nanos(self.total_nanos.load(Ordering::Relaxed) / samples),
+            slow: self.slow.load(Ordering::Relaxed),
             idle,
+            longest_idle,
         }
     }
 }
 
-/// The shortest, longest and mean of a stretch of intervals.
+/// The shortest, longest and mean of a stretch of intervals, and how many were bad.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Moments {
     /// How many intervals were measured. Zero means the three durations below mean nothing.
@@ -237,8 +265,12 @@ pub struct Moments {
     pub slowest: Duration,
     /// The mean.
     pub mean: Duration,
+    /// How many of them were longer than [`SLOW_INTERVAL`].
+    pub slow: u64,
     /// How many intervals were left out for being idle rather than slow.
     pub idle: u64,
+    /// The longest of those.
+    pub longest_idle: Duration,
 }
 
 impl Moments {
@@ -253,7 +285,7 @@ impl Moments {
         if self.samples == 0 {
             return match self.idle {
                 0 => String::from("—"),
-                idle => format!("— ({idle} idle)"),
+                idle => format!("— ({idle} idle, {} longest)", seconds(self.longest_idle)),
             };
         }
 
@@ -262,11 +294,38 @@ impl Moments {
             millis(self.mean),
             millis(self.fastest),
             millis(self.slowest),
-            match self.idle {
-                0 => String::new(),
-                idle => format!(", {idle} idle"),
-            },
+            self.asides(),
         )
+    }
+
+    /// The counts that qualify the three numbers: how many were bad, and how many were not measured.
+    ///
+    /// They are printed with the three because of what the three cannot say. A mean of 35 ms over a
+    /// slowest of 152 ms is two completely different sessions — one where nearly every frame was late,
+    /// and one that was fine except for a handful of hitches — and `min`/`max`/`avg` alone cannot tell
+    /// them apart. The slow count can, because it is a count of the frames a 60 Hz screen did not get.
+    /// The idle count matters for the same reason: a window with thinking in it is not a window of slow
+    /// frames, and the longest gap is what separates one from the other.
+    fn asides(&self) -> String {
+        let mut said: Vec<String> = Vec::new();
+
+        if self.slow > 0 {
+            said.push(format!("{} over {:.1} ms", self.slow, millis(SLOW_INTERVAL)));
+        }
+
+        if self.idle > 0 {
+            said.push(format!(
+                "{} idle ({} longest)",
+                self.idle,
+                seconds(self.longest_idle)
+            ));
+        }
+
+        if said.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", said.join(", "))
+        }
     }
 
     /// The whole clause: how many were measured, then the extremes.
@@ -535,6 +594,11 @@ fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
+/// Seconds in a duration, as a string: for the one duration here that is often measured in whole ones.
+fn seconds(duration: Duration) -> String {
+    format!("{:.2} s", duration.as_secs_f64())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,9 +818,38 @@ mod tests {
 
         assert_eq!(nothing.frames.samples, 0);
         assert!(
-            nothing.summary().contains("1 idle"),
+            nothing.summary().contains("1 idle, 3.00 s longest"),
             "a session with nothing measured still says what it was: {}",
             nothing.summary()
+        );
+    }
+
+    /// A frame a 60 Hz screen would not have got is counted as one, and an idle gap is not.
+    ///
+    /// The count is what tells a session that was uniformly late from one that was fine except for a few
+    /// hitches — the two have the same shape of `min`/`max`/`avg` and differ only in how many frames went
+    /// over the line.
+    #[test]
+    fn a_slow_frame_is_counted_and_an_idle_gap_is_not() {
+        let session = Session::default();
+        session.start();
+
+        session.record_frame(Duration::from_millis(8));
+        session.record_frame(Duration::from_millis(20));
+        // Just under the line: a frame that was late but not a frame the screen missed.
+        session.record_frame(Duration::from_millis(16));
+        session.record_frame(Duration::from_secs(3));
+
+        let measured = session.stop(Duration::from_secs(4));
+
+        assert_eq!(measured.frames.samples, 3);
+        assert_eq!(measured.frames.slow, 1, "only the one over the line");
+        assert_eq!(measured.frames.idle, 1, "the three-second gap is not a frame");
+        assert_eq!(measured.frames.longest_idle, Duration::from_secs(3));
+        assert!(
+            measured.summary().contains("1 over 16.7 ms"),
+            "and the line says which line was crossed: {}",
+            measured.summary()
         );
     }
 

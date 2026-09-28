@@ -78,6 +78,16 @@ pub struct InkTransform {
     pub origin: (f32, f32),
     /// The paper's own size, in sheet units. `(0.0, 0.0)` means "no paper": see [`Self::has_paper`].
     pub paper: (f32, f32),
+    /// Where the interface's top bar ends, in window logical pixels: everything above it is *in
+    /// front of* the sheet, and a reading that lands there is a press on a control rather than ink.
+    /// `0.0` when nothing is in front of the page — no bar, or one that has not been laid out yet.
+    ///
+    /// The bar floats over the canvas rather than taking part in the layout, which is what keeps a
+    /// pen's coordinates free of offsets (see [`crate::app`]); this is the price of that. It is
+    /// carried with the rest of the window's geometry because it answers, with the paper's edges,
+    /// the one question this model asks of every reading: is it *on the page the user is writing
+    /// on* — and the top of the page behind a bar is not somewhere a nib can write.
+    pub bar: f32,
 }
 
 impl Default for InkTransform {
@@ -97,6 +107,7 @@ impl InkTransform {
             zoom: 1.0,
             origin: (0.0, 0.0),
             paper: (0.0, 0.0),
+            bar: 0.0,
         }
     }
 
@@ -136,6 +147,19 @@ impl InkTransform {
         }
 
         (x.clamp(0.0, self.paper.0), y.clamp(0.0, self.paper.1))
+    }
+
+    /// Whether a reading, at a vertical position in **physical client** pixels, landed on the bar.
+    ///
+    /// The bar's line is the *window's*, not the sheet's: a page panned up out from under the bar is
+    /// still covered where the two overlap, so this is asked of the reading's own pixels — which is
+    /// also why the DPI scale divides here, exactly as [`Self::sheet_point`] divides it.
+    ///
+    /// A bar of no height refuses nothing, and a reading exactly on the line is the bar's: the line
+    /// is the bar's last pixel, and one pixel of ink behind a button is a dot on the page that the
+    /// user never saw themselves write.
+    pub fn on_bar(&self, pixel_y: f32) -> bool {
+        self.bar > 0.0 && pixel_y / finite_or_one(self.scale) <= self.bar
     }
 
     /// Whether there is a paper to be off.
@@ -635,7 +659,9 @@ impl InkDocument {
     /// the sheet's zoom, where the sheet is drawn, and how large the paper is. All of them are
     /// applied here, once, so that nothing downstream has to know about any of them — the ink, the
     /// eraser and the geometry all work in the sheet's own coordinates, and everything they produce
-    /// is *on the paper*, because a reading that is not on it is not ink.
+    /// is *on the paper*, because a reading that is not on it is not ink. Where the bar is counts as
+    /// part of that same question, one layer nearer the eye: a reading that lands on the bar is a
+    /// press on a control (see [`InkTransform::on_bar`]).
     ///
     /// Returns whether anything changed, which is what the caller uses to decide whether a
     /// repaint is worth scheduling.
@@ -667,10 +693,24 @@ impl InkDocument {
                     // drew is kept, and an `Up` that never arrived is no reason to lose it.
                     self.finish_open();
 
-                    // A nib that comes down on the desk opens nothing: clipping cannot help there,
-                    // because there is no line to clip yet, and starting one would put a dot on the
-                    // nearest edge of the paper — ink at a place nobody wrote.
-                    if !on_paper {
+                    if transform.on_bar(sample.pixel.y) {
+                        // A nib that comes down on the bar opens nothing either: the bar is in
+                        // front of the page and its buttons are pressed *with the pen*, so the
+                        // reading is a press on a control and not a line. A tap that opened a
+                        // stroke here would leave a dot on the page behind the bar — ink the user
+                        // never saw themselves write, saved with the note and hidden there until
+                        // the note was opened with the bar switched off. Nothing opens, so the
+                        // readings that follow the `Down` have no stroke to extend: a tap on the
+                        // bar leaves the page exactly as it was.
+                        //
+                        // Only the `Down` is refused. A line that began on the page and ran up
+                        // behind the bar keeps the ink it has, for the reason the paper's own edge
+                        // is a clamp rather than a cut: the user cannot see the line a cut would
+                        // be made on.
+                    } else if !on_paper {
+                        // Clipping cannot help a nib that comes down on the desk: there is no line
+                        // to clip yet, and starting one would put a dot on the nearest edge of the
+                        // paper — ink at a place nobody wrote.
                         self.stats.off_paper += 1;
                         changed = true;
                     } else {
@@ -1087,6 +1127,15 @@ mod tests {
         }
     }
 
+    /// That paper with the bar in front of it: the bar reaches down `bar` logical pixels of the
+    /// window, so the page it hides is from the top of the window to that line.
+    fn barred(bar: f32) -> InkTransform {
+        InkTransform {
+            bar,
+            ..papered()
+        }
+    }
+
     /// The edges are what make a stroke: a down, positions, and an up.
     #[test]
     fn a_down_and_up_make_one_stroke() {
@@ -1261,6 +1310,93 @@ mod tests {
             ink.stats().off_paper,
             1,
             "the one reading past the edge is counted"
+        );
+    }
+
+    /// The bar is not paper either: a nib that comes down on it opens nothing, because the pen
+    /// there is pressing a control rather than writing on the page behind it.
+    #[test]
+    fn the_bar_is_not_paper() {
+        let mut ink = InkDocument::default();
+        let s = settings();
+        let t = barred(100.0);
+
+        // A tap on a control: down and up, both on the bar.
+        ink.consume(&[reading(7, PenPhase::Down, 200.0, 40.0, Some(0.5))], &t, &s);
+        ink.consume(&[reading(7, PenPhase::Up, 200.0, 40.0, None)], &t, &s);
+
+        assert_eq!(ink.stroke_count(), 0, "the tap leaves no dot behind the bar");
+        assert!(ink.is_blank());
+        assert_eq!(
+            ink.stats().off_paper,
+            0,
+            "it is the bar and not the desk: nothing was off the page"
+        );
+
+        // The same nib, below the bar, is a pen again.
+        ink.consume(&[reading(7, PenPhase::Down, 200.0, 140.0, Some(0.5))], &t, &s);
+        ink.consume(&[reading(7, PenPhase::Up, 200.0, 140.0, None)], &t, &s);
+
+        assert_eq!(ink.stroke_count(), 1, "the page below the bar still takes ink");
+    }
+
+    /// A line that runs up behind the bar keeps the ink it has: only a `Down` on the bar is refused,
+    /// so no stroke is ever cut in two at a line the user cannot see.
+    #[test]
+    fn a_line_that_runs_up_behind_the_bar_keeps_its_ink() {
+        let mut ink = InkDocument::default();
+        let s = settings();
+        let t = barred(100.0);
+
+        ink.consume(&[reading(7, PenPhase::Down, 200.0, 140.0, Some(0.5))], &t, &s);
+        ink.consume(&[reading(7, PenPhase::Move, 200.0, 40.0, Some(0.5))], &t, &s);
+        ink.consume(&[reading(7, PenPhase::Up, 200.0, 20.0, None)], &t, &s);
+
+        assert_eq!(ink.stroke_count(), 1);
+        let stroke = &ink.finished()[0];
+        assert!(
+            stroke.bounds[1] < 100.0,
+            "the reading behind the bar is part of the line: {:?}",
+            stroke.bounds
+        );
+    }
+
+    /// The eraser is refused by the bar too: erasing a page behind a button is erasing a page the
+    /// user is not looking at.
+    #[test]
+    fn the_eraser_is_refused_by_the_bar_too() {
+        let mut ink = InkDocument::default();
+        let s = settings();
+        let t = barred(100.0);
+
+        // A line written up behind the bar, where a stroke to be erased has to be.
+        ink.consume(&[reading(7, PenPhase::Down, 200.0, 140.0, Some(0.5))], &t, &s);
+        ink.consume(&[reading(7, PenPhase::Up, 200.0, 20.0, None)], &t, &s);
+        assert_eq!(ink.stroke_count(), 1);
+
+        // The eraser nib comes down on the bar, over the line the bar is hiding.
+        let mut eraser = reading(7, PenPhase::Down, 200.0, 60.0, None);
+        eraser.eraser = true;
+        ink.consume(&[eraser], &t, &s);
+
+        assert_eq!(ink.stroke_count(), 1, "the stroke behind the bar is still there");
+        assert_eq!(ink.stats().erased_strokes, 0);
+    }
+
+    /// The bar's line is the window's, in logical pixels: a reading is measured against it whatever
+    /// the panel's scale factor is, and a window with no bar refuses nothing at all.
+    #[test]
+    fn the_bar_is_a_line_in_the_window() {
+        let scaled = InkTransform {
+            scale: 2.0,
+            ..barred(100.0)
+        };
+
+        assert!(scaled.on_bar(200.0), "200 physical pixels is 100 logical");
+        assert!(!scaled.on_bar(210.0), "and the pixel below the line is not");
+        assert!(
+            !InkTransform::identity().on_bar(0.0),
+            "no bar refuses nothing, not even the top pixel"
         );
     }
 

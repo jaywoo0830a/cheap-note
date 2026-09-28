@@ -9,6 +9,11 @@
 //! stroke would have to be offset by its height — and that offset would have to be captured
 //! from a layout callback, which is exactly the kind of coupling this avoids.
 //!
+//! The overlay costs the pen one number: where the bar ends (see [`NoteApp::bar_edge`]). A reading
+//! that lands on the bar is a press on a control rather than ink, so that line has to be the bar's
+//! *real* bottom edge — observed from the frame, since only the toolkit knows how the bar wrapped —
+//! while no ink point is ever *moved* by the bar's existence, which is the offset this design avoids.
+//!
 //! ## The frame loop
 //!
 //! Nothing here polls for pen input. The pen thread pushes readings into a queue, and an async task
@@ -55,8 +60,10 @@
 //! loads the page that was open and the note's page list, and every other page is read the moment it
 //! is turned to. A thousand-page note opens as fast as a one-page note.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -177,6 +184,11 @@ const BAR_MARGIN: f32 = 12.0;
 /// may have wrapped — and it errs upward deliberately: being wrong upward leaves a strip of sheet
 /// still showing the pointer (a small surprise), while being wrong downward would leave part of the
 /// bar with no cursor at all, and the pen is how those controls get clicked.
+///
+/// Ink is not asked that favour, which is why it does not use this number: a reading refused in a
+/// strip of page *below* the bar is a pen that does not write where the user can see it. The rule
+/// that keeps ink off the bar uses the bar's own edge, as the frame laid it out — see
+/// [`NoteApp::bar_edge`].
 const BAR_HEIGHT: f32 = 148.0;
 
 /// How often the status line is rebuilt at most.
@@ -331,12 +343,16 @@ impl Sheet {
     ///
     /// The paper travels with it: the pump has to be able to refuse a reading that landed on the desk
     /// beside the page, and the paper's edges are what "beside" means (see [`InkTransform::on_paper`]).
-    fn transform(&self, scale: f32) -> InkTransform {
+    /// `bar` travels with it because it answers the same question asked of the interface: it is where
+    /// the bar ends, and a reading above it is a press on a control rather than ink (see
+    /// [`InkTransform::on_bar`]).
+    fn transform(&self, scale: f32, bar: f32) -> InkTransform {
         InkTransform {
             scale,
             zoom: self.zoom,
             origin: self.origin,
             paper: self.paper,
+            bar,
         }
     }
 
@@ -429,6 +445,22 @@ pub struct NoteApp {
     view: Viewport,
     /// The sheet as the last frame drew it.
     sheet: Sheet,
+    /// The bar's bottom edge, in window logical pixels, as the last frame laid it out.
+    ///
+    /// A measurement rather than a constant — unlike [`BAR_HEIGHT`], which is the same edge
+    /// *estimated* for the cursor's sake — because the ink rule cannot be given the benefit of the
+    /// doubt that the estimate takes: refusing a reading in a strip of page below the bar is a pen
+    /// that does not write where the user can see it. The bar's real height is the toolkit's
+    /// business, not this file's: its second row wraps when the window is narrow, so it is a
+    /// different number in a different window.
+    ///
+    /// Written during prepaint by the one element that knows where the bar ended (see
+    /// [`Self::top_bar`]) into a cell shared with that closure, and read by the pump, which has no
+    /// window to ask — the same arrangement, and for the same reason, as [`Self::sheet`].
+    ///
+    /// `None` until a frame has laid the bar out: nothing is refused on the strength of a
+    /// measurement that has not been made.
+    bar_bottom: Rc<Cell<Option<f32>>>,
     /// What every hot path costs, shared with the paint callback.
     timings: Arc<Timings>,
     /// When the pump last woke, for the gap it reports against its own interval.
@@ -592,6 +624,7 @@ impl NoteApp {
             scale: window.scale_factor(),
             view,
             sheet: Sheet::default(),
+            bar_bottom: Rc::new(Cell::new(None)),
             timings: Arc::new(Timings::default()),
             last_pump: None,
             pending_pdf: None,
@@ -836,10 +869,26 @@ impl NoteApp {
     }
 
 
+    /// How far down the window the bar reaches, in logical pixels: the line above which a reading
+    /// belongs to a control and below which it belongs to the page.
+    ///
+    /// `0.0` — a line that refuses nothing — when the bar is hidden, and before any frame has laid
+    /// it out: a window with no bar in front of the page has no such line, and neither has one whose
+    /// bar is still only a plan.
+    fn bar_edge(&self) -> f32 {
+        if !self.settings.show_toolbar {
+            return 0.0;
+        }
+
+        self.bar_bottom.get().unwrap_or(0.0)
+    }
+
     /// Reads a batch of readings into the ink model, timed.
     ///
     /// The transform comes from the last frame's sheet rather than from the window: a reading
-    /// belongs on the sheet the user was looking at when the nib moved.
+    /// belongs on the sheet the user was looking at when the nib moved. The bar's edge travels with
+    /// it for the same reason, and it is what keeps a tap on the bar from landing on the page behind
+    /// it (see [`Self::bar_edge`] and [`InkTransform::on_bar`]).
     fn consume_ink(&mut self, samples: &[pen_windows::PenSample]) -> bool {
         // The pen is not a pen while something is in front of the sheet: a name being typed must not
         // leave a line across the page behind the field, and the list of recent notes is drawn over a
@@ -848,7 +897,7 @@ impl NoteApp {
             return false;
         }
 
-        let transform = self.sheet.transform(self.scale);
+        let transform = self.sheet.transform(self.scale, self.bar_edge());
         let _timed = measure(&self.timings.ink);
 
         self.ink.consume(samples, &transform, &self.settings)
@@ -2579,9 +2628,16 @@ impl NoteApp {
     /// the sheet's size, its ruling, and the two colours. The bar floats for the reason the module
     /// docs give (an overlay needs no offset arithmetic for the pen), and it is rounded and lifted
     /// off the desk because that is what makes the sheet underneath read as paper.
+    ///
+    /// It also *reports where it ended*, which is the one number the overlay costs the pen: a mark
+    /// pinned to its bottom edge, whose bounds are the bar's own footprint as this frame laid it out.
+    /// See [`Self::bar_edge`].
     fn top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (surface, hairline) = (theme.title_bar, theme.title_bar_border);
+
+        // The mark below writes through this; the pump reads it later, with no window to ask.
+        let bar_bottom = Rc::clone(&self.bar_bottom);
 
         // The width comes from a full-width box with a margin's worth of padding, not from setting
         // both insets on the bar itself: an absolutely positioned element with a left *and* a right
@@ -2593,6 +2649,19 @@ impl NoteApp {
             .left_0()
             .w_full()
             .px(px(BAR_MARGIN))
+            // A zero-height box on the bar's own bottom edge — the edge is what it is pinned to, so
+            // its bounds are right whatever the bar's height turned out to be, and a bar that wraps
+            // into three rows reports the third row's bottom rather than a guess at it. Paints
+            // nothing, takes no pointer, and is out of the layout: it exists to be measured.
+            .child(
+                canvas(
+                    move |bounds, _, _| bar_bottom.set(Some(f32::from(bounds.bottom()))),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .bottom_0()
+                .h_0(),
+            )
             .child(
                 div()
                     .flex()

@@ -1,3 +1,5 @@
 target
 vendor
 cheap-note.settings.json
+*.txt
+*.log

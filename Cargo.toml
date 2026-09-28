@@ -16,7 +16,9 @@ gpui-kit = "=0.6.6"
 # pinned to the 0.2.0 git tag requested by the project.
 pen-windows = { git = "https://github.com/jaywoo0830a/pen-windows", tag = "0.2.0", features = ["window-handle"] }
 
-# PDF: Pdfium, loaded at run time from `vendor/lib/pdfium.dll`.
+# PDF: Pdfium, loaded at run time from `vendor/lib/pdfium.dll` — which `build.rs` copies next to the
+# executable a build produces, so that a release build is a pair of files rather than a path that
+# works only when the program is started from the project root. See `vendor/README.md`.
 #
 # The app resolves the handful of C entry points it calls itself — see `src/pdfium.rs` — because it
 # needs the *progressive* render (`IFSDK_PAUSE`), which `pdfium-render` does not surface, and because

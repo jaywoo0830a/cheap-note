@@ -23,6 +23,22 @@
 //! release one. The header in the repository is the authority; a binding generated for another
 //! Pdfium version is not.
 //!
+//! ## Where the library comes from, and where it is looked for
+//!
+//! The repository does not carry Pdfium: it is downloaded into `vendor/` (see `vendor/README.md`), and
+//! `/vendor` is ignored by git. A build copies `vendor/lib/*.dll` next to the executable it produces
+//! (`build.rs`), and that is the first place this module looks — so a release build is a *pair* of
+//! files that can be started from anywhere, or carried to another machine, and PDFs open.
+//!
+//! The rest of the search is for the arrangements a developer has instead: a `vendor/lib` under the
+//! working directory (a `cargo run` from the project root), or beside the executable's own directory
+//! and the few above it (an executable started from `target/release`, which is how a release build is
+//! normally started — and the arrangement that used to fail to find the library at all).
+//!
+//! A *fresh clone* has none of this, and that is a state the app is built for: it starts, draws,
+//! writes ink, and refuses to open a PDF with a message naming where the library belongs rather than
+//! crashing. See [`AppError::PdfiumLibrary`].
+//!
 //! ## Why documents are always opened from memory
 //!
 //! `FPDF_LoadDocument` takes a path that Pdfium interprets itself, which is a different (and less
@@ -57,7 +73,7 @@
 
 
 use std::ffi::{c_char, c_int, c_uint, c_void, CString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -263,9 +279,10 @@ fn open_library() -> Result<Library> {
     use windows::Win32::System::LibraryLoader::LoadLibraryW;
     use windows::core::PCWSTR;
 
+    let candidates = library_candidates();
     let mut tried: Vec<String> = Vec::new();
 
-    for directory in library_candidates() {
+    for directory in &candidates {
         let candidate = directory.join(LIBRARY_NAME);
         if !candidate.is_file() {
             continue;
@@ -284,8 +301,16 @@ fn open_library() -> Result<Library> {
     }
 
     Err(AppError::PdfiumLibrary(if tried.is_empty() {
+        // What was looked *in* rather than only what was found: a missing library is fixed by putting
+        // it in one of these places, and this message is what a person has to work from.
         format!(
-            "{LIBRARY_NAME} was not found next to the executable, in the working directory, or in vendor/lib"
+            "{LIBRARY_NAME} was not found. It belongs next to the executable ({}) or in a vendor/lib \
+             beside it, the working directory, or a project it was built in — see vendor/README.md",
+            candidates
+                .first()
+                .map_or_else(|| String::from("an unknown directory"), |directory| directory
+                    .display()
+                    .to_string())
         )
     } else {
         tried.join("; ")
@@ -302,20 +327,40 @@ fn open_library() -> Result<Library> {
 
 /// Where the app looks for the shared library, nearest first.
 fn library_candidates() -> Vec<PathBuf> {
+    let executable = std::env::current_exe().ok();
+    let working_directory = std::env::current_dir().ok();
+
+    candidates_for(executable.as_deref(), working_directory.as_deref())
+}
+
+/// The places a library is looked for, given the two things that say where this process is.
+///
+/// Split out from the search so it can be tested: what is worth pinning is not that a running process
+/// knows its own path, but that the layout of a build tree leads the search back to the repository's
+/// own `vendor/lib` (see the tests at the foot of this module).
+///
+/// The order is what makes it work. The executable's **own directory** is first, because a build puts
+/// the library there and two files that belong together are the whole of what a release build ships;
+/// then the few directories **above** it, which is where a build tree keeps the repository's copy; and
+/// then the **working directory**, which is what a `cargo run` from the project root has.
+fn candidates_for(executable: Option<&Path>, working_directory: Option<&Path>) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(directory) = executable.parent() {
-            candidates.push(directory.to_path_buf());
+    if let Some(directory) = executable.and_then(Path::parent) {
+        candidates.push(directory.to_path_buf());
+
+        // `target/release`, `target/debug` and `target/debug/deps` are two or three directories below
+        // the project root, which is where `vendor/lib` is.
+        for ancestor in directory.ancestors().skip(1).take(4) {
+            candidates.push(ancestor.join("vendor").join("lib"));
+            candidates.push(ancestor.join("vendor"));
         }
     }
 
-    if let Ok(working_directory) = std::env::current_dir() {
-        // The repository ships the library under `vendor/lib`, which is where a `cargo run` from
-        // the project root finds it.
+    if let Some(working_directory) = working_directory {
         candidates.push(working_directory.join("vendor").join("lib"));
         candidates.push(working_directory.join("vendor"));
-        candidates.push(working_directory);
+        candidates.push(working_directory.to_path_buf());
     }
 
     candidates
@@ -351,6 +396,85 @@ unsafe fn resolve<T: Copy>(_library: Library, name: &str) -> Result<T> {
     Err(AppError::PdfiumLibrary(format!(
         "{name} cannot be resolved without the Windows library"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The project root the tests pretend to have been built in. Nothing is read from it: what is
+    /// being pinned is which directories a *shape* of build tree leads the search to.
+    const ROOT: &str = "C:/projects/cheap-note";
+
+    /// A release executable finds the repository's own library — which is where a release build is
+    /// normally started from, and what it used to fail to find.
+    ///
+    /// The regression in full: `target/release/cheap-note.exe`, double-clicked, is started *by* its own
+    /// directory and has the project root two directories above it, with `pdfium.dll` in `vendor/lib`
+    /// there. The search looked next to the executable and in the working directory — which for that
+    /// launch *is* the executable's directory — so the one arrangement a release build is used in was
+    /// the one arrangement that could not find the library.
+    #[test]
+    fn a_release_executable_finds_the_repositorys_library() {
+        let root = Path::new(ROOT);
+        let release = root.join("target").join("release");
+        let candidates = candidates_for(Some(&release.join("cheap-note.exe")), None);
+
+        assert_eq!(
+            candidates.first(),
+            Some(&release),
+            "next to the executable comes first: that is where a build puts the library"
+        );
+        assert!(
+            candidates.contains(&root.join("vendor").join("lib")),
+            "and the repository's copy is found by walking up from it: {candidates:?}"
+        );
+    }
+
+    /// The same for the two executables a development tree has: the debug one, and the one the tests
+    /// themselves are run from, which sits a directory deeper.
+    #[test]
+    fn a_debug_executable_and_a_test_executable_find_it_too() {
+        let root = Path::new(ROOT);
+        let wanted = root.join("vendor").join("lib");
+
+        for executable in [
+            root.join("target").join("debug").join("cheap-note.exe"),
+            root.join("target")
+                .join("debug")
+                .join("deps")
+                .join("cheap_note-1a2b3c4d.exe"),
+        ] {
+            let candidates = candidates_for(Some(&executable), None);
+
+            assert!(
+                candidates.contains(&wanted),
+                "{}: {candidates:?}",
+                executable.display()
+            );
+        }
+    }
+
+    /// The working directory is what a `cargo run` from the project root has — and a process that knows
+    /// neither its own path nor a working directory is told so rather than handed a guess.
+    #[test]
+    fn the_working_directory_is_searched_with_nothing_better_to_go_on() {
+        let root = Path::new(ROOT);
+
+        assert!(
+            candidates_for(None, None).is_empty(),
+            "nowhere to look, and no pretending otherwise"
+        );
+        assert_eq!(
+            candidates_for(None, Some(root)),
+            vec![
+                root.join("vendor").join("lib"),
+                root.join("vendor"),
+                root.to_path_buf(),
+            ],
+            "the working directory's own vendor/lib is what a run from the project root finds"
+        );
+    }
 }
 
 

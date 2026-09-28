@@ -23,9 +23,10 @@
 //! * `pump` is the gap between two wakes of the ink pump — that is, how often the pen handed the app
 //!   a batch. It is the number that says whether the ink is reaching the screen at the rate the pen
 //!   reports it; it is no longer compared with a timer the app set, because there is no timer.
-//! * `ink`, `render`, `paint` and `pdf` split the per-frame work. `paint` growing with the amount
-//!   of ink on the page is the shape of the immediate-mode renderer, and the counters beside it
-//!   say how much of that ink was actually on screen.
+//! * `canvas` is the whole of a frame's canvas: describing it for its own renderer, counting what it
+//!   holds, and the layer drawing it. It is the number that grows with the amount of ink on the page,
+//!   and the one that says whether the layer is keeping its promise — a page of 316 strokes must cost
+//!   what a page of 29 does (see `src/ink_layer/render.rs`).
 //! * A [`Session`] is the other half of that, and the half a live line cannot give: the numbers above
 //!   describe the frame that is happening, and a session describes a stretch of frames a person chose
 //!   to measure — the fastest, the slowest and the mean of the wait between them, and of the pen's own

@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::RenderImage;
 
 use crate::error::{AppError, Result};
-use crate::pdfium::{Document, RenderJob};
+use crate::pdfium::{Document, OutlineEntry, RenderJob};
 
 /// What one slice of a render did, re-exported because it is part of this module's own API.
 pub use crate::pdfium::Progress;
@@ -256,6 +256,12 @@ pub struct PdfDocumentView {
     rotations: Vec<u8>,
     /// What rasterising has cost and what the cache has saved.
     stats: PdfStats,
+    /// The document's own table of contents, read once when it was opened.
+    ///
+    /// Held rather than asked for: it belongs to the document rather than to any page of it, it is a
+    /// handful of kilobytes at worst, and the app asks for it while drawing a *screen* (see
+    /// [`crate::outline`]) — where a walk into Pdfium would be work done on the wrong side of a frame.
+    outline: Vec<OutlineEntry>,
 }
 
 /// How much of a page the pump renders per wake, when the pen is quiet.
@@ -285,6 +291,7 @@ impl Default for PdfDocumentView {
             budget: CACHE_BUDGET_BYTES,
             rotations: Vec::new(),
             stats: PdfStats::default(),
+            outline: Vec::new(),
         }
     }
 }
@@ -312,6 +319,16 @@ impl PdfDocumentView {
         // A new document: the keys of the old one must never match this one's bitmaps.
         view.document_id = 1;
 
+        // The document's own table of contents, read here rather than when the app asks for it: it is
+        // a walk of a few dozen titles and destinations, it needs no page handle, and the moment the
+        // app asks is a frame that is drawing a screen (see [`crate::outline`]). A document without one
+        // answers with nothing, which is what most documents do.
+        view.outline = view
+            .document
+            .as_ref()
+            .map(|document| document.outline())
+            .unwrap_or_default();
+
         // Render the first page now, so an open PDF shows something other than a blank page. This
         // is the one blocking render left in the app, and it is deliberate: the frame that follows
         // an open has nothing to show until it has happened.
@@ -338,6 +355,23 @@ impl PdfDocumentView {
             .as_ref()
             .map(|document| document.name().to_string())
             .unwrap_or_else(|| String::from("untitled page"))
+    }
+
+    /// The document's own table of contents, as it was read when the document was opened.
+    ///
+    /// A tree in the document's own order, each entry carrying the page of *this* document it opens — no
+    /// page handle, no rasterising, nothing that depends on a render having finished. Empty for a
+    /// document that has none, which is most documents and is not a failure.
+    pub fn outline(&self) -> &[OutlineEntry] {
+        &self.outline
+    }
+
+    /// Whether the document carries a table of contents at all.
+    ///
+    /// What the bar's button asks before offering to open it: an offer to open a screen that says "this
+    /// document has no contents" is an offer that was better off not made.
+    pub fn has_outline(&self) -> bool {
+        !self.outline.is_empty()
     }
 
     /// The page's own size in PDF points, without rendering it.
@@ -753,6 +787,75 @@ mod tests {
         out.into_bytes()
     }
 
+    /// A three-page PDF that carries an outline, built object by object.
+    ///
+    /// The outline is the document's *own* table of contents: a tree of titled destinations. This fixture
+    /// has the shapes a real one has, because each is a different branch of the walk that reads it — two
+    /// top-level chapters, a section nested under one of them, a destination written as a page reference and
+    /// another written as a *name*, a title written as UTF-16 with a Korean character in it, and an entry
+    /// that links *out* of the document instead of opening a page.
+    ///
+    /// The cross-reference offsets are real, as in [`a_page_with_rectangles`]: a table of contents that
+    /// Pdfium had to repair would let a broken fixture pass for the wrong reason.
+    fn a_document_with_contents() -> Vec<u8> {
+        let objects = [
+            // 1: the catalog, which is what says the document has an outline at all — and which carries
+            // the name tree the outline's named destination is looked up in.
+            String::from(
+                "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R /PageMode /UseOutlines \
+                 /Names << /Dests 11 0 R >> >>",
+            ),
+            // 2: three pages, in the order the outline's page numbers are counted in.
+            String::from("<< /Type /Pages /Kids [3 0 R 5 0 R 10 0 R] /Count 3 >>"),
+            String::from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>"),
+            // 4: the outline's root: the two chapters below it, and how many entries there are.
+            String::from("<< /Type /Outlines /First 6 0 R /Last 7 0 R /Count 4 >>"),
+            String::from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>"),
+            // 6: a chapter that names its page, with a title written as UTF-16 — "1장".
+            String::from("<< /Title <FEFF0031C7A5> /Parent 4 0 R /Dest [3 0 R /Fit] /Next 7 0 R >>"),
+            // 7: a chapter that has a section under it, where the section is a *later* page.
+            String::from(
+                "<< /Title (Chapter two) /Parent 4 0 R /Dest [5 0 R /Fit] /Prev 6 0 R \
+                 /First 8 0 R /Last 9 0 R /Count 2 >>",
+            ),
+            // 8: a section, linked forward to the entry beside it — children are a chain like their parents
+            // are, and Pdfium walks *that* chain rather than the `Last` pointer. Its destination is a
+            // *name*, which is how a table of contents written by a word processor usually points at a page.
+            String::from(
+                "<< /Title (Two, part one) /Parent 7 0 R /Dest (chapter three) /Next 9 0 R >>",
+            ),
+            // 9: no destination of its own — an action that leaves the document.
+            String::from(
+                "<< /Title (An online appendix) /Parent 7 0 R /Prev 8 0 R \
+                 /A << /S /URI /URI (https://example.com/appendix) >> >>",
+            ),
+            String::from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>"),
+            // 11: the name tree that `chapter three` is looked up in.
+            String::from("<< /Names [(chapter three) [10 0 R /Fit]] >>"),
+        ];
+
+        let mut out = String::from("%PDF-1.7\n");
+        let mut offsets = Vec::new();
+
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+        }
+
+        let xref = out.len();
+        out.push_str(&format!("xref\n0 {}\n", objects.len() + 1));
+        out.push_str("0000000000 65535 f \n");
+        for offset in &offsets {
+            out.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        out.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        ));
+
+        out.into_bytes()
+    }
+
     /// The right to use Pdfium, for a test that rasterises.
     ///
     /// One process, one Pdfium library, and `cargo test` runs tests on parallel threads: Pdfium is
@@ -774,22 +877,42 @@ mod tests {
     /// with what they are testing. The name carries the process id, so two test runs at once do not
     /// tread on each other either.
     fn a_one_page_pdf() -> Option<PathBuf> {
-        static FIXTURE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        written_once("page", a_page_with_rectangles)
+    }
 
-        FIXTURE
-            .get_or_init(|| {
-                if !crate::pdfium::available() {
-                    return None;
-                }
+    /// The document with an outline on disk, or `None` when Pdfium is not available.
+    fn the_contents_pdf() -> Option<PathBuf> {
+        written_once("contents", a_document_with_contents)
+    }
 
-                let path = std::env::temp_dir().join(format!(
-                    "cheap-note-fixture-{}.pdf",
-                    std::process::id()
-                ));
-                std::fs::write(&path, a_page_with_rectangles()).ok()?;
-                Some(path)
-            })
-            .clone()
+    /// A fixture written to the temp directory the first time it is asked for, and kept after that.
+    ///
+    /// One mechanism for every fixture, so that a test which needs a *document* and a test which needs a
+    /// table of contents do not each grow their own `OnceLock`: the name is the key, and a second call
+    /// with the same name answers with the file already written.
+    fn written_once(name: &str, build: fn() -> Vec<u8>) -> Option<PathBuf> {
+        static WRITTEN: std::sync::Mutex<Vec<(String, Option<PathBuf>)>> =
+            std::sync::Mutex::new(Vec::new());
+
+        // Pdfium missing is a state the suite is built for: a test that needs a document says so and
+        // returns, rather than failing for a reason the person running it cannot act on.
+        if !crate::pdfium::available() {
+            return None;
+        }
+
+        let mut written = WRITTEN.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some((_, path)) = written.iter().find(|(written, _)| written == name) {
+            return path.clone();
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "cheap-note-{name}-{}.pdf",
+            std::process::id()
+        ));
+
+        let path = std::fs::write(&path, build()).ok().map(|()| path);
+        written.push((name.to_string(), path.clone()));
+        path
     }
 
     /// The colour at one pixel of a rendered page, as `(blue, green, red, alpha)`.
@@ -1263,4 +1386,69 @@ mod tests {
         );
 
     }
+
+    /// A document's own table of contents is read as a tree, with the page each entry opens.
+    ///
+    /// This is the whole of what the outline is for: a chapter's title, where it is, and what is under
+    /// it. The fixture carries one of each shape a real contents has — a plain chapter, a chapter with a
+    /// section under it, a title that is not ASCII, and an entry that leaves the document — because each
+    /// is a different branch of the walk.
+    #[test]
+    fn a_documents_outline_is_read_with_its_pages() {
+        let _pdfium = exclusive();
+
+        let Some(path) = the_contents_pdf() else {
+            eprintln!("skipping: pdfium.dll is not available");
+            return;
+        };
+
+        let view = open_fixture(&path, 200).expect("the document opens");
+        assert_eq!(view.page_count(), 3);
+        assert!(view.has_outline(), "the fixture carries one");
+
+        let outline = view.outline();
+        assert_eq!(outline.len(), 2, "two top-level chapters");
+
+        assert_eq!(outline[0].title, "1장", "a title read out of UTF-16");
+        assert_eq!(outline[0].page, Some(0), "the chapter that opens the first page");
+        assert!(outline[0].children.is_empty(), "with nothing under it");
+
+        let second = &outline[1];
+        assert_eq!(second.title, "Chapter two");
+        assert_eq!(second.page, Some(1));
+        assert_eq!(second.children.len(), 2, "a section and a link, in that order");
+
+        assert_eq!(second.children[0].title, "Two, part one");
+        assert_eq!(
+            second.children[0].page,
+            Some(2),
+            "a destination written as a *name*, resolved through the document's name tree"
+        );
+
+        assert_eq!(second.children[1].title, "An online appendix");
+        assert_eq!(
+            second.children[1].page, None,
+            "an entry that links out of the document keeps its line and opens no page"
+        );
+    }
+
+    /// A document with no outline answers with nothing at all.
+    ///
+    /// The common case, and the one the app has to be able to tell apart from a document that has one:
+    /// the button that opens the contents is offered only when there is something to show.
+    #[test]
+    fn a_document_without_an_outline_has_none() {
+        let _pdfium = exclusive();
+
+        let Some(path) = a_one_page_pdf() else {
+            eprintln!("skipping: pdfium.dll is not available");
+            return;
+        };
+
+        let view = open_fixture(&path, 200).expect("the document opens");
+        assert!(!view.has_outline());
+        assert!(view.outline().is_empty());
+    }
+
 }
+

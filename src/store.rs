@@ -31,7 +31,16 @@
 //! chunks(id, page_id, seq, stroke_start, stroke_count, codec, raw_len, data, crc32)
 //! dirty_strokes(id, page_id, seq, data, created_at)
 //! meta(key, value)
+//! bookmarks(ord, created_at)
 //! ```
+//!
+//! **The one table that is not ink is `bookmarks`**: one row per page a person marked, keyed by that
+//! page's position in the note's reading order — the same number `pages.ord` is, and the same one the
+//! app shows in the page pill. Keying it by position is what makes a bookmark a *page* rather than a
+//! moment: inserting a page before a marked one renames the mark along with the page it is on, and
+//! deleting a page takes its mark with it (see [`NoteStore::insert_page`] and
+//! [`NoteStore::delete_page`], which do both in the same transaction as the shift). Nothing about the
+//! ink depends on it: a note whose bookmarks are all removed is a note whose ink is untouched.
 //!
 //! **Why `pages` has both `id` and `ord`.** `id` is an identity that never changes — it is what
 //! `chunks.page_id` points at, so it has to be stable — while `ord` is the page's position in the
@@ -311,6 +320,19 @@ CREATE INDEX IF NOT EXISTS idx_dirty_page ON dirty_strokes(page_id, seq);
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+) STRICT;
+
+-- The pages a person marked, by their position in the note's reading order.
+--
+-- One row per marked page rather than a list in a `meta` row: a mark is a fact about a page, it is
+-- renamed by the same shift `pages.ord` gets, and a table is what lets the database answer which
+-- pages are marked, in reading order, without anything decoding a blob. `created_at` is not read by
+-- this build — it is there because a row that cannot say when it was written is a row that has to be
+-- rewritten to find out, and because a list of marks is the one place a person may later want the
+-- order they were made in.
+CREATE TABLE IF NOT EXISTS bookmarks (
+    ord        INTEGER PRIMARY KEY,
+    created_at INTEGER NOT NULL
 ) STRICT;
 
 CREATE VIEW IF NOT EXISTS page_strokes AS
@@ -641,19 +663,28 @@ impl NoteStore {
     /// Two statements through the offset, because `ord` is unique: see [`SHIFT`]. Nothing else has
     /// to move — `chunks` and `dirty_strokes` point at `pages.id`, which does not change — which is
     /// the whole reason a page has an identity *and* a position.
+    ///
+    /// The bookmarks move with the pages, in the same transaction and by the same two statements: a
+    /// mark names a page's *position*, so a page inserted before a marked one puts that mark one
+    /// place further along. The alternative — a mark left behind at the number it was made at — is a
+    /// bookmark that opens a page the person never marked, which is worse than no bookmark at all.
+    /// The ink needs none of this because it is keyed by `pages.id`; a mark is a position, so it is
+    /// renamed the way every position after the insertion is.
     pub fn insert_page(&mut self, at: u64) -> Result<()> {
         let tx = self.begin()?;
 
-        tx.execute(
-            "UPDATE pages SET ord = ord + ?1 WHERE ord >= ?2",
-            params![SHIFT, at as i64],
-        )
-        .map_err(sql)?;
-        tx.execute(
-            "UPDATE pages SET ord = ord - ?1 WHERE ord >= ?2",
-            params![SHIFT - 1, SHIFT + at as i64],
-        )
-        .map_err(sql)?;
+        for table in ["pages", "bookmarks"] {
+            tx.execute(
+                &format!("UPDATE {table} SET ord = ord + ?1 WHERE ord >= ?2"),
+                params![SHIFT, at as i64],
+            )
+            .map_err(sql)?;
+            tx.execute(
+                &format!("UPDATE {table} SET ord = ord - ?1 WHERE ord >= ?2"),
+                params![SHIFT - 1, SHIFT + at as i64],
+            )
+            .map_err(sql)?;
+        }
 
         tx.commit().map_err(sql)?;
         Ok(())
@@ -663,24 +694,84 @@ impl NoteStore {
     ///
     /// The ink goes with the page: a deleted page's writing has nowhere to be shown. The cascade on
     /// `chunks` and `dirty_strokes` is what makes that one statement rather than three.
+    ///
+    /// A bookmark on that page goes too, and the marks after it close the gap exactly as the pages do:
+    /// what is being deleted is a *page*, and a mark for the page that used to be here would be a mark
+    /// that opens its neighbour.
     pub fn delete_page(&mut self, at: u64) -> Result<()> {
         let tx = self.begin()?;
 
         tx.execute("DELETE FROM pages WHERE ord = ?1", params![at as i64])
             .map_err(sql)?;
-        tx.execute(
-            "UPDATE pages SET ord = ord + ?1 WHERE ord > ?2",
-            params![SHIFT, at as i64],
-        )
-        .map_err(sql)?;
-        tx.execute(
-            "UPDATE pages SET ord = ord - ?1 WHERE ord >= ?2",
-            params![SHIFT + 1, SHIFT + at as i64],
-        )
-        .map_err(sql)?;
+        tx.execute("DELETE FROM bookmarks WHERE ord = ?1", params![at as i64])
+            .map_err(sql)?;
+
+        for table in ["pages", "bookmarks"] {
+            tx.execute(
+                &format!("UPDATE {table} SET ord = ord + ?1 WHERE ord > ?2"),
+                params![SHIFT, at as i64],
+            )
+            .map_err(sql)?;
+            tx.execute(
+                &format!("UPDATE {table} SET ord = ord - ?1 WHERE ord >= ?2"),
+                params![SHIFT + 1, SHIFT + at as i64],
+            )
+            .map_err(sql)?;
+        }
 
         tx.commit().map_err(sql)?;
         Ok(())
+    }
+
+    /// Marks the page at `ord` with a bookmark, or takes the mark off it.
+    ///
+    /// Marking twice is marking once: the row is inserted only if the page has none, so a command
+    /// that arrives twice — two clicks, a key as well as a button — cannot make a second mark or
+    /// rewrite the first one's time. Taking a mark off a page that has none is likewise nothing rather
+    /// than an error: the state that was asked for is the state that is there.
+    ///
+    /// The page needs no ink for this: a mark is a fact about a page of the note, and a blank page
+    /// somebody marked is a page of the note like any other (this is why `bookmarks` is not keyed by
+    /// `pages.id`, which only exists once a page holds ink).
+    pub fn set_bookmark(&mut self, ord: u64, mark: bool) -> Result<()> {
+        if mark {
+            self.conn
+                .execute(
+                    "INSERT INTO bookmarks (ord, created_at) VALUES (?1, ?2)
+                     ON CONFLICT(ord) DO NOTHING",
+                    params![ord as i64, now_millis()],
+                )
+                .map_err(sql)?;
+        } else {
+            self.conn
+                .execute("DELETE FROM bookmarks WHERE ord = ?1", params![ord as i64])
+                .map_err(sql)?;
+        }
+
+        Ok(())
+    }
+
+    /// The marked pages, in the note's reading order.
+    ///
+    /// The order is the database's rather than the list's: marks made in any order come back in the
+    /// order the pages are read in, which is the only order a bookmark list can be useful in, and
+    /// which means there is no order of its own for the app to store or repair.
+    pub fn bookmarks(&self) -> Result<Vec<u64>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT ord FROM bookmarks ORDER BY ord")
+            .map_err(sql)?;
+
+        let rows = statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(sql)?;
+
+        let mut marks = Vec::new();
+        for row in rows {
+            marks.push(row.map_err(sql)? as u64);
+        }
+
+        Ok(marks)
     }
 
     /// Folds the write-ahead log back into the note file.
@@ -1567,6 +1658,126 @@ mod tests {
         store.delete_page(1).expect("a page is deleted");
         assert_eq!(store.pages().expect("pages"), vec![0, 1, 2]);
         assert_eq!(first_points(&store.load(1).expect("a page")), vec![100.0]);
+
+        cleanup(&path);
+    }
+
+    /// A marked page is marked, and the marks come back in reading order however they were made.
+    ///
+    /// The order is the one thing a bookmark list cannot be allowed to get wrong: a list in the order
+    /// the marks were made would be a list that has to be read rather than used. It is also the
+    /// database's answer rather than the app's, so a note carried to another machine lists the same
+    /// pages in the same order without anything being stored about it.
+    #[test]
+    fn the_marked_pages_come_back_in_reading_order() {
+        let (mut store, path) = store_for("bookmarks");
+
+        store.set_bookmark(2, true).expect("a mark");
+        store.set_bookmark(0, true).expect("a mark");
+        store.set_bookmark(1, true).expect("a mark");
+
+        assert_eq!(store.bookmarks().expect("marks"), vec![0, 1, 2]);
+        assert!(
+            store.pages().expect("pages").is_empty(),
+            "a mark is not ink: no page row is made for it"
+        );
+
+        // A mark is a row of the note rather than a fact about the session, so it is there when the
+        // note is opened again.
+        drop(store);
+        let reopened = NoteStore::open(&path).expect("the note opens again");
+        assert_eq!(reopened.bookmarks().expect("marks"), vec![0, 1, 2]);
+
+        cleanup(&path);
+    }
+
+    /// Marking twice is marking once, and taking a mark off a page that has none is nothing.
+    ///
+    /// The toggle is what the app's button and its keyboard binding both come through, and both can
+    /// arrive twice: a second mark on a page is impossible here rather than merely unlikely.
+    #[test]
+    fn a_page_is_marked_or_it_is_not() {
+        let (mut store, path) = store_for("bookmark-once");
+
+        store.set_bookmark(1, true).expect("a mark");
+        store.set_bookmark(1, true).expect("the same mark again");
+        assert_eq!(store.bookmarks().expect("marks"), vec![1]);
+
+        store.set_bookmark(1, false).expect("the mark goes");
+        store.set_bookmark(1, false).expect("the mark is already gone");
+        assert!(store.bookmarks().expect("marks").is_empty());
+
+        cleanup(&path);
+    }
+
+    /// A mark is on a *page*: inserting a page before it moves the mark along with that page.
+    ///
+    /// This is the whole reason a mark is stored by position and shifted by the same statements
+    /// `pages.ord` is: a mark left behind at the number it was made at would open some other page,
+    /// which is the one failure a bookmark must not have.
+    #[test]
+    fn a_mark_moves_when_a_page_is_inserted_before_it() {
+        let (mut store, path) = store_for("bookmark-insert");
+        store.set_bookmark(0, true).expect("a mark");
+        store.set_bookmark(2, true).expect("a mark");
+
+        store.insert_page(1).expect("a page is inserted");
+        assert_eq!(
+            store.bookmarks().expect("marks"),
+            vec![0, 3],
+            "the mark that was page 2 is page 3 now, and the mark before the insertion stays"
+        );
+
+        // An insertion *at* a mark's position puts the new page in front of the marked page, so the
+        // mark follows its page rather than sitting still on a number.
+        store.insert_page(0).expect("another page is inserted");
+        assert_eq!(store.bookmarks().expect("marks"), vec![1, 4]);
+
+        cleanup(&path);
+    }
+
+    /// Deleting a page takes its mark with it, and the marks after it close the gap.
+    #[test]
+    fn deleting_a_page_takes_its_mark_with_it() {
+        let (mut store, path) = store_for("bookmark-delete");
+        for page in 0..4 {
+            store.set_bookmark(page, true).expect("a mark");
+        }
+
+        store.delete_page(1).expect("a page is deleted");
+        assert_eq!(
+            store.bookmarks().expect("marks"),
+            vec![0, 1, 2],
+            "the deleted page's mark went with it and the rest closed the gap"
+        );
+
+        cleanup(&path);
+    }
+
+    /// A note written before the table existed gains it when it is opened.
+    ///
+    /// The table is added by the same `CREATE TABLE IF NOT EXISTS` batch every open already runs, so a
+    /// note that never had it is brought up to date by being opened — no migration, and no version
+    /// this build refuses. A note that has the table and is opened by a build that does not know it is
+    /// equally fine: the rows are not read, not written, and not deleted by the other build.
+    #[test]
+    fn an_older_note_gains_the_bookmarks_it_never_had() {
+        let (mut store, path) = store_for("bookmark-old");
+        store.set_bookmark(3, true).expect("a mark");
+        // What the file looks like to the build that wrote it before this table existed.
+        store.run("DROP TABLE bookmarks");
+        drop(store);
+
+        let mut reopened = NoteStore::open(&path).expect("the note still opens");
+        assert!(
+            reopened.bookmarks().expect("marks").is_empty(),
+            "the table comes back empty rather than as an error"
+        );
+
+        reopened
+            .set_bookmark(3, true)
+            .expect("a mark on the table that came back");
+        assert_eq!(reopened.bookmarks().expect("marks"), vec![3]);
 
         cleanup(&path);
     }

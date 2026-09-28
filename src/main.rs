@@ -29,6 +29,7 @@
 //! | [`system_cursor`] | hiding the system pointer while the pen is in range          |
 //! | [`pdf`]     | the Pdfium document, page rendering, and the page cache            |
 //! | [`pages`]   | what a note's pages are, and what each one shows                   |
+//! | [`bookmarks`] | the pages a note has marked, and the screen that lists them      |
 //! | [`pdfium`]  | Pdfium's own C API: documents, pages, and the sliced render        |
 //! | [`store`]   | the note's SQLite file: the schema, the batch write, the read path |
 //! | [`chunk`]   | a page of ink as one blob: SoA, varints, zstd, CRC32               |
@@ -61,6 +62,7 @@
 //! than a database read. A path on the command line opens that instead, and skips the list.
 
 mod app;
+mod bookmarks;
 mod canvas;
 mod chunk;
 mod cursor;

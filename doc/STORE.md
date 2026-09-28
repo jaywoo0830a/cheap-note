@@ -444,6 +444,11 @@ CREATE TABLE dirty_strokes (
 
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;  -- one row per fact: see §3
 
+CREATE TABLE bookmarks (               -- the pages a person marked: one row per marked page
+    ord        INTEGER PRIMARY KEY,    -- the same position `pages.ord` is, renamed with it
+    created_at INTEGER NOT NULL
+) STRICT;
+
 CREATE INDEX idx_chunks_page ON chunks(page_id, stroke_start);
 CREATE INDEX idx_dirty_page  ON dirty_strokes(page_id, seq);
 ```
@@ -451,6 +456,11 @@ CREATE INDEX idx_dirty_page  ON dirty_strokes(page_id, seq);
 `STRICT` means SQLite checks the declared type of every value, which is what keeps a `BLOB` column a
 `BLOB` column. `ON DELETE CASCADE` is why deleting a page is one statement: its chunks and dirty rows go
 with it.
+
+**`bookmarks` is the one table that is not ink.** A mark names a *page* by its position, so inserting a
+page in front of a marked one renames the mark together with `pages.ord`, and deleting a page deletes its
+mark. It arrives in an older note the way any table does — `CREATE TABLE IF NOT EXISTS` runs on every
+open — which is why this build's `user_version` is still `5` (§9), and why a note with marks opens anywhere.
 
 ### The pragmas, in the order they are applied
 

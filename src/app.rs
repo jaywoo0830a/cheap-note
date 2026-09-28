@@ -35,10 +35,13 @@
 //!
 //! ## The top bar, and why it can be turned off
 //!
-//! The status line holds counters that move on every reading, and text that changes is text GPUI
-//! has to re-shape and re-lay-out. Rebuilding it on every frame is what made the top of the
-//! window flicker while writing, so it is rebuilt on a slow clock instead (see [`status_due`]) and
-//! can be switched off entirely — as can the whole bar, which floats over the canvas.
+//! The status line holds counters that move on every reading, and text that changes is text GPUI has to
+//! re-shape and re-lay-out. Rebuilding it on every frame is what made the top of the window flicker
+//! while writing, so it is rebuilt when the user changes something — a key, a tool, a page — and never
+//! on a clock of its own. What needs a clock to be readable is a measurement, and that is a session a
+//! person starts and stops by hand (see [`crate::timing::Session`]): the fastest, the slowest and the
+//! mean of the wait between frames, over exactly the stretch they chose. The line can be switched off
+//! entirely — as can the whole bar, which floats over the canvas.
 //!
 //! ## The sheet
 //!
@@ -96,7 +99,7 @@ use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
 use crate::recent::{self, Recent};
 use crate::settings::{PenWeight, Settings};
 use crate::system_cursor::SystemCursor;
-use crate::timing::{measure, Timings};
+use crate::timing::{measure, Measurement, Timings};
 use crate::view::{Fit, Viewport};
 
 // The two commands a keyboard reaches that the bar also carries.
@@ -197,12 +200,13 @@ const BAR_MARGIN: f32 = 12.0;
 /// [`NoteApp::bar_edge`].
 const BAR_HEIGHT: f32 = 148.0;
 
-/// How often the status line is rebuilt at most.
+/// The key that starts and stops a measurement session.
 ///
-/// Four times a second: often enough that the numbers look live to a person reading them, rare
-/// enough that the text is identical across most frames and therefore costs nothing to draw. The
-/// line is the only text in the interface that changes on its own.
-const STATUS_INTERVAL: Duration = Duration::from_millis(250);
+/// Named once for the one place it is *said* — the line that reports on a session, which tells the
+/// reader how to stop it. The chord this app listens for is the same one and is matched by its letter in
+/// [`NoteApp::note_key_down`], where the control modifier is what separates it from the sheet's own
+/// unmodified keys.
+const MEASURE_KEY: &str = "Ctrl+M";
 
 /// How much of the window's width the status pill may take, as a fraction of it.
 ///
@@ -218,14 +222,6 @@ const STATUS_PILL_WIDTH: f32 = 0.6;
 /// control a person is reaching for is worse than one floating a row higher. The number is the page
 /// pill's own height plus [`BAR_MARGIN`], which is what "clear of it" comes to.
 const STATUS_LIFT: f32 = 40.0;
-
-/// Whether the status line is due to be rebuilt.
-///
-/// A free function rather than a method so the pacing can be tested without a window: this clock
-/// is the difference between a calm top bar and one that flickers.
-fn status_due(built_at: Instant, now: Instant) -> bool {
-    now.saturating_duration_since(built_at) >= STATUS_INTERVAL
-}
 
 /// How often the housekeeping pump wakes.
 ///
@@ -330,8 +326,8 @@ fn file_stem(title: &str) -> String {
 
 /// Whether the pen has been quiet long enough to spend a rasterisation on it.
 ///
-/// A free function for the same reason [`status_due`] is: it is a decision, and decisions that can
-/// be tested without a window are worth testing without one.
+/// A free function for the same reason the other decisions in this file are: it is a decision, and
+/// decisions that can be tested without a window are worth testing without one.
 fn pdf_render_due(last_ink_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(last_ink_at) >= PDF_QUIET_INTERVAL
 }
@@ -519,13 +515,30 @@ pub struct NoteApp {
     /// Held here rather than rebuilt in the paint callback: the callback runs once per frame and
     /// must not do geometry work.
     ruling: Ruling,
-    /// The status line as last composed, and when.
+    /// The status line as last composed.
     ///
-    /// Cached so that most frames draw the *same* text. A line rebuilt every frame is a line the
-    /// text system has to shape and lay out every frame, which is what flickers.
+    /// Cached so that most frames draw the *same* text. A line rebuilt every frame is a line the text
+    /// system has to shape and lay out every frame, which is what flickers — so it is rebuilt when the
+    /// user changes something that the line reports, and never on a clock (see the module docs).
     status: String,
-    /// When [`Self::status`] was last composed, for [`status_due`].
-    status_at: Instant,
+    /// When the measurement session was started, if one is running.
+    ///
+    /// The app owns the clock rather than the counters, because "how long did I measure for" is wall
+    /// clock rather than accumulated nanoseconds — and because a session that is stopped and started
+    /// again has nothing to keep in the counters at all. `None` means idle or stopped.
+    session_at: Option<Instant>,
+    /// When the last frame was drawn, for the interval between frames.
+    ///
+    /// A frame's own duration is measured already (`ink`, `render`, `paint`), and what those leave out
+    /// is where a stutter lives: the wait between one frame ending and the next arriving, which is the
+    /// toolkit's scene, its upload and its present. That interval is what a session measures — see
+    /// [`crate::timing::Session`].
+    last_frame_at: Option<Instant>,
+    /// What the last session measured, held on the line until another one replaces it.
+    ///
+    /// Held rather than shown once: a result that vanished on the next key press would be a number
+    /// nobody could read, and reading it afterwards is the whole point of stopping the session.
+    measured: Option<Measurement>,
     /// The last thing worth telling the user.
     message: String,
     /// What the note on the sheet is called — its own name, or one the list would derive.
@@ -699,7 +712,9 @@ impl NoteApp {
             last_ink_at: Instant::now(),
             ruling: Ruling::default(),
             status: String::new(),
-            status_at: Instant::now(),
+            session_at: None,
+            last_frame_at: None,
+            measured: None,
             message,
             note_title: String::new(),
             window_title: String::new(),
@@ -855,6 +870,9 @@ impl NoteApp {
                 // own delay — the digitizer to the window, which nothing here can change — this
                 // is the whole path from the pen to the frame that shows it.
                 app.timings.pen_latency.record(batch.waited);
+                // The other half of what a session measures: the same wait, folded into the session
+                // rather than into the running mean, so a stretch of writing can be reported on its own.
+                app.timings.session.record_response(batch.waited);
 
                 // The ink is the frame's business, and it is now the only part of a reading that is:
                 // a pen in range but not touching lays none, and the ghost cursor follows it without
@@ -881,9 +899,10 @@ impl NoteApp {
                     return;
                 }
 
-                // The counters have moved too, but the line is rebuilt on a slow clock by the
-                // housekeeping pump: re-shaping text is the reader-visible half of the same problem,
-                // and a frame drawn to show ink does not have to carry it.
+                // The counters have moved too, but the line is not rebuilt for them: it waits for a
+                // change the user made, and the counters a person actually reads are the ones a session
+                // reports. Re-shaping text is still work a frame drawn to show ink does not have to
+                // carry (see the module docs).
                 cx.notify();
             });
 
@@ -912,10 +931,6 @@ impl NoteApp {
                 // skipped while the pen is laying ink, so the ink pump keeps taking readings.
                 let page_rendered = app.serve_pdf(now);
 
-                // The status counters have moved; the *line* is rebuilt only when it is due, and
-                // the answer says whether it was.
-                let status_rebuilt = app.refresh_status(now);
-
                 // The note's own housekeeping, on the same clock: ink still in memory is handed
                 // over when the pen has stopped (see `persist`), and whatever the writer has to say
                 // — an export finished, or a write that failed — reaches the status line here.
@@ -923,7 +938,10 @@ impl NoteApp {
                 let reported = app.drain_writer_reports();
                 app.checkpoint_if_idle(now);
 
-                if page_rendered || status_rebuilt || reported {
+                // Nothing here rebuilds the status line: it is rebuilt by the change that makes it
+                // stale, and the counters that move on their own are read from a session a person
+                // stops (see the module docs and [`crate::timing::Session`]).
+                if page_rendered || reported {
                     cx.notify();
                 }
             });
@@ -2634,6 +2652,10 @@ impl NoteApp {
             "n" => self.new_blank_sheet(cx),
             "o" => self.prompt_for_pdf(cx),
             "s" => self.save(cx),
+            // The measurement session, on the letter with nothing else to mean: `M` for measure. The
+            // sheet's own key, like these, because a session is measured *while* writing — and one key
+            // both starts and stops it, which the line in front of the reader says while it runs.
+            "m" => self.toggle_measurement(cx),
             // The two steps between marks. The list is not needed for these, which is the point of
             // them: one keystroke per mark, for a reader hopping between the pages they use.
             "down" => self.next_bookmark(cx),
@@ -2991,7 +3013,8 @@ impl NoteApp {
 
     /// Puts a message in the status line, rebuilding it at once.
     ///
-    /// An error has to reach the user as soon as it happens rather than on the status clock.
+    /// An error has to reach the user as soon as it happens rather than waiting for the next change they
+    /// make — the line is not on a clock, so this is the only thing that would otherwise hold it back.
     fn report(&mut self, message: String) {
         if self.message != message {
             self.message = message;
@@ -3029,9 +3052,9 @@ impl NoteApp {
 
     /// The one line that says what the app is doing.
     ///
-    /// Composed from the current state rather than cached by the caller: the caching is
-    /// [`Self::refresh_status`]'s job, and keeping the two apart means a caller can force the
-    /// line up to date without knowing how it is paced.
+    /// Composed from the current state rather than cached here: caching it is what
+    /// [`Self::touch_status`] does, and keeping the two apart means a caller can put a line together
+    /// — a test, or a screen — without it being the line the bar is showing.
     fn compose_status(&self) -> String {
         if !self.settings.show_status {
             // Not built at all, not built and hidden: composing a string the user asked not to
@@ -3112,6 +3135,17 @@ impl NoteApp {
         // view state the sheet's own controls cannot show a number for, and the rest is the
         // measurement this app runs on itself.
         parts.push(format!("view {:.0}%", self.view.zoom() * 100.0));
+
+        // The measurement session, while one is running or once it has been stopped, and in front of the
+        // live meters rather than instead of them: the meters answer "what is happening now", and this is
+        // the stretch of time that was actually measured. The two together are what makes a stutter
+        // arguable rather than a matter of opinion — see [`crate::timing::Session`].
+        if self.session_at.is_some() {
+            parts.push(format!("measuring: {MEASURE_KEY} stops it"));
+        } else if let Some(measured) = self.measured {
+            parts.push(measured.summary());
+        }
+
         parts.push(self.timings.summary(HOUSEKEEPING_INTERVAL));
 
         if !self.message.is_empty() {
@@ -3122,23 +3156,42 @@ impl NoteApp {
     }
 
     /// Rebuilds the status line, for a change the user made and expects to see at once.
+    ///
+    /// There is no clock behind this any more, and that is the point: a line that moves on its own is a
+    /// line nobody can read, so it is rebuilt by the change that made it stale and by the session a
+    /// person starts and stops.
     fn touch_status(&mut self) {
         self.status = self.compose_status();
-        self.status_at = Instant::now();
     }
 
-    /// Rebuilds the status line if enough time has passed, and says whether it did.
+    /// Starts or stops the measurement session, and puts what it found on the status line.
     ///
-    /// Called on every wake of the housekeeping pump, which is up to 240 times a second. The clock is
-    /// what keeps the text identical across those wakes, and the answer is what keeps the *frames*
-    /// off them: a wake that rebuilt nothing has nothing new for a frame to draw.
-    fn refresh_status(&mut self, now: Instant) -> bool {
-        if status_due(self.status_at, now) {
-            self.touch_status();
-            return true;
+    /// One key for both, because a session is a stopwatch: starting it and stopping it are the same
+    /// gesture a moment apart, and a person reading a number off the screen should not have to remember
+    /// which of two keys they pressed. What is measured is the wait between frames and the pen's own
+    /// wait (see [`crate::timing::Session`]); what is *shown* while it runs is only that it is running,
+    /// because a number that changes while it is being measured is the thing this replaced.
+    fn toggle_measurement(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+
+        match self.session_at.take() {
+            // Stopping. The counters are left standing rather than cleared, so the line can be
+            // rebuilt for something else and still say what was measured.
+            Some(started) => {
+                let over = now.saturating_duration_since(started);
+                self.measured = Some(self.timings.session.stop(over));
+            }
+            // Starting. The last result goes, so a session that is running cannot be mistaken for the
+            // answer of the one before it.
+            None => {
+                self.timings.session.start();
+                self.measured = None;
+                self.session_at = Some(now);
+            }
         }
 
-        false
+        self.touch_status();
+        cx.notify();
     }
 
     /// The bar: floating, rounded, over the sheet.
@@ -3925,6 +3978,19 @@ impl Render for NoteApp {
         // The counters describe one frame, so this frame's are its own.
         self.timings.start_frame();
 
+        // The wait since the last frame, for the session a person may be running: the interval a
+        // frame's own meters cannot see, because they measure what a frame *does* and this is the time
+        // between two of them (see [`crate::timing::Session`]). Recorded here because this is the frame
+        // clock — `render` runs once per frame and not for a frame the toolkit decided not to draw. The
+        // clock is kept whether or not a session is running, so the first interval of one is a frame
+        // interval rather than the whole time since the last session.
+        let now = Instant::now();
+        if let Some(previous) = self.last_frame_at.replace(now) {
+            self.timings
+                .session
+                .record_frame(now.saturating_duration_since(previous));
+        }
+
         // A name that was asked for by the bar's button is put up here, on the frame that has a window
         // to put the keyboard in the field with.
         if self.naming_asked {
@@ -4444,8 +4510,8 @@ mod tests {
     // scope and shadow the attribute this module needs.
     use super::{
         file_label, file_stem, notch_in_pixels, pdf_render_due, pinch_zoom_factor, quantise_width,
-        sheet_matches, solid_path, status_due, wheel_pan, wheel_zoom_factor, PDF_QUIET_INTERVAL,
-        STATUS_INTERVAL, WHEEL_LINE_HEIGHT, WHEEL_LINES_PER_NOTCH, WHEEL_ZOOM_STEP,
+        sheet_matches, solid_path, wheel_pan, wheel_zoom_factor, PDF_QUIET_INTERVAL,
+        WHEEL_LINE_HEIGHT, WHEEL_LINES_PER_NOTCH, WHEEL_ZOOM_STEP,
     };
     use crate::ink::{InkPoint, Stroke};
     use gpui_kit::{point, px, Path, PathBuilder, Pixels, Point};
@@ -4740,44 +4806,6 @@ mod tests {
         );
     }
 
-    /// The status line is rebuilt on a clock, not on every frame.
-    ///
-    /// This is the whole anti-flicker fix, so it is pinned down: the pump wakes up to 240 times a
-    /// second while writing, and a line rebuilt on each of those wakes is a line the text system
-    /// has to shape and the bar has to lay out on each of them.
-    #[test]
-    fn the_status_line_is_not_rebuilt_every_frame() {
-        let built = Instant::now();
-
-        assert!(!status_due(built, built), "a line just built is not rebuilt");
-        assert!(
-            !status_due(built, built + Duration::from_millis(4)),
-            "not even on a 240 Hz panel"
-        );
-        assert!(
-            !status_due(built, built + STATUS_INTERVAL - Duration::from_millis(1)),
-            "not just before the interval is up"
-        );
-        assert!(
-            status_due(built, built + STATUS_INTERVAL),
-            "due once the interval has passed"
-        );
-        assert!(
-            status_due(built, built + Duration::from_secs(5)),
-            "and still due long after"
-        );
-    }
-
-    /// A clock that appears to go backwards must not make the line rebuilt on every wake.
-    ///
-    /// `Instant` is monotonic, so this cannot happen in practice — but the guard is one call and
-    /// the failure it prevents is the flicker this pacing exists to remove.
-    #[test]
-    fn a_clock_that_goes_backwards_does_not_force_rebuilds() {
-        let now = Instant::now();
-
-        assert!(!status_due(now + Duration::from_secs(1), now));
-    }
 }
 
 /// The path builder every solid shape the canvas draws is filled with: the ink, and the ghost

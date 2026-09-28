@@ -26,6 +26,8 @@ use std::sync::Arc;
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
+use crate::ink_layer::canvas::{Fill, Rect};
+
 /// How many logical pixels one millimetre of paper is drawn at.
 ///
 /// Chosen so the default sheet, A4, comes out 720 logical pixels wide — a comfortable reading
@@ -302,7 +304,7 @@ struct RulingKey {
 #[derive(Default)]
 pub struct Ruling {
     built_for: Option<RulingKey>,
-    quads: Arc<Vec<PaintQuad>>,
+    rules: Arc<Vec<Fill>>,
     /// How many times the geometry has actually been built.
     ///
     /// Counted here rather than inferred by the caller: whether a request was served from the cache
@@ -316,7 +318,8 @@ impl Ruling {
     pub fn rebuilds(&self) -> u64 {
         self.rebuilds
     }
-    /// The rule quads for this sheet.
+
+    /// The ruling for this sheet, as the marks the canvas draws.
     ///
     /// Returns the cached set when the sheet has not changed, so a frame that only adds ink pays
     /// nothing for the ruling; otherwise rebuilds it once and caches that.
@@ -325,13 +328,13 @@ impl Ruling {
     /// the rules have to grow with it, or zooming in would make the grid relatively finer instead
     /// of closer. It is part of the cache key for the same reason — two different papers at two
     /// different zooms can share a rectangle.
-    pub fn quads(
+    pub fn rules(
         &mut self,
         sheet: Bounds<Pixels>,
         style: CanvasStyle,
         paper: u32,
         zoom: f32,
-    ) -> Arc<Vec<PaintQuad>> {
+    ) -> Arc<Vec<Fill>> {
         let key = RulingKey {
             x: sheet.origin.x.into(),
             y: sheet.origin.y.into(),
@@ -343,12 +346,12 @@ impl Ruling {
         };
 
         if self.built_for != Some(key) {
-            self.quads = Arc::new(build_ruling(sheet, style, rgb(rule_color(paper)).into(), zoom));
+            self.rules = Arc::new(build_ruling(sheet, style, rgb(rule_color(paper)).into(), zoom));
             self.built_for = Some(key);
             self.rebuilds += 1;
         }
 
-        Arc::clone(&self.quads)
+        Arc::clone(&self.rules)
     }
 }
 
@@ -362,7 +365,7 @@ fn build_ruling(
     style: CanvasStyle,
     color: Hsla,
     zoom: f32,
-) -> Vec<PaintQuad> {
+) -> Vec<Fill> {
     let Some(spacing) = style.spacing() else {
         return Vec::new();
     };
@@ -386,15 +389,15 @@ fn build_ruling(
         CanvasStyle::Plain => {}
         CanvasStyle::Ruled => {
             for line in 1..=rules_that_fit(height, spacing) {
-                quads.push(rule_quad(x, y + line as f32 * spacing, width, thick, color));
+                quads.push(rule(x, y + line as f32 * spacing, width, thick, color));
             }
         }
         CanvasStyle::Grid => {
             for line in 1..=rules_that_fit(height, spacing) {
-                quads.push(rule_quad(x, y + line as f32 * spacing, width, thick, color));
+                quads.push(rule(x, y + line as f32 * spacing, width, thick, color));
             }
             for line in 1..=rules_that_fit(width, spacing) {
-                quads.push(vertical_rule_quad(
+                quads.push(vertical_rule(
                     x + line as f32 * spacing,
                     y,
                     height,
@@ -407,7 +410,7 @@ fn build_ruling(
             let diameter = DOT_DIAMETER * zoom;
             for row in 1..=rules_that_fit(height, spacing) {
                 for column in 1..=rules_that_fit(width, spacing) {
-                    quads.push(dot_quad(
+                    quads.push(dot(
                         x + column as f32 * spacing,
                         y + row as f32 * spacing,
                         diameter,
@@ -437,50 +440,50 @@ fn rules_that_fit(extent: f32, spacing: f32) -> usize {
 }
 
 /// A horizontal rule filling the sheet's width.
-fn rule_quad(x: f32, y: f32, width: f32, thickness: f32, color: Hsla) -> PaintQuad {
-    fill(
-        Bounds {
-            origin: point(px(x), px(y)),
-            size: size(px(width), px(thickness)),
+fn rule(x: f32, y: f32, width: f32, thickness: f32, colour: Hsla) -> Fill {
+    Fill::new(
+        Rect {
+            x,
+            y,
+            width,
+            height: thickness,
         },
-        color,
+        colour,
     )
 }
 
 /// A vertical rule filling the sheet's height.
 ///
-/// A separate function rather than a sign flip on [`rule_quad`]: a rule's two dimensions are not
+/// A separate function rather than a sign flip on [`rule`]: a rule's two dimensions are not
 /// interchangeable, and passing a height into a width is exactly the mistake that puts a line
 /// off the side of the sheet.
-fn vertical_rule_quad(x: f32, y: f32, height: f32, thickness: f32, color: Hsla) -> PaintQuad {
-    fill(
-        Bounds {
-            origin: point(px(x), px(y)),
-            size: size(px(thickness), px(height)),
+fn vertical_rule(x: f32, y: f32, height: f32, thickness: f32, colour: Hsla) -> Fill {
+    Fill::new(
+        Rect {
+            x,
+            y,
+            width: thickness,
+            height,
         },
-        color,
+        colour,
     )
 }
 
 /// One dot of a dot grid, centred on the given position.
-fn dot_quad(x: f32, y: f32, diameter: f32, color: Hsla) -> PaintQuad {
+fn dot(x: f32, y: f32, diameter: f32, colour: Hsla) -> Fill {
     let radius = diameter / 2.0;
-    let corner = px(radius);
 
-    fill(
-        Bounds {
-            origin: point(px(x - radius), px(y - radius)),
-            size: size(px(diameter), px(diameter)),
-        },
-        color,
-    )
     // A square whose corners are rounded by half its side is a circle.
-    .corner_radii(Corners {
-        top_left: corner,
-        top_right: corner,
-        bottom_right: corner,
-        bottom_left: corner,
-    })
+    Fill::new(
+        Rect {
+            x: x - radius,
+            y: y - radius,
+            width: diameter,
+            height: diameter,
+        },
+        colour,
+    )
+    .rounded(radius)
 }
 
 #[cfg(test)]
@@ -491,8 +494,10 @@ mod tests {
         build_ruling, contrast_color, relative_luminance, rule_color, rules_that_fit, CanvasSize,
         CanvasStyle, Ruling, INK_COLORS, PAPER_COLORS,
     };
-    use gpui_kit::{point, px, rgb, size, Bounds, Hsla, PaintQuad, Pixels};
+    use gpui_kit::{point, px, rgb, size, Bounds, Hsla, Pixels};
     use std::sync::Arc;
+
+    use crate::ink_layer::canvas::Fill;
 
     /// The rule colour for a sheet of white paper, as a paintable colour.
     fn rule_on_white() -> Hsla {
@@ -507,14 +512,9 @@ mod tests {
         }
     }
 
-    /// The bounds of a quad, as plain floats.
-    fn quad_bounds(quad: &PaintQuad) -> (f32, f32, f32, f32) {
-        (
-            quad.bounds.origin.x.into(),
-            quad.bounds.origin.y.into(),
-            quad.bounds.size.width.into(),
-            quad.bounds.size.height.into(),
-        )
+    /// The rectangle of a ruling mark, as plain floats.
+    fn fill_bounds(fill: &Fill) -> (f32, f32, f32, f32) {
+        (fill.rect.x, fill.rect.y, fill.rect.width, fill.rect.height)
     }
 
     /// Every size is drawn at one scale, so the sizes are comparable rather than merely
@@ -574,8 +574,8 @@ mod tests {
         let sheet = sheet(720.0, 1018.0);
 
         for style in CanvasStyle::ALL {
-            for quad in build_ruling(sheet, style, rule_on_white(), 1.0) {
-                let (x, y, width, height) = quad_bounds(&quad);
+            for mark in build_ruling(sheet, style, rule_on_white(), 1.0) {
+                let (x, y, width, height) = fill_bounds(&mark);
                 assert!(
                     x >= 24.0 - 1e-3 && y >= 24.0 - 1e-3,
                     "{style:?} starts outside the sheet at {x},{y}"
@@ -614,17 +614,17 @@ mod tests {
         let mut ruling = Ruling::default();
         let sheet = sheet(720.0, 1018.0);
 
-        let first = ruling.quads(sheet, CanvasStyle::Grid, 0xFF_FF_FF, 1.0);
-        let again = ruling.quads(sheet, CanvasStyle::Grid, 0xFF_FF_FF, 1.0);
+        let first = ruling.rules(sheet, CanvasStyle::Grid, 0xFF_FF_FF, 1.0);
+        let again = ruling.rules(sheet, CanvasStyle::Grid, 0xFF_FF_FF, 1.0);
         assert!(
             Arc::ptr_eq(&first, &again),
             "an unchanged sheet is not rebuilt"
         );
 
-        let restyled = ruling.quads(sheet, CanvasStyle::Dots, 0xFF_FF_FF, 1.0);
+        let restyled = ruling.rules(sheet, CanvasStyle::Dots, 0xFF_FF_FF, 1.0);
         assert!(!Arc::ptr_eq(&first, &restyled), "a new style is rebuilt");
 
-        let repapered = ruling.quads(sheet, CanvasStyle::Dots, 0x14_16_1A, 1.0);
+        let repapered = ruling.rules(sheet, CanvasStyle::Dots, 0x14_16_1A, 1.0);
         assert!(
             !Arc::ptr_eq(&restyled, &repapered),
             "new paper changes the rule's colour, so it is rebuilt"

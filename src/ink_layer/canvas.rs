@@ -18,7 +18,11 @@
 //! looks like. That is also what keeps the two renderers — the layer, and the frame's own painting
 //! when there is no layer — from drifting apart: both are handed the same rectangles.
 
-use gpui_kit::Hsla;
+use std::sync::Arc;
+
+use gpui_kit::{Hsla, RenderImage};
+
+use crate::ink::Stroke;
 
 /// A rectangle in logical window pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -41,13 +45,77 @@ impl Rect {
 }
 
 /// A rectangle to fill, and the colour to fill it with.
+///
+/// Also the shape of one mark of a sheet's ruling: a line on paper is a rectangle and its colour, a
+/// dot is that with its corners rounded, and nothing else about either is the renderer's business.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fill {
     pub rect: Rect,
     pub colour: Hsla,
+    /// The corners' radius, in logical pixels: nought for a rectangle, and half the short side for
+    /// the dot of a dot grid.
+    pub radius: f32,
 }
 
-/// One frame of canvas: the desk, and everything painted over it in order.
+impl Fill {
+    /// A rectangle, with square corners.
+    pub fn new(rect: Rect, colour: Hsla) -> Self {
+        Fill {
+            rect,
+            colour,
+            radius: 0.0,
+        }
+    }
+
+    /// The same fill, with its corners rounded by `radius`.
+    pub fn rounded(self, radius: f32) -> Self {
+        Fill { radius, ..self }
+    }
+}
+
+/// The document's page, as the canvas draws it: the pixels Pdfium rendered, and where on the desk
+/// they are placed.
+#[derive(Clone, Debug)]
+pub struct Page {
+    /// The bitmap, in BGRA rows ordered top-down. Uploaded when [`RenderImage::id`] changes and kept
+    /// until it does — a page is rasterised when the zoom asks for a different width, not per frame.
+    pub image: Arc<RenderImage>,
+    /// Where the page is drawn, in logical window pixels.
+    pub rect: Rect,
+}
+
+/// The ink in front of the reader.
+///
+/// ## Why the geometry is not in these numbers
+///
+/// A stroke's outline is in the *paper's* units — the same numbers at every zoom — and where the
+/// paper sits and how large it is drawn are these three fields. That split is the whole reason the
+/// canvas can pan and zoom without rebuilding anything: the layer keeps each stroke's geometry and
+/// moves it, and geometry is built only when the ink changes or the *detail* the zoom asks for
+/// moves (see [`Canvas::ink`]).
+#[derive(Clone, Debug, Default)]
+pub struct Ink {
+    /// Where the paper's own origin is drawn, in logical window pixels.
+    pub origin: (f32, f32),
+    /// How much larger than its own units the paper is drawn.
+    pub zoom: f32,
+    /// The finished strokes, shared rather than copied: the layer reads their outlines and compares
+    /// their identities, and a frame that copies three hundred outlines would be the cost this
+    /// exists to remove.
+    ///
+    /// The `Arc` is also the *identity* of the page of ink: a page turn, an undo or an erase
+    /// replaces it, and a replaced one is a cache the layer drops.
+    pub strokes: Arc<Vec<Arc<Stroke>>>,
+    /// The stroke under the pen, closed at the zoom in hand. Rebuilt by the app for every frame it
+    /// is drawn in, because it is the one piece of ink that is still moving.
+    pub open: Option<Arc<Stroke>>,
+    /// Counts the rebuilds of the outlines themselves: a zoom that crosses into another detail rung
+    /// changes every stroke's outline without changing any of their identities, and this is what
+    /// says so.
+    pub revision: u64,
+}
+
+/// One frame of canvas: the desk, what is printed on it, and the ink in front of it.
 #[derive(Clone, Debug, Default)]
 pub struct Canvas {
     /// The colour of the desk, which is also what the parts of the surface nothing covers are.
@@ -55,26 +123,44 @@ pub struct Canvas {
     /// Physical pixels per logical pixel, as the window is drawn at. The layer scales by this; the
     /// app never does (see the module docs).
     pub scale: f32,
-    /// What is painted over the desk, in the order it is painted: the page's shadow, then the sheet.
+    /// The page's shadow and the sheet, in the order they are painted.
     pub fills: Vec<Fill>,
+    /// The ruling, printed on the sheet.
+    pub rules: Vec<Fill>,
+    /// The document's page, when the sheet is one.
+    pub page: Option<Page>,
+    /// The ink, in the paper's own coordinates.
+    pub ink: Ink,
 }
 
 impl Canvas {
     /// Empties the canvas, keeping the memory it was using.
     ///
-    /// Called once per frame rather than rebuilding the description: a frame is a few rectangles,
-    /// but "a few" is not a reason to allocate them anew sixty times a second.
+    /// Called once per frame rather than rebuilding the description: a frame is a few rectangles
+    /// and a shared list of strokes, but "a few" is not a reason to allocate them anew sixty times a
+    /// second.
     pub fn clear(&mut self) {
         self.fills.clear();
+        self.rules.clear();
+        self.page = None;
+        self.ink = Ink::default();
     }
 
     /// Adds a rectangle to the canvas, on top of what is already described.
     pub fn fill(&mut self, rect: Rect, colour: Hsla) {
         if !rect.is_empty() {
-            self.fills.push(Fill { rect, colour });
+            self.fills.push(Fill::new(rect, colour));
+        }
+    }
+
+    /// Adds a mark to the sheet's ruling.
+    pub fn rule(&mut self, fill: Fill) {
+        if !fill.rect.is_empty() {
+            self.rules.push(fill);
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -108,7 +194,7 @@ mod tests {
         let mut canvas = Canvas {
             desk,
             scale: 1.5,
-            fills: Vec::new(),
+            ..Default::default()
         };
         canvas.fill(
             Rect {

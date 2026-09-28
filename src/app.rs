@@ -91,7 +91,7 @@ use crate::cursor::PenCursor;
 use crate::cursor_overlay::{CursorFeed, Screen};
 use crate::home::Home;
 use crate::ink::{InkTransform, Notes, Stroke, Tool};
-use crate::ink_layer::{Canvas, InkLayer, Rect};
+use crate::ink_layer::{Canvas, Ink, InkLayer, Page, Rect};
 use crate::note::{self, Note, NoteWriter, Report};
 use crate::outline::{Outline, OutlinePages};
 use crate::pages::Pages;
@@ -482,6 +482,13 @@ pub struct NoteApp {
     /// Direct3D 11 a device — in which case the app says so once and draws the canvas the way it
     /// did before this existed. See [`crate::ink_layer`].
     ink_layer: Option<InkLayer>,
+    /// Counts the rebuilds of the ink's own outlines.
+    ///
+    /// The ink model rebuilds every stroke's ribbon when the zoom crosses into another detail rung
+    /// (`InkDocument::set_zoom`), which changes what the canvas layer has to draw without changing
+    /// any stroke's identity. This is how the layer is told: it is part of the canvas it is handed
+    /// (see [`crate::ink_layer::canvas::Ink`]).
+    ink_revision: u64,
     /// The canvas as the last frame described it: the desk, the page's shadow, and the sheet.
     ///
     /// Described by the app and drawn by the layer — or, when there is no layer, painted by the
@@ -653,20 +660,10 @@ impl NoteApp {
         // answer `WM_SETCURSOR` before anything else can put a cursor back.
         let system_cursor = SystemCursor::install(window);
 
-        // The canvas's own renderer. From this phase it draws a probe and nothing else, so what it
-        // is here for is to be *looked at* before anything is built on it (see
-        // [`crate::ink_layer`]). Until the canvas is finished, failing to install one falls back to
-        // the frame's own painting; a machine with no graphics processor is not meant to run this
-        // app at all, so this is a report rather than a resting place.
-        let ink_layer = match InkLayer::install(window) {
-            Ok(layer) => Some(layer),
-            Err(reason) => {
-                if message.is_empty() {
-                    message = format!("canvas layer: {reason}");
-                }
-                None
-            }
-        };
+        // The canvas's own renderer, which this app requires: a machine that cannot give Direct3D 11
+        // a hardware device cannot run this app at all, and saying so here — once, at startup, with
+        // the reason — is the whole of the report (see [`crate::ink_layer`]).
+        let ink_layer = Some(InkLayer::install(window).expect("a canvas for the window"));
 
         if message.is_empty() {
             message = pen.status().to_string();
@@ -731,6 +728,7 @@ impl NoteApp {
             system_cursor,
             cursor,
             ink_layer,
+            ink_revision: 0,
             canvas: Canvas::default(),
             page_index: 0,
             scale: window.scale_factor(),
@@ -4146,7 +4144,12 @@ impl Render for NoteApp {
         // the *detail* the zoom asks for moves, rather than on every frame a pinch is on. This keeps a
         // cache in step and edits nothing — the strokes themselves are what they were (see
         // `InkDocument::set_zoom`).
-        self.ink.set_zoom(sheet.zoom);
+        // The outlines themselves are rebuilt when the zoom crosses into another detail rung, and the
+        // canvas layer has to hear about that: every stroke's geometry is stale, without any stroke's
+        // *identity* having changed (see [`crate::ink_layer::render`]).
+        if self.ink.set_zoom(sheet.zoom) {
+            self.ink_revision += 1;
+        }
 
         let (page_size, page_origin) = (
             sheet.drawn(),
@@ -4157,16 +4160,15 @@ impl Render for NoteApp {
             origin: page_origin,
             size: size(px(page_size.0), px(page_size.1)),
         };
-        // Built here rather than in the paint callback: the callback runs once per frame, and a
-        // full page of grid lines is several hundred quads. `Ruling` hands back the same set
-        // until the sheet itself changes — which now includes its zoom, because the ruling is
-        // printed on the paper and grows with it.
+        // Built here rather than in a paint callback: a full page of grid lines is several hundred
+        // marks, and `Ruling` hands back the same set until the sheet itself changes — which
+        // includes its zoom, because the ruling is printed on the paper and grows with it.
         //
         // A PDF page is its own paper, so a blank sheet's ruling has nothing to sit on.
-        let ruling = page.is_none().then(|| {
+        let rules = page.is_none().then(|| {
             let started = Instant::now();
             let before = self.ruling.rebuilds();
-            let quads = self.ruling.quads(
+            let rules = self.ruling.rules(
                 sheet_bounds,
                 self.settings.canvas_style,
                 self.settings.page_color,
@@ -4180,30 +4182,77 @@ impl Render for NoteApp {
                 self.timings.count_ruling();
             }
 
-            quads
+            rules
         });
 
-        // Everything the paint callback needs is owned by the time the callback is built: it
-        // runs later, during the paint phase, and it must not borrow the view.
-        let finished = Arc::clone(self.ink.finished());
+        // The stroke under the pen: an in-progress one has no cached ribbon outline yet, so it is
+        // closed here, for the sheet as it is drawn now. Its newest segment is left straight — the
+        // reading after the tip has not arrived, and a curve drawn without it would move ink the
+        // user has already seen, under the nib, as they write (see `Stroke::close_live`).
         let open = self.ink.open().cloned().map(|mut stroke| {
-            // An in-progress stroke has no cached ribbon outline yet; computing it here keeps
-            // the paint callback free of geometry work. It is detailed for the sheet as it is drawn
-            // now, and its newest segment is left straight: the reading after the tip has not
-            // arrived, and a curve drawn without it would move ink the user has already seen, under
-            // the nib, as they write (see `Stroke::close_live`).
             stroke.close_live(sheet.zoom);
-            stroke
+            Arc::new(stroke)
         });
-        let page_image = page.as_ref().map(|page| Arc::clone(&page.image));
+
         let page_color: Hsla = rgb(self.settings.page_color).into();
 
-        // The canvas, described for its own renderer: the desk, the page's shadow and the sheet, in
-        // the order they are painted (see [`describe_canvas`]).
-        describe_canvas(&mut self.canvas, &sheet, self.scale, page_color, background);
+        {
+            let _timed = measure(&self.timings.canvas);
 
-        // A layer that fails is dropped and reported rather than drawn into: the frame paints the
-        // canvas itself from then on, which is what this app did before the layer existed.
+            // What the canvas is, described for its own renderer (see [`crate::ink_layer::canvas`]):
+            // the desk, the page's shadow and the sheet; then what is printed on the paper, the
+            // document's page, and the ink.
+            describe_canvas(&mut self.canvas, &sheet, self.scale, page_color, background);
+
+            for rule in rules.iter().flat_map(|rules| rules.iter()) {
+                self.canvas.rule(*rule);
+            }
+
+            self.canvas.page = page.as_ref().map(|page| Page {
+                image: Arc::clone(&page.image),
+                rect: Rect {
+                    x: sheet.origin.0,
+                    y: sheet.origin.1,
+                    width: page_size.0,
+                    height: page_size.1,
+                },
+            });
+
+            self.canvas.ink = Ink {
+                origin: sheet.origin,
+                zoom: sheet.zoom,
+                strokes: Arc::clone(self.ink.finished()),
+                open,
+                revision: self.ink_revision,
+            };
+        }
+
+        // What the canvas was asked to draw, counted for the status line: the layer draws it and
+        // this does not touch a polygon, but the numbers a person reads are the numbers they read
+        // before — strokes on the sheet, the outline points they cost, and how many were off it.
+        {
+            let visible = sheet.visible();
+            let (mut painted, mut vertices, mut culled) = (0u64, 0u64, 0u64);
+
+            for stroke in self.canvas.ink.strokes.iter() {
+                if stroke.visible_in(visible) {
+                    painted += 1;
+                    vertices += stroke.outline.len() as u64;
+                } else {
+                    culled += 1;
+                }
+            }
+
+            if let Some(stroke) = &self.canvas.ink.open {
+                painted += 1;
+                vertices += stroke.outline.len() as u64;
+            }
+
+            self.timings.count_painted(painted, vertices, culled);
+        }
+
+        // The canvas draws itself. A layer that fails is reported rather than drawn around: it is
+        // dropped, the desk below comes back to this element, and the canvas keeps its last frame.
         let failure = match self.ink_layer.as_mut() {
             Some(ink) => ink.draw(&self.canvas).err(),
             None => None,
@@ -4213,15 +4262,9 @@ impl Render for NoteApp {
             self.message = format!("canvas layer: {error}");
         }
 
-        // What the frame paints itself, when the layer is not the one drawing it.
-        let fallback = self
-            .ink_layer
-            .is_none()
-            .then(|| self.canvas.clone());
-
-        // The desk belongs to the canvas layer when there is one: this element leaves those pixels
-        // to it, and the layer's own background shows through them. Without a layer the desk is
-        // this element's, which is what the app drew before the layer existed.
+        // The desk belongs to the canvas layer when it is there: this element leaves those pixels to
+        // it, and the layer's own background shows through them. With no layer the desk is this
+        // element's again, which is what the app looked like before the layer existed.
         //
         // Resolved here rather than where the element is built: the theme is a borrow of `cx`, and
         // the bar below is built from `cx` mutably.
@@ -4230,7 +4273,6 @@ impl Render for NoteApp {
         } else {
             background
         };
-        let timings = Arc::clone(&self.timings);
 
         // The pen's ghost cursor is *not* drawn here. It is a position rather than a stroke, and a
         // frame is one frame too late for a position: it has a window of its own, fed straight from
@@ -4277,93 +4319,10 @@ impl Render for NoteApp {
             // handle that is no longer drawn, which is what [`Self::claim_sheet_keyboard`] fixes on the next
             // frame. The handle is tracked here so that the focus has somewhere in this element to land.
             .track_focus(&self.sheet_focus)
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |_bounds, _, window: &mut Window, _cx: &mut App| {
-                        let _timed = measure(&timings.paint);
-
-                        // The desk, the page's shadow and the sheet are the canvas layer's when
-                        // there is one; when there is not, this frame paints the same description
-                        // itself, in one coordinate system and with no layout involved (see
-                        // [`describe_canvas`]).
-                        if let Some(canvas) = &fallback {
-                            for fill in canvas.fills.iter() {
-                                paint_fill(window, fill.rect, fill.colour);
-                            }
-                        }
-
-                        // Quad by quad, cloned: a `PaintQuad` is a handful of plain old data, so
-                        // this is a memcpy per rule and needs no geometry work at all.
-                        if let Some(quads) = &ruling {
-                            for quad in quads.iter() {
-                                window.paint_quad(quad.clone());
-                            }
-                        }
-
-                        if let Some(image) = page_image {
-                            let image_bounds = Bounds {
-                                origin: page_origin,
-                                size: size(px(page_size.0), px(page_size.1)),
-                            };
-                            window
-                                .paint_image(
-                                    image_bounds,
-                                    image_bounds,
-                                    Corners::default(),
-                                    image,
-                                    0,
-                                    false,
-                                )
-                                .ok();
-                        }
-
-                        // Ink that is off the sheet is skipped before a polygon is built for it.
-                        // This is where zooming in pays for itself: a page and a half of ink can
-                        // be off screen, and building a path per stroke only to have the renderer
-                        // discard it is the most expensive thing an immediate-mode canvas does.
-                        let visible = sheet.visible();
-                        let mut scratch: Vec<Point<Pixels>> = Vec::new();
-                        let mut painted = 0u64;
-                        let mut vertices = 0u64;
-                        let mut culled = 0u64;
-
-                        // The ink is clipped to the sheet, which is the display half of the rule the
-                        // ink model enforces: a reading off the paper is not ink (see
-                        // [`InkTransform::on_paper`]), and ink off the paper is not *drawn* either. The
-                        // clip is here rather than in the model because it also has to hide ink written
-                        // before that rule existed, and because one rectangle for the whole page is
-                        // cheaper than a mask per stroke.
-                        window.with_content_mask(
-                            Some(ContentMask { bounds: sheet_bounds }),
-                            |window| {
-                                for stroke in finished.iter() {
-                                    if !stroke.visible_in(visible) {
-                                        culled += 1;
-                                        continue;
-                                    }
-
-                                    painted += 1;
-                                    vertices += stroke.outline.len() as u64;
-                                    paint_stroke(window, stroke, &sheet, &mut scratch);
-                                }
-
-                                // The stroke being drawn is never culled: it is by definition under
-                                // the pen, and a stroke that vanished for a frame would read as a
-                                // glitch.
-                                if let Some(stroke) = &open {
-                                    painted += 1;
-                                    vertices += stroke.outline.len() as u64;
-                                    paint_stroke(window, stroke, &sheet, &mut scratch);
-                                }
-                            },
-                        );
-
-                        timings.count_painted(painted, vertices, culled);
-                    },
-                )
-                .size_full(),
-            )
+            // The canvas is not drawn here. It is drawn by a renderer of its own, in a surface of
+            // its own *behind* this element, and what this element paints is nothing — which is what
+            // lets the desk, the sheet and the ink be drawn without a frame hearing about them (see
+            // [`crate::ink_layer`]).
             .child(bar)
             // The desk's own row: the page in the middle, the counters at the edge. Last, so it
             // paints over the sheet — a page pill *under* the paper would be no pill at all.

@@ -480,8 +480,9 @@ pub struct Timings {
     pub ink: Meter,
     /// Building a frame's geometry and element tree.
     pub render: Meter,
-    /// The canvas paint callback: polygon building and quad issuing.
-    pub paint: Meter,
+    /// Building a frame's canvas: the desk, the sheet, the ruling, the page and the ink, described
+    /// for the renderer that draws them (see [`crate::ink_layer`]).
+    pub canvas: Meter,
     /// Rasterising a PDF page. Pdfium runs on this thread, so this is time the frame spent
     /// waiting rather than drawing.
     pub pdf: Meter,
@@ -556,10 +557,10 @@ impl Timings {
     /// this used to do) compared the pen against the wrong clock entirely.
     pub fn summary(&self) -> String {
         format!(
-            "ink {}  render {}  paint {}  pdf {} ms  ·  pump {} ms ({} /s)  ·  pen→app {}  ·  {} strokes {} px{}",
+            "ink {}  render {}  canvas {}  pdf {} ms  ·  pump {} ms ({} /s)  ·  pen→app {}  ·  {} strokes {} px{}",
             span(&self.ink),
             span(&self.render),
-            span(&self.paint),
+            span(&self.canvas),
             pdf_clause(&self.pdf, &self.pdf_slice),
             span_mean(&self.pump_gap),
             rate(&self.pump_gap),

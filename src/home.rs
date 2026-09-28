@@ -79,7 +79,8 @@ use crate::recent::{self, Recent, Recents, Stamp};
 use crate::store::{Facts, NoteStore};
 
 /// The space the screen keeps from the window's edges.
-const SIDE_MARGIN: f32 = 56.0;
+/// The margin the two screens keep: the list of notes, and the list of a note's bookmarks.
+pub(crate) const SIDE_MARGIN: f32 = 56.0;
 
 /// How long after a click a confirmation still counts as that click's.
 ///

@@ -77,6 +77,7 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _};
 use gpui_kit::*;
 
+use crate::bookmarks::{Bookmarks, MarkedPages, Marks};
 use crate::canvas::{
     contrast_color, relative_luminance, CanvasSize, CanvasStyle, Ruling, Swatch, INK_COLORS,
     PAPER_COLORS,
@@ -429,6 +430,15 @@ pub struct NoteApp {
     /// any document's pages: a page can be inserted or deleted, and after that the two are not the
     /// same thing. See [`crate::pages`].
     pages: Pages,
+    /// The pages of the note that are marked, in reading order.
+    ///
+    /// Held here rather than read from the note wherever it is wanted, because the status line, the
+    /// bar's button and the list all ask about it on paths that have no error to report — and because
+    /// the marks are one of the few things the app *writes* while it runs: every mark is a row in the
+    /// note (see [`crate::bookmarks`]).
+    bookmarks: Bookmarks,
+    /// The list of those marks, drawn in front of the note while it is up.
+    marks: Marks,
     /// The PDF being annotated, if any.
     pdf: PdfDocumentView,
     /// The pen capture and its queue.
@@ -617,6 +627,8 @@ impl NoteApp {
             checkpointed_at: Instant::now(),
             loaded: BTreeSet::new(),
             pages: Pages::default(),
+            bookmarks: Bookmarks::default(),
+            marks: Marks::new(window, cx),
             pdf: PdfDocumentView::empty(),
             pen,
             system_cursor,
@@ -891,9 +903,12 @@ impl NoteApp {
     /// it (see [`Self::bar_edge`] and [`InkTransform::on_bar`]).
     fn consume_ink(&mut self, samples: &[pen_windows::PenSample]) -> bool {
         // The pen is not a pen while something is in front of the sheet: a name being typed must not
-        // leave a line across the page behind the field, and the list of recent notes is drawn over a
-        // sheet nobody can see — a stroke laid there would go into a note the user is not looking at.
-        if self.naming.is_some() || self.home_is_open() {
+        // leave a line across the page behind the field, and the two *screens* — the list of notes, and
+        // the list of this note's bookmarks — are drawn over a sheet nobody can see. A stroke laid there
+        // would go into a note the user is not looking at, and behind a screen it would not even be
+        // visible. This is why both are screens rather than panels floating on the sheet: see
+        // [`crate::bookmarks`].
+        if self.naming.is_some() || self.home_is_open() || self.marks.is_open() {
             return false;
         }
 
@@ -1018,6 +1033,14 @@ impl NoteApp {
         note.store_mut().set_sheet(Some(self.sheet_size()))?;
         note.store_mut().set_settings(&self.settings)?;
         note.store_mut().set_open_page(self.page_index as u64)?;
+
+        // And the marks that were made on the sheet before there was a note to keep them in: a blank
+        // sheet is a note that does not exist until something is written on it, and a bookmark made on
+        // one is one of the things that makes it exist. Until here they were only in memory, which is
+        // where a setting chosen on a blank sheet lives too (see [`crate::settings`]).
+        for page in self.bookmarks.pages() {
+            note.store_mut().set_bookmark(*page as u64, true)?;
+        }
 
         // The writer's connection opens before its thread, as it does for a note that is opened, so a
         // note that cannot be written is reported now rather than discovered later.
@@ -1428,6 +1451,10 @@ impl NoteApp {
 
         let at = self.pages.insert(self.page_index, before);
         self.ink.insert_at(at);
+        // The marks are renamed with the pages, because a mark names a page's *position*: see
+        // [`crate::bookmarks::Bookmarks::inserted_at`] for the rule and the note's own shift for the
+        // rows that back it.
+        self.bookmarks.inserted_at(at);
 
         // The note's ink is renamed with its pages: `insert_page` moves every page after the
         // insertion along, and the ink moves with the sheet it was written on. What has been handed
@@ -1482,6 +1509,9 @@ impl NoteApp {
         self.rename_pages(self.page_index as u64 + 1, -1);
 
         self.ink.remove_at(self.page_index);
+        // And the mark, if the page had one: what was deleted is a page, so the mark for the page that
+        // used to be at this position is gone with it rather than pointing at its neighbour.
+        self.bookmarks.removed_at(self.page_index);
         self.page_index = show;
         self.turn_to(show);
         self.save_note_state();
@@ -1491,6 +1521,168 @@ impl NoteApp {
             self.page_total().saturating_sub(1).max(1)
         ));
         cx.notify();
+    }
+
+    /// Puts a bookmark on the page in front of the reader, or takes the one there off.
+    fn toggle_bookmark(&mut self, cx: &mut Context<Self>) {
+        let page = self.marked_page(cx);
+        self.record_mark(page, !self.bookmarks.contains(page), cx);
+    }
+
+    /// Takes the bookmark off a page, asked for by the row that names it.
+    ///
+    /// Not a toggle: the menu says "take the bookmark off", and a command that says what it does has to
+    /// do that rather than the opposite of what it finds there.
+    pub(crate) fn unmark_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        self.record_mark(page, false, cx);
+    }
+
+    /// Records that a page is marked or is not: in the list, in the note, and in what the app says.
+    ///
+    /// One place, because its callers are all the same act told differently — the toggle key, the bar's
+    /// button, the list's menu — and because a mark is the one thing the app writes that is neither ink
+    /// nor a setting: a single `INSERT` or `DELETE` in a file that is already open, done here rather than
+    /// on the writer's thread, which exists for batches of ink.
+    fn record_mark(&mut self, page: usize, mark: bool, cx: &mut Context<Self>) {
+        let changed = self.bookmarks.set(page, mark);
+
+        if let Some(note) = &mut self.note {
+            if let Err(error) = note.store_mut().set_bookmark(page as u64, mark) {
+                self.report(error.to_string());
+            }
+        }
+
+        if changed {
+            self.report(format!(
+                "{} page {} \u{2014} {} marked in this note",
+                if mark {
+                    "bookmarked"
+                } else {
+                    "took the bookmark off"
+                },
+                page + 1,
+                self.bookmarks.len()
+            ));
+        }
+
+        // A list that is up is drawing the rows that have just changed, and those rows are its own copy:
+        // it is told, with the highlight left where it was.
+        if self.marks.is_open() {
+            let marked = self.marked_pages();
+            self.marks.refresh(marked, cx);
+        }
+
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// The page a bookmark command acts on: the page in front of the reader.
+    ///
+    /// Which page that is depends on what they are looking at. With the sheet in front it is the page on
+    /// the desk; with the *list* in front it is the row under its highlight, because a person pointing at
+    /// a list of pages is pointing at a row — marking the page behind the screen is the one thing the key
+    /// would be understood not to do. The page on the desk is the answer either way when the list has no
+    /// highlight to go by.
+    fn marked_page(&self, cx: &Context<Self>) -> usize {
+        if self.marks.is_open() {
+            self.marks.highlighted(cx).unwrap_or(self.page_index)
+        } else {
+            self.page_index
+        }
+    }
+
+    /// The note's marked pages, gathered for the list to draw.
+    fn marked_pages(&self) -> MarkedPages {
+        MarkedPages {
+            marked: self.bookmarks.pages().to_vec(),
+            here: self.page_index,
+            total: self.page_total(),
+            pages: self.pages.clone(),
+            document: self.pdf.file_name(),
+        }
+    }
+
+    /// Puts the bookmark list in front of the note.
+    ///
+    /// The page being read is *not* closed first, unlike a page turn: nothing about the note changes by
+    /// looking at a list of its marks, and the ink still in memory is written on the batch's own clock
+    /// (see [`Self::persist`]) rather than on this command. What the screen needs is its rows, which are
+    /// gathered here rather than kept in step for as long as it is up.
+    pub(crate) fn show_marks(&mut self, cx: &mut Context<Self>) {
+        let marked = self.marked_pages();
+        self.marks.show(marked, cx);
+
+        self.message = if self.bookmarks.is_empty() {
+            String::from("no page is marked yet \u{2014} Ctrl+B marks the page in front")
+        } else {
+            format!("{} marked in this note", self.bookmarks.len())
+        };
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// Takes the bookmark list away: what Escape on it does.
+    pub(crate) fn hide_marks(&mut self, cx: &mut Context<Self>) {
+        self.marks.hide();
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// Shows a marked page — what opening a row of the list does.
+    ///
+    /// The screen goes with it. It has done its job: the page the reader asked for is the page in front
+    /// of them now, and a list left over the answer would be a list covering it.
+    pub(crate) fn go_to_mark(&mut self, page: usize, cx: &mut Context<Self>) {
+        self.marks.hide();
+
+        // A row can only be a page the list was given, so this is a guard rather than a case: a note
+        // whose pages were deleted from under a list that is somehow still up.
+        let page = page.min(self.page_total().saturating_sub(1));
+        self.turn_to(page);
+        cx.notify();
+    }
+
+    /// Turns to the next marked page after this one.
+    ///
+    /// The keyboard's step, for a reader who knows where they are going: no list, no highlight, one
+    /// keystroke per mark. A note with nothing marked ahead says so rather than doing nothing, because a
+    /// key that quietly stops working is a key a person presses again.
+    fn next_bookmark(&mut self, cx: &mut Context<Self>) {
+        match self.bookmarks.next_from(self.page_index) {
+            Some(page) => {
+                self.turn_to(page);
+                cx.notify();
+            }
+            None => {
+                let message = self.no_mark_message("after");
+                self.report(message);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Turns to the last marked page before this one: the step back.
+    fn previous_bookmark(&mut self, cx: &mut Context<Self>) {
+        match self.bookmarks.previous_from(self.page_index) {
+            Some(page) => {
+                self.turn_to(page);
+                cx.notify();
+            }
+            None => {
+                let message = self.no_mark_message("before");
+                self.report(message);
+                cx.notify();
+            }
+        }
+    }
+
+    /// What the two steps say when there is nowhere further to go.
+    fn no_mark_message(&self, direction: &str) -> String {
+        if self.bookmarks.is_empty() {
+            String::from("no page is marked yet \u{2014} Ctrl+B marks the page in front")
+        } else {
+            format!("no marked page {direction} this one")
+        }
     }
 
     /// Renames the pages from `from` on by `by`, in what the app remembers about the note.
@@ -1678,6 +1870,7 @@ impl NoteApp {
             strokes += note.store().stroke_count(*page)?;
         }
         let sheet = note.store().sheet()?;
+        let marks = note.store().bookmarks()?;
         let open_page = note.store().open_page()?.unwrap_or(0) as usize;
 
         self.pdf = pdf;
@@ -1687,6 +1880,11 @@ impl NoteApp {
             ink_pages,
         );
         self.page_index = self.pages.clamp(open_page);
+        // The note's marks, in the note's order: what the list draws, and what the next keystroke
+        // steps to. The list itself is put away — a screen left open from the note that was closed
+        // would be a list of another note's pages.
+        self.bookmarks = Bookmarks::of(marks);
+        self.marks.hide();
 
         // Everything the page turn keeps in memory is reset: the ink that was there belonged to the
         // note that is no longer open.
@@ -2125,6 +2323,9 @@ impl NoteApp {
         self.writer = None;
         self.pdf = PdfDocumentView::empty();
         self.pages = Pages::default();
+        self.bookmarks = Bookmarks::default();
+        // A screen over a sheet that is no longer open is a screen about nothing.
+        self.marks.hide();
         self.page_index = 0;
         self.ink = Notes::new();
         self.loaded.clear();
@@ -2175,7 +2376,53 @@ impl NoteApp {
             return;
         }
 
+        // The bookmark chords first, because the letter is shared: `Ctrl+B` marks the page in front and
+        // `Ctrl+Shift+B` opens the list of what is marked — the two halves of one idea, which is why
+        // they are the two halves of one key.
+        if keystroke.key.as_str() == "b" {
+            if keystroke.modifiers.shift {
+                self.show_marks(cx);
+            } else {
+                self.toggle_bookmark(cx);
+            }
+            return;
+        }
+
         match keystroke.key.as_str() {
+            "n" => self.new_blank_sheet(cx),
+            "o" => self.prompt_for_pdf(cx),
+            "s" => self.save(cx),
+            // The two steps between marks. The list is not needed for these, which is the point of
+            // them: one keystroke per mark, for a reader hopping between the pages they use.
+            "down" => self.next_bookmark(cx),
+            "up" => self.previous_bookmark(cx),
+            _ => {}
+        }
+    }
+
+    /// The bookmark list's keyboard: the app's own chords, and nothing the list wants.
+    ///
+    /// Everything a list needs the keyboard for — arrows to move, Enter to open the row, Escape to come
+    /// back — belongs to the list, which has the focus, and this screen takes none of it away. What is
+    /// left is what the list cannot know: `Ctrl+B`, which marks the row in front of the reader (the same
+    /// act as marking the page in front of them on the sheet, see [`Self::marked_page`]), and the three
+    /// chords that are the app's wherever it is — a new sheet, opening a file, saving one — which is the
+    /// same set the home screen keeps.
+    ///
+    /// The steps between marks are deliberately not bound here: the arrows are the list's own, and two
+    /// meanings on one key would be one meaning too many.
+    pub(crate) fn marks_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.keystroke.modifiers.control {
+            return;
+        }
+
+        match event.keystroke.key.as_str() {
+            "b" if !event.keystroke.modifiers.shift => self.toggle_bookmark(cx),
             "n" => self.new_blank_sheet(cx),
             "o" => self.prompt_for_pdf(cx),
             "s" => self.save(cx),
@@ -2533,6 +2780,12 @@ impl NoteApp {
             self.page_index + 1,
             self.page_total().max(1)
         ));
+
+        // The marks, said only when there are any: it is the answer to "which pages did I keep", and a
+        // zero on every frame is noise — the same rule the off-the-sheet readings follow below.
+        if !self.bookmarks.is_empty() {
+            parts.push(format!("{} marked", self.bookmarks.len()));
+        }
         match self.pen.stats() {
             Some(stats) => {
                 parts.push(format!("{stats}  {:.1} readings/message", stats.mean_batch()));
@@ -3233,15 +3486,21 @@ impl NoteApp {
             .children(controls)
     }
 
-    /// The page commands: insert a page before or after this one, or delete this one.
+    /// The page commands: insert a page before or after this one, delete this one, and mark it.
     ///
     /// The first group in the bar's second row, because a page *is* the sheet and these are the only
     /// controls in the app that change how much of it there is. They stand bare on the bar rather
     /// than in a pill: in the bar, every group does. The pill they used to sit in is still there —
     /// the zoom has it now (see [`NoteApp::zoom_pill`]).
+    ///
+    /// The bookmark sits with them because it is a fact about *this page* and not about the view: the
+    /// page pill and the zoom pill are how the sheet is read, and this is something the page keeps. Its
+    /// button says which way round the page is — a filled mark for a marked page — and the list of what
+    /// is marked is the button beside it, because the two are the same subject.
     fn page_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let hairline = theme.title_bar_border;
+        let marked = self.bookmarks.contains(self.page_index);
 
         // Collected before they are chained: each `cx.listener` takes a mutable borrow of the
         // context, and one long builder chain would hold them all at once.
@@ -3272,6 +3531,29 @@ impl NoteApp {
                 true,
                 cx,
                 |app, cx| app.delete_page(cx),
+            )
+            .into_any_element(),
+            toolbar_divider(hairline).into_any_element(),
+            tool_button(
+                "page-mark",
+                if marked {
+                    IconName::BookmarkCheck
+                } else {
+                    IconName::Bookmark
+                },
+                "Bookmark this page (Ctrl+B)",
+                marked,
+                cx,
+                |app, cx| app.toggle_bookmark(cx),
+            )
+            .into_any_element(),
+            icon_button(
+                "page-marks",
+                IconName::BookMarked,
+                "The bookmarked pages (Ctrl+Shift+B)",
+                true,
+                cx,
+                |app, cx| app.show_marks(cx),
             )
             .into_any_element(),
         ];
@@ -3401,6 +3683,23 @@ impl Render for NoteApp {
                 .bg(background)
                 .text_color(foreground)
                 .child(home)
+                .into_any_element();
+        }
+
+        // The bookmark list is the same kind of thing as the home screen: a screen in front of the note
+        // rather than a panel on it, and the sheet's state is left exactly as it is, so Escape from the
+        // list puts the note back as it was. See [`crate::bookmarks`] for why it is a screen.
+        if self.marks.is_open() {
+            // Once per frame: the list is handed the keyboard when the screen has just appeared.
+            self.marks.settle(window, cx);
+            let marks = self.marks.view(&self.note_title, &self.message, cx);
+
+            return div()
+                .relative()
+                .size_full()
+                .bg(background)
+                .text_color(foreground)
+                .child(marks)
                 .into_any_element();
         }
 

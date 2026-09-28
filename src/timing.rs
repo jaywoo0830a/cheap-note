@@ -132,8 +132,18 @@ pub struct Timings {
     pub ink: Meter,
     /// Building a frame's geometry and element tree.
     pub render: Meter,
-    /// The canvas paint callback: polygon building and quad issuing.
+    /// The canvases a frame draws itself: the sheet under the ink, and the stroke over it.
+    ///
+    /// The finished ink is *not* here — it belongs to [`Timings::ink_layer`], which a frame pays for
+    /// only when the layer is rebuilt. A page full of strokes should therefore move this meter not at
+    /// all, and move that one on the frames that changed the page.
     pub paint: Meter,
+    /// Rebuilding the finished ink of the page into its cached layer.
+    ///
+    /// A frame pays this only when the layer is *not* reused — when the ink changed, or the sheet it
+    /// is drawn on moved — which is why it is measured beside the counter rather than instead of
+    /// it: the interesting reading is not what a rebuild costs, but how rarely one happens.
+    pub ink_layer: Meter,
     /// Rasterising a PDF page. Pdfium runs on this thread, so this is time the frame spent
     /// waiting rather than drawing.
     pub pdf: Meter,
@@ -150,6 +160,13 @@ pub struct Timings {
     pub vertices: AtomicU64,
     /// Strokes the last frame skipped because they were outside the sheet.
     pub culled: AtomicU64,
+    /// Whether the last frame had to rebuild the finished ink's layer.
+    ///
+    /// Zero is the number this whole arrangement exists to produce: a page full of ink, and a frame
+    /// that drew the stroke being written and nothing else. One means the ink moved or changed on
+    /// that frame, and the ribbons were built again — which is what writing a stroke, turning a page
+    /// or panning the sheet costs, and what holding still does not.
+    pub ink_layer_repaints: AtomicU64,
     /// Sheets' worth of rule geometry built over the session.
     pub rulings_built: AtomicU64,
     /// PDF pages rasterised over the session.
@@ -165,6 +182,7 @@ impl Timings {
         self.painted.store(0, Ordering::Relaxed);
         self.vertices.store(0, Ordering::Relaxed);
         self.culled.store(0, Ordering::Relaxed);
+        self.ink_layer_repaints.store(0, Ordering::Relaxed);
     }
 
     /// Adds one to the count of sheets' rule geometry built.
@@ -184,17 +202,27 @@ impl Timings {
         self.culled.fetch_add(culled, Ordering::Relaxed);
     }
 
+    /// Records that a frame rebuilt the finished ink's layer rather than reusing it.
+    pub fn count_ink_layer(&self) {
+        self.ink_layer_repaints.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// The whole measurement as one line of the status bar.
     ///
     /// Shaped for a line that is read at a glance: the mean, then the worst since this was last
     /// called in brackets, then the counters that make sense of the two. `pump` is reported
     /// against the interval the loop asked for, because "4 ms" only means anything next to
     /// "4 ms wanted".
+    ///
+    /// The last clause is the ink's layer, and it is absent when the layer was reused — which is the
+    /// answer to "did that cost anything this frame" rather than a number to read: a page of ink that
+    /// costs nothing per frame says nothing at all, and the frames that did rebuild say what they
+    /// cost. See [`Timings::ink_layer`].
     pub fn summary(&self, pump_interval: Duration) -> String {
         let wanted = pump_interval.as_secs_f64() * 1000.0;
 
         format!(
-            "ink {}  render {}  paint {}  pdf {} ms  ·  pump {} (of {:.2})  ·  pen→app {}  ·  {} strokes {} px{}",
+            "ink {}  render {}  paint {}  pdf {} ms  ·  pump {} (of {:.2})  ·  pen→app {}  ·  {} strokes {} px{}{}",
             span(&self.ink),
             span(&self.render),
             span(&self.paint),
@@ -207,6 +235,13 @@ impl Timings {
             match self.culled.load(Ordering::Relaxed) {
                 0 => String::new(),
                 culled => format!(" ({culled} culled)"),
+            },
+            match self.ink_layer_repaints.load(Ordering::Relaxed) {
+                0 => String::new(),
+                repaints => match self.ink_layer.last() {
+                    Some(last) => format!(" ({repaints} layer, {:.2} ms)", millis(last)),
+                    None => format!(" ({repaints} layer)"),
+                },
             },
         )
     }
@@ -314,11 +349,13 @@ mod tests {
         let timings = Timings::default();
 
         timings.count_painted(3, 30, 1);
+        timings.count_ink_layer();
         timings.start_frame();
 
         assert_eq!(timings.painted.load(Ordering::Relaxed), 0);
         assert_eq!(timings.vertices.load(Ordering::Relaxed), 0);
         assert_eq!(timings.culled.load(Ordering::Relaxed), 0);
+        assert_eq!(timings.ink_layer_repaints.load(Ordering::Relaxed), 0);
     }
 
     /// The line names every path, and says so plainly when one has not run yet.
@@ -355,6 +392,39 @@ mod tests {
         assert!(
             measured.contains("(3 culled)"),
             "including what was skipped: {measured}"
+        );
+    }
+
+    /// The ink's layer is reported only when a frame rebuilt it, and then says what it cost.
+    ///
+    /// This is the reading the whole cache is judged by: a page of ink that is reused costs nothing
+    /// and says nothing, while the frames that paid for a rebuild name the price.
+    #[test]
+    fn the_summary_reports_the_ink_layer_only_when_it_was_rebuilt() {
+        let timings = Timings::default();
+        timings.count_painted(340, 21_000, 0);
+
+        let reused = timings.summary(Duration::from_micros(4166));
+        assert!(
+            !reused.contains("layer"),
+            "a frame that reused the layer says nothing about it: {reused}"
+        );
+
+        timings.ink_layer.record(Duration::from_micros(4200));
+        timings.count_ink_layer();
+        let rebuilt = timings.summary(Duration::from_micros(4166));
+
+        assert!(
+            rebuilt.contains("(1 layer, 4.20 ms)"),
+            "a rebuilt layer says what it cost: {rebuilt}"
+        );
+
+        timings.start_frame();
+        let next = timings.summary(Duration::from_micros(4166));
+
+        assert!(
+            !next.contains("layer"),
+            "and the number belongs to the frame that paid it: {next}"
         );
     }
 

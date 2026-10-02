@@ -1587,6 +1587,12 @@ impl InkDocument {
     /// Rebuilding is not optional: a stroke's bounds and outline are `#[serde(skip)]`, because they
     /// are derivable from its points, and they are what the eraser hit-tests against and what a
     /// frame culls by. A page loaded without them would draw, and would refuse to be erased.
+    ///
+    /// The **selection mask** is rebuilt with them, one flag per stroke, all of them clear. It is a *view* of the
+    /// ink — which strokes a lasso has in hand — and nothing about it is stored, so a page read out of the note has
+    /// nothing selected. Leaving it as an empty vector is what made the first edit on a freshly opened page insert
+    /// flags past the end of a list that had a stroke for every one of them (see [`crate::history`], whose `insert`
+    /// is where that was fatal).
     pub fn from_strokes(strokes: Vec<Stroke>) -> Self {
         let finished = strokes
             .into_iter()
@@ -1597,6 +1603,7 @@ impl InkDocument {
             .collect::<Vec<_>>();
 
         InkDocument {
+            selected: Arc::new(vec![false; finished.len()]),
             finished: Arc::new(finished),
             // Built at 1:1, which is what [`Stroke::close`] details a stroke for. A sheet drawn larger
             // refines them, and the frame that draws it is what knows how large that is: see
@@ -5371,6 +5378,49 @@ mod tests {
             ink.finished()[0].points.len() > 2,
             "with the path the hand took"
         );
+    }
+
+    /// A page read out of the note takes ink like any other — which used to be fatal, and silently so.
+    ///
+    /// The reported shape of the bug: open a note, write, come back to it later, write again, and the process went
+    /// down in `history::insert` inserting a *selection flag* at the 155th stroke of a page whose flag list was
+    /// empty. The mask is the ink's own length and nothing about it is stored, so a page read back has to rebuild it
+    /// (see [`InkDocument::from_strokes`]).
+    #[test]
+    fn a_page_read_out_of_the_note_can_be_written_on() {
+        let s = settings();
+
+        let stored: Vec<Stroke> = (0..154)
+            .map(|at| {
+                let mut stroke = Stroke::new(InkPoint::new(at as f32, 10.0, 2.0), 0x1C_1C_1E);
+                stroke
+                    .points
+                    .push(InkPoint::new(at as f32 + 5.0, 12.0, 2.0));
+                stroke.close();
+                stroke
+            })
+            .collect();
+
+        let mut ink = InkDocument::from_strokes(stored);
+
+        assert_eq!(ink.stroke_count(), 154);
+        assert!(
+            !ink.has_selection(),
+            "a page read back out of the note has nothing in hand"
+        );
+
+        ink.consume(&[reading(7, PenPhase::Down, 200.0, 300.0, None)], &id(), &s);
+        ink.consume(&[reading(7, PenPhase::Up, 240.0, 300.0, None)], &id(), &s);
+
+        assert_eq!(
+            ink.stroke_count(),
+            155,
+            "and the new stroke landed at the end"
+        );
+        assert!(ink.undo(), "with its edit in the page's history");
+        assert_eq!(ink.stroke_count(), 154);
+        assert!(ink.redo());
+        assert_eq!(ink.stroke_count(), 155);
     }
 
     /// The in-memory history is bounded, and it is the *deepest* undo that a full history costs.

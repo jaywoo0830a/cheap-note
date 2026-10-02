@@ -167,6 +167,12 @@ impl Edit {
 }
 
 /// Inserts strokes at `at`, keeping the flags the same length as the stroke list.
+///
+/// The mask is the stroke list's *length*, always — a flag per stroke, in the same order — so the two are made to
+/// agree here before either is touched. A mask that is out of step is therefore repaired rather than indexed past
+/// the end of: a page read out of the note once arrived with no mask at all, and the first stroke written on it
+/// took the whole process down (`InkDocument::from_strokes` is where that is fixed, and this is what keeps any
+/// *other* way of getting them out of step from being fatal).
 fn insert(page: &mut Page<'_>, at: usize, strokes: &[Arc<Stroke>]) -> bool {
     if strokes.is_empty() || at > page.strokes.len() {
         return false;
@@ -174,6 +180,7 @@ fn insert(page: &mut Page<'_>, at: usize, strokes: &[Arc<Stroke>]) -> bool {
 
     let strokes_now = Arc::make_mut(page.strokes);
     let flags = Arc::make_mut(page.selected);
+    flags.resize(strokes_now.len(), false);
 
     for (offset, stroke) in strokes.iter().enumerate() {
         strokes_now.insert(at + offset, Arc::clone(stroke));
@@ -199,8 +206,14 @@ fn remove_at(page: &mut Page<'_>, index: usize, stroke: &Arc<Stroke>) -> bool {
         return false;
     }
 
+    // Both are brought into step *before* either is touched: the mask is a flag per stroke, in the same order, and
+    // it is the one part of a page that is not stored anywhere (see [`insert`] for the same repair, and why).
+    let flags = Arc::make_mut(page.selected);
+    flags.resize(page.strokes.len(), false);
+
     Arc::make_mut(page.strokes).remove(index);
-    Arc::make_mut(page.selected).remove(index);
+    flags.remove(index);
+
     true
 }
 
@@ -647,6 +660,69 @@ mod tests {
                 "the same edit, to the byte"
             );
         }
+    }
+
+    /// An edit applied to a page whose selection mask is out of step repairs it rather than panicking.
+    ///
+    /// The mask is a flag per stroke, and it is the one part of a page that is *not* stored anywhere: a page read
+    /// back out of a note arrives with none of it (see `InkDocument::from_strokes`). Writing the first stroke on such
+    /// a page used to index past the end of that empty list and take the process down, which is why the repair is
+    /// here as well as at the source — an edit is about *ink*, and a view of it must never be fatal.
+    #[test]
+    fn an_edit_repairs_a_mask_that_is_out_of_step() {
+        let mut strokes: Arc<Vec<Arc<Stroke>>> = Arc::new(vec![
+            stroke(0.0, 0x11_11_11),
+            stroke(10.0, 0x22_22_22),
+            stroke(20.0, 0x33_33_33),
+        ]);
+        let mut selected: Arc<Vec<bool>> = Arc::new(Vec::new());
+        let mut shifts = 0;
+
+        {
+            let mut page = Page {
+                strokes: &mut strokes,
+                selected: &mut selected,
+                shifts: &mut shifts,
+                detail: 1.0,
+            };
+
+            assert!(
+                Edit::Written {
+                    at: 3,
+                    strokes: vec![stroke(30.0, 0x44_44_44)],
+                }
+                .apply(&mut page),
+                "a stroke written at the end of the page"
+            );
+        }
+
+        assert_eq!(strokes.len(), 4);
+        assert_eq!(
+            selected.len(),
+            4,
+            "the mask came into step with the ink rather than past the end of it"
+        );
+        assert!(selected.iter().all(|flag| !flag), "nothing new is in hand");
+
+        // A mask *longer* than the ink is repaired the same way, and taking a stroke away keeps the two equal.
+        selected = Arc::new(vec![true; 9]);
+
+        {
+            let mut page = Page {
+                strokes: &mut strokes,
+                selected: &mut selected,
+                shifts: &mut shifts,
+                detail: 1.0,
+            };
+
+            assert!(Edit::Erased {
+                removed: vec![(0, stroke(0.0, 0x11_11_11))],
+            }
+            .apply(&mut page));
+        }
+
+        assert_eq!(strokes.len(), 3);
+        assert_eq!(selected.len(), 3, "one flag per stroke, still");
     }
 
     /// A decoded edit still names its strokes, and holds the ink of them.

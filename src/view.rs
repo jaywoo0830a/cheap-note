@@ -157,6 +157,32 @@ impl Viewport {
         was != self.offset
     }
 
+    /// How far the sheet has been panned from its resting place, in logical pixels.
+    ///
+    /// Read to *keep* a place: a page's pan is remembered while the note is open, so turning back to a page one was
+    /// reading comes back to the line one was on, and a page that has not been looked at yet starts at its own top
+    /// (see `NoteApp::turn_to`). The pair is meaningless on an axis the sheet fits on — see the module docs — which is
+    /// why it is the pan that is kept rather than the origin: an origin is a size and a window, and the window
+    /// changes.
+    pub fn pan(&self) -> (f32, f32) {
+        self.offset
+    }
+
+    /// Puts the sheet where a pan says it was, reporting whether that changed anything.
+    ///
+    /// A pan that is not two numbers is refused rather than stored: a `NaN` here would poison every rectangle derived
+    /// from the origin, and the one place a pan comes from outside this module is a page's remembered place.
+    pub fn set_pan(&mut self, pan: (f32, f32)) -> bool {
+        if !pan.0.is_finite() || !pan.1.is_finite() {
+            return false;
+        }
+
+        let was = self.offset;
+        self.offset = pan;
+
+        was != self.offset
+    }
+
     /// Pans by a delta, reporting whether it changed anything.
     pub fn pan_by(&mut self, delta: (f32, f32)) -> bool {
         if !delta.0.is_finite() || !delta.1.is_finite() {
@@ -282,6 +308,56 @@ mod tests {
     /// The window the app's own default opens at.
     const WINDOW: (f32, f32) = (1280.0, 900.0);
     const MARGIN: f32 = 24.0;
+
+    /// A page opens at its own top, and comes back to the place it was left at.
+    ///
+    /// The two halves of what a page turn does with the sheet: a pan of nothing is the sheet's top-left corner at the
+    /// margin — the top of the page, wherever the reader has zoomed to — and a pan that was remembered is the place to
+    /// come back to (`NoteApp::turn_to` keeps one per page for as long as the note is open, which is why a page nobody
+    /// has looked at opens at its top rather than where the page before it was scrolled to).
+    #[test]
+    fn a_page_opens_at_its_top_and_comes_back_where_it_was() {
+        // Twice A4, so it fits on neither axis and the pan is what decides what is on screen.
+        let sheet = (SHEET.0 * 2.0, SHEET.1 * 2.0);
+        let mut view = Viewport::new(2.0);
+
+        assert_eq!(
+            view.origin(sheet, WINDOW, MARGIN),
+            (MARGIN, MARGIN),
+            "a page nobody has panned is drawn from its top-left corner"
+        );
+
+        // Read part-way down the page, and left there.
+        view.pan_by((0.0, -900.0));
+        let place = view.pan();
+
+        assert!(place.1 < 0.0, "the sheet was pushed up: {place:?}");
+
+        // Another page: its top. Then back to this one: where it was.
+        view.reset_pan();
+        assert_eq!(view.origin(sheet, WINDOW, MARGIN), (MARGIN, MARGIN));
+
+        assert!(view.set_pan(place), "the place came back");
+        assert_eq!(view.pan(), place);
+        assert_eq!(
+            view.origin(sheet, WINDOW, MARGIN),
+            (MARGIN, MARGIN - 900.0),
+            "and the sheet with it"
+        );
+    }
+
+    /// A pan that is not two numbers is refused rather than stored: a `NaN` would poison every rectangle drawn from
+    /// it, and the one place a pan comes from outside this module is a page's remembered place.
+    #[test]
+    fn a_pan_that_is_not_a_place_is_refused() {
+        let mut view = Viewport::new(2.0);
+        view.pan_by((10.0, 10.0));
+
+        for nonsense in [(f32::NAN, 0.0), (0.0, f32::INFINITY), (f32::NAN, f32::NAN)] {
+            assert!(!view.set_pan(nonsense), "{nonsense:?} is not a place");
+            assert_eq!(view.pan(), (10.0, 10.0), "and the sheet did not move");
+        }
+    }
 
     /// Zoom is clamped at both ends, and nonsense is not zoom at all.
     #[test]

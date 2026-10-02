@@ -11,7 +11,7 @@
 //! the map of this module; `doc/ARCHITECTURE.md` is the map of the whole program. What is left here is
 //! the line-long "why" a reader wants where they are reading.
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -412,6 +412,16 @@ pub struct NoteApp {
     scale: f32,
     /// How large the sheet is drawn, and where it sits in the window.
     view: Viewport,
+    /// Where each page was being read, for as long as the note in hand is open.
+    ///
+    /// The *page's* place rather than the reader's: turning to a page added at the end of a note opens that page at
+    /// its top rather than at whatever part of the page before it the reader had scrolled to, and turning back to a
+    /// page one was in the middle of comes back to the middle (see [`Self::turn_to`]).
+    ///
+    /// Emptied when a note is opened and when the pages are renumbered — a place remembered for page 4 belongs to the
+    /// page that is now 3 when one in front of it is deleted — because what it holds is a position in a list rather
+    /// than anything the note knows about itself.
+    pans: HashMap<usize, (f32, f32)>,
     /// The sheet as the last frame drew it.
     sheet: Sheet,
     /// The bar's bottom edge, in window logical pixels, as the last frame laid it out.
@@ -507,7 +517,6 @@ impl NoteApp {
         }
 
         let view = Viewport::new(settings.zoom);
-
         // The two choosers are built from the style the app starts on, so the first frame already
         // shows the right one. They are the control the style comes from, and they are put back in
         // step with it on any frame where opening a note has moved it — see [`Self::sync_choosers`].
@@ -578,6 +587,7 @@ impl NoteApp {
             page_index: 0,
             scale: window.scale_factor(),
             view,
+            pans: HashMap::new(),
             sheet: Sheet::default(),
             bar_bottom: Rc::new(Cell::new(None)),
             timings: Arc::new(Timings::default()),
@@ -1507,8 +1517,16 @@ impl NoteApp {
 
     /// Turns to a page: what is being left is written out, and what is being turned to is read in.
     fn turn_to(&mut self, page: usize) {
+        // Where the reader was, before the page is left: a page keeps the place it was reading at for as long as the
+        // note is open, so turning back to it comes back to the line one was on. A page nobody has looked at yet has
+        // no place to come back to, and opens at its own top (`Viewport::set_pan` of nothing).
+        self.pans.insert(self.page_index, self.view.pan());
+
         self.close_page();
         self.show_page(page);
+
+        let remembered = self.pans.get(&page).copied();
+        self.view.set_pan(remembered.unwrap_or((0.0, 0.0)));
 
         self.remember_page();
         // The status line names the page, so it is stale as soon as the page changes.
@@ -1643,6 +1661,10 @@ impl NoteApp {
 
         let at = self.pages.insert(self.page_index, before);
         self.ink.insert_at(at);
+        // The pages after the insertion are not the pages they were: a place remembered for the page that is now one
+        // along belongs to the wrong one (`Self::turn_to` is where those places are kept, and this is why it is a map
+        // of positions rather than anything the note stores).
+        self.pans.clear();
         // The marks are renamed with the pages, because a mark names a page's *position*: see
         // [`crate::bookmarks::Bookmarks::inserted_at`] for the rule and the note's own shift for the
         // rows that back it.
@@ -1661,6 +1683,10 @@ impl NoteApp {
         // The page left behind was closed above, *before* the pages were renamed — that is the order
         // the design asks for — so the turn here is only the half that shows the page that was made.
         self.show_page(at);
+        // And a page nobody has read opens at its own **top**: the sheet in the view was panned to wherever the page
+        // before it was being read, and carrying that over is how a page added at the end starts half-way down (see
+        // [`Self::turn_to`], which is the same rule for a page turn proper).
+        self.view.reset_pan();
         self.save_note_state();
 
         self.report(format!(
@@ -1685,6 +1711,10 @@ impl NoteApp {
             return;
         };
 
+        // Every page after the one that has gone has moved along, so the places remembered for them mean nothing now
+        // (see [`Self::turn_to`]).
+        self.pans.clear();
+
         if let Some(note) = &mut self.note {
             if let Err(error) = note.store_mut().delete_page(self.page_index as u64) {
                 self.report(error.to_string());
@@ -1703,6 +1733,9 @@ impl NoteApp {
         // As in `add_page`: the page being left was closed before the pages were renamed, so this is
         // the showing half of a turn rather than another close of a page nobody is on.
         self.show_page(show);
+        // The page shown is not the one that was panned — the view still holds the place of the page that has just
+        // gone — and every place remembered for the pages after it means nothing now (see [`Self::turn_to`]).
+        self.view.reset_pan();
         self.save_note_state();
 
         self.report(format!(
@@ -2106,6 +2139,9 @@ impl NoteApp {
         // A whole note, not a page turn: the pan is reset with the zoom, because the sheet that was
         // being looked at is not the sheet in hand any more.
         self.view = Viewport::new(self.settings.zoom);
+        // And the pages of the note that has just gone are not the pages of this one: a place remembered for *their*
+        // page 4 means nothing on this note's page 4, which nobody has looked at yet.
+        self.pans.clear();
 
         // The writer's connection is opened here, before its thread runs, so that a note that cannot
         // be written is something the user is told about rather than something they discover the next

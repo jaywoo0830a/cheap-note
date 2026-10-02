@@ -307,6 +307,14 @@ changes nothing about the page.
 
 ### Turning a page
 
+**A page keeps the place it was being read at**, for as long as the note is open: turning to a page added at the
+end of a note opens that page at its own **top**, rather than at whatever part of the page before it the reader had
+scrolled to, and turning back to a page one was in the middle of comes back to the middle. The `zoom` is the
+*reader's* and follows them from page to page; the pan is the *page's*, and `NoteApp::turn_to` is where one is put
+away and the next taken up (a page nobody has looked at has none, and opens at its top). The places are in memory
+only — a note opened tomorrow starts its pages at their tops — and they are dropped when the pages are renumbered,
+because a place kept for page 4 belongs to page 3 once one in front of it is deleted.
+
 The **order** is the whole of it: the page being left is closed first — its outstanding ink is handed to
 the writer and folded into chunks, which is the design's "compaction at page close" — and only then is
 the page being turned to read, so a page's ink is never in two places at once. The ink moves with the

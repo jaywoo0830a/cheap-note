@@ -289,6 +289,68 @@ impl Sheet {
     }
 }
 
+/// A command that cannot be taken back, waiting to be confirmed.
+///
+/// The two commands a note has no undo for: clearing a page's ink, and deleting the page itself. Both are *only*
+/// reachable through the box the app puts up (see [`confirmed`]) — a button that acted on the first click is how a
+/// page of handwriting disappears by accident, and a note is not something a reader expects to have to be careful
+/// with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Confirmation {
+    /// Empty the page in front: every stroke on it, and its history with them.
+    ClearInk,
+    /// Delete the page in front, and everything on it.
+    DeletePage,
+}
+
+impl Confirmation {
+    /// What the box says: the heading, the line under it, and the two words on its buttons.
+    ///
+    /// Two strings rather than one with a line break in it, because a heading and its explanation are two elements:
+    /// the heading is what a reader reads, and the line under it is there for the reader who wants to know exactly
+    /// what goes.
+    fn words(self) -> Words {
+        match self {
+            Confirmation::ClearInk => Words {
+                heading: "Clear the ink on this page?",
+                detail:
+                    "Every stroke on it goes, and its history with them. This cannot be taken back.",
+                agree: "Clear the page",
+                refuse: "Keep it",
+            },
+            Confirmation::DeletePage => Words {
+                heading: "Delete this page?",
+                detail: "Everything on it goes, and the page itself. This cannot be taken back.",
+                agree: "Delete the page",
+                refuse: "Keep it",
+            },
+        }
+    }
+}
+
+/// What a box says: the question, and the two answers it offers.
+///
+/// "Keep it" rather than "Cancel" on the refusing side: a reader asked about their own handwriting should be able to
+/// answer without working out what cancel means here, and the word that says what happens to the page is the word
+/// that gets read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Words {
+    heading: &'static str,
+    detail: &'static str,
+    agree: &'static str,
+    refuse: &'static str,
+}
+
+/// What an answer to a confirmation means: the command to run, or nothing at all.
+///
+/// A free function, and the whole of the state machine — which is why it is here rather than inside the app: it is
+/// the one place "yes" becomes an action, so the rule that a destructive command is reachable *only* through an
+/// answer is checkable without a window, and a command that could be reached another way would have to be written
+/// into this match to be reachable at all.
+fn confirmed(what: Confirmation, yes: bool) -> Option<Confirmation> {
+    yes.then_some(what)
+}
+
 /// The application view.
 pub struct NoteApp {
     /// Everything the note in hand remembers: its paper, its pen, its switches, and how it feels.
@@ -382,6 +444,11 @@ pub struct NoteApp {
     naming: Option<PathBuf>,
     /// Whether a name has been asked for, and the field has not been put up yet.
     naming_asked: bool,
+    /// What a destructive command is waiting for an answer to, if anything is on screen.
+    ///
+    /// The two commands a note cannot undo ask first, and this is the question being asked: while it is here, the
+    /// pen has no cursor and lays no ink, and the keyboard belongs to the box (see [`Confirmation`]).
+    confirm: Option<Confirmation>,
     /// The field the name is typed into on the sheet.
     name_input: Entity<InputState>,
     /// The keyboard the sheet gets back when the field goes away.
@@ -391,11 +458,14 @@ pub struct NoteApp {
     /// What the field being typed into says — Enter keeps the name, a click away leaves it as it was.
     _name_events: Subscription,
     /// The bar's paper-size chooser.
-    sheet_select: Entity<SelectState<Vec<&'static str>>>,
+    sheet_select: Entity<SelectState<Vec<String>>>,
     /// The bar's ruling chooser. Held for the same reason as [`NoteApp::sheet_select`].
-    rule_select: Entity<SelectState<Vec<&'static str>>>,
+    rule_select: Entity<SelectState<Vec<String>>>,
     /// The bar's pen-weight chooser: the pen the note in hand is written with.
-    pen_select: Entity<SelectState<Vec<&'static str>>>,
+    ///
+    /// Its labels are *built* rather than spelled out, because each one carries the pen's thickness in millimetres
+    /// ([`PenWeight::describe`]) and that belongs to the note in hand: hence `String` rather than `&'static str`.
+    pen_select: Entity<SelectState<Vec<String>>>,
     /// The screen that offers what was opened recently, and the app starts on.
     home: Home,
 }
@@ -457,8 +527,13 @@ impl NoteApp {
             window,
             cx,
         );
-        let pen_select = choice(
-            &PenWeight::ALL.map(PenWeight::label),
+        let pen_select = choice_of(
+            // The thickness is spelled out beside each name, in millimetres of paper: a weight is a *name*, and
+            // what a reader wants to know is how thick the line is (see [`PenWeight::describe`]).
+            PenWeight::ALL
+                .iter()
+                .map(|weight| weight.describe(settings.no_pressure_width))
+                .collect(),
             PenWeight::ALL
                 .iter()
                 .position(|weight| *weight == settings.pen_weight),
@@ -519,6 +594,7 @@ impl NoteApp {
             window_title: String::new(),
             naming: None,
             naming_asked: false,
+            confirm: None,
             name_input,
             sheet_focus,
             sheet_has_keyboard: false,
@@ -543,7 +619,7 @@ impl NoteApp {
         // one, and is ignored: a sheet always has a size, something printed on it, and a pen.
         cx.subscribe(
             &app.sheet_select,
-            |app, _, event: &SelectEvent<Vec<&'static str>>, cx| {
+            |app, _, event: &SelectEvent<Vec<String>>, cx| {
                 if let SelectEvent::Confirm(Some(label)) = event {
                     if let Some(size) = CanvasSize::from_label(label) {
                         app.set_canvas_size(size, cx);
@@ -555,7 +631,7 @@ impl NoteApp {
 
         cx.subscribe(
             &app.rule_select,
-            |app, _, event: &SelectEvent<Vec<&'static str>>, cx| {
+            |app, _, event: &SelectEvent<Vec<String>>, cx| {
                 if let SelectEvent::Confirm(Some(label)) = event {
                     if let Some(style) = CanvasStyle::from_label(label) {
                         app.set_canvas_style(style, cx);
@@ -567,7 +643,7 @@ impl NoteApp {
 
         cx.subscribe(
             &app.pen_select,
-            |app, _, event: &SelectEvent<Vec<&'static str>>, cx| {
+            |app, _, event: &SelectEvent<Vec<String>>, cx| {
                 if let SelectEvent::Confirm(Some(label)) = event {
                     if let Some(weight) = PenWeight::from_label(label) {
                         app.set_pen_weight(weight, cx);
@@ -634,8 +710,10 @@ impl NoteApp {
 
                 // The pen is captured by the *window* rather than by anything on it, so a reading that
                 // reached the ink with a screen in front would be ink on a page nobody is looking at. The
-                // capture is left alone and the readings are dropped here, where they become strokes.
-                if app.home_is_open() {
+                // capture is left alone and the readings are dropped here, where they become strokes — and a
+                // reading that arrives under a confirmation box is dropped for the same reason: nothing is
+                // written while a question is waiting for an answer.
+                if app.home_is_open() || app.asking() {
                     return;
                 }
 
@@ -841,6 +919,7 @@ impl NoteApp {
         // obeys an app state, not a rectangle (see [`crate::bookmarks`]).
         if self.naming.is_some()
             || self.home_is_open()
+            || self.asking()
             || self.marks.is_open()
             || self.outline.is_open()
         {
@@ -1245,14 +1324,32 @@ impl NoteApp {
 
         cursor.set_screen(Screen {
             scale: self.scale,
-            // The colour the frame used to draw the ghost in before it moved out: not the ink's, so
-            // that it is visible on a sheet of any colour, including one where ink would disappear.
-            colour: contrast_color(self.settings.page_color) & 0x00FF_FFFF,
+            // The ghost's mark is the colour in hand: the dot says what the next stroke will be
+            // written in, which is what a reader looks at it for. The *halo* is the app's answer for
+            // the paper, so a mark that would vanish on it — white ink, a highlighter's pale yellow —
+            // still has an edge to be found by (see [`Screen::halo`]).
+            colour: self.ink_colour_in_hand(),
+            halo: contrast_color(self.settings.page_color) & 0x00FF_FFFF,
             // The line above which a reading belongs to a control rather than to the page. The same
             // estimate the pointer rule uses ([`Self::pen_has_its_own_cursor`]), in physical pixels.
             sheet_top: BAR_HEIGHT * self.scale,
-            suppressed: self.home_is_open() || !self.settings.show_tilt_cursor,
+            suppressed: self.home_is_open() || self.asking() || !self.settings.show_tilt_cursor,
         });
+    }
+
+    /// The colour the next stroke will be written in: what the ghost cursor's mark is drawn in.
+    ///
+    /// The pen's ink or the marker's, whichever is in hand — the ghost is a ghost of the *next* stroke, and that is
+    /// what a reader looks at it to know. The eraser and the lasso write nothing, so they keep the paper's own
+    /// contrast colour, which is what a mark on that paper can be seen in at all.
+    fn ink_colour_in_hand(&self) -> u32 {
+        let colour = match self.ink.mode() {
+            Tool::Pen => self.settings.ink_color,
+            Tool::Highlighter => self.settings.highlighter_color,
+            Tool::Eraser | Tool::Lasso => contrast_color(self.settings.page_color),
+        };
+
+        colour & 0x00FF_FFFF
     }
 
     /// Keeps the system pointer in step with the ghost cursor, hiding it exactly while the ghost replaces
@@ -1347,6 +1444,43 @@ impl NoteApp {
     }
 
     /// Removes every stroke.
+    /// Asks before doing something the note cannot take back.
+    ///
+    /// Nothing happens until [`Self::answer`] is called: asking is what makes a destructive command reachable only
+    /// through an answer (see [`confirmed`]). The pen is told as well — with the box up it draws no ghost and lays no
+    /// ink — because a stroke arriving under a question would be ink nobody asked for.
+    fn ask(&mut self, what: Confirmation, cx: &mut Context<Self>) {
+        self.confirm = Some(what);
+        self.follow_pen_with_pointer();
+        self.publish_screen();
+        cx.notify();
+    }
+
+    /// Answers the question on screen: `yes` runs what it asked about, and any other answer drops it.
+    fn answer(&mut self, yes: bool, cx: &mut Context<Self>) {
+        let Some(what) = self.confirm.take() else {
+            return;
+        };
+
+        // The one place an answer becomes an action. Every arm is spelled out rather than wildcarded: a new
+        // destructive command has to be given a meaning here, or it cannot be run at all.
+        match confirmed(what, yes) {
+            Some(Confirmation::ClearInk) => self.clear(cx),
+            Some(Confirmation::DeletePage) => self.delete_page(cx),
+            None => {}
+        }
+
+        self.follow_pen_with_pointer();
+        self.publish_screen();
+        cx.notify();
+    }
+
+    /// Whether a question is waiting for an answer.
+    fn asking(&self) -> bool {
+        self.confirm.is_some()
+    }
+
+    /// Empties the page in front: every stroke on it, and its history with them.
     fn clear(&mut self, cx: &mut Context<Self>) {
         if !self.ink.is_blank() {
             self.ink.clear();
@@ -2102,6 +2236,7 @@ impl NoteApp {
         let in_front = !self.home_is_open()
             && !self.marks.is_open()
             && !self.outline.is_open()
+            && !self.asking()
             && self.naming.is_none();
 
         if in_front == self.sheet_has_keyboard {
@@ -2460,7 +2595,11 @@ impl NoteApp {
         if !keystroke.modifiers.control {
             match keystroke.key.as_str() {
                 "escape" => {
-                    if self.naming.is_some() {
+                    if self.asking() {
+                        // A question is answered before anything else Escape means: the box is in front of
+                        // everything on screen, and "no" is what this key says to it.
+                        self.answer(false, cx);
+                    } else if self.naming.is_some() {
                         self.stop_note_name(window, cx);
                     } else if self.ink.has_selection() {
                         // A selection is let go of *before* the note is left: a reader who has just lassoed
@@ -3150,10 +3289,10 @@ impl NoteApp {
             icon_button(
                 "clear",
                 IconName::Trash,
-                "Clear the ink",
+                "Clear the ink (asks first)",
                 true,
                 cx,
-                |app, cx| app.clear(cx),
+                |app, cx| app.ask(Confirmation::ClearInk, cx),
             )
             .into_any_element(),
         ];
@@ -3298,6 +3437,81 @@ impl NoteApp {
             }))
     }
 
+    /// The box a destructive command is confirmed in.
+    ///
+    /// Over everything and centred: it is a question about the page in front, so it stands in front of it rather than
+    /// beside it. Two answers, and no way out that is not one of them — a click off the box and Escape both *refuse*
+    /// (see [`Self::note_key_down`]) — because a question that can be got rid of without answering is a question
+    /// nobody reads.
+    fn confirm_box(&self, what: Confirmation, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (surface, hairline, muted) = (
+            theme.title_bar,
+            theme.title_bar_border,
+            theme.muted_foreground,
+        );
+        let words = what.words();
+
+        // The two answers, in the bar's own style: the one that carries the command out is the accent, and the one
+        // that refuses is the quieter of the two — a reader glancing at the box should be able to tell which is which
+        // without reading both. The verb is on the button ("Clear the page"), not "OK": the last thing read before a
+        // page goes should say what is about to happen.
+        let keep = Button::new("confirm-keep")
+            .label(words.refuse)
+            .ghost()
+            .on_click(cx.listener(|app, _, _, cx| app.answer(false, cx)));
+
+        let agree = Button::new("confirm-agree")
+            .label(words.agree)
+            .custom(
+                ButtonCustomVariant::new(cx)
+                    .color(theme.accent)
+                    .hover(theme.accent)
+                    .active(theme.accent)
+                    .foreground(theme.accent_foreground),
+            )
+            .on_click(cx.listener(|app, _, _, cx| app.answer(true, cx)));
+
+        div()
+            .id("confirm-backdrop")
+            .absolute()
+            .inset_0()
+            // The desk behind the question, dimmed: the page is still there, and it is what the question is about.
+            .bg(theme.overlay)
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|app, _, _, cx| app.answer(false, cx)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p(px(16.0))
+                    .w(px(360.0))
+                    .rounded(theme.radius_lg)
+                    .bg(surface)
+                    .border_1()
+                    .border_color(hairline)
+                    .shadow_md()
+                    // The box is not the backdrop: a click *on* it is not an answer either way, and without this the
+                    // backdrop's own handler would hear it and refuse.
+                    .occlude()
+                    .child(div().child(words.heading))
+                    .child(div().text_sm().text_color(muted).child(words.detail))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .gap_2()
+                            .pt_2()
+                            .child(keep)
+                            .child(agree),
+                    ),
+            )
+    }
+
     /// The bar's second row: the page's commands, the sheet's size, its ruling, its two colours, and the
     /// pen's weight.
     fn sheet_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3402,7 +3616,7 @@ impl NoteApp {
     }
 
     /// One of the row's choosers, at the width the bar gives it.
-    fn chooser(&self, state: &Entity<SelectState<Vec<&'static str>>>) -> impl IntoElement {
+    fn chooser(&self, state: &Entity<SelectState<Vec<String>>>) -> impl IntoElement {
         div().w(px(112.0)).child(Select::new(state).small())
     }
 
@@ -3642,10 +3856,10 @@ impl NoteApp {
             icon_button(
                 "page-delete",
                 IconName::FileX,
-                "Delete this page",
+                "Delete this page (asks first)",
                 true,
                 cx,
-                |app, cx| app.delete_page(cx),
+                |app, cx| app.ask(Confirmation::DeletePage, cx),
             )
             .into_any_element(),
             toolbar_divider(hairline).into_any_element(),
@@ -4049,7 +4263,7 @@ impl Render for NoteApp {
             self.bar_handle(cx).into_any_element()
         };
 
-        div()
+        let mut screen = div()
             .relative()
             .size_full()
             .bg(desk)
@@ -4078,8 +4292,15 @@ impl Render for NoteApp {
             .child(bar)
             // The desk's own row: the page in the middle, the counters at the edge. Last, so it
             // paints over the sheet — a page pill *under* the paper would be no pill at all.
-            .child(self.bottom_row(cx))
-            .into_any_element()
+            .child(self.bottom_row(cx));
+
+        // The confirmation box, over everything: a question about the page in front stands in front of it, and while
+        // it is there the box is what answers (see [`Self::confirm_box`]).
+        if let Some(what) = self.confirm {
+            screen = screen.child(self.confirm_box(what, cx));
+        }
+
+        screen.into_any_element()
     }
 }
 
@@ -4089,8 +4310,27 @@ fn choice(
     selected: Option<usize>,
     window: &mut Window,
     cx: &mut Context<NoteApp>,
-) -> Entity<SelectState<Vec<&'static str>>> {
-    let items: Vec<&'static str> = labels.to_vec();
+) -> Entity<SelectState<Vec<String>>> {
+    choice_of(
+        labels.iter().map(|label| label.to_string()).collect(),
+        selected,
+        window,
+        cx,
+    )
+}
+
+/// A chooser over labels that are *built* rather than spelled out in the source.
+///
+/// The pen's chooser needs this because each of its labels carries a number that belongs to the note in hand (see
+/// [`PenWeight::describe`]), so the strings are owned rather than `&'static`. Every chooser is built this way —
+/// the state's item type is one thing rather than one per label flavour — so a fixed-label chooser simply hands
+/// its labels through [`choice`].
+fn choice_of(
+    items: Vec<String>,
+    selected: Option<usize>,
+    window: &mut Window,
+    cx: &mut Context<NoteApp>,
+) -> Entity<SelectState<Vec<String>>> {
     cx.new(|cx| SelectState::new(items, selected.map(IndexPath::new), window, cx))
 }
 
@@ -4248,12 +4488,47 @@ mod tests {
     // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
     // scope and shadow the attribute this module needs.
     use super::{
-        file_label, file_stem, notch_in_pixels, page_of_write, page_owes_a_rewrite, pdf_render_due,
-        pinch_zoom_factor, quantise_width, sheet_matches, wheel_pan, wheel_zoom_factor,
-        PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH, WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
+        confirmed, file_label, file_stem, notch_in_pixels, page_of_write, page_owes_a_rewrite,
+        pdf_render_due, pinch_zoom_factor, quantise_width, sheet_matches, wheel_pan,
+        wheel_zoom_factor, Confirmation, PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH,
+        WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
     };
     use crate::ink::Notes;
     use std::time::{Duration, Instant};
+
+    /// A destructive command is reachable only through an answer.
+    ///
+    /// The whole of the rule the box exists for, checked here because it can be checked without a window: "yes" means
+    /// the command runs, and *anything else* — the refusing button, a click off the box, Escape — means nothing
+    /// happened at all (see [`confirmed`]). What this test cannot run is the command itself: that these two are only
+    /// ever run from `NoteApp::answer` is what this function being the only way in *means*.
+    #[test]
+    fn a_destructive_command_needs_an_answer() {
+        for what in [Confirmation::ClearInk, Confirmation::DeletePage] {
+            assert_eq!(confirmed(what, true), Some(what), "yes carries it out");
+            assert_eq!(confirmed(what, false), None, "and no leaves the page alone");
+
+            let words = what.words();
+
+            assert!(
+                words.heading.ends_with('?'),
+                "the box asks rather than announces: {}",
+                words.heading
+            );
+            assert!(
+                words.detail.contains("cannot be taken back"),
+                "and says what it costs, because the note cannot undo it: {}",
+                words.detail
+            );
+            assert!(
+                !words.agree.eq_ignore_ascii_case("ok")
+                    && !words.refuse.eq_ignore_ascii_case("cancel"),
+                "the buttons name what they do rather than OK and Cancel: {} / {}",
+                words.agree,
+                words.refuse
+            );
+        }
+    }
 
     /// One notch of a wheel is one zoom step, however many lines the platform reports it as.
     #[test]

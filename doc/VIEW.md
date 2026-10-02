@@ -110,7 +110,11 @@ swatches, which is what a palette is. Each group is captioned, because without t
 guess which of the two runs of squares is the paper and which the ink. The pen's weight sits beside the
 ink's colour because the two are one answer — the colour is *which* pen, the weight is *how heavy* it
 is — and its caption is a property (`Gray`) rather than a thing (`Pen`), since `Ink` already captions
-the colours.
+the colours. **The weight is spelled out in millimetres**: each box in the list reads `Normal · 0.58 mm`, because a
+name is a label and a thickness is what a reader is actually choosing between. The number is measured on the paper
+(`settings::PenWeight::millimetres`), on the app's own millimetre — the scale every canvas size is drawn at — and it is
+the line a pen lays *without* pressure, which is the nib's own thickness: a pen that reports pressure draws thinner and
+thicker either side of it.
 
 A chooser's width is set on the **row**, not on the select: a `Select` fills its parent by design (it is
 a form field, and a form field is as wide as the field it is on), so in a row it would take the whole
@@ -227,6 +231,14 @@ Four facts about the ghost are decided here, and each of them is something a pen
 | where it is *not* drawn | **only below the bar**: over the bar it would be drawn behind an opaque background, where it cannot be seen — and **never on the home screen**, which has no sheet to point at and is meant to be tapped |
 | the scale, the colour on this paper, and where the bar ends | published to the overlay (`publish_screen`) on the frames where they change, so an effect like the Tilt switch takes hold at once rather than at the next reading |
 
+**The nib's dot is the colour in hand.** The mark is drawn in the ink the next stroke will be written in — the pen's
+colour, or the marker's — because that is what a reader looks at the dot to know, and the palette in the bar changes
+with the tool, so the two always say the same thing. The soft edge under the mark and the nib's bloom are drawn in the
+paper's **contrast colour** instead, which is what keeps a mark findable when it is close to the colour of the paper:
+white ink on white paper reads as a white dot with a dark rim rather than as nothing at all. The two colours reach the
+overlay as a pair (`cursor_overlay::Screen::colour` and `Screen::halo`), and the eraser and the lasso — which write
+nothing — keep the contrast colour for both.
+
 The system pointer is driven **from the ghost** and not from the pen's range, because the two states
 have to be impossible to separate: a hidden pointer with nothing drawn in its place is a window with no
 cursor at all — and on a list, that is a list no pen can click.
@@ -311,6 +323,20 @@ old one would make the button look like it did nothing.
 A **deleted** page takes its ink with it: there is nowhere to show it afterwards, and keeping it would
 mean keeping an identity for "the page that used to be here" that no later page could be confused with.
 On a note about a document the page leaves the *note*, not the file.
+
+### The commands that cannot be taken back
+
+Clearing a page's ink and deleting the page are the two things a note has **no undo for** — the first drops the
+history with the strokes, and the second drops the page that history belongs to — so neither acts on the click that
+reaches for it. Both put up a box instead: what goes, and two answers, `Clear the page` / `Delete the page` and
+`Keep it`. The question names the page in front and says what is lost, because a reader who is asked "are you sure"
+learns nothing and clicks yes, while a reader who is asked about *this* page can tell whether that is the page they
+meant.
+
+There is no way out of the box that is not one of the two answers: a click outside it and Escape both *refuse*, the
+word on the refusing button is "Keep it" rather than "Cancel" — it says what happens to the page — and while a box is
+up the pen draws no ghost and lays no ink and the keyboard belongs to the question
+(`NoteApp::ask`/`answer`, and `confirmed` is the one place an answer becomes an action).
 
 ### The page's rotation
 

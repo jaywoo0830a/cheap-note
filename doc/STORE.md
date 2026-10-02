@@ -47,6 +47,21 @@ Beside the notes folder there is one small file, `%LOCALAPPDATA%\cheap-note\rece
 what has been opened. It is a **cache of the notes folder, not a note** — deleting it costs the order of
 a list, and a folder it has never heard of is adopted by being there.
 
+### Two windows at once
+
+That file is the only thing two running copies of the app share, and it is shared safely because it is a
+cache: each copy **merges** what it holds with what is on disk before it writes (`recent::merge`), so the
+copy that started second cannot drop a note the other one opened, and a note taken out of the list in one
+copy is not put back by the other. The note itself is not shared: a note is a folder, and *one copy of the
+app owns one note while it is open*. Two windows on two different notes are therefore independent — the
+only thing they can disagree about is the order of the list — while two windows on the **same** note are
+not supported and would genuinely lose ink: each holds the page's shape (its chunks, their order, and the
+history cursor) from the moment it read it, and writes against that, so one copy's compaction deletes
+chunks the other has just appended. SQLite does not save the note here either — WAL and `busy_timeout`
+make the *file* safe, but the invariants being broken are the app's own. The fix, if it is ever wanted, is
+a lock in the note's folder; it is deliberately not there yet, because a lock file left behind by a crash
+would make a note unopenable, which is worse than the mistake it prevents.
+
 ## 2. Where the ink goes, end to end
 
 ```text

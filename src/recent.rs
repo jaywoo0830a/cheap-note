@@ -301,6 +301,64 @@ struct Index {
     forgotten: Vec<PathBuf>,
 }
 
+impl Index {
+    /// What the file holds right now, or nothing when it is missing or unreadable.
+    ///
+    /// Nothing rather than an error, for the reason [`Recents::load_from`] gives: this file is a cache, and a window
+    /// that could not read it has nothing to merge with — which is a smaller problem than refusing to write at all.
+    fn read(path: &Path) -> Index {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Index>(&text).ok())
+            .unwrap_or_default()
+    }
+}
+
+/// Two windows' worth of index, as one.
+///
+/// The rule is: **what this window has decided stands, and what it says nothing about is taken from the other's
+/// file.** A folder this window has an opinion about — kept in its list, or taken out of it — is not touched by the
+/// other window's copy, because that copy was read before this window opened the note it is about to write. A folder
+/// neither of them has ever mentioned here is added, and a folder the other window has forgotten stays forgotten.
+///
+/// The one number that is *merged* rather than decided is `opened_at`: two windows both knowing a note, the later visit
+/// wins, because that is the sort key and the only thing about an entry a reader would notice being stale.
+fn merge(mut ours: Index, theirs: Index) -> Index {
+    for entry in theirs.entries {
+        // Asked before the list is borrowed mutably, and it is the *folder* that is asked about, so a push for
+        // another note in an earlier turn of this loop cannot change the answer.
+        let known = mentions(&ours, &entry.folder);
+
+        match ours
+            .entries
+            .iter_mut()
+            .find(|mine| mine.folder == entry.folder)
+        {
+            Some(mine) if mine.opened_at < entry.opened_at => *mine = entry,
+            Some(_) => {}
+            None if known => {}
+            None => ours.entries.push(entry),
+        }
+    }
+
+    for folder in theirs.forgotten {
+        if !mentions(&ours, &folder) && !ours.forgotten.contains(&folder) {
+            ours.forgotten.push(folder);
+        }
+    }
+
+    ours
+}
+
+/// Whether an index has an opinion about a folder: it is in the list, or it has been taken out of it.
+///
+/// A free function rather than a closure over the index being written, because the loop that asks is also the loop that
+/// grows it: the answer is needed *before* the mutable borrow, and a closure would hold one from the first question to
+/// the last.
+fn mentions(index: &Index, folder: &PathBuf) -> bool {
+    index.entries.iter().any(|entry| &entry.folder == folder) || index.forgotten.contains(folder)
+}
+
 /// What the app remembers opening, newest first.
 #[derive(Debug)]
 pub struct Recents {
@@ -329,10 +387,7 @@ impl Recents {
 
     /// Loads the index from a given path: the same thing, for a test or another location.
     pub fn load_from(path: &Path) -> Self {
-        let index = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Index>(&text).ok())
-            .unwrap_or_default();
+        let index = Index::read(path);
 
         let mut recents = Recents {
             path: path.to_path_buf(),
@@ -473,15 +528,23 @@ impl Recents {
 
     /// Writes the index out: a temporary file and a rename, so a crash mid-write cannot leave half
     /// a list behind.
+    ///
+    /// **The file is merged with what is on disk before it is written**, because two windows of the app share it: each
+    /// holds the list it read when it started, and writing that straight back would drop everything the other window
+    /// has done since — a note opened there would fall out of the list, and a note forgotten there would come back.
+    /// Merging is safe *because* this file is a cache: the worst a merge can do is keep an entry the reader no longer
+    /// wants, and the next scan settles what is actually on disk (see the module docs) — and what a merge keeps and
+    /// what a merge lets go is [`merge`]'s rule, per folder.
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        let index = Index {
+        let ours = Index {
             entries: self.entries.clone(),
             forgotten: self.forgotten.clone(),
         };
+        let index = merge(ours, Index::read(&self.path));
         let temporary = self.path.with_extension("json.tmp");
         std::fs::write(&temporary, serde_json::to_string_pretty(&index)?)?;
         std::fs::rename(&temporary, &self.path)?;
@@ -568,6 +631,65 @@ mod tests {
         let entry = found(&recents, &dir);
         assert_eq!(entry.title, "chapter three");
         assert_eq!(entry.stamp, Some(stamp), "the entry is stale, by design");
+    }
+
+    /// Two windows' worth of index, as one: what a window has decided stands, and what it says nothing about comes
+    /// from the other window's file.
+    ///
+    /// The shape of the hazard, as it happens in practice: two windows of the app are open, one takes a note out of
+    /// the list, the other opens a *different* note. The second window's write holds a list it read before the take-out
+    /// happened, so a plain write would put the forgotten note back; and the first window's write holds no entry for
+    /// the note the other one just opened, so a plain write would drop it. Both are settled here — and what makes a
+    /// merge safe at all is that this file is a cache of what the notes folder already says.
+    #[test]
+    fn two_windows_worth_of_list_are_merged() {
+        let here = folder("merge-here");
+        let there = folder("merge-there");
+        let out = folder("merge-out");
+
+        // This window: `here` in its list, `out` taken out of it.
+        let ours = Index {
+            entries: vec![Recent::note(
+                here.clone(),
+                None,
+                String::from("here"),
+                None,
+                100,
+            )],
+            forgotten: vec![out.clone()],
+        };
+
+        // The other window, writing what it read before either of those: `here` in its list too (and opened *later*,
+        // which is the one thing that is merged rather than decided), `out` still in it, and `there` newly opened.
+        let theirs = Index {
+            entries: vec![
+                Recent::note(here.clone(), None, String::from("here"), None, 300),
+                Recent::note(out.clone(), None, String::from("out"), None, 200),
+                Recent::note(there.clone(), None, String::from("there"), None, 400),
+            ],
+            forgotten: Vec::new(),
+        };
+
+        let merged = merge(ours, theirs);
+        let folders: Vec<&PathBuf> = merged.entries.iter().map(|entry| &entry.folder).collect();
+
+        assert!(
+            folders.contains(&&there),
+            "a note only the other window knows is kept: {folders:?}"
+        );
+        assert!(
+            !folders.contains(&&out),
+            "and a note this window took out of the list stays out: {folders:?}"
+        );
+        assert_eq!(
+            merged
+                .entries
+                .iter()
+                .find(|entry| entry.folder == here)
+                .map(|entry| entry.opened_at),
+            Some(300),
+            "and of two entries for one note, the later visit is the one that counts"
+        );
     }
 
     /// A missing index is an empty list, not an error.

@@ -508,6 +508,11 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
     document's own `/Rotate`, which `pdf::a_pages_text_is_in_the_pages_own_points` is what pins down), and the model
     turns a span into bands without ever asking Pdfium anything. What is written down is still ink
     ([VIEW.md](VIEW.md), §7, *The highlighter*).
+18. **A page's selection mask is one flag per stroke, and reading a page rebuilds it.** The mask is a *view* of the
+    ink — which strokes a lasso has in hand — and it is the one part of a page nothing stores. A page read out of a
+    note therefore has to build one (`InkDocument::from_strokes`), and an edit repairs it if it ever arrives out of
+    step (`history::insert`/`remove_at`): inserting a flag past the end of a short mask is how the first stroke
+    written on a freshly opened page used to end the process, silently and at the worst possible moment.
 
 ## 12. Requirements, building, running
 

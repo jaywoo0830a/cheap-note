@@ -119,11 +119,15 @@ impl PenWeight {
 
     /// The weight a label names. See [`crate::canvas::CanvasSize::from_label`] for why the lookup is
     /// by name: the toolbar's chooser carries a choice back as the text that was showing in it.
+    ///
+    /// The name is looked for *within* the label rather than matched whole, because a chooser's label also spells
+    /// the thickness out ([`Self::describe`]) — the two halves are one string, so the name is what the lookup is
+    /// left with. No weight's name contains another's, which is what makes that safe.
     pub fn from_label(label: &str) -> Option<PenWeight> {
         PenWeight::ALL
             .iter()
             .copied()
-            .find(|weight| weight.label() == label)
+            .find(|weight| label.contains(weight.label()))
     }
 
     /// What this weight multiplies every width by.
@@ -139,6 +143,32 @@ impl PenWeight {
             PenWeight::Bold => 1.5,
             PenWeight::Heavy => 2.25,
         }
+    }
+
+    /// How thick this pen is, in **millimetres of paper**.
+    ///
+    /// `no_pressure_width` is the setting's own width for a pen with no pressure sensor, and the one measured here
+    /// because it is the line the pen draws when it is not being pressed — the nib's own thickness. A pen that
+    /// reports pressure draws thinner and thicker either side of it (see [`Settings::width_for_pressure`]), so one
+    /// number has to be the pen's own, and this is it.
+    ///
+    /// Measured with [`crate::canvas::PIXELS_PER_MM`], which is the app's millimetre: the ink is written in logical
+    /// pixels, every canvas size is drawn at that scale, and so the number means the same thing on any sheet.
+    pub fn millimetres(self, no_pressure_width: f32) -> f32 {
+        no_pressure_width * self.scale() / crate::canvas::PIXELS_PER_MM
+    }
+
+    /// The label a chooser shows: the weight's name, and how thick it is in millimetres.
+    ///
+    /// Two decimals, because the thin end of the range is where a difference is worth being able to see: a fine pen
+    /// is 0.29 mm and the next one up is 0.44, and one decimal would print those as 0.3 and 0.4 — a 50% difference
+    /// rounded away.
+    pub fn describe(self, no_pressure_width: f32) -> String {
+        format!(
+            "{} \u{b7} {:.2} mm",
+            self.label(),
+            self.millimetres(no_pressure_width)
+        )
     }
 }
 
@@ -337,6 +367,41 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every weight is spelled out in millimetres, and a chooser's label names its weight back again.
+    ///
+    /// The thickness is the number a reader picks a pen by, so it has to be *right*: measured on a plain pen (no
+    /// pressure), and on the app's own millimetre, which every canvas size is drawn at.
+    #[test]
+    fn a_weight_is_spelled_out_in_millimetres() {
+        let width = Settings::default().no_pressure_width;
+
+        for weight in PenWeight::ALL {
+            let label = weight.describe(width);
+
+            assert_eq!(
+                PenWeight::from_label(&label),
+                Some(weight),
+                "the chooser's label names the weight back: {label}"
+            );
+        }
+
+        let (fine, normal, heavy) = (
+            PenWeight::Fine.millimetres(width),
+            PenWeight::Normal.millimetres(width),
+            PenWeight::Heavy.millimetres(width),
+        );
+
+        assert!(
+            (normal - width / crate::canvas::PIXELS_PER_MM).abs() < 1e-5,
+            "the shipped pen is its own width in millimetres: {normal}"
+        );
+        assert!(
+            (0.4..=0.8).contains(&normal),
+            "and that is a pen's line and not a rope's: {normal} mm"
+        );
+        assert!(fine < normal && normal < heavy, "and the range is ordered");
+    }
 
     /// Pressure drives width between the two ends; no sensor means the constant width.
     #[test]

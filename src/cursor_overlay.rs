@@ -114,8 +114,15 @@ pub struct CursorShape {
     pub cursor: PenCursor,
     /// Physical pixels per logical pixel.
     pub scale: f32,
-    /// The colour the ghost is drawn in, as `0xRRGGBB`.
+    /// The colour the ghost's *mark* is drawn in, as `0xRRGGBB`: the ink the ghost is a ghost of.
     pub colour: u32,
+    /// The colour of the soft edge under the mark, and of the nib's bloom.
+    ///
+    /// A second colour because the first one is the *ink's*, and ink can be the colour of the paper it is on — a
+    /// white pen, a highlighter's pale yellow. The halo is what makes such a mark findable: it is the app's answer
+    /// for the paper in front (see [`crate::canvas::contrast_color`]), so a pale dot reads as a pale dot with a dark
+    /// rim rather than as nothing at all.
+    pub halo: u32,
     /// The line the ghost is drawn below, in physical client pixels.
     pub sheet_top: f32,
 }
@@ -237,6 +244,7 @@ impl Surface {
     pub fn draw(&mut self, shape: &CursorShape, nib: [f32; 2], clip: Option<f32>) {
         let scale = sane_scale(shape.scale);
         let colour = rgb_of(shape.colour);
+        let halo = rgb_of(shape.halo);
         let origin = shape.cursor.position();
         let map = |p: [f32; 2]| {
             [
@@ -251,23 +259,29 @@ impl Surface {
             let fade = shape.cursor.body_fade();
 
             // The soft edge first, then the body over it: widest and faintest first, which is the
-            // order the page's own shadow is painted in.
-            for (grow, alpha) in [
-                (BODY_HALO_GROW, BODY_HALO_ALPHA * fade),
-                (0.0, BODY_ALPHA * fade),
+            // order the page's own shadow is painted in. The edge is the *halo's* colour, so a body
+            // the colour of the paper still has an outline to be seen by.
+            for (grow, alpha, tint) in [
+                (BODY_HALO_GROW, BODY_HALO_ALPHA * fade, halo),
+                (0.0, BODY_ALPHA * fade, colour),
             ] {
                 flatten(&body.outline(grow), &map, &mut self.outline);
                 let outline = std::mem::take(&mut self.outline);
-                self.fill_polygon(&outline, clip, alpha, colour);
+                self.fill_polygon(&outline, clip, alpha, tint);
                 self.outline = outline;
             }
         }
 
         // The nib: a small circle, always, so there is a fixed point that says exactly where the
         // ink will land. The faint bloom around it is what lets it sit in the page rather than on
-        // it, and the mark is the exception to how faint the rest of it is.
-        for (radius, alpha) in [(NIB_BLOOM_RADIUS, NIB_BLOOM_ALPHA), (NIB_RADIUS, NIB_ALPHA)] {
-            self.fill_disc(nib, radius * scale, clip, alpha, colour);
+        // it, and the mark is the exception to how faint the rest of it is — and it is drawn *in the
+        // ink's colour*, over a bloom in the halo's, so the dot says both what will be written and
+        // where.
+        for (radius, alpha, tint) in [
+            (NIB_BLOOM_RADIUS, NIB_BLOOM_ALPHA, halo),
+            (NIB_RADIUS, NIB_ALPHA, colour),
+        ] {
+            self.fill_disc(nib, radius * scale, clip, alpha, tint);
         }
     }
 
@@ -543,8 +557,14 @@ fn sane_scale(scale: f32) -> f32 {
 pub struct Screen {
     /// Physical pixels per logical pixel, as the frame laid the window out.
     pub scale: f32,
-    /// The colour the ghost is drawn in, as `0xRRGGBB`.
+    /// The colour the ghost's mark is drawn in, as `0xRRGGBB`.
     pub colour: u32,
+    /// The colour of the soft edge under it, and of the nib's bloom.
+    ///
+    /// The frame's own answer for the paper in front: the ghost's mark is the *ink's* colour, which can be the
+    /// colour of the paper it is drawn on, and this is what keeps a white pen or a highlighter's pale yellow
+    /// findable.
+    pub halo: u32,
     /// The line the ghost is drawn below, in physical client pixels: the bar's bottom edge.
     pub sheet_top: f32,
     /// Whether the ghost is switched off, or the pen is not on the sheet at all.
@@ -558,6 +578,7 @@ impl Default for Screen {
         Screen {
             scale: 1.0,
             colour: 0x00_00_00,
+            halo: 0x00_00_00,
             sheet_top: 0.0,
             suppressed: true,
         }
@@ -591,6 +612,7 @@ fn cursor_for(sample: PenSample, screen: &Screen) -> Option<(PenSample, CursorSh
         cursor,
         scale: screen.scale,
         colour: screen.colour,
+        halo: screen.halo,
         sheet_top: screen.sheet_top,
     };
 
@@ -1085,6 +1107,7 @@ mod tests {
         Screen {
             scale: 1.0,
             colour: 0x00_00_00,
+            halo: 0x00_00_00,
             sheet_top: 0.0,
             suppressed: false,
         }
@@ -1095,6 +1118,42 @@ mod tests {
         cursor_for(reading(PenPhase::Hover, pixel, tilt), &screen())
             .expect("a pen on the sheet has a ghost")
             .1
+    }
+
+    /// The nib's mark is the ink's colour and its bloom is the halo's: the dot says what will be written, and its
+    /// edge is what makes a mark the colour of the paper findable (see [`Screen::halo`]).
+    #[test]
+    fn the_mark_is_the_ink_and_the_bloom_is_the_halo() {
+        let span = surface_span(1.0) as usize;
+        let middle = span as f32 / 2.0;
+
+        let mut surface = Surface::new(span, span);
+        surface.clear();
+
+        let shape = CursorShape {
+            colour: 0xFF_00_00,
+            halo: 0x00_00_FF,
+            ..shape((middle, middle), None)
+        };
+
+        surface.draw(&shape, [middle, middle], None);
+
+        let at =
+            |radius: f32| surface.pixels()[(middle as usize) * span + (middle + radius) as usize];
+        let centre = at(0.0);
+        let ring = at(NIB_RADIUS + (NIB_BLOOM_RADIUS - NIB_RADIUS) * 0.5);
+
+        let (centre_red, centre_blue) = ((centre >> 16) & 0xFF, centre & 0xFF);
+        let (ring_red, ring_blue) = ((ring >> 16) & 0xFF, ring & 0xFF);
+
+        assert!(
+            centre_red > centre_blue,
+            "the mark in the middle is the colour in hand: {centre:#010X}"
+        );
+        assert!(
+            ring_blue > ring_red,
+            "and the bloom around it is the halo's: {ring:#010X}"
+        );
     }
 
     /// The bounding box of everything drawn on a surface, or `None` when nothing was.

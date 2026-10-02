@@ -513,6 +513,11 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
     note therefore has to build one (`InkDocument::from_strokes`), and an edit repairs it if it ever arrives out of
     step (`history::insert`/`remove_at`): inserting a flag past the end of a short mask is how the first stroke
     written on a freshly opened page used to end the process, silently and at the worst possible moment.
+19. **A command with no undo asks first, and only the answer runs it.** Clearing a page's ink and deleting the page
+    both go through one box (`NoteApp::ask`) and one place where an answer becomes an action (`confirmed`), so a
+    destructive command is reachable only through a "yes" — the button that reaches for it does not act, and neither
+    a click off the box nor Escape agrees. The pen is held off while a box is up: nothing is written under a question
+    ([VIEW.md](VIEW.md), §7, *The commands that cannot be taken back*).
 
 ## 12. Requirements, building, running
 

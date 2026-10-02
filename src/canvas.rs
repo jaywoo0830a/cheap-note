@@ -33,7 +33,13 @@ use crate::pages::Quarters;
 ///
 /// Chosen so the default sheet, A4, comes out 720 logical pixels wide — a comfortable reading
 /// size in a 1280-pixel window.
-const PX_PER_MM: f32 = 720.0 / 210.0;
+///
+/// **The app's own millimetre**, and therefore the one a pen's thickness is measured in: every canvas size is drawn
+/// at this scale (`display_width` is its own width in millimetres times this), so a width in logical pixels is the
+/// same number of millimetres on A5 as on A4 — which is what makes "0.6 mm" a fact about the pen and not about the
+/// page. Public because the settings spell a pen's thickness out in millimetres (see
+/// [`crate::settings::PenWeight::describe`]).
+pub const PIXELS_PER_MM: f32 = 720.0 / 210.0;
 
 /// The thickness of a rule, in logical pixels.
 const RULE_THICKNESS: f32 = 1.0;
@@ -115,7 +121,7 @@ impl CanvasSize {
 
     /// The width, in logical pixels, this size is drawn at when it is selected.
     pub fn display_width(self) -> f32 {
-        self.millimetres().0 * PX_PER_MM
+        self.millimetres().0 * PIXELS_PER_MM
     }
 
     /// The sheet's drawn size at the given width, in logical pixels.

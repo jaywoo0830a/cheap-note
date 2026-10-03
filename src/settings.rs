@@ -106,28 +106,18 @@ impl PenWeight {
         PenWeight::Heavy,
     ];
 
-    /// The label on this weight's box.
-    pub fn label(self) -> &'static str {
-        match self {
-            PenWeight::Fine => "Fine",
-            PenWeight::Light => "Light",
-            PenWeight::Normal => "Normal",
-            PenWeight::Bold => "Bold",
-            PenWeight::Heavy => "Heavy",
-        }
-    }
-
-    /// The weight a label names. See [`crate::canvas::CanvasSize::from_label`] for why the lookup is
-    /// by name: the toolbar's chooser carries a choice back as the text that was showing in it.
+    /// The weight a note's row stands for, from the multiplier the row holds.
     ///
-    /// The name is looked for *within* the label rather than matched whole, because a chooser's label also spells
-    /// the thickness out ([`Self::describe`]) — the two halves are one string, so the name is what the lookup is
-    /// left with. No weight's name contains another's, which is what makes that safe.
-    pub fn from_label(label: &str) -> Option<PenWeight> {
+    /// The row holds [`Self::scale`] — a number rather than a word — because that is what a weight *is*: a multiplier
+    /// on the nib's own line, meaningful whatever the nib is. No two weights are near enough to be confused (the
+    /// closest pair are a quarter apart) and the tolerance is there only to survive the text a float is written as.
+    pub fn from_scale(text: &str) -> Option<PenWeight> {
+        let wanted: f32 = text.trim().parse().ok()?;
+
         PenWeight::ALL
             .iter()
             .copied()
-            .find(|weight| label.contains(weight.label()))
+            .find(|weight| (weight.scale() - wanted).abs() < SCALE_TOLERANCE)
     }
 
     /// What this weight multiplies every width by.
@@ -158,18 +148,56 @@ impl PenWeight {
         no_pressure_width * self.scale() / crate::canvas::PIXELS_PER_MM
     }
 
-    /// The label a chooser shows: the weight's name, and how thick it is in millimetres.
+    /// The label a chooser shows: how thick this pen is, in millimetres — a number and its unit, and no name.
     ///
-    /// Two decimals, because the thin end of the range is where a difference is worth being able to see: a fine pen
-    /// is 0.29 mm and the next one up is 0.44, and one decimal would print those as 0.3 and 0.4 — a 50% difference
+    /// A name is what the *setting* is called, and nobody choosing a pen is choosing a word: five boxes reading "Fine,
+    /// Light, Normal, Bold, Heavy" say nothing about what they will draw, while five numbers say exactly the one thing
+    /// that matters. It also settles where each pen's own width sits, which is the question a person with a 0.5 mm
+    /// nib is actually asking.
+    ///
+    /// Two decimals, because the thin end of the range is where a difference is worth being able to see: a fine pen is
+    /// 0.29 mm and the next one up is 0.44, and one decimal would print those as 0.3 and 0.4 — a 50% difference
     /// rounded away.
     pub fn describe(self, no_pressure_width: f32) -> String {
-        format!(
-            "{} \u{b7} {:.2} mm",
-            self.label(),
-            self.millimetres(no_pressure_width)
-        )
+        format!("{:.2} mm", self.millimetres(no_pressure_width))
     }
+
+    /// The weight a chooser's label names, against the nib of the note in hand.
+    ///
+    /// The label is a *measurement* ([`Self::describe`]), so the lookup is one: the number is read out of the label and
+    /// the weight whose own thickness it is, to the last digit the label prints, is the one it names. The width is the
+    /// note's own because the number is — the same pen is a different line on a note with a different nib.
+    ///
+    /// A label that is not a measurement is `None` rather than the nearest pen: "Marker" is a word, and answering it
+    /// with the closest number would be a guess at what someone meant.
+    pub fn from_label(label: &str, no_pressure_width: f32) -> Option<PenWeight> {
+        let named = millimetres_from_label(label)?;
+
+        PenWeight::ALL
+            .iter()
+            .copied()
+            .find(|weight| (weight.millimetres(no_pressure_width) - named).abs() < LABEL_TOLERANCE)
+    }
+}
+
+/// Half of the last digit [`PenWeight::describe`] prints: the most a label can be rounded by and still name a weight.
+///
+/// Half rather than the whole digit, because a label is a rounded number and either side of a rounding boundary is the
+/// same pen: 0.585 mm and 0.584 mm both print as "0.58 mm", and both are the pen that is 0.5833 mm.
+const LABEL_TOLERANCE: f32 = 0.005;
+
+/// How far a row's multiplier may sit from a weight's own and still be that weight.
+///
+/// The values are exact in binary (0.5, 0.75, 1, 1.5, 2.25) so the tolerance is not doing arithmetic's work — it is
+/// there so that a row written by hand, or by a build that printed fewer digits, still reads as the pen it named.
+const SCALE_TOLERANCE: f32 = 0.005;
+
+/// The number of millimetres a label shows, or nothing when the label shows something else.
+///
+/// The unit is looked for rather than ignored: the label's job is to say how thick the pen is, and text without the
+/// millimetres on it is not an answer to that question.
+fn millimetres_from_label(label: &str) -> Option<f32> {
+    label.trim().strip_suffix("mm")?.trim().parse().ok()
 }
 
 /// Everything a note remembers: how its paper is set up, and how the pen in hand behaves.
@@ -204,7 +232,7 @@ pub struct Settings {
     /// How heavy the pen is.
     ///
     /// Beside the ink's colour on purpose: those two *are* the pen, and everything else in this struct
-    /// is the paper it is writing on. See [`PenWeight`] for what the name multiplies.
+    /// is the paper it is writing on. See [`PenWeight`] for what the weight multiplies.
     pub pen_weight: PenWeight,
 
     /// The width a rendered PDF page is drawn at, in logical pixels.
@@ -236,6 +264,15 @@ pub struct Settings {
     /// it. Kept with the note because it is where the reader *was*, and re-derived by Fit Width and
     /// Fit Height, which are the other two ways to make it.
     pub zoom: f32,
+
+    /// Whether the gestures that zoom are held off, so that only an *asked-for* zoom moves the sheet.
+    ///
+    /// A reader who has set a page to 60% and is writing on it wants it to stay at 60%: a wheel rolled while reading, a
+    /// palm settling onto a trackpad and a stray pinch all move the zoom without being meant, and one of them landing
+    /// mid-sentence takes the line being written away from the nib. Locked, the two things that *say* a zoom — the
+    /// steps and the typed number ([`crate::app`]) — still work, because a lock that stood in their way would be a lock
+    /// with no key, while the wheel, a pinch and Fit Width/Height are ignored ([`Self::gestures_zoom`]).
+    pub zoom_locked: bool,
 
     /// The least distance, in logical pixels, between two ink points that are kept.
     ///
@@ -318,6 +355,9 @@ impl Default for Settings {
             // As large as the paper says. A sheet that fills a 1280-pixel window at its own scale
             // is the right place to start; Fit Width is one press away.
             zoom: 1.0,
+            // Unlocked: a fresh note is being read, not written in at a size chosen by hand, and a lock nobody asked
+            // for is a control that appears not to work.
+            zoom_locked: false,
             // 0.75 logical px: below the eye's ability to see a missing point at 1:1 zoom,
             // and it removes the majority of a slow stroke's readings.
             resample_spacing: 0.75,
@@ -340,6 +380,15 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Whether a zoom *gesture* — a wheel, a pinch, or a fit — may move the sheet.
+    ///
+    /// The lock's whole rule, in the one place it is asked, so that "locked" means one thing at every site that zooms
+    /// without being asked to by name. See [`Settings::zoom_locked`] for why the steps and the typed number are not
+    /// gestures for this purpose, and [`crate::view`] for what a gesture does when it is allowed.
+    pub fn gestures_zoom(&self) -> bool {
+        !self.zoom_locked
+    }
+
     /// The width to draw a reading at, given the pressure the digitizer reported.
     ///
     /// `None` means the pen has no pressure sensor, which is *not* the same as zero pressure:
@@ -371,7 +420,8 @@ mod tests {
     /// Every weight is spelled out in millimetres, and a chooser's label names its weight back again.
     ///
     /// The thickness is the number a reader picks a pen by, so it has to be *right*: measured on a plain pen (no
-    /// pressure), and on the app's own millimetre, which every canvas size is drawn at.
+    /// pressure), and on the app's own millimetre, which every canvas size is drawn at. The label is a number and a
+    /// unit and nothing else — a name in it would be a word standing where the measurement goes.
     #[test]
     fn a_weight_is_spelled_out_in_millimetres() {
         let width = Settings::default().no_pressure_width;
@@ -379,8 +429,14 @@ mod tests {
         for weight in PenWeight::ALL {
             let label = weight.describe(width);
 
+            assert!(
+                label
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.' || c == ' ' || c == 'm'),
+                "the label is a number and its unit and nothing else: {label}"
+            );
             assert_eq!(
-                PenWeight::from_label(&label),
+                PenWeight::from_label(&label, width),
                 Some(weight),
                 "the chooser's label names the weight back: {label}"
             );
@@ -446,14 +502,12 @@ mod tests {
             assert_eq!(
                 settings.width_for_pressure(Some(0.0)),
                 settings.min_width * scale,
-                "{} starts where the tuning starts",
-                weight.label()
+                "{weight:?} starts where the tuning starts"
             );
             assert_eq!(
                 settings.width_for_pressure(Some(1.0)),
                 settings.max_width * scale,
-                "{} ends where the tuning ends",
-                weight.label()
+                "{weight:?} ends where the tuning ends"
             );
             assert_eq!(
                 settings.width_for_pressure(None),
@@ -462,8 +516,7 @@ mod tests {
             );
             assert!(
                 settings.width_for_pressure(Some(0.0)) < settings.width_for_pressure(Some(1.0)),
-                "{}: pressure still widens the line",
-                weight.label()
+                "{weight:?}: pressure still widens the line"
             );
         }
 
@@ -483,31 +536,106 @@ mod tests {
         );
     }
 
-    /// Every weight has a name of its own, and the name leads back to it.
+    /// A label is a measurement, and only a label that *is* one names a weight.
     ///
-    /// The bar's chooser carries a choice back as the label that was showing, so a weight whose label
-    /// did not resolve would leave the pen as it was while the box showed the new name, and two weights
-    /// sharing a label would resolve to whichever came first in the list rather than to the one chosen.
+    /// The number is looked for with the millimetres on it, matched to half the last digit the label prints, and
+    /// measured against the nib of the note in hand — because the number is the note's: the same pen is a thinner line
+    /// on a note whose plain-pen width is smaller.
     #[test]
-    fn a_label_leads_back_to_its_weight() {
-        let mut seen: Vec<&str> = Vec::new();
+    fn a_thickness_names_the_weight_it_measures() {
+        let width = Settings::default().no_pressure_width;
 
+        assert_eq!(
+            PenWeight::from_label("0.58 mm", width),
+            Some(PenWeight::Normal)
+        );
+        assert_eq!(
+            PenWeight::from_label(&PenWeight::Heavy.describe(width), width),
+            Some(PenWeight::Heavy)
+        );
+
+        // Rounded either side of the last digit it prints, and still the same pen: a label is a rounded number, and
+        // half a digit is how far a number can be rounded and still be the one it came from.
+        let normal = PenWeight::Normal.millimetres(width);
+        assert_eq!(
+            PenWeight::from_label(&format!("{:.3} mm", normal), width),
+            Some(PenWeight::Normal)
+        );
+
+        // A number between two pens names neither of them rather than the nearer one.
+        assert_eq!(
+            PenWeight::from_label("0.36 mm", width),
+            None,
+            "half-way between the fine pen and the light one is not either of them"
+        );
+
+        assert_eq!(PenWeight::from_label("Marker", width), None);
+        assert_eq!(PenWeight::from_label("", width), None);
+        assert_eq!(
+            PenWeight::from_label("0.58", width),
+            None,
+            "no unit, no answer"
+        );
+        assert_eq!(
+            PenWeight::from_label("0.58 mm", 0.0),
+            None,
+            "no pen that thin"
+        );
+
+        // The number belongs to the note it was measured on: the same label is a different pen on a note whose
+        // plain-pen nib is a different width.
+        let finer = width / 2.0;
+        assert_eq!(
+            PenWeight::from_label(&PenWeight::Normal.describe(finer), finer),
+            Some(PenWeight::Normal)
+        );
+        assert_eq!(
+            PenWeight::from_label(&PenWeight::Normal.describe(finer), width),
+            Some(PenWeight::Fine),
+            "and on a note with the wider nib, that thickness is the fine pen"
+        );
+    }
+
+    /// Settings are read back out of a note by the multiplier the row holds, so a row that is not one leaves the
+    /// note's own default in place.
+    #[test]
+    fn only_a_weight_own_multiplier_names_it() {
         for weight in PenWeight::ALL {
-            assert!(
-                !seen.contains(&weight.label()),
-                "two pens are labelled {}",
-                weight.label()
+            assert_eq!(
+                PenWeight::from_scale(&weight.scale().to_string()),
+                Some(weight)
             );
-            seen.push(weight.label());
-            assert_eq!(PenWeight::from_label(weight.label()), Some(weight));
         }
 
-        assert_eq!(PenWeight::from_label("Marker"), None);
-        assert_eq!(PenWeight::from_label(""), None);
-        assert_eq!(
-            PenWeight::from_label("normal"),
-            None,
-            "a label is a name, not a guess at one"
+        for refused in ["", "Fine", "heavy", "0", "-1", "many"] {
+            assert_eq!(
+                PenWeight::from_scale(refused),
+                None,
+                "{refused:?} is not a multiplier"
+            );
+        }
+
+        // Between two weights is not either of them: the gap is a quarter, and the tolerance is a two-hundredth.
+        assert_eq!(PenWeight::from_scale("0.62"), None);
+    }
+
+    /// The zoom lock holds off the gestures, and a fresh note is unlocked.
+    ///
+    /// One line of rule, but it is the line every zooming site asks: [`Settings::gestures_zoom`] is what the wheel, a
+    /// pinch and a fit consult, so a lock that answered wrongly would either do nothing or hold off the steps and the
+    /// typed number — a lock with no key. See [`Settings::zoom_locked`].
+    #[test]
+    fn a_zoom_lock_holds_off_gestures_and_a_note_starts_unlocked() {
+        assert!(
+            Settings::default().gestures_zoom(),
+            "a note starts unlocked"
         );
+
+        let locked = Settings {
+            zoom_locked: true,
+            ..Settings::default()
+        };
+
+        assert!(!locked.gestures_zoom(), "and a lock is a lock");
     }
 }

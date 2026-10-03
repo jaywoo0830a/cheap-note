@@ -518,6 +518,13 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
     destructive command is reachable only through a "yes" — the button that reaches for it does not act, and neither
     a click off the box nor Escape agrees. The pen is held off while a box is up: nothing is written under a question
     ([VIEW.md](VIEW.md), §7, *The commands that cannot be taken back*).
+20. **The page owns its writing; the reader owns the tool and the zoom.** The ink, the selection mask and the history
+    belong to the page and travel with it through `ink::Notes::taken`; the tool in hand and the zoom are the reader's
+    and are carried across every page turn by `ink::Notes::show`, which is the one path a document comes to the front
+    by (the page turned to, the page read out of the file, the page that follows a deleted one). The tool is *not* a
+    setting: it is not stored and not restored, so a note always opens with the pen in hand. This is the invariant
+    whose failure is silent — a page that hands back the tool it was last written with puts the marker in a reader's
+    hand on the page they meant to write on ([VIEW.md](VIEW.md), §7, *Turning a page*).
 
 ## 12. Requirements, building, running
 

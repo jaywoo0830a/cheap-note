@@ -1184,7 +1184,7 @@ impl NoteStore {
         into.highlighter_color =
             row_value(conn, "highlighter_color", into.highlighter_color, colour_of)?;
         into.page_color = row_value(conn, "page_color", into.page_color, colour_of)?;
-        into.pen_weight = row_value(conn, "pen_weight", into.pen_weight, PenWeight::from_label)?;
+        into.pen_weight = row_value(conn, "pen_weight", into.pen_weight, PenWeight::from_scale)?;
         into.grayscale_pages = row_value(conn, "grayscale_pages", into.grayscale_pages, flag_of)?;
         into.canvas_size = row_value(
             conn,
@@ -1205,6 +1205,7 @@ impl NoteStore {
             number_of,
         )?;
         into.zoom = row_value(conn, "zoom", into.zoom, number_of)?;
+        into.zoom_locked = row_value(conn, "zoom_locked", into.zoom_locked, flag_of)?;
         into.resample_spacing =
             row_value(conn, "resample_spacing", into.resample_spacing, number_of)?;
         into.smoothing_ms = row_value(conn, "smoothing_ms", into.smoothing_ms, number_of)?;
@@ -1244,12 +1245,13 @@ impl NoteStore {
         put_row(&tx, "ink_color", settings.ink_color)?;
         put_row(&tx, "highlighter_color", settings.highlighter_color)?;
         put_row(&tx, "page_color", settings.page_color)?;
-        put_row(&tx, "pen_weight", settings.pen_weight.label())?;
+        put_row(&tx, "pen_weight", settings.pen_weight.scale())?;
         put_flag(&tx, "grayscale_pages", settings.grayscale_pages)?;
         put_row(&tx, "canvas_size", settings.canvas_size.label())?;
         put_row(&tx, "canvas_style", settings.canvas_style.label())?;
         put_row(&tx, "page_display_width", settings.page_display_width)?;
         put_row(&tx, "zoom", settings.zoom)?;
+        put_flag(&tx, "zoom_locked", settings.zoom_locked)?;
         put_row(&tx, "resample_spacing", settings.resample_spacing)?;
         put_row(&tx, "smoothing_ms", settings.smoothing_ms)?;
         put_row(&tx, "min_width", settings.min_width)?;
@@ -2308,6 +2310,7 @@ mod tests {
             canvas_style: CanvasStyle::Ruled,
             page_display_width: 640.0,
             zoom: 1.5,
+            zoom_locked: true,
             resample_spacing: 0.5,
             smoothing_ms: 4.0,
             min_width: 0.8,
@@ -2329,6 +2332,7 @@ mod tests {
             canvas_style: CanvasStyle::Grid,
             page_display_width: 720.0,
             zoom: 2.0,
+            zoom_locked: false,
             resample_spacing: 1.25,
             smoothing_ms: 0.0,
             min_width: 2.0,

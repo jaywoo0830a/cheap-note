@@ -1285,7 +1285,12 @@ pub struct InkDocument {
     active_pointer: Option<u32>,
     /// Which tool [`Self::active_pointer`] is using.
     active_tool: Tool,
-    /// The tool the toolbar has selected.
+    /// The tool the toolbar has selected: what an ordinary nib lays.
+    ///
+    /// The **reader's**, and not the page's — like the zoom, and unlike the ink, the selection and the history, which
+    /// are what the page was *written* with. The home of the fact while a note is open is [`Notes::mode`], which hands
+    /// this document the reader's answer on every page turn ([`Notes::show`]); it is read from here because this is
+    /// where the pen's path needs it (see [`Self::consume`]), and written from there so that the two cannot disagree.
     ///
     /// This is the fallback when the pen reports nothing about itself: a pen whose eraser end
     /// is toward the screen always erases, and this decides what an ordinary nib does.
@@ -1365,12 +1370,10 @@ impl InkDocument {
         self.open.as_ref()
     }
 
-    /// The tool the toolbar has selected.
-    pub fn mode(&self) -> Tool {
-        self.mode
-    }
-
     /// Selects the tool an ordinary nib uses.
+    ///
+    /// The document's own copy of [`Notes::mode`], and a real setter for the tests that drive a single page:
+    /// [`Notes::set_mode`] writes both, and that is the one the app uses.
     ///
     /// The pen's own state still wins: a pen whose eraser end is toward the screen erases even
     /// while the toolbar says `Pen`, because that is what the user is physically doing.
@@ -2376,6 +2379,15 @@ fn inside_loop(point: (f32, f32), loop_points: &[InkPoint]) -> bool {
 /// `Notes` dereferences to the current page, so the writing path reads `notes.consume(..)` and
 /// `notes.finished()` and never has to name a page at all: there is only ever one page the pen can
 /// be writing on, and this type owns which.
+///
+/// ## What the page owns, and what the reader carries
+///
+/// The split matters more than it looks, and getting it wrong is silent. The **page** owns the ink written on it, the
+/// selection a lasso has of it, and the history of the edits it went through — all of which travel with it through
+/// `taken`, and none of which a reader would expect another page to inherit. The **reader** owns the tool in hand and
+/// the zoom: turning a page is not reaching for a different pen, and it is not standing closer to the paper either.
+/// Every way a document comes to the front therefore goes through [`Self::show`], which is where the reader's state is
+/// carried across.
 #[derive(Debug)]
 pub struct Notes {
     /// Which page [`Self::current`] is the ink of.
@@ -2391,6 +2403,13 @@ pub struct Notes {
     /// on. Only the page in front of the reader is detailed as the zoom moves (see [`Self::set_zoom`]
     /// and [`InkDocument::set_zoom`]).
     zoom: f32,
+    /// The tool in the reader's hand: which one an ordinary nib lays.
+    ///
+    /// Beside the zoom on purpose, because the two are the same kind of fact — the reader's, and carried from page to
+    /// page — rather than the page's, like the ink, the selection and the history. The page's document keeps a copy
+    /// because that is where the pen's path reads it ([`InkDocument::consume`]), and [`Self::show`] writes that copy
+    /// from here on every page turn. See [`Self::mode`].
+    mode: Tool,
 }
 
 impl Default for Notes {
@@ -2401,6 +2420,7 @@ impl Default for Notes {
             current: InkDocument::blank(),
             taken: BTreeMap::new(),
             zoom: 1.0,
+            mode: Tool::Pen,
         }
     }
 }
@@ -2437,6 +2457,24 @@ impl Notes {
         self.page
     }
 
+    /// The tool in the reader's hand.
+    ///
+    /// This is the home of the fact while a note is open — see [`Notes`] for why it is the reader's and not the page's.
+    /// The page's own document keeps a copy for the pen's path ([`InkDocument::consume`]), and it is written by
+    /// [`Self::show`] and [`Self::set_mode`] alone, so the two agree.
+    pub fn mode(&self) -> Tool {
+        self.mode
+    }
+
+    /// Puts a tool in the reader's hand.
+    ///
+    /// The pen's own state still wins over it: a pen whose eraser end is toward the screen erases even while the bar
+    /// says `Pen`, because that is what the user is physically doing (see [`InkDocument::consume`]).
+    pub fn set_mode(&mut self, mode: Tool) {
+        self.mode = mode;
+        self.current.set_mode(mode);
+    }
+
     /// Tells the note what the sheet is drawn at, so the page in front of the reader is detailed for
     /// it — and so is the ink of a page turned to afterwards.
     ///
@@ -2471,11 +2509,10 @@ impl Notes {
             self.taken.insert(self.page, leaving);
         }
 
-        self.current = self.taken.remove(&page).unwrap_or_else(InkDocument::blank);
-        // A page turned back to holds the ink it did, and its outlines were detailed for the sheet as
-        // it was drawn when the reader left it. One pass, and only when the detail has moved since.
-        self.current.set_zoom(self.zoom);
-        self.page = page;
+        let arriving = self.taken.remove(&page).unwrap_or_else(InkDocument::blank);
+
+        // The tool in hand is *not* part of what went into `taken`: it is the reader's, and they take it with them.
+        self.show(arriving, page);
     }
 
     /// Puts one page's ink into the note: what reading a page out of the file gives.
@@ -2493,7 +2530,7 @@ impl Notes {
         ink.set_zoom(self.zoom);
 
         if page == self.page {
-            self.current = ink;
+            self.show(ink, page);
             return;
         }
 
@@ -2533,13 +2570,14 @@ impl Notes {
         if page == self.page {
             // The page in front of the reader is the one that followed the deleted page, or a blank
             // sheet when it was the last.
-            self.current = self
+            let arriving = self
                 .taken
                 .remove(&(page + 1))
                 .unwrap_or_else(InkDocument::blank);
-            // The page that follows a deleted one was detailed for the sheet as it was drawn when the
-            // reader last had it, which need not be the size it is drawn at now.
-            self.current.set_zoom(self.zoom);
+
+            // The tool in hand comes across with the reader: the page that follows a deleted one is written on with
+            // the pen that was already in hand, not with whatever the note's default is.
+            self.show(arriving, page);
         } else if page < self.page {
             self.page -= 1;
         }
@@ -2548,6 +2586,26 @@ impl Notes {
             .into_iter()
             .map(|(index, ink)| (if index > page { index - 1 } else { index }, ink))
             .collect();
+    }
+
+    /// Puts a document in front of the reader, with the reader's tool still in hand.
+    ///
+    /// The ink, the selection and the history belong to the **page**, and travel with it through `taken`; the tool in
+    /// hand and the zoom are the **reader's**, because turning a page is not reaching for a different pen. So every way
+    /// a document comes to the front goes through here, and both of the reader's two facts are handed to the arriving
+    /// document from [`Self::mode`] and [`Self::zoom`].
+    ///
+    /// Getting this wrong is invisible and compound: the bar would quietly show the tool some *other* page was last
+    /// written with, and the next stroke would be laid with it, so one page's marker would write on the next page. It is
+    /// also why the tool is carried from `self.mode` rather than read off the document being left: by the time a turn
+    /// has taken that document away, what is left in its place holds nothing.
+    fn show(&mut self, mut ink: InkDocument, page: usize) {
+        ink.set_mode(self.mode);
+        // A page turned back to holds the ink it did, and its outlines were detailed for the sheet as
+        // it was drawn when the reader left it. One pass, and only when the detail has moved since.
+        ink.set_zoom(self.zoom);
+        self.current = ink;
+        self.page = page;
     }
 }
 
@@ -4201,6 +4259,98 @@ mod tests {
     fn write(notes: &mut Notes, s: &Settings, x: f32) {
         notes.consume(&[reading(7, PenPhase::Down, x, x, Some(0.5))], &id(), s);
         notes.consume(&[reading(7, PenPhase::Up, x + 4.0, x, None)], &id(), s);
+    }
+
+    /// The tool in hand goes with the *reader*, and not with the page: turning a page does not reach for a
+    /// different pen.
+    ///
+    /// The failure this pins down is quiet and compound. The tool is kept on the page's document, because that is
+    /// where the pen's path reads it, so a page turn that simply swapped documents handed the reader back the tool
+    /// that page was *last written with* — and the next stroke, on the new page, was laid with it. Highlighting a page
+    /// and then turning to the next one to take notes put the marker in hand on that page.
+    #[test]
+    fn the_tool_in_hand_goes_with_the_reader_from_page_to_page() {
+        let s = settings();
+        let mut notes = Notes::new();
+
+        notes.set_mode(Tool::Highlighter);
+        write(&mut notes, &s, 20.0);
+
+        notes.go_to(1);
+        assert_eq!(
+            notes.mode(),
+            Tool::Highlighter,
+            "the page turned to is written on with the tool that was already in hand"
+        );
+
+        write(&mut notes, &s, 40.0);
+        assert!(
+            (alpha_of(notes.finished()[0].color) - HIGHLIGHTER_ALPHA).abs() < 0.01,
+            "and the stroke it lays is the marker's"
+        );
+
+        // The reader's, both ways round: a page does not remember a tool to hand back, and the reader's
+        // choice is the only one there is.
+        notes.set_mode(Tool::Pen);
+        notes.go_to(0);
+        assert_eq!(notes.mode(), Tool::Pen);
+        notes.go_to(1);
+        assert_eq!(
+            notes.mode(),
+            Tool::Pen,
+            "so the pen stays in hand even back on the page that was highlighted"
+        );
+    }
+
+    /// A page read out of the note arrives with its ink and its history — and with no tool of its own, because a
+    /// document built from a file has none: what is in hand is the reader's, and stays.
+    ///
+    /// The same rule as the turn above, on the other path that puts a page in front: opening a note, or turning to a
+    /// page whose ink has not been read yet, builds a document and hands it over (`NoteApp::load_page_ink` →
+    /// [`Notes::put_page`]), which is a wholesale replacement of the page — the ink comes back, and the pen in hand is
+    /// still the one the reader was holding.
+    #[test]
+    fn a_page_read_out_of_the_note_keeps_the_tool_in_hand() {
+        let mut notes = Notes::new();
+
+        notes.set_mode(Tool::Eraser);
+        notes.put_page(0, page_with(2));
+
+        assert_eq!(notes.stroke_count(), 2, "the page's ink is what arrived");
+        assert_eq!(
+            notes.mode(),
+            Tool::Eraser,
+            "and the tool in hand is the one the reader left it in"
+        );
+    }
+
+    /// Deleting the page in front of the reader hands over what followed it *with the tool that was in hand*.
+    ///
+    /// The page that follows is one the reader may never have been on, so there is nothing of its own to carry — and
+    /// what the arriving document holds is whatever it was last written with, which is exactly the answer a reader who
+    /// has just deleted a page does not want ([`Notes::show`]).
+    #[test]
+    fn the_page_that_follows_a_deleted_one_keeps_the_tool_in_hand() {
+        let s = settings();
+        let mut notes = Notes::new();
+
+        write(&mut notes, &s, 10.0);
+        notes.go_to(1);
+        write(&mut notes, &s, 30.0);
+        // What page 1's own document will be left holding: not the reader's answer.
+        notes.set_mode(Tool::Lasso);
+
+        notes.go_to(0);
+        notes.set_mode(Tool::Eraser);
+        notes.remove_at(0);
+
+        assert_eq!(notes.page(), 0, "the reader lands on what followed");
+        assert_eq!(notes.stroke_count(), 1, "which is the page written on");
+        assert_eq!(
+            notes.mode(),
+            Tool::Eraser,
+            "with the eraser still in hand, rather than the tool that page was last written with"
+        );
     }
 
     /// Inserting a page renames the pages after it, and the ink moves with the names.

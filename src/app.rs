@@ -473,9 +473,18 @@ pub struct NoteApp {
     rule_select: Entity<SelectState<Vec<String>>>,
     /// The bar's pen-weight chooser: the pen the note in hand is written with.
     ///
-    /// Its labels are *built* rather than spelled out, because each one carries the pen's thickness in millimetres
+    /// Its labels are *built* rather than spelled out, because each one is the pen's thickness in millimetres
     /// ([`PenWeight::describe`]) and that belongs to the note in hand: hence `String` rather than `&'static str`.
     pen_select: Entity<SelectState<Vec<String>>>,
+    /// The field the zoom is typed into, between the two steps.
+    ///
+    /// A field rather than a third pair of buttons, because the zoom a person wants is usually a *number* they already
+    /// have in mind — the size they read at, or the number the page was laid out at — and stepping to 60% is a dozen
+    /// presses. What it shows is the truth about the view ([`Self::sync_choosers`]), whether the view changed by a
+    /// press, a wheel, a pinch, a fit or a note being opened.
+    zoom_input: Entity<InputState>,
+    /// What the zoom field says: Enter takes the number, a click away leaves the view's own.
+    _zoom_events: Subscription,
     /// The screen that offers what was opened recently, and the app starts on.
     home: Home,
 }
@@ -537,8 +546,8 @@ impl NoteApp {
             cx,
         );
         let pen_select = choice_of(
-            // The thickness is spelled out beside each name, in millimetres of paper: a weight is a *name*, and
-            // what a reader wants to know is how thick the line is (see [`PenWeight::describe`]).
+            // Each box carries the pen's thickness in millimetres rather than a name: a weight is a *word*, and what
+            // a person choosing a pen wants to know is how thick the line will be (see [`PenWeight::describe`]).
             PenWeight::ALL
                 .iter()
                 .map(|weight| weight.describe(settings.no_pressure_width))
@@ -557,6 +566,19 @@ impl NoteApp {
             &name_input,
             window,
             |app, _, event: &InputEvent, window, cx| app.note_name_event(event, window, cx),
+        );
+
+        // The field the zoom is typed into, and the two things it can say: Enter takes the number, and losing focus —
+        // clicking anywhere else — puts the view's own back. It is filled from the view rather than from the settings,
+        // because the view is what has been clamped and fitted.
+        let zoom_input = cx.new(|cx| InputState::new(window, cx).placeholder(ZOOM_PLACEHOLDER));
+        zoom_input.update(cx, |input, cx| {
+            input.set_value(zoom_text(view.zoom()), window, cx);
+        });
+        let _zoom_events = cx.subscribe_in(
+            &zoom_input,
+            window,
+            |app, _, event: &InputEvent, window, cx| app.zoom_event(event, window, cx),
         );
         let sheet_focus = cx.focus_handle();
 
@@ -609,6 +631,8 @@ impl NoteApp {
             sheet_focus,
             sheet_has_keyboard: false,
             _name_events,
+            zoom_input,
+            _zoom_events,
             sheet_select,
             rule_select,
             pen_select,
@@ -655,7 +679,9 @@ impl NoteApp {
             &app.pen_select,
             |app, _, event: &SelectEvent<Vec<String>>, cx| {
                 if let SelectEvent::Confirm(Some(label)) = event {
-                    if let Some(weight) = PenWeight::from_label(label) {
+                    if let Some(weight) =
+                        PenWeight::from_label(label, app.settings.no_pressure_width)
+                    {
                         app.set_pen_weight(weight, cx);
                     }
                 }
@@ -1175,6 +1201,15 @@ impl NoteApp {
         self.finish_setting(cx);
     }
 
+    /// Locks or unlocks the zoom gestures. See [`Settings::zoom_locked`].
+    ///
+    /// Locking does not move the sheet and does not change the number: it says what the *next* wheel, pinch or fit
+    /// does, which is nothing.
+    fn set_zoom_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
+        self.settings.zoom_locked = locked;
+        self.finish_setting(cx);
+    }
+
     /// One step closer.
     fn zoom_in(&mut self, cx: &mut Context<Self>) {
         if self.view.zoom_in() {
@@ -1191,6 +1226,18 @@ impl NoteApp {
 
     /// Makes the sheet fill the window on one axis.
     fn fit_sheet(&mut self, which: Fit, cx: &mut Context<Self>) {
+        // A fit is a gesture: it *derives* the zoom from the window rather than being told it, which is the thing a
+        // locked view is protected from (see [`Settings::zoom_locked`]). Said out loud, because a button that does
+        // nothing is worse than one that is disabled — and this one cannot be disabled, since the lock is what
+        // disables it.
+        if !self.settings.gestures_zoom() {
+            self.report(String::from(
+                "the zoom is locked: unlock it to fit the sheet",
+            ));
+            cx.notify();
+            return;
+        }
+
         let sheet = self.sheet;
 
         if self.view.fit(which, sheet.paper, sheet.window, PAGE_MARGIN) {
@@ -1202,6 +1249,52 @@ impl NoteApp {
     fn finish_zoom(&mut self, cx: &mut Context<Self>) {
         self.settings.zoom = self.view.zoom();
         self.finish_setting(cx);
+        // The zoom field *is* the readout of the zoom, so it has to be redrawn after any change to it — by a button,
+        // a wheel, a pinch or a fit ([`Self::sync_choosers`] puts the number in it, this is what asks for the frame).
+        cx.notify();
+    }
+
+    /// What the zoom field says: Enter takes the number that was typed, and a click away puts the view's own back.
+    fn zoom_event(&mut self, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            InputEvent::PressEnter { .. } => {
+                let typed = self.zoom_input.read(cx).value().to_string();
+                self.set_zoom_from_text(&typed, window, cx);
+            }
+            // A half-typed number is not a zoom: leaving the field — which is what a click on the sheet means — puts
+            // back the number the sheet is actually drawn at.
+            InputEvent::Blur => self.show_zoom(window, cx),
+            InputEvent::Change | InputEvent::Focus => {}
+        }
+    }
+
+    /// Applies a typed zoom, and shows what the view made of it.
+    ///
+    /// Written back in both directions, because the field is the only place the zoom is shown: a number the view
+    /// clamped to its range, and a number it refused, both have to leave the field saying what the sheet is drawn at
+    /// rather than what was typed (see [`Self::sync_choosers`]).
+    fn set_zoom_from_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match parse_zoom(text) {
+            Some(zoom) => {
+                if self.view.set_zoom(zoom) {
+                    self.finish_zoom(cx);
+                }
+            }
+            None => self.report(format!("'{}' is not a zoom", text.trim())),
+        }
+
+        self.show_zoom(window, cx);
+    }
+
+    /// Puts the view's own zoom into the field.
+    fn show_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let showing = zoom_text(self.view.zoom());
+
+        self.zoom_input.update(cx, |input, cx| {
+            if input.value().as_ref() != showing {
+                input.set_value(showing.clone(), window, cx);
+            }
+        });
     }
 
     /// Zooms or pans with the wheel — which is also where a trackpad's two-finger gesture arrives.
@@ -1209,6 +1302,13 @@ impl NoteApp {
         let pointer = (event.position.x.into(), event.position.y.into());
 
         if event.modifiers.control {
+            // A wheel with `Ctrl` is a zoom, and a locked view does not take one: this is the gesture the lock exists
+            // for — a roll of the wheel beside a page that is being read (see [`Settings::zoom_locked`]). The pan below
+            // is not a zoom and is left alone.
+            if !self.settings.gestures_zoom() {
+                return;
+            }
+
             let (amount, in_pixels) = match event.delta {
                 ScrollDelta::Lines(delta) => (delta.y, false),
                 ScrollDelta::Pixels(delta) => (delta.y.into(), true),
@@ -1238,6 +1338,12 @@ impl NoteApp {
 
     /// Zooms with a trackpad's pinch, about the point between the fingers.
     fn on_pinch(&mut self, event: &PinchEvent, cx: &mut Context<Self>) {
+        // A pinch is the likeliest of the accidents a lock is for: a palm settling onto a trackpad is a pinch as far as
+        // the platform is concerned, and it happens while a hand is writing (see [`Settings::zoom_locked`]).
+        if !self.settings.gestures_zoom() {
+            return;
+        }
+
         let pointer = (event.position.x.into(), event.position.y.into());
         let factor = pinch_zoom_factor(event.delta);
         let sheet = self.sheet;
@@ -1285,7 +1391,6 @@ impl NoteApp {
         self.settings.show_status = shown;
         self.finish_setting(cx);
     }
-
     /// Shows or hides the pen's ghost cursor.
     fn set_tilt_cursor_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.settings.show_tilt_cursor = shown;
@@ -3135,8 +3240,18 @@ impl NoteApp {
 
         // Where the reading goes and what it costs to put it there. The zoom is the one piece of
         // view state the sheet's own controls cannot show a number for, and the rest is the
-        // measurement this app runs on itself.
-        parts.push(format!("view {:.0}%", self.view.zoom() * 100.0));
+        // measurement this app runs on itself. A locked zoom says so here as well as in the pill: the
+        // lock is the reason a wheel or a Fit did nothing, and a person who pressed Fit wants to know
+        // that it was not a bug.
+        parts.push(format!(
+            "view {:.0}%{}",
+            self.view.zoom() * 100.0,
+            if self.settings.zoom_locked {
+                " (locked)"
+            } else {
+                ""
+            }
+        ));
 
         // The measurement session, in front of the live meters rather than instead of them: the meters are
         // what is happening now, and this is the stretch that was measured (see [`crate::timing::Session`]).
@@ -3690,6 +3805,15 @@ impl NoteApp {
                 }
             });
         }
+
+        // The zoom field is the same kind of readout, and needs the same treatment: the view changes the number under
+        // it — a wheel, a pinch, a fit, a note being opened — and a field left showing the number that was typed last
+        // would be showing a zoom the sheet is not drawn at. Left alone while it has the keyboard, because then the
+        // field is a number being *typed* and [`Self::zoom_event`] is what writes it back.
+        let typing = self.zoom_input.read(cx).focus_handle(cx).is_focused(window);
+        if !typing {
+            self.show_zoom(window, cx);
+        }
     }
 
     /// The desk's own row: the counters at one edge, the page in the middle, the zoom at the other.
@@ -3787,12 +3911,8 @@ impl NoteApp {
     /// The way the sheet is looked at: two steps, the number they are at, and the two fits.
     fn zoom_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (surface, hairline, accent, radius) = (
-            theme.title_bar,
-            theme.title_bar_border,
-            theme.primary,
-            theme.radius_lg,
-        );
+        let (surface, hairline, radius) =
+            (theme.title_bar, theme.title_bar_border, theme.radius_lg);
 
         // Collected before they are chained, for the reason the page commands give.
         let mut controls: Vec<AnyElement> = Vec::new();
@@ -3809,12 +3929,8 @@ impl NoteApp {
         );
         controls.push(
             div()
-                .text_size(px(12.0))
-                .text_color(accent)
-                .whitespace_nowrap()
-                .min_w(px(42.0))
-                .text_center()
-                .child(format!("{:.0}%", self.view.zoom() * 100.0))
+                .w(px(68.0))
+                .child(Input::new(&self.zoom_input).small())
                 .into_any_element(),
         );
         controls.push(
@@ -3845,6 +3961,30 @@ impl NoteApp {
                 .into_any_element(),
             );
         }
+
+        // The lock, after a hairline of its own: it is not a way of *moving* the zoom but a statement about the three
+        // that do it by gesture, so it reads as the last thing in the pill rather than as another step.
+        controls.push(toolbar_divider(hairline).into_any_element());
+        let locked = self.settings.zoom_locked;
+        controls.push(
+            tool_button(
+                "zoom-lock",
+                if locked {
+                    IconName::Lock
+                } else {
+                    IconName::LockOpen
+                },
+                if locked {
+                    "Zoom locked: the wheel, a pinch and Fit leave it alone"
+                } else {
+                    "Lock the zoom, so a wheel, a pinch or Fit cannot move it"
+                },
+                locked,
+                cx,
+                move |app, cx| app.set_zoom_locked(!locked, cx),
+            )
+            .into_any_element(),
+        );
 
         div()
             .flex()
@@ -4525,8 +4665,8 @@ mod tests {
     // scope and shadow the attribute this module needs.
     use super::{
         confirmed, file_label, file_stem, notch_in_pixels, page_of_write, page_owes_a_rewrite,
-        pdf_render_due, pinch_zoom_factor, quantise_width, sheet_matches, wheel_pan,
-        wheel_zoom_factor, Confirmation, PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH,
+        parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width, sheet_matches, wheel_pan,
+        wheel_zoom_factor, zoom_text, Confirmation, PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH,
         WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
     };
     use crate::ink::Notes;
@@ -4562,6 +4702,51 @@ mod tests {
                 "the buttons name what they do rather than OK and Cancel: {} / {}",
                 words.agree,
                 words.refuse
+            );
+        }
+    }
+
+    /// A zoom is typed as a percentage, and only a percentage.
+    ///
+    /// The field shows a whole percent, so a number typed into it means the same thing the field does — with or
+    /// without the sign — and the fraction the view takes is that number over a hundred. Everything else is refused
+    /// rather than guessed at: a zoom the view cannot be drawn at (zero, negative, not a number) and text that is not a
+    /// number at all would otherwise snap to the nearest limit or step, and a field that answers "150" with 5% is worse
+    /// than one that says it did not understand (see [`NoteApp::set_zoom_from_text`]).
+    #[test]
+    fn a_zoom_is_typed_as_a_percentage() {
+        assert_eq!(parse_zoom("60"), Some(0.6));
+        assert_eq!(parse_zoom("60%"), Some(0.6));
+        assert_eq!(parse_zoom(" 150 % "), Some(1.5));
+        assert_eq!(parse_zoom("100"), Some(1.0));
+        assert_eq!(
+            parse_zoom("0.5"),
+            Some(0.005),
+            "half a percent, if that is what was typed"
+        );
+
+        for refused in ["", "  ", "%", "wide", "60mm", "-50", "0", "nan", "inf"] {
+            assert_eq!(parse_zoom(refused), None, "{refused:?} is not a zoom");
+        }
+    }
+
+    /// What the field shows is what was typed, read back: the zoom as a whole percent, with the sign on it.
+    ///
+    /// The two halves have to agree, because the field is filled from the view and read back into it: a number that did
+    /// not survive the round trip would move the zoom every time the field was refilled, once a frame.
+    #[test]
+    fn the_zoom_field_shows_a_whole_percentage() {
+        assert_eq!(zoom_text(0.6), "60%");
+        assert_eq!(zoom_text(1.0), "100%");
+        assert_eq!(zoom_text(1.5), "150%");
+
+        for zoom in [0.05_f32, 0.6, 0.75, 1.0, 1.25, 2.0, 16.0] {
+            let shown = zoom_text(zoom);
+
+            assert_eq!(
+                parse_zoom(&shown),
+                Some(zoom),
+                "{zoom} came back as something else from {shown}"
             );
         }
     }
@@ -4861,6 +5046,39 @@ fn describe_canvas(canvas: &mut Canvas, sheet: &Sheet, scale: f32, paper: Hsla, 
         },
         paper,
     );
+}
+
+/// What the zoom field says while it is empty, which is only until the first frame fills it.
+const ZOOM_PLACEHOLDER: &str = "100%";
+
+/// The zoom a typed number asks for, as the fraction the view takes.
+///
+/// A number is a **percentage** — "60" is 60%, and "150%" is the same thing with the sign spelled out — because that
+/// is what the field shows and what a number read off a page means. Nothing else is a zoom: a word, a zero, a negative
+/// number and an empty field are all `None`, and the caller puts the view's own number back rather than guessing at
+/// what was meant.
+fn parse_zoom(text: &str) -> Option<f32> {
+    let number: f32 = text
+        .trim()
+        .strip_suffix('%')
+        .unwrap_or(text)
+        .trim()
+        .parse()
+        .ok()?;
+
+    if !number.is_finite() || number <= 0.0 {
+        return None;
+    }
+
+    Some(number / 100.0)
+}
+
+/// What the zoom field shows: the zoom as a whole percentage.
+///
+/// Whole, because this is a number to read and a zoom is not measured in fractions of a percent: the view's own steps
+/// are a quarter of the way at a time, and the two fits land wherever the window puts them.
+fn zoom_text(zoom: f32) -> String {
+    format!("{:.0}%", zoom * 100.0)
 }
 
 /// How much a scroll zooms, as a factor to multiply the current zoom by.

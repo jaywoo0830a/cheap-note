@@ -218,11 +218,12 @@ migrated — and the three ways a row can fail to be there are three different a
   wrote it, and quietly replacing an answer is how a setting disappears without a word.
 
 Every setting a person can change is a row here — the paper, the ruling, the colours, the pen and its
-weight, the zoom, whether the bar and the status line are shown, and how the pen *feels* in the hand —
-and nothing about a note is remembered anywhere but in the note. The pen is in two kinds of row on
-purpose: `pen_weight` says *which* pen (`Fine` … `Heavy`) while `min_width`, `max_width` and
-`no_pressure_width` say how *any* pen answers a hand, so a marker is fat at the lightest touch *and* at
-the heaviest and no weight can make a line that thins as it is pressed. What is already written is
+weight, the zoom, the zoom lock, whether the bar and the status line are shown, and how the pen *feels* in
+the hand — and nothing about a note is remembered anywhere but in the note. The pen is in two kinds of row
+on purpose: `pen_weight` says *which* pen, as the multiplier on the nib's own line (`0.5` … `2.25` —
+`settings::PenWeight::scale`), while `min_width`, `max_width` and `no_pressure_width` say how *any* pen
+answers a hand, so a marker is fat at the lightest touch *and* at the heaviest and no weight can make a line
+that thins as it is pressed. What is already written is
 untouched: every point carries the width and the colour it was drawn with.
 
 ---

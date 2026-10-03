@@ -110,18 +110,25 @@ swatches, which is what a palette is. Each group is captioned, because without t
 guess which of the two runs of squares is the paper and which the ink. The pen's weight sits beside the
 ink's colour because the two are one answer — the colour is *which* pen, the weight is *how heavy* it
 is — and its caption is a property (`Gray`) rather than a thing (`Pen`), since `Ink` already captions
-the colours. **The weight is spelled out in millimetres**: each box in the list reads `Normal · 0.58 mm`, because a
-name is a label and a thickness is what a reader is actually choosing between. The number is measured on the paper
-(`settings::PenWeight::millimetres`), on the app's own millimetre — the scale every canvas size is drawn at — and it is
+the colours. **The weight is spelled out in millimetres, and in nothing else**: each box in the list reads
+`0.58 mm`, because a name is a label and a thickness is what a reader is actually choosing between — five
+boxes reading Fine, Light, Normal, Bold, Heavy say nothing about what they will draw. The number is measured on the
+paper (`settings::PenWeight::millimetres`), on the app's own millimetre — the scale every canvas size is drawn at — and
+it is
 the line a pen lays *without* pressure, which is the nib's own thickness: a pen that reports pressure draws thinner and
-thicker either side of it.
+thicker either side of it. The note stores the pen as the *multiplier* rather than as that number
+(`settings::PenWeight::scale`, which is what `pen_weight` holds), because a thickness belongs to a nib and a
+multiplier does not: the same "0.29 mm" is the fine pen on one note and the light one on a note whose plain
+nib is wider, and a row that held a measurement would mean a different pen on each.
 
 A chooser's width is set on the **row**, not on the select: a `Select` fills its parent by design (it is
 a form field, and a form field is as wide as the field it is on), so in a row it would take the whole
 bar. It is wide enough for the longest label (`Square`, `Letter`) so the box does not resize as the
 choice changes, which would move the controls beside it.
 
-`sync_choosers` keeps each box showing what the note is actually written with. What the style *is* and
+`sync_choosers` keeps each box showing what the note is actually written with, and it is where the zoom
+field is filled too — the same rule, one row down: the *view* changes the zoom under the field the way a note
+opening changes the boxes. What the style *is* and
 what a box *draws* are two things, and they are kept in step the way `home` keeps its list's highlight
 on the row Enter would open: three reads a frame, a write only on frames where they disagree. This is
 not cosmetic — these boxes are the only control that changes the paper, the ruling and the pen, and a
@@ -182,11 +189,27 @@ glanced at and stay out of the way at the other edge. The page is centred by *th
 taken out of the flow, so a counter growing by a digit cannot shove the page off centre — a page number
 that moved whenever a number changed would be worse than no page number.
 
-The zoom pill holds two steps, the number they are at, and the two fits. The percentage sits between the
-steps and is a readout rather than a button — it is the one thing that says whether Fit Width has already
-been pressed — and it is given a fixed width so that stepping from 99% to 100% to 101% does not shuffle
-the buttons either side of it. Zoom lives here rather than on the bar because it is reading, not writing,
+The zoom pill holds two steps, the zoom itself, the two fits, and a lock. The zoom sits between the steps and is a
+**field rather than a readout**: a person's zoom is often a number they already have in mind — the size they
+read at, the number the page was laid out at — and stepping to 60% is a dozen presses, so a number typed
+into it is taken on Enter and understood as a percentage ("60" and "60%" are the same answer). It is given a
+fixed width so that stepping from 99% to 100% to 101% does not shuffle the buttons either side of it, and it
+shows the *view's* zoom at every frame (`sync_choosers`), whether the view changed by a press, a wheel, a
+pinch, a fit or a note being opened — a field that showed the number typed last would be showing a zoom the
+sheet is not drawn at. A click away puts the view's own number back rather than leaving a half-typed one, and
+a number the view will not take (nonsense, zero, or something outside its range) is refused out loud rather
+than snapped to the nearest limit. Zoom lives here rather than on the bar because it is reading, not writing,
 and the pill it sits in is the one the page commands left behind.
+
+**The lock holds the gestures off, and only the gestures** (`settings::Settings::zoom_locked`). A reader who
+has set a page to 60% and is writing on it wants it to stay at 60%: a wheel rolled while reading, a palm
+settling onto a trackpad and a stray pinch all move the zoom without being meant, and one of them landing
+mid-sentence takes the line being written away from the nib. Locked, a wheel, a pinch and Fit Width/Height do
+nothing — the fit says so on the status line rather than failing silently — while the two ways a zoom is
+*asked for*, the steps and the typed number, still work: a lock that stood in their way would be a lock with
+no key. It sits at the end of the pill, after a hairline, because it is not another way of moving the zoom but
+a statement about the three that do; it is the note's, like every other setting, and it says `(locked)` on
+the status line so that a Fit which did nothing reads as the lock rather than as a bug.
 
 The page commands — insert a page before or after this one, delete this one, and mark it — lead the
 bar's second row and stand bare on it, rather than in a pill: in the bar, every group does. They lead
@@ -314,6 +337,16 @@ scrolled to, and turning back to a page one was in the middle of comes back to t
 away and the next taken up (a page nobody has looked at has none, and opens at its top). The places are in memory
 only — a note opened tomorrow starts its pages at their tops — and they are dropped when the pages are renumbered,
 because a place kept for page 4 belongs to page 3 once one in front of it is deleted.
+
+**The tool in hand is the reader's too**, and travels with them for a sharper reason: turning a page is not reaching
+for a different pen. A reader who highlights a page and then turns to the next one means to keep the marker, so the
+tool is carried *across* the turn rather than handed back by the page being arrived at — the page's own document is
+told which tool is in hand as it comes to the front (`ink::Notes::show`, the one path every page turn takes,
+including the page read out of the file and the page that follows a deleted one). The split is the same one the pan
+and the zoom make: the ink, the selection a lasso has, and the history of a page's edits belong to the **page** and
+come back with it; the tool and the zoom belong to the **reader**. What the tool is *not* is a setting — it is not
+written into the note and not restored by opening one, so every note starts with the pen in hand (`Tool::Pen`), and
+only a page that was written on while the marker was up is a page the marker came from.
 
 The **order** is the whole of it: the page being left is closed first — its outstanding ink is handed to
 the writer and folded into chunks, which is the design's "compaction at page close" — and only then is

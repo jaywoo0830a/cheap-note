@@ -16,10 +16,11 @@
 //!
 //! ## What it draws, and with what
 //!
-//! The shapes are [`crate::cursor`]'s: the pen's body, a soft edge under it, and the nib mark with
-//! its bloom. They are rasterised here — a few hundred pixels of coverage, on the pen thread — and
-//! handed to `UpdateLayeredWindow`, which both moves the window and replaces its pixels in one
-//! call. No GPU, no swap chain, no frame.
+//! The shapes are [`crate::cursor`]'s: the pen's body with a cast shadow and a soft edge, and the nib
+//! mark with its bloom — the mark drawn as wide as the line in hand, so the ghost says how thick the
+//! next stroke will be. They are rasterised here — a few hundred pixels of coverage, on the pen
+//! thread — and handed to `UpdateLayeredWindow`, which both moves the window and replaces its pixels
+//! in one call. No GPU, no swap chain, no frame.
 //!
 //! ## The window must never take input
 //!
@@ -65,7 +66,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::cursor::{
     PenCursor, BODY_ALPHA, BODY_HALO_ALPHA, BODY_HALO_GROW, BODY_LENGTH, NIB_ALPHA,
-    NIB_BLOOM_ALPHA, NIB_BLOOM_RADIUS, NIB_RADIUS,
+    NIB_BLOOM_ALPHA, NIB_BLOOM_SPREAD, NIB_RADIUS_MAX, NIB_RADIUS_MIN,
 };
 
 /// The message the pen thread uses to wake the overlay's own thread.
@@ -86,10 +87,34 @@ const CLASS_NAME: PCWSTR = windows::core::w!("cheap-note-pen-cursor");
 /// land a hair above one.
 const BODY_LENGTH_LONGEST: f32 = BODY_LENGTH * 1.02;
 
-/// How far the shape reaches from the nib, in logical pixels: the longest body, its soft edge, and
-/// the nib's bloom. The overlay's window is twice this across, so the ghost fits whichever way the
-/// pen leans.
-const REACH: f32 = BODY_LENGTH_LONGEST + BODY_HALO_GROW + NIB_BLOOM_RADIUS;
+/// How far the body's shadow is dropped, in logical pixels: down and to the right, as if the light came
+/// from above and to the left.
+///
+/// A *cast* shadow rather than a rim: the halo thickens the body's own edge, while this is the same shape in the same
+/// colour a little way off, which is what makes the rod read as lying *above* the paper rather than being drawn on
+/// it — and it is what a reader's eye finds first on a page of writing. [`BODY_SHADOW_REACH`] is this offset's
+/// length, and a test holds the two together.
+const BODY_SHADOW_DROP: [f32; 2] = [3.0, 3.6];
+
+/// How far [`BODY_SHADOW_DROP`] reaches, as a length: how much further the shadow can be drawn than the body itself.
+///
+/// Written out rather than derived because a `const` cannot take a square root, and pinned to the offset by a test so
+/// the two cannot drift apart: a shadow that reaches further than the window is sized for is a ghost with its edge cut
+/// off.
+const BODY_SHADOW_REACH: f32 = 4.8;
+
+/// How opaque the body's shadow is.
+///
+/// Fainter than the body and stronger than the halo, because it is the layer with the job of being *found*: it is the
+/// only part of the rod that is not the colour of the rod's own faint self, and on paper the same colour as the body it
+/// is the whole of what a reader sees.
+const BODY_SHADOW_ALPHA: f32 = 0.26;
+
+/// How far the shape reaches from the nib, in logical pixels: the longest body, its soft edge and its
+/// shadow, and the widest nib mark with its bloom. The overlay's window is twice this across, so the
+/// ghost fits whichever way the pen leans.
+const REACH: f32 =
+    BODY_LENGTH_LONGEST + BODY_HALO_GROW + BODY_SHADOW_REACH + NIB_RADIUS_MAX + NIB_BLOOM_SPREAD;
 
 /// How many scanlines are sampled per pixel row when a shape is filled.
 ///
@@ -123,6 +148,14 @@ pub struct CursorShape {
     /// for the paper in front (see [`crate::canvas::contrast_color`]), so a pale dot reads as a pale dot with a dark
     /// rim rather than as nothing at all.
     pub halo: u32,
+    /// How wide the ghost's nib mark is, in logical pixels: half the width of the line the tool in hand lays.
+    ///
+    /// The frame's answer, for the same reason `colour` is one — only the app knows the pen's weight and what is in
+    /// hand — and the mark is where the *ink* is previewed, so its size says how thick the ink will be: a heavier pen
+    /// has a heavier dot, and a highlighter's mark is as wide as the band it is about to lay
+    /// ([`crate::cursor::nib_radius_for_width`]). The drawing holds it between [`NIB_RADIUS_MIN`] and
+    /// [`NIB_RADIUS_MAX`] whatever arrives.
+    pub nib_radius: f32,
     /// The line the ghost is drawn below, in physical client pixels.
     pub sheet_top: f32,
 }
@@ -258,28 +291,33 @@ impl Surface {
         if let Some(body) = shape.cursor.body_shape() {
             let fade = shape.cursor.body_fade();
 
-            // The soft edge first, then the body over it: widest and faintest first, which is the
-            // order the page's own shadow is painted in. The edge is the *halo's* colour, so a body
-            // the colour of the paper still has an outline to be seen by.
-            for (grow, alpha, tint) in [
-                (BODY_HALO_GROW, BODY_HALO_ALPHA * fade, halo),
-                (0.0, BODY_ALPHA * fade, colour),
+            // Three passes over one shape, widest and faintest first — the order the page's own shadow
+            // is painted in, and the whole of what makes the rod findable. The shadow is the same body
+            // dropped a little down and to the right in the *halo's* colour, which is the one colour
+            // this app knows can be seen on the paper in front; the edge is that colour too, so the two
+            // read as one soft shadow around the body rather than as an outline with a line beside it.
+            for (grow, shift, alpha, tint) in [
+                (0.0, BODY_SHADOW_DROP, BODY_SHADOW_ALPHA * fade, halo),
+                (BODY_HALO_GROW, [0.0, 0.0], BODY_HALO_ALPHA * fade, halo),
+                (0.0, [0.0, 0.0], BODY_ALPHA * fade, colour),
             ] {
-                flatten(&body.outline(grow), &map, &mut self.outline);
+                let shifted = |p: [f32; 2]| map([p[0] + shift[0], p[1] + shift[1]]);
+                flatten(&body.outline(grow), &shifted, &mut self.outline);
                 let outline = std::mem::take(&mut self.outline);
                 self.fill_polygon(&outline, clip, alpha, tint);
                 self.outline = outline;
             }
         }
 
-        // The nib: a small circle, always, so there is a fixed point that says exactly where the
-        // ink will land. The faint bloom around it is what lets it sit in the page rather than on
-        // it, and the mark is the exception to how faint the rest of it is — and it is drawn *in the
-        // ink's colour*, over a bloom in the halo's, so the dot says both what will be written and
-        // where.
+        // The nib: a disc as wide as the line in hand, so there is a fixed point that says exactly where
+        // the ink will land *and how thick it will be*. The faint bloom around it is what lets it sit in
+        // the page rather than on it, and the mark is the exception to how faint the rest of it is — and
+        // it is drawn *in the ink's colour*, over a bloom in the halo's, so the dot says both what will
+        // be written and where.
+        let mark = sane_radius(shape.nib_radius);
         for (radius, alpha, tint) in [
-            (NIB_BLOOM_RADIUS, NIB_BLOOM_ALPHA, halo),
-            (NIB_RADIUS, NIB_ALPHA, colour),
+            (mark + NIB_BLOOM_SPREAD, NIB_BLOOM_ALPHA, halo),
+            (mark, NIB_ALPHA, colour),
         ] {
             self.fill_disc(nib, radius * scale, clip, alpha, tint);
         }
@@ -547,10 +585,24 @@ fn sane_scale(scale: f32) -> f32 {
     }
 }
 
+/// A nib mark's radius that can be draw with, held between the two the shape declares.
+///
+/// [`crate::cursor::nib_radius_for_width`] already clamps what the app sends, so this is the *drawing's* own
+/// defence rather than a second opinion: a surface is a public thing to hand a shape to, and a radius that is
+/// not finite would draw nothing at all — a cursor with no dot in it, which is the one part of it that has to
+/// be exact.
+fn sane_radius(radius: f32) -> f32 {
+    if radius.is_finite() {
+        radius.clamp(NIB_RADIUS_MIN, NIB_RADIUS_MAX)
+    } else {
+        NIB_RADIUS_MIN
+    }
+}
+
 /// What the frame publishes about the screen the ghost is drawn on: everything about it that a
 /// reading cannot say.
 ///
-/// These four numbers are the whole of what the app knows and the overlay does not. `suppressed`
+/// These five numbers are the whole of what the app knows and the overlay does not. `suppressed`
 /// means "there is nothing to draw a ghost for here" — the home list is up, or the Tilt switch is
 /// off — and it is published rather than inferred because only the frame knows it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -565,6 +617,11 @@ pub struct Screen {
     /// colour of the paper it is drawn on, and this is what keeps a white pen or a highlighter's pale yellow
     /// findable.
     pub halo: u32,
+    /// How wide the ghost's nib mark is, in logical pixels: half the width of the line the tool in hand lays.
+    ///
+    /// Published for the same reason the colour is — the app is the only thing that knows the pen's weight — and it is
+    /// what makes the mark a preview of the ink rather than a point. See [`CursorShape::nib_radius`].
+    pub nib_radius: f32,
     /// The line the ghost is drawn below, in physical client pixels: the bar's bottom edge.
     pub sheet_top: f32,
     /// Whether the ghost is switched off, or the pen is not on the sheet at all.
@@ -573,12 +630,14 @@ pub struct Screen {
 
 impl Default for Screen {
     /// The state before the first frame has said anything: no ghost, which is the honest answer for
-    /// a screen nobody has described yet.
+    /// a screen nobody has described yet. The mark is the smallest one, because nothing has said what
+    /// is in hand — and it is not drawn at all while `suppressed` is set, which is what this is.
     fn default() -> Self {
         Screen {
             scale: 1.0,
             colour: 0x00_00_00,
             halo: 0x00_00_00,
+            nib_radius: NIB_RADIUS_MIN,
             sheet_top: 0.0,
             suppressed: true,
         }
@@ -613,6 +672,7 @@ fn cursor_for(sample: PenSample, screen: &Screen) -> Option<(PenSample, CursorSh
         scale: screen.scale,
         colour: screen.colour,
         halo: screen.halo,
+        nib_radius: screen.nib_radius,
         sheet_top: screen.sheet_top,
     };
 
@@ -1103,11 +1163,15 @@ mod tests {
     }
 
     /// A screen that wants a ghost, with nothing in the way.
+    ///
+    /// The mark is the pen this app ships with — [`crate::settings::Settings::default`]'s widest press, halved —
+    /// because the *size* is the app's answer and these tests are about what the drawing does with one.
     fn screen() -> Screen {
         Screen {
             scale: 1.0,
             colour: 0x00_00_00,
             halo: 0x00_00_00,
+            nib_radius: crate::cursor::nib_radius_for_width(4.5),
             sheet_top: 0.0,
             suppressed: false,
         }
@@ -1141,7 +1205,7 @@ mod tests {
         let at =
             |radius: f32| surface.pixels()[(middle as usize) * span + (middle + radius) as usize];
         let centre = at(0.0);
-        let ring = at(NIB_RADIUS + (NIB_BLOOM_RADIUS - NIB_RADIUS) * 0.5);
+        let ring = at(shape.nib_radius + NIB_BLOOM_SPREAD * 0.5);
 
         let (centre_red, centre_blue) = ((centre >> 16) & 0xFF, centre & 0xFF);
         let (ring_red, ring_blue) = ((ring >> 16) & 0xFF, ring & 0xFF);
@@ -1153,6 +1217,155 @@ mod tests {
         assert!(
             ring_blue > ring_red,
             "and the bloom around it is the halo's: {ring:#010X}"
+        );
+    }
+
+    /// The mark is drawn as wide as the app says the line in hand is: a heavier pen's dot is visibly heavier, which is
+    /// the only way the weight can be seen without putting ink on the page.
+    ///
+    /// The bloom is a fixed *spread* beyond the mark rather than a multiple of it, and that is the second half of this:
+    /// a wide mark gets the same thickness of edge as a narrow one, so the edge stays an edge when the mark is as wide
+    /// as a highlighter's band.
+    #[test]
+    fn the_mark_is_as_wide_as_the_line_in_hand() {
+        let span = surface_span(1.0) as usize;
+        let middle = span as f32 / 2.0;
+
+        // The mark's colour leads in red and the bloom's in blue, so a pixel belongs to the mark when red leads — which
+        // is how the two are told apart on one surface.
+        let extents = |radius: f32| {
+            let shape = CursorShape {
+                colour: 0xFF_00_00,
+                halo: 0x00_00_FF,
+                nib_radius: radius,
+                ..shape((middle, middle), None)
+            };
+
+            let mut surface = Surface::new(span, span);
+            surface.draw(&shape, [middle, middle], None);
+
+            let mut mark = 0.0f32;
+            let mut whole = 0.0f32;
+
+            for (index, pixel) in surface.pixels().iter().enumerate() {
+                if *pixel == 0 {
+                    continue;
+                }
+
+                let reach = ((index % span) as f32 - middle).abs();
+                whole = whole.max(reach);
+
+                if (pixel >> 16) & 0xFF > pixel & 0xFF {
+                    mark = mark.max(reach);
+                }
+            }
+
+            (mark, whole)
+        };
+
+        let (narrow, narrow_whole) = extents(2.25);
+        let (wide, wide_whole) = extents(NIB_RADIUS_MAX);
+
+        assert!(
+            (narrow - 2.25).abs() <= 1.5,
+            "the mark is drawn at the radius it was given: {narrow}"
+        );
+        assert!(
+            wide > narrow + 4.0,
+            "and a wider line is a wider dot: {wide} against {narrow}"
+        );
+        assert!(
+            (narrow_whole - narrow - NIB_BLOOM_SPREAD).abs() <= 1.5,
+            "the bloom is a spread past the mark, not a multiple of it: {}",
+            narrow_whole - narrow
+        );
+        assert!(
+            (wide_whole - wide - NIB_BLOOM_SPREAD).abs() <= 1.5,
+            "and the same spread on a mark as wide as a highlighter's band: {}",
+            wide_whole - wide
+        );
+    }
+
+    /// The body casts a shadow: the same rod dropped down and to the right, which is what makes a faint body findable
+    /// on paper nearly the colour of the body.
+    ///
+    /// The halo alone is not enough, and this is the difference: it thickens the body's *own* edge, so on a page the
+    /// same colour as the rod there is still only a faint rod with a faint edge. The shadow is drawn past that edge, in
+    /// the halo's colour, and the two together are what an eye finds.
+    #[test]
+    fn the_body_casts_a_shadow_past_its_own_edge() {
+        let span = surface_span(1.0) as usize;
+        let middle = span as f32 / 2.0;
+
+        // A pen laid flat to the right, so the body runs along x and its shadow is the only thing that can be drawn
+        // past the far end of the body itself.
+        let shape = CursorShape {
+            colour: 0xFF_00_00,
+            halo: 0x00_00_FF,
+            ..shape((middle, middle), Some((80.0, 0.0)))
+        };
+        let body = shape.cursor.body_shape().expect("a flat pen has a body");
+        // The body's own reach, flattened exactly as the drawing flattens it: the control points' hull is far wider
+        // than the curves inside it, so a point past *this* is past the body, its edge and its antialiasing.
+        let mut outline = Vec::new();
+        flatten(&body.outline(0.0), &|point| point, &mut outline);
+        let furthest = outline
+            .iter()
+            .map(|point| point[0])
+            .fold(f32::MIN, f32::max);
+        let lowest = outline
+            .iter()
+            .map(|point| point[1])
+            .fold(f32::MIN, f32::max);
+
+        let mut surface = Surface::new(span, span);
+        surface.draw(&shape, [middle, middle], None);
+
+        let (_, _, right, bottom) = drawn(&surface).expect("a leaning pen draws a body");
+        assert!(
+            right as f32 > furthest + BODY_HALO_GROW,
+            "the shadow reaches past the body and its edge, to the right: {right} against {furthest} + {BODY_HALO_GROW}"
+        );
+        assert!(
+            bottom as f32 > lowest + BODY_HALO_GROW,
+            "and below it: {bottom} against {lowest} + {BODY_HALO_GROW}"
+        );
+
+        let shadow = (0..span)
+            .map(|row| surface.pixels()[row * span + right])
+            .find(|pixel| *pixel != 0)
+            .expect("the rightmost drawn column has a pixel in it");
+
+        assert!(
+            shadow & 0xFF > (shadow >> 16) & 0xFF,
+            "and what is out there is the halo's colour rather than the body's: {shadow:#010X}"
+        );
+    }
+
+    /// The window is sized for the shadow's own reach, and the reach is the length of the drop: a shadow that reached
+    /// further than the window allows would be a ghost with its edge cut off.
+    ///
+    /// The two are written down separately because a `const` cannot take a square root, so this is what holds them
+    /// together.
+    #[test]
+    fn the_shadow_reaches_no_further_than_the_window_allows() {
+        let reach = (BODY_SHADOW_DROP[0].powi(2) + BODY_SHADOW_DROP[1].powi(2)).sqrt();
+
+        assert!(
+            BODY_SHADOW_REACH >= reach,
+            "the drop reaches {reach} and the window allows {BODY_SHADOW_REACH}"
+        );
+        assert!(
+            BODY_SHADOW_DROP[0] > BODY_HALO_GROW && BODY_SHADOW_DROP[1] > BODY_HALO_GROW,
+            "the shadow is thrown further than the edge reaches, or the two would be one edge"
+        );
+        assert!(
+            BODY_SHADOW_ALPHA < BODY_ALPHA,
+            "a shadow is fainter than the body that throws it"
+        );
+        assert!(
+            BODY_SHADOW_ALPHA > BODY_HALO_ALPHA,
+            "and stronger than the rim, because being found is its whole job"
         );
     }
 
@@ -1370,6 +1583,8 @@ mod tests {
                 let middle = span as f32 / 2.0;
                 let mut shape = shape((100.0, 300.0), tilt);
                 shape.scale = scale;
+                // The widest mark the shape allows, so the window is checked against the biggest ghost there can be.
+                shape.nib_radius = NIB_RADIUS_MAX;
 
                 surface.draw(&shape, [middle, middle], None);
                 let (left, top, right, bottom) =

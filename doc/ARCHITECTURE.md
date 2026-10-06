@@ -377,10 +377,12 @@ There is one rule that decides what a piece of interface is allowed to be, and t
   the pen lays no ink at all. Two of these screens are deliberate twins — same list, same keys, same
   right-click menu — because a person who has used one has used both.
 * The **ghost cursor** is neither: it is a layered window of its own, drawn from the pen thread the
-  instant a reading lands, and the system pointer is hidden exactly while it is on screen. The two
-  states are driven from the same answer (`follow_pen_with_pointer` / `publish_screen`) so that a
-  window with neither cannot happen — a hidden pointer with nothing drawn in its place is a window with
-  no cursor at all.
+  instant a reading lands, and the system pointer is hidden exactly while it is on screen. What it draws is a
+  *preview of the next stroke* — the ink's colour and the ink's own width, so a heavier pen has a heavier dot and a
+  marker's dot is its band, with a cast shadow under the rod that says which way the pen leans ([VIEW.md](VIEW.md),
+  §5, *The ghost cursor*). The two states are driven from the same answer (`follow_pen_with_pointer` /
+  `publish_screen`) so that a window with neither cannot happen — a hidden pointer with nothing drawn in its place is a
+  window with no cursor at all.
 
 The keyboard follows the same idea: the app has no focusable canvas and no text field, so the chords
 that are the *app's* (undo, redo, `Ctrl+N`, `Ctrl+O`, `Ctrl+S`, `Ctrl+B`, `Ctrl+M`) are registered as

@@ -245,22 +245,36 @@ there is no arrow that means "a pen held at 40 degrees". The system pointer is t
 `system_cursor` exactly while the ghost is on screen, so the ghost *is* the cursor rather than a marker
 beside one.
 
-Four facts about the ghost are decided here, and each of them is something a pen reading cannot say:
+Five facts about the ghost are decided here, and each of them is something a pen reading cannot say:
 
 | Fact | Where it comes from |
 |---|---|
 | whether the pen has a cursor of its own at all | the **ink model**, not a batch, so the cursor survives the batches that lay nothing — most of them, while the pen is merely held over the window — and disappears only when the pen does |
 | where it is and how it leans | the pen's newest reading, in window coordinates, with no sign flip: lean right and the ghost extends right of the nib |
 | where it is *not* drawn | **only below the bar**: over the bar it would be drawn behind an opaque background, where it cannot be seen — and **never on the home screen**, which has no sheet to point at and is meant to be tapped |
-| the scale, the colour on this paper, and where the bar ends | published to the overlay (`publish_screen`) on the frames where they change, so an effect like the Tilt switch takes hold at once rather than at the next reading |
+| the scale, the colours on this paper, and where the bar ends | published to the overlay (`publish_screen`) on the frames where they change, so an effect like the Tilt switch takes hold at once rather than at the next reading |
+| how **thick** the mark is | the same publication (`Screen::nib_radius`): half the width the tool in hand lays, which only the app knows — the pen's weight is a setting, and the marker's band is the tool's |
 
-**The nib's dot is the colour in hand.** The mark is drawn in the ink the next stroke will be written in — the pen's
-colour, or the marker's — because that is what a reader looks at the dot to know, and the palette in the bar changes
-with the tool, so the two always say the same thing. The soft edge under the mark and the nib's bloom are drawn in the
-paper's **contrast colour** instead, which is what keeps a mark findable when it is close to the colour of the paper:
-white ink on white paper reads as a white dot with a dark rim rather than as nothing at all. The two colours reach the
-overlay as a pair (`cursor_overlay::Screen::colour` and `Screen::halo`), and the eraser and the lasso — which write
-nothing — keep the contrast colour for both.
+**The nib's dot is the colour in hand, and it is as wide as the line in hand.** The mark is drawn in the ink the next
+stroke will be written in — the pen's colour, or the marker's — because that is what a reader looks at the dot to know,
+and the palette in the bar changes with the tool, so the two always say the same thing. For the same reason it is drawn
+as wide as the line that stroke will be (`cursor::nib_radius_for_width`): half the width the tool in hand lays, so
+`Fine` and `Heavy` are two different dots, and a highlighter's mark is as wide as the band it is about to lay. The
+width is the pen's *widest* press and not the pressure of the moment — the weight is a setting and a pressure is a
+measurement, and a dot that grew and shrank as the hand pressed and eased would never mean the same thing twice — which
+makes this the one place the pen's weight can be *seen* without putting ink on the page. The soft edge under the mark
+and the nib's bloom are drawn in the paper's **contrast colour** instead, which is what keeps a mark findable when it is
+close to the colour of the paper: white ink on white paper reads as a white dot with a dark rim rather than as nothing
+at all. The three facts reach the overlay as a set (`cursor_overlay::Screen::colour`, `Screen::halo` and
+`Screen::nib_radius`), and the eraser and the lasso — which write nothing — keep the contrast colour and the pen's own
+width, because it is the pen whose weight the reader set.
+
+**The body casts a shadow.** A leaning pen draws a rod, and a rod of a faint colour needs more than an edge when the
+paper is nearly the colour of the rod: the body is painted *three* times, as the sheet's own shadow is — the same rod
+**dropped** a few pixels down and to the right in the contrast colour, then the soft edge around it, then the body
+itself, widest and faintest first. The drop is what makes the rod read as lying *above* the page rather than being
+painted on it, and it is the layer an eye finds first on a page of writing; the halo alone thickens the body's own
+edge, which is no help at all when that edge and the paper are the same colour.
 
 The system pointer is driven **from the ghost** and not from the pen's range, because the two states
 have to be impossible to separate: a hidden pointer with nothing drawn in its place is a window with no

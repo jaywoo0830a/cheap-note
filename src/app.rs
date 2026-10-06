@@ -32,12 +32,12 @@ use crate::canvas::{
     contrast_color, relative_luminance, CanvasSize, CanvasStyle, Ruling, RulingSheet, Swatch,
     HIGHLIGHTER_COLORS, INK_COLORS, PAPER_COLORS,
 };
-use crate::cursor::PenCursor;
+use crate::cursor::{nib_radius_for_width, PenCursor};
 use crate::cursor_overlay::{CursorFeed, Screen};
 use crate::home::Home;
 use crate::ink::{
     paper_of_drawn, paper_of_page_point, with_alpha, InkTransform, Notes, Stroke, TextChar,
-    TextLayout, Tool, HIGHLIGHTER_ALPHA,
+    TextLayout, Tool, HIGHLIGHTER_ALPHA, HIGHLIGHTER_WIDTH,
 };
 use crate::ink_layer::render::ink_colour;
 use crate::ink_layer::{Canvas, Ink, InkLayer, Page, Rect};
@@ -1445,11 +1445,31 @@ impl NoteApp {
             // still has an edge to be found by (see [`Screen::halo`]).
             colour: self.ink_colour_in_hand(),
             halo: contrast_color(self.settings.page_color) & 0x00FF_FFFF,
+            // And how thick that stroke will be, for the same reason: the mark is a preview of the
+            // ink, so a heavy pen's dot is heavy (see [`Self::nib_width`]).
+            nib_radius: nib_radius_for_width(self.nib_width()),
             // The line above which a reading belongs to a control rather than to the page. The same
             // estimate the pointer rule uses ([`Self::pen_has_its_own_cursor`]), in physical pixels.
             sheet_top: BAR_HEIGHT * self.scale,
             suppressed: self.home_is_open() || self.asking() || !self.settings.show_tilt_cursor,
         });
+    }
+
+    /// How thick the line in hand is, in logical pixels: what the ghost cursor's nib mark is sized by.
+    ///
+    /// The pen's *widest* line rather than the pressure of the moment — the weight is a setting and a pressure is a
+    /// measurement, and a mark that grew and shrank as the hand pressed and eased would be a mark that never meant the
+    /// same thing twice. It is the weight that makes it interesting: switching from `Fine` to `Heavy` grows the dot,
+    /// which is the one way the pen's thickness can be seen without putting ink on the page.
+    ///
+    /// A marker lays one width and ignores the pen's, so it is asked for its own band; the eraser and the lasso lay
+    /// nothing, and are shown the pen's mark, because it is the pen whose weight the reader set — a dot the size of
+    /// what a lasso encloses would be a smear rather than a cursor.
+    fn nib_width(&self) -> f32 {
+        match self.ink.mode() {
+            Tool::Highlighter => HIGHLIGHTER_WIDTH,
+            Tool::Pen | Tool::Eraser | Tool::Lasso => self.settings.width_for_pressure(Some(1.0)),
+        }
     }
 
     /// The colour the next stroke will be written in: what the ghost cursor's mark is drawn in.

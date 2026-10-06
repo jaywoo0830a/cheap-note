@@ -42,14 +42,18 @@
 //! What this module owns is the shape, and it is the same shape either way.
 //!
 //! Two shapes, each with a soft edge: the pen's body — a slender spindle that swells away from the
-//! nib and ends in a round cap, drawn as three quadratic curves — and a small mark at the nib.
-//! Both are painted twice, the wider and fainter copy first, so the ghost sits *in* the page rather
-//! than on top of it. That is the same trick the sheet's own shadow uses, done in one step rather
-//! than three, because this shape is small and is rebuilt on every reading the hand moves.
+//! nib and ends in a round cap, drawn as three quadratic curves — and a mark at the nib that is as
+//! wide as the line in hand. The body is painted three times — a cast shadow, then its soft edge,
+//! then the body itself, widest and faintest first — and the mark twice, its bloom under it, so the
+//! ghost sits *in* the page rather than on top of it. That is the same trick the sheet's own shadow
+//! uses, in fewer steps, because this shape is small and is rebuilt on every reading the hand moves.
 //!
 //! The two shapes say different things, and are weighted for it: the nib mark is exact and nearly
-//! opaque, because it is where the ink will land, while the body is a hint about the angle, and is
-//! drawn faintly and no more strongly than the lean it is reporting.
+//! opaque, because it is where the ink will land *and how thick that ink will be* — it is drawn at
+//! the pen's own weight, so a heavier pen has a heavier dot (see [`nib_radius_for_width`]) — while
+//! the body is a hint about the angle, drawn faintly and no more strongly than the lean it is
+//! reporting. Its shadow is what makes a faint rod findable on paper that is nearly the colour of
+//! the rod itself.
 
 use pen_windows::{PenPhase, PenSample, Tilt};
 
@@ -95,22 +99,45 @@ const BODY_TAIL_WIDTH: f32 = 3.6;
 /// not.
 const BODY_BULGE: f32 = 0.72;
 
-/// The radius of the nib mark, in logical pixels.
+/// The least and the most the nib mark is ever drawn at, in logical pixels.
 ///
-/// A fixed size rather than one that follows the stroke width: a mark the size of the stroke would
-/// cover the very ink it is pointing at, and the ink already shows its own width. What the mark is
-/// for is the moment before the nib touches down.
-pub const NIB_RADIUS: f32 = 2.5;
+/// The mark's size is the width of the line in hand — see [`nib_radius_for_width`] — so the number that matters is the
+/// app's, and these two are what keeps an answer the app had no business sending from drawing a mark nobody can find,
+/// or one that fills the window. The ceiling is half a highlighter's band, because a highlighter's mark *is* the band
+/// it is about to lay, and the floor keeps the thinnest pen's mark a dot.
+pub const NIB_RADIUS_MIN: f32 = 1.2;
+pub const NIB_RADIUS_MAX: f32 = 9.0;
 
-/// The radius of the faint bloom around the nib mark, in logical pixels.
+/// The radius of the nib mark for a line of the given width, in logical pixels.
+///
+/// Half the width, because a width is a *diameter*: the mark is drawn as wide as the line the tool in hand lays, so a
+/// heavier pen's dot is visibly heavier and a reader can see the weight they chose without touching the page. The app
+/// asks this once per frame and publishes the answer to the window the ghost is drawn in
+/// ([`crate::cursor_overlay::Screen::nib_radius`]).
+///
+/// A width that is not finite — a setting that arrived as nonsense — is answered with the smallest mark rather than
+/// with a hole in the window.
+pub fn nib_radius_for_width(width: f32) -> f32 {
+    if !width.is_finite() {
+        return NIB_RADIUS_MIN;
+    }
+
+    (width * 0.5).clamp(NIB_RADIUS_MIN, NIB_RADIUS_MAX)
+}
+
+/// How far the nib mark's bloom reaches beyond the mark, in logical pixels.
+///
+/// A *spread* rather than a multiple of the mark: the mark can be as wide as a highlighter's band, and a bloom that
+/// grew with it would be a fog rather than an edge. A fixed spread keeps the edge the same thickness whatever is in
+/// hand, which is what makes it read as an edge.
+pub const NIB_BLOOM_SPREAD: f32 = 4.0;
+
+/// How opaque the nib mark's bloom is.
 ///
 /// The renderer antialiases the mark's own edge, but a hard edge of a hard grey on white paper is
 /// still a sticker on the page. One wider, much fainter copy underneath reads as the mark sitting
 /// *in* the paper — the same trick the page's own shadow uses, in one step rather than three,
 /// because a cursor is small and is rebuilt on every frame the hand moves.
-pub const NIB_BLOOM_RADIUS: f32 = NIB_RADIUS * 2.6;
-
-/// How opaque the nib mark's bloom is.
 pub const NIB_BLOOM_ALPHA: f32 = 0.10;
 
 /// How opaque the nib mark itself is.
@@ -120,11 +147,15 @@ pub const NIB_BLOOM_ALPHA: f32 = 0.10;
 pub const NIB_ALPHA: f32 = 0.85;
 
 /// How far the body's soft edge reaches beyond the body itself, in logical pixels.
-pub const BODY_HALO_GROW: f32 = 1.2;
+pub const BODY_HALO_GROW: f32 = 1.4;
 
 /// How opaque the body's soft edge is. It is painted under the body, so the two read as one shape
 /// with a soft edge rather than as a shape with an outline.
-pub const BODY_HALO_ALPHA: f32 = 0.10;
+///
+/// Twice what it was, because the body's shadow changed what this one is for: the edge used to be the only thing
+/// standing between a faint rod and the paper, and now it is the second of two — a rim around the shadow rather than
+/// a rescue, and the two together are what an eye finds a rod by on a page of writing.
+pub const BODY_HALO_ALPHA: f32 = 0.20;
 
 /// How opaque the body is, at the lean [`FULL_LEAN_DEGREES`] and beyond.
 ///
@@ -604,13 +635,17 @@ mod tests {
     /// strongest thing drawn: this is what keeps the cursor a hint rather than a blot.
     #[test]
     fn the_soft_layers_are_fainter_than_what_they_sit_under() {
-        assert!(NIB_BLOOM_RADIUS > NIB_RADIUS, "the bloom is the wider copy");
-        assert!(NIB_BLOOM_ALPHA < NIB_ALPHA, "and the fainter one");
+        assert!(NIB_BLOOM_SPREAD > 0.0, "the bloom reaches past the mark");
+        assert!(NIB_BLOOM_ALPHA < NIB_ALPHA, "and is the fainter copy");
         assert!(BODY_HALO_GROW > 0.0, "the body's edge reaches outward");
         assert!(BODY_HALO_ALPHA < BODY_ALPHA, "and is fainter than the body");
         assert!(
             BODY_ALPHA < NIB_ALPHA,
             "the body never competes with the nib"
+        );
+        assert!(
+            NIB_RADIUS_MIN < NIB_RADIUS_MAX,
+            "the mark has a range of sizes to move in"
         );
 
         for alpha in [NIB_ALPHA, NIB_BLOOM_ALPHA, BODY_ALPHA, BODY_HALO_ALPHA] {
@@ -638,6 +673,35 @@ mod tests {
             nonsense.position(),
             [200.0, 400.0],
             "a scale that makes no sense is 1:1 rather than a division by zero"
+        );
+    }
+
+    /// The nib mark is half the line in hand, held between the two sizes the shape declares: the dot is the pen's
+    /// weight made visible, and no setting can make it invisible or fill the window.
+    #[test]
+    fn the_mark_is_half_the_line_in_hand() {
+        assert!(
+            (nib_radius_for_width(4.5) - 2.25).abs() < 1e-6,
+            "half of the widest press the shipped pen has"
+        );
+        assert!(
+            nib_radius_for_width(18.0) > nib_radius_for_width(4.5),
+            "a heavier pen has a heavier dot"
+        );
+        assert_eq!(
+            nib_radius_for_width(18.0),
+            NIB_RADIUS_MAX,
+            "and a highlighter's mark is half its own band"
+        );
+        assert_eq!(
+            nib_radius_for_width(0.1),
+            NIB_RADIUS_MIN,
+            "a pen of nothing still has a dot"
+        );
+        assert_eq!(
+            nib_radius_for_width(f32::NAN),
+            NIB_RADIUS_MIN,
+            "and a width that arrived as nonsense is not a hole in the window"
         );
     }
 }

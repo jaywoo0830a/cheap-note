@@ -225,13 +225,18 @@ annotate — and it is disabled for a document that has none, which is most of t
 
 The pen is captured by the **window**, not by anything on it — `pen-windows` delivers a raw
 `WM_POINTER` stream — so nothing in the drawing layer can stand between the pen and the page, and the
-app refuses the pen itself. There are exactly two refusals, and both are app *state*:
+app refuses the pen itself. There are exactly three refusals, and all of them are app *state*:
 
 * **A line**: above `bar_edge` a reading is a press on a control rather than ink (§1).
 * **A screen**: while the home list, the marked pages or the contents are in front, and while a name is
   being typed, every reading is dropped where it would otherwise become a stroke. A name being typed
   must not leave a line across the page behind the field, and a screen is drawn over a sheet nobody can
   see — a stroke laid there would go into a note the user is not looking at.
+* **The palette at the pen** (§6): while it is up the nib lays nothing, and a reading that lands near one
+  of its colours is a *choice* rather than a stroke. This is the one control a pen is aimed at instead of
+  written on, and both halves of that are the same state: the `NoteApp::palette` that refuses the ink is
+  what reads the tap (`palette_from_pen`), so there is no press for a stroke to arrive on — and, as with
+  a screen, no rectangle that could be wrong by a frame.
 
 That second rule is *why* the two lists are screens rather than panels floating on the sheet: a panel
 would have had to add a rectangle to the ink rule, and a rectangle that is wrong by a frame is ink drawn
@@ -304,6 +309,39 @@ without a text field to type it into.
 | `Ctrl+N` | a new blank sheet |
 | `Ctrl+S` | `Save`, which writes the file a person carries rather than one more write into a note that is already written (§10) |
 | `Ctrl+M` | the measurement session, on the letter with nothing else to mean |
+| `Ctrl+Shift+C` | the palette at the pen: it opens under the nib, and the same chord puts it away — `C` for colour, on the chord every drawing app spells it with (§6, below) |
+
+**The palette at the pen** is an overlay that takes the keyboard the way a *box* does rather than the way
+a screen does: while it is up the arrows walk its ring, `Enter` takes the colour the ring marks, `Escape`
+puts it away, and nothing else a key means reaches the sheet or the bar under it (`NoteApp::note_key_down`,
+`NoteApp::palette_take`). Why it is shaped the way it is comes down to five decisions:
+
+* **It opens where the *pen* is**, which the app knows to the last reading (`last_cursor`), so the palette
+  arrives under the nib — where the hand already is — rather than at the pointer, which is the second
+  answer, or the middle of the window, the third. It is then *clamped onto the screen* (`palette_centre`),
+  because the pen is at the window's edge as often as it is in the middle, and a ring half off the window
+  is a ring with half its colours.
+* **It does not follow the pen.** A ring that moved with the hand is a ring the hand cannot aim at, and the
+  pen keeps reporting while the palette is up: the position is fixed where it opened.
+* **The ring is the palette of the tool in hand** (`palette_colours`): the marker's four colours replace
+  the pen's twelve without the palette being rebuilt, which is the same rule the bar's Ink row follows —
+  and it is why taking a colour from behind the eraser puts the pen back in hand, since a colour is what a
+  pen writes with.
+* **A tap is answered by distance**, not by the element under the pointer (`palette_at`), because the pen is
+  captured by the window and never reaches the element tree at all (§5) — the same reason the ghost cursor
+  has a window of its own. One function answers the pen's tap, a mouse's click and the keyboard's own place
+  on the ring, so the three cannot disagree. The ring is a clock face — the first colour of a table at
+  twelve o'clock, and the table's order going clockwise (`palette_point`) — so a palette is *learnt* rather
+  than hunted for, and the gaps between discs are wider than two reaches, which is what makes a ring of
+  twelve pressable with a pen (there is a test for both).
+* **It is two zones, not thirteen discs on one field.** The colours are on the ring, because a ring is
+  what makes them a list; the tools — and the colour in hand — are inside, in a well of the theme's quiet
+  grey, so that what the palette *offers* and what it is *set to* are two things to look at rather than
+  one field to read. A tool is a chip with its icon in it rather than a bare glyph, which is what the same
+  tool is on the bar and for the same reason: an icon alone on a white field is a smudge. The hub is the
+  colour the next stroke will be written in, and it is *not* a control, so it is set in a ring of white —
+  the one filled circle in the middle that cannot be pressed does not look like the three that can. Its
+  measurements are in §12 with the rest of them.
 
 The two list screens keep the app's own chords and nothing else: the arrows, Enter and Escape belong to
 the list that has the focus, and the same chords work there as on the note, because a person looking at
@@ -661,6 +699,14 @@ counts the rebuilds a zoom's change of detail forced (see `ink_layer/render.rs`)
 | `WHEEL_ZOOM_STEP` | 1.25 | one notch of a wheel, and one press of the toolbar's zoom buttons — the same question, answered at the same rate |
 | `WHEEL_LINES_PER_NOTCH` | 3 | what the platform turns one notch into; 32 logical px per line; 96 px is a trackpad's notch |
 | `WHEEL_LINE_HEIGHT` | 32 logical px | what one line of a scroll is worth when panning |
+| `PALETTE_KEY` | `Ctrl+Shift+C` | the palette at the pen's one chord, for opening it and for putting it away; the status line says so while it is up |
+| `PALETTE_RING_RADIUS` / `PALETTE_TOOL_RADIUS` | 104 / 54 logical px | how far the colours and the three tools sit from the palette's centre: the tools are in the well inside and the colours are on the ring outside, and both rings are far enough out that no point on the palette is within reach of two controls |
+| `PALETTE_DISC` / `PALETTE_DISC_BOX` | 30 / 38 logical px | a colour disc, and the box it draws in — the box carries the ring that marks the keyboard's place, so a placement is measured in the box rather than in the disc |
+| `PALETTE_TOOL_DISC` / `PALETTE_TOOL_ICON` | 38 / 20 logical px | a tool chip, and the icon inside it: a little over half, which is the proportion the bar's own tool buttons are drawn at |
+| `PALETTE_HUB` / `PALETTE_HUB_RING` | 44 / 4 logical px | the colour the next stroke is written in, and the ring of white it is set in: the readout at the centre is the one filled circle there that is not a control, and it is drawn so as not to look like one |
+| `PALETTE_WELL` / `PALETTE_WELL_PAD` | 158 / 6 logical px | the well the hub and the tools sit in, and the gap between its rim and the outermost chip: the fill that makes the middle of the palette a zone of its own |
+| `PALETTE_REACH` | 24 logical px | how near a tap has to come to a colour's centre to be that colour: a disc's radius plus the slack a hand needs, and under half the gap between two colours on the densest ring |
+| `PALETTE_MARGIN` / `PALETTE_PAD` / `PALETTE_RADIUS` | 8 / 14 / 133 logical px | how far the palette is kept from the window's edge, the white the ring of colours is given inside it, and the square it is drawn in: the ring radius, half a disc, and that white |
 | `BATCH_INTERVAL` / `BATCH_STROKES` | 500 ms / 200 | how long ink may wait in memory, and how much of it may |
 | `CHECKPOINT_QUIET_INTERVAL` / `CHECKPOINT_INTERVAL` | 5 s / 5 min | when the write-ahead log may be folded back into the note file, and how rarely |
 | `PAGE_SHADOW` | three steps | the spread, the offset beyond the spread, and the colour of each of the three rectangles a sheet's shadow is made of, widest and faintest first |

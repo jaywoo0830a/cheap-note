@@ -24,7 +24,9 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::label::Label;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _};
+use gpui_kit::component::theme::Theme;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme as _, Icon, IndexPath, Sizable as _};
 use gpui_kit::*;
 
 use crate::bookmarks::{Bookmarks, MarkedPages, Marks};
@@ -86,6 +88,76 @@ const BAR_HEIGHT: f32 = 148.0;
 
 /// The key that starts and stops a measurement session.
 const MEASURE_KEY: &str = "Ctrl+M";
+
+/// The key that puts the palette at the pen, and takes it away again.
+const PALETTE_KEY: &str = "Ctrl+Shift+C";
+
+/// How far from the palette's centre a colour is placed, in logical pixels.
+///
+/// Two rings in two zones around one hub: the tools the hand is reaching for sit in the well inside, and
+/// the colours the palette was opened for are on the ring outside. The distances follow from what a tap
+/// has to miss — a disc's own radius plus the slack a hand needs ([`PALETTE_REACH`]) — and the two rings
+/// are far enough apart that no point on the palette is nearer two controls than one (there is a test for
+/// that, and for the gaps within a ring).
+const PALETTE_RING_RADIUS: f32 = 104.0;
+
+/// How far from the palette's centre the inner ring's tool chips are placed, in logical pixels.
+const PALETTE_TOOL_RADIUS: f32 = 54.0;
+
+/// The diameter of one colour disc, in logical pixels.
+const PALETTE_DISC: f32 = 30.0;
+
+/// The diameter of the chip one tool is drawn in, in logical pixels.
+///
+/// A chip rather than a bare glyph: the palette is read at a glance and at arm's length, and a tool with
+/// nothing behind it is a smudge on a white field — which is what the bar's own buttons would be without
+/// the bar under them.
+const PALETTE_TOOL_DISC: f32 = 38.0;
+
+/// The size of the icon inside a tool chip, in logical pixels.
+///
+/// A little over half the chip: the proportions the bar's own tool buttons are drawn at, so a tool looks
+/// the same in both places.
+const PALETTE_TOOL_ICON: f32 = 20.0;
+
+/// The size of the box one colour disc draws in: the disc, and the ring around it.
+///
+/// What a placement is measured in, because the ring is a border on the box rather than a disc under it
+/// (see [`palette_disc`]): placing by the disc's own size would put every ringed disc a hair off centre.
+/// The eight is that ring and the white gap inside it, two pixels each.
+const PALETTE_DISC_BOX: f32 = PALETTE_DISC + 8.0;
+
+/// The diameter of the hub: the colour the next stroke is written in, at the middle of the palette.
+const PALETTE_HUB: f32 = 44.0;
+
+/// How wide the ring of white the hub's colour is set in is, in logical pixels.
+const PALETTE_HUB_RING: f32 = 4.0;
+
+/// The least gap between the well's rim and the outermost tool chip in it, in logical pixels.
+const PALETTE_WELL_PAD: f32 = 6.0;
+
+/// The diameter of the well the hub and the tools sit in, in logical pixels.
+///
+/// What makes the palette two zones rather than a dozen discs on one white field: the colours are on the
+/// ring and the tools are in the middle, and the well is what says so — the trick the bar plays when it
+/// boxes a row of controls instead of leaving them to float.
+const PALETTE_WELL: f32 = (PALETTE_TOOL_RADIUS + PALETTE_TOOL_DISC / 2.0 + PALETTE_WELL_PAD) * 2.0;
+
+/// The least gap between the palette and the window's edge, in logical pixels.
+const PALETTE_MARGIN: f32 = 8.0;
+
+/// How near a point has to come to a control's centre to be that control, in logical pixels.
+///
+/// Wider than a disc, because a pen lands where a hand put it rather than on a pixel: the reach is a
+/// disc's own radius plus the slack a hand needs, and the gaps between discs are wider than twice this,
+/// so a tap between two colours belongs to neither rather than to the nearer of them by a hair.
+const PALETTE_REACH: f32 = 24.0;
+
+/// The white the ring of colours is given inside the palette, in logical pixels.
+const PALETTE_PAD: f32 = 14.0;
+
+/// The radius of the square the whole palette fits in: the outer ring, half a disc, and that white.
+const PALETTE_RADIUS: f32 = PALETTE_RING_RADIUS + PALETTE_DISC / 2.0 + PALETTE_PAD;
 
 /// How much of the window's width the status pill may take, as a fraction of it.
 const STATUS_PILL_WIDTH: f32 = 0.6;
@@ -351,6 +423,162 @@ fn confirmed(what: Confirmation, yes: bool) -> Option<Confirmation> {
     yes.then_some(what)
 }
 
+/// The palette that opens at the pen: where it is, and what the keyboard is on.
+///
+/// Where it *is* is fixed where it opened, and never follows the pen afterwards: a ring that moved
+/// with the hand is a ring the hand cannot aim at, and the pen keeps reporting while it is up (see
+/// [`NoteApp::palette_from_pen`]). What it *holds* is deliberately not stored here — the ring is the
+/// palette of the tool in hand ([`palette_colours`]), so a tool taken from the inner ring changes the
+/// colours around it without the palette being rebuilt.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Palette {
+    /// The middle of the palette, in logical window pixels.
+    centre: [f32; 2],
+    /// The colour the keyboard is on: what Enter takes, and what the ring's own ring marks.
+    ///
+    /// It starts on the colour in hand, the way a chooser opens on the value it holds, and the arrows
+    /// walk it around the ring (see [`spun`]).
+    chosen: usize,
+}
+
+/// The tools the palette's inner ring offers, in the order a clock face reads them.
+///
+/// Three, and not the four the bar carries: the lasso is a *sweep* — what it takes is what a loop
+/// encloses — and a ring of buttons a tap is aimed at has no room for a gesture. It stays where a
+/// sweep belongs, on the bar.
+const PALETTE_TOOLS: [Tool; 3] = [Tool::Pen, Tool::Highlighter, Tool::Eraser];
+
+/// What a press on the palette landed on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PalettePart {
+    /// The colour at this place on the outer ring.
+    Colour(usize),
+    /// The tool at this place on the inner ring.
+    Tool(usize),
+}
+
+/// Where one control of a ring sits, as the point its *centre* goes at, in logical pixels.
+///
+/// The angle is a clock's: place 0 is at twelve o'clock and the ring runs clockwise, so a table's
+/// first colour is the one at the top and the order a person reads the ring in is the order the table
+/// is written in. `radius` is how far out from `centre` the ring is drawn.
+fn palette_point(centre: [f32; 2], radius: f32, place: usize, count: usize) -> [f32; 2] {
+    let step = std::f32::consts::TAU / count.max(1) as f32;
+    let angle = -std::f32::consts::FRAC_PI_2 + step * place as f32;
+
+    [
+        centre[0] + radius * angle.cos(),
+        centre[1] + radius * angle.sin(),
+    ]
+}
+
+/// Which control of the palette a point is, if it is one at all.
+///
+/// Distance rather than the element under the pointer, because the pen is captured by the *window* and
+/// never reaches the element tree (see [`crate::pen`]): a tap has to be answered by where it landed.
+/// The same rule answers a mouse's click and the keyboard's place on the ring, so all three reach a
+/// colour the same way. The outer ring is asked first, because a colour is what a hand reaching into
+/// this palette is reaching for; a point within reach of nothing is the palette's own background, and
+/// putting the palette away is what a press on that means (see [`NoteApp::palette_overlay`]).
+fn palette_at(centre: [f32; 2], point: [f32; 2], colours: usize) -> Option<PalettePart> {
+    let nearest = |radius: f32, count: usize| {
+        (0..count)
+            .map(|place| {
+                let at = palette_point(centre, radius, place, count);
+                let (dx, dy) = (at[0] - point[0], at[1] - point[1]);
+
+                (place, (dx * dx + dy * dy).sqrt())
+            })
+            .filter(|(_, away)| *away <= PALETTE_REACH)
+            .min_by(|one, other| one.1.total_cmp(&other.1))
+            .map(|(place, _)| place)
+    };
+
+    nearest(PALETTE_RING_RADIUS, colours)
+        .map(PalettePart::Colour)
+        .or_else(|| nearest(PALETTE_TOOL_RADIUS, PALETTE_TOOLS.len()).map(PalettePart::Tool))
+}
+
+/// Where the palette may be centred and still be on the screen.
+///
+/// The pen is at the window's edge as often as it is in the middle — the last line of a page, a note
+/// written down the margin — and a ring half off the screen is a ring with half its colours. A window
+/// too small to hold the palette puts it in the middle and lets it overhang, which is the one case
+/// where there is no better answer.
+fn palette_centre(near: [f32; 2], window: [f32; 2], radius: f32) -> [f32; 2] {
+    let keep = |at: f32, extent: f32| {
+        let (low, high) = (radius + PALETTE_MARGIN, extent - radius - PALETTE_MARGIN);
+
+        if low > high {
+            extent / 2.0
+        } else {
+            at.clamp(low, high)
+        }
+    };
+
+    [keep(near[0], window[0]), keep(near[1], window[1])]
+}
+
+/// The next place on a ring of `count` controls, `step` controls along.
+///
+/// Wrapping at both ends: a ring has no end, so no arrow is a key that does nothing (see
+/// [`NoteApp::palette_spin`]).
+fn spun(from: usize, step: isize, count: usize) -> usize {
+    (from as isize + step).rem_euclid(count.max(1) as isize) as usize
+}
+
+/// The palette the tool in hand writes with: the pen's twelve, or the marker's four.
+///
+/// The two tables the bar's Ink row draws, because a colour means one thing in this app — and the
+/// *pen's* for the tools that write no colour at all: an eraser has no palette of its own, and a
+/// colour taken from behind one is a colour to write in, so taking it puts the pen back in hand (see
+/// [`NoteApp::palette_colour`]).
+fn palette_colours(tool: Tool) -> &'static [Swatch] {
+    match tool {
+        Tool::Highlighter => &HIGHLIGHTER_COLORS,
+        Tool::Pen | Tool::Eraser | Tool::Lasso => &INK_COLORS[..],
+    }
+}
+
+/// Where a colour sits in a palette, or the first place when the palette does not hold it.
+///
+/// The colour in hand is in the ring for every tool whose palette the ring is (see [`palette_colours`]),
+/// so the second answer is the one no tool leaves: the keyboard has to be *somewhere* for the arrows
+/// to walk from, and the first place is the one a reader can find without being told.
+fn palette_in_hand(colours: &[Swatch], colour: u32) -> usize {
+    colours
+        .iter()
+        .position(|swatch| swatch.color == colour)
+        .unwrap_or(0)
+}
+
+/// What an inner-ring button carries: the id its element draws with, its icon, and the words for it.
+///
+/// `None` for a tool the ring does not offer (see [`PALETTE_TOOLS`]), which is a fact about this ring
+/// rather than a mistake: what a tap can take is what has a face here.
+fn palette_face(tool: Tool) -> Option<(&'static str, IconName, &'static str)> {
+    match tool {
+        Tool::Pen => Some(("palette-tool-pen", IconName::Pen, "Pen")),
+        Tool::Highlighter => Some((
+            "palette-tool-highlighter",
+            IconName::Highlighter,
+            "Highlighter",
+        )),
+        Tool::Eraser => Some(("palette-tool-eraser", IconName::Eraser, "Eraser")),
+        Tool::Lasso => None,
+    }
+}
+
+/// The element id one of the palette's colour discs draws with.
+///
+/// An id of its own rather than the bar's swatch id for the same colour: element ids address the whole
+/// element tree, and the palette floats *over* the bar, so the two are drawn at the same moment —
+/// sharing an id would silently share their hover and press state. The bar's ids come from the colour
+/// tables for the same reason (see [`crate::canvas::Swatch`]).
+fn palette_id(swatch: &Swatch) -> ElementId {
+    ElementId::Name(format!("palette-{}", swatch.id).into())
+}
+
 /// The application view.
 pub struct NoteApp {
     /// Everything the note in hand remembers: its paper, its pen, its switches, and how it feels.
@@ -459,6 +687,12 @@ pub struct NoteApp {
     /// The two commands a note cannot undo ask first, and this is the question being asked: while it is here, the
     /// pen has no cursor and lays no ink, and the keyboard belongs to the box (see [`Confirmation`]).
     confirm: Option<Confirmation>,
+    /// The palette at the pen, while it is up.
+    ///
+    /// Like a question, it is a state the *pen* obeys: while it is here the nib lays no ink and a
+    /// reading that lands on a colour is a choice rather than a stroke (see [`Self::consume_ink`] and
+    /// [`Self::palette_from_pen`]).
+    palette: Option<Palette>,
     /// The field the name is typed into on the sheet.
     name_input: Entity<InputState>,
     /// The keyboard the sheet gets back when the field goes away.
@@ -627,6 +861,7 @@ impl NoteApp {
             naming: None,
             naming_asked: false,
             confirm: None,
+            palette: None,
             name_input,
             sheet_focus,
             sheet_has_keyboard: false,
@@ -750,6 +985,14 @@ impl NoteApp {
                 // reading that arrives under a confirmation box is dropped for the same reason: nothing is
                 // written while a question is waiting for an answer.
                 if app.home_is_open() || app.asking() {
+                    return;
+                }
+
+                // The palette at the pen: with it up a reading is a *choice* rather than a stroke —
+                // this is the one control the pen is aimed at instead of written on — and either way
+                // no ink is laid while it is there (see [`NoteApp::palette_from_pen`]).
+                if app.palette_is_open() {
+                    app.palette_from_pen(&batch.samples, cx);
                     return;
                 }
 
@@ -958,6 +1201,7 @@ impl NoteApp {
             || self.asking()
             || self.marks.is_open()
             || self.outline.is_open()
+            || self.palette_is_open()
         {
             return false;
         }
@@ -1613,6 +1857,164 @@ impl NoteApp {
     /// Whether a question is waiting for an answer.
     fn asking(&self) -> bool {
         self.confirm.is_some()
+    }
+
+    /// Whether the palette at the pen is up.
+    fn palette_is_open(&self) -> bool {
+        self.palette.is_some()
+    }
+
+    /// Puts the palette at the pen, on the colour in hand.
+    ///
+    /// *Where the pen is*, not where the pointer is: the hand is over the page holding a pen, and this
+    /// is a control for that hand — the app knows the pen's position to the last reading (see
+    /// [`Self::last_cursor`]), so the palette arrives under the nib, where the hand already is. With no
+    /// pen in range the pointer's own position is the second answer, and with neither — a window that
+    /// has just opened — the middle of it, which is where the sheet is, so the palette never lands half
+    /// off the window ([`palette_centre`]).
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A question, a name being typed, a list in front: each is already what the pen and the
+        // keyboard obey, and a palette opened over one would be a second answer to the same question
+        // (see [`Self::consume_ink`]).
+        if self.asking()
+            || self.naming.is_some()
+            || self.home_is_open()
+            || self.marks.is_open()
+            || self.outline.is_open()
+        {
+            return;
+        }
+
+        let near = self
+            .last_cursor()
+            .map(PenCursor::position)
+            .unwrap_or_else(|| {
+                let at = window.mouse_position();
+
+                [f32::from(at.x), f32::from(at.y)]
+            });
+
+        let size = window.bounds().size;
+
+        self.palette = Some(Palette {
+            centre: palette_centre(
+                near,
+                [size.width.into(), size.height.into()],
+                PALETTE_RADIUS,
+            ),
+            chosen: palette_in_hand(palette_colours(self.ink.mode()), self.ink_colour_in_hand()),
+        });
+
+        // The ghost cursor is deliberately *not* told to go: it is where the hand is aiming, and the
+        // palette is what the hand is reaching for. What the pen is told is that it lays no ink under it,
+        // which is the rule a confirmation box follows for the same reason (see [`Self::consume_ink`]).
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// Takes the palette away.
+    fn close_palette(&mut self, cx: &mut Context<Self>) {
+        if self.palette.take().is_some() {
+            self.touch_status();
+            cx.notify();
+        }
+    }
+
+    /// Takes what a press on the palette landed on.
+    fn palette_take(&mut self, part: PalettePart, cx: &mut Context<Self>) {
+        match part {
+            // A tool *stays*: what it changes is the ring of colours around it, and a hand that has
+            // just picked up the marker means to pick a marker's colour next — the two presses the bar
+            // asks for, made as one gesture.
+            PalettePart::Tool(place) => {
+                if let Some(tool) = PALETTE_TOOLS.get(place).copied() {
+                    self.palette_tool(tool, cx);
+                }
+            }
+            // A colour is the answer the palette was opened for, so the palette goes with it.
+            PalettePart::Colour(place) => self.palette_colour(place, cx),
+        }
+    }
+
+    /// Writes in the colour at `place` on the ring, and puts the palette away.
+    fn palette_colour(&mut self, place: usize, cx: &mut Context<Self>) {
+        let highlighter = self.ink.mode() == Tool::Highlighter;
+
+        let Some(swatch) = palette_colours(self.ink.mode()).get(place) else {
+            return;
+        };
+
+        let (color, name) = (swatch.color, swatch.name);
+
+        self.close_palette(cx);
+
+        if highlighter {
+            self.set_highlighter_color(color, cx);
+        } else {
+            // The pen's palette is the ring's for every tool that writes no colour of its own (see
+            // [`palette_colours`]), so a colour taken from it is one the *pen* is about to write in, and
+            // the eraser or the lasso goes out of hand with it.
+            self.ink.set_mode(Tool::Pen);
+            self.set_ink_color(color, cx);
+        }
+
+        // Said in words as well as in colour: the bar's swatch — the other place this is readable —
+        // may be hidden, and the ring that was just pressed goes away with the answer.
+        self.report(format!("writing in {name}"));
+    }
+
+    /// Puts a tool in hand from the palette, and leaves the palette up.
+    fn palette_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
+        self.set_tool(tool, cx);
+
+        // The keyboard goes to the colour in hand *of the ring it is now looking at*: a place on a ring
+        // of four is not the place it was on a ring of twelve, and the colour in hand is the one answer
+        // both palettes have (see [`palette_in_hand`]). Read before the palette is borrowed, because the
+        // colour in hand is asked of the app.
+        let home = palette_in_hand(palette_colours(tool), self.ink_colour_in_hand());
+
+        if let Some(palette) = &mut self.palette {
+            palette.chosen = home;
+        }
+
+        cx.notify();
+    }
+
+    /// Walks the keyboard's own place around the ring.
+    fn palette_spin(&mut self, step: isize, cx: &mut Context<Self>) {
+        let count = palette_colours(self.ink.mode()).len();
+
+        if let Some(palette) = &mut self.palette {
+            palette.chosen = spun(palette.chosen, step, count);
+            cx.notify();
+        }
+    }
+
+    /// Reads a batch of readings as a *choice*, while the palette is up.
+    ///
+    /// Called from the pen's pump in place of the ink, because a tap is what a pen has instead of a
+    /// click and this is the one control a pen is aimed at rather than written on. A landing point is
+    /// converted exactly as the ghost cursor converts its own (see [`PenCursor::from_sample`]): a palette
+    /// that answered a different point than the ghost is drawn at would take a colour the hand never
+    /// touched.
+    fn palette_from_pen(&mut self, samples: &[pen_windows::PenSample], cx: &mut Context<Self>) {
+        let Some(palette) = self.palette else {
+            return;
+        };
+
+        let colours = palette_colours(self.ink.mode()).len();
+        let landed = samples
+            .iter()
+            .filter(|sample| sample.phase == pen_windows::PenPhase::Down)
+            .find_map(|sample| {
+                let at = PenCursor::from_sample(*sample, self.scale)?.position();
+
+                palette_at(palette.centre, at, colours)
+            });
+
+        if let Some(part) = landed {
+            self.palette_take(part, cx);
+        }
     }
 
     /// Empties the page in front: every stroke on it, and its history with them.
@@ -2753,6 +3155,38 @@ impl NoteApp {
     fn note_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
 
+        // The palette at the pen takes the keyboard while it is up: the arrows walk the ring, Enter
+        // takes the colour the ring marks, Escape puts it away — and nothing else the keyboard means
+        // reaches the sheet or the bar under it. That *is* the palette's modality: like a confirmation
+        // box, it is a state the app is in rather than a panel beside what it covers (see
+        // [`Self::consume_ink`]), so there is no press for a stroke to arrive on and no command to be
+        // issued under it.
+        if let Some(palette) = self.palette {
+            match keystroke.key.as_str() {
+                "escape" => self.close_palette(cx),
+                "enter" | "space" => self.palette_take(PalettePart::Colour(palette.chosen), cx),
+                "left" | "up" => self.palette_spin(-1, cx),
+                "right" | "down" => self.palette_spin(1, cx),
+                // The chord that put it up takes it away again; a press on the palette's own
+                // background is the other way out (see [`Self::palette_overlay`]).
+                "c" if keystroke.modifiers.control && keystroke.modifiers.shift => {
+                    self.close_palette(cx)
+                }
+                _ => {}
+            }
+
+            return;
+        }
+
+        // The palette at the pen: `C` for colour, on the one chord every drawing app spells it with —
+        // and on *both* modifiers, so that the `Ctrl+C` the field beside this one would expect stays
+        // where it is.
+        if keystroke.modifiers.control && keystroke.modifiers.shift && keystroke.key.as_str() == "c"
+        {
+            self.open_palette(window, cx);
+            return;
+        }
+
         if !keystroke.modifiers.control {
             match keystroke.key.as_str() {
                 "escape" => {
@@ -3281,6 +3715,13 @@ impl NoteApp {
             parts.push(measured.summary());
         }
 
+        // The palette at the pen says how to leave it, the way a running session says how to stop it:
+        // the ring is on screen but the *key* is not on it, and this line is where the app names the
+        // states a reader is in (see [`PALETTE_KEY`]).
+        if self.palette_is_open() {
+            parts.push(format!("palette: {PALETTE_KEY} or Esc puts it away"));
+        }
+
         parts.push(self.timings.summary());
 
         if !self.message.is_empty() {
@@ -3680,6 +4121,142 @@ impl NoteApp {
                             .child(keep)
                             .child(agree),
                     ),
+            )
+    }
+
+    /// The palette at the pen: a ring of the tool's colours around the tool in hand, on a disc of its
+    /// own (see [`Self::open_palette`]).
+    ///
+    /// An *overlay* rather than a screen, because the page is still in front of the reader and what is
+    /// being chosen is a colour *for* it — and because the pen obeys an app state rather than a
+    /// rectangle (see [`Self::consume_ink`]): one state holds the ink off and takes a tap as a choice,
+    /// which a panel covering part of the window could not do.
+    ///
+    /// Every control is placed by [`palette_point`] from the palette's own middle, and the whole palette
+    /// is put where the pen was ([`palette_centre`]) — so the same numbers answer the drawing, a mouse's
+    /// click, a pen's tap *and* the keyboard ([`palette_at`]).
+    fn palette_overlay(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (surface, hairline, accent, overlay, well_fill) = (
+            theme.popover,
+            theme.border,
+            theme.primary,
+            theme.overlay,
+            // The fill of the well the tools sit in: the theme's quiet grey, which is the one colour the
+            // app uses for a surface *behind* controls rather than for a control.
+            theme.muted,
+        );
+
+        let mode = self.ink.mode();
+        let colours = palette_colours(mode);
+
+        // Where the ring is measured from *inside* this palette's own square: its middle, which is one
+        // radius in from each side. Every placement below is in the box's coordinates, so the box is put
+        // where the pen was and nothing else has to know about that.
+        let middle = [PALETTE_RADIUS, PALETTE_RADIUS];
+
+        // Collected before they are chained, for the reason the bar collects its own: each
+        // `cx.listener` takes the context mutably (see [`Self::top_bar`]).
+        let mut discs: Vec<AnyElement> = Vec::new();
+        for (place, swatch) in colours.iter().enumerate() {
+            let at = palette_point(middle, PALETTE_RING_RADIUS, place, colours.len());
+
+            discs.push(
+                placed(
+                    at,
+                    PALETTE_DISC_BOX,
+                    palette_disc(swatch, place, palette.chosen == place, accent, cx),
+                )
+                .into_any_element(),
+            );
+        }
+
+        let mut tools: Vec<AnyElement> = Vec::new();
+        for (place, tool) in PALETTE_TOOLS.iter().enumerate() {
+            let Some((id, icon, label)) = palette_face(*tool) else {
+                continue;
+            };
+
+            let at = palette_point(middle, PALETTE_TOOL_RADIUS, place, PALETTE_TOOLS.len());
+
+            tools.push(
+                placed(
+                    at,
+                    PALETTE_TOOL_DISC,
+                    palette_tool_chip(id, icon, label, *tool == mode, cx, move |app, cx| {
+                        app.palette_take(PalettePart::Tool(place), cx)
+                    }),
+                )
+                .into_any_element(),
+            );
+        }
+
+        // The middle is the tools' own zone rather than more white. The well is what makes the ring of
+        // colours and the three tools beside the hub read as two things instead of thirteen discs on one
+        // field, and it is the first child so that everything else sits *in* it.
+        let well = div()
+            .absolute()
+            .left(px(middle[0] - PALETTE_WELL / 2.0))
+            .top(px(middle[1] - PALETTE_WELL / 2.0))
+            .w(px(PALETTE_WELL))
+            .h(px(PALETTE_WELL))
+            .rounded_full()
+            .bg(well_fill);
+
+        // The hub: the colour the next stroke is written in, which is what a palette is opened to *see* —
+        // the answer at the centre, rather than hunted for among eleven others. It is set in a ring of
+        // white, so that the one thing in the middle that is not a control does not look like one.
+        let in_hand = self.ink_colour_in_hand();
+
+        let hub = div()
+            .absolute()
+            .left(px(middle[0] - PALETTE_HUB / 2.0))
+            .top(px(middle[1] - PALETTE_HUB / 2.0))
+            .w(px(PALETTE_HUB))
+            .h(px(PALETTE_HUB))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(surface)
+            .shadow_sm()
+            .child(colour_chip(
+                in_hand,
+                PALETTE_HUB - PALETTE_HUB_RING * 2.0,
+                colour_edge(in_hand, cx.theme()),
+                true,
+            ));
+
+        div()
+            .id("palette-backdrop")
+            .absolute()
+            .inset_0()
+            // Dimmed like a question's backdrop, and for the same reason: while the palette is up the pen
+            // writes nothing, and a page still fully lit would say otherwise.
+            .bg(overlay)
+            .on_click(cx.listener(|app, _, _, cx| app.close_palette(cx)))
+            .child(
+                div()
+                    .id("palette")
+                    .absolute()
+                    .left(px(palette.centre[0] - PALETTE_RADIUS))
+                    .top(px(palette.centre[1] - PALETTE_RADIUS))
+                    .w(px(PALETTE_RADIUS * 2.0))
+                    .h(px(PALETTE_RADIUS * 2.0))
+                    .rounded_full()
+                    .bg(surface)
+                    .border_1()
+                    .border_color(hairline)
+                    // The widest shadow the theme has: the palette is the only thing on the screen while
+                    // it is up and the page behind it is dimmed, so it can afford to be seen to float.
+                    .shadow_lg()
+                    // The palette is not the backdrop: a press *on* it is a press on a control, and
+                    // without this the backdrop's own handler would hear it and put the palette away.
+                    .occlude()
+                    .child(well)
+                    .child(hub)
+                    .children(tools)
+                    .children(discs),
             )
     }
 
@@ -4490,6 +5067,13 @@ impl Render for NoteApp {
             // paints over the sheet — a page pill *under* the paper would be no pill at all.
             .child(self.bottom_row(cx));
 
+        // The palette at the pen, over the sheet: what the hand is reaching for is drawn in front of
+        // what it is writing on, and under the question below, which is about the page (see
+        // [`Self::palette_overlay`]).
+        if let Some(palette) = self.palette {
+            screen = screen.child(self.palette_overlay(palette, cx));
+        }
+
         // The confirmation box, over everything: a question about the page in front stands in front of it, and while
         // it is there the box is what answers (see [`Self::confirm_box`]).
         if let Some(what) = self.confirm {
@@ -4630,6 +5214,141 @@ fn visibility_switch(
         .on_change(cx.listener(move |app, checked: &bool, _, cx| handler(app, *checked, cx)))
 }
 
+/// A box placed at one point of the palette, in logical pixels.
+///
+/// The point is the box's *centre*, so its own size is taken off it before it is placed. The palette's
+/// controls are placed by hand rather than laid out in a row or a grid, because a ring is neither:
+/// there is no arrangement of flex children that puts twelve things on a circle.
+fn placed(at: [f32; 2], size: f32, child: impl IntoElement) -> Div {
+    div()
+        .absolute()
+        .left(px(at[0] - size / 2.0))
+        .top(px(at[1] - size / 2.0))
+        .child(child)
+}
+
+/// The edge a colour is given where it is drawn.
+///
+/// A white or ivory chip on a white surface would have no edge of its own, so a light colour is given a
+/// hairline; a dark one is its own edge and is given nothing. Read off the colour's own luminance rather
+/// than decided per palette, so wherever a colour is drawn it is drawn the same way.
+fn colour_edge(color: u32, theme: &Theme) -> Hsla {
+    if relative_luminance(color) > 0.85 {
+        theme.border
+    } else {
+        theme.transparent
+    }
+}
+
+/// A colour, drawn: a filled shape of `size`, with the hairline a light colour needs to have an edge.
+///
+/// Shared by the bar's swatches and the palette's discs, so that one colour cannot come out two colours
+/// depending on where it is drawn — and so the shape a colour has is chosen in one place: a page is a
+/// square, because a page has corners, and a pen's colour is a circle.
+fn colour_chip(color: u32, size: f32, edge: Hsla, circle: bool) -> Div {
+    let chip = div()
+        .w(px(size))
+        .h(px(size))
+        .bg(rgb(color))
+        .border_1()
+        .border_color(edge);
+
+    if circle {
+        chip.rounded_full()
+    } else {
+        chip.rounded(px(4.0))
+    }
+}
+
+/// One colour of the palette at the pen: a disc, ringed when it is the place the keyboard is on.
+///
+/// Its id is its own rather than the bar's swatch id for the same colour (see [`palette_id`]), and what a
+/// press reports is its *place* on the ring rather than its colour: the ring is a list, and its places
+/// are what the keyboard walks and what the palette is looked up by ([`NoteApp::palette_spin`]).
+fn palette_disc(
+    swatch: &Swatch,
+    place: usize,
+    chosen: bool,
+    ring: Hsla,
+    cx: &mut Context<NoteApp>,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let (edge, none) = (colour_edge(swatch.color, theme), theme.transparent);
+
+    div()
+        .id(palette_id(swatch))
+        // A disc of colour says nothing to a screen reader, and nothing to anyone who cannot tell
+        // "ivory" from "white" by eye: the name is what both need to hear or see.
+        .aria_label(swatch.name)
+        .p(px(2.0))
+        .border_2()
+        .border_color(if chosen { ring } else { none })
+        .rounded_full()
+        .cursor_pointer()
+        .on_click(
+            cx.listener(move |app, _, _, cx| app.palette_take(PalettePart::Colour(place), cx)),
+        )
+        .child(colour_chip(swatch.color, PALETTE_DISC, edge, true))
+}
+
+/// One tool of the palette at the pen: a chip with the tool's icon in it, washed in the accent when the
+/// tool is the one in hand.
+///
+/// Built here rather than borrowed from the bar's [`tool_button`] because the two are drawn at different
+/// sizes — a chip is a circle of a fixed diameter with an icon of a fixed size inside it, and the button's
+/// icon grows with its box — and because the ring places its own controls by hand anyway (see `placed`).
+/// What the two *do* share is the state the palette and the bar agree on: the same accent wash for the
+/// tool in hand, and a tooltip naming the tool.
+fn palette_tool_chip(
+    id: &'static str,
+    icon: IconName,
+    label: &'static str,
+    active: bool,
+    cx: &mut Context<NoteApp>,
+    handler: impl Fn(&mut NoteApp, &mut Context<NoteApp>) + 'static,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let (wash, accent, surface, hairline, idle) = (
+        // The wash a tool in hand is drawn in, which is the bar's own answer to the same question.
+        theme.accent,
+        theme.accent_foreground,
+        // An idle chip is cut out of the palette's own surface: the white of a button on a grey well.
+        theme.popover,
+        theme.border,
+        // Darker than the bar's muted grey, because a chip is a smaller thing to read: the icon carries
+        // the whole of what the chip says.
+        theme.secondary_foreground,
+    );
+
+    let chip = div()
+        .id(id)
+        // An icon says nothing to a screen reader: the name is what it needs to hear ([`palette_face`]).
+        .aria_label(label)
+        .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
+        .w(px(PALETTE_TOOL_DISC))
+        .h(px(PALETTE_TOOL_DISC))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .cursor_pointer()
+        .on_click(cx.listener(move |app, _, _, cx| handler(app, cx)));
+
+    // A tool in hand is washed in the accent, as it is on the bar; the others are chips of the palette's
+    // own white with the hairline a white chip needs to have an edge of its own.
+    let chip = if active {
+        chip.bg(wash)
+    } else {
+        chip.bg(surface).border_1().border_color(hairline)
+    };
+
+    chip.child(
+        Icon::new(icon)
+            .with_size(px(PALETTE_TOOL_ICON))
+            .text_color(if active { accent } else { idle }),
+    )
+}
+
 /// One colour swatch: a filled shape, ringed when it is the colour in use.
 fn swatch_button(
     swatch: &Swatch,
@@ -4641,21 +5360,9 @@ fn swatch_button(
 ) -> impl IntoElement {
     let theme = cx.theme();
     let color = swatch.color;
-
-    // A white or ivory chip on a white bar would have no edge of its own, so a light colour is given
-    // a hairline; a dark one is its own edge and is given nothing.
-    let edge = if relative_luminance(color) > 0.85 {
-        theme.border
-    } else {
-        theme.transparent
-    };
-
-    let mut chip = div()
-        .w(px(16.0))
-        .h(px(16.0))
-        .bg(rgb(color))
-        .border_1()
-        .border_color(edge);
+    // The edge a light colour is given, and the ring's own absence: both read off the theme here,
+    // because the listener below takes the context ([`colour_edge`] says why a colour needs either).
+    let (edge, none) = (colour_edge(color, theme), theme.transparent);
 
     let mut button = div()
         .id(swatch.id)
@@ -4664,19 +5371,18 @@ fn swatch_button(
         .aria_label(swatch.name)
         .p(px(2.0))
         .border_2()
-        .border_color(if in_use { ring } else { theme.transparent })
+        .border_color(if in_use { ring } else { none })
         .cursor_pointer()
         .on_click(cx.listener(move |app, _, _, cx| handler(app, color, cx)));
 
-    if circle {
-        chip = chip.rounded_full();
-        button = button.rounded_full();
+    button = if circle {
+        button.rounded_full()
     } else {
-        chip = chip.rounded(px(4.0));
-        button = button.rounded(px(6.0));
-    }
+        button.rounded(px(6.0))
+    };
 
-    button.child(chip)
+    // The chip is the shared one: the same colour, drawn by the same rule the palette's discs are.
+    button.child(colour_chip(color, 16.0, edge, circle))
 }
 
 #[cfg(test)]
@@ -4685,11 +5391,17 @@ mod tests {
     // scope and shadow the attribute this module needs.
     use super::{
         confirmed, file_label, file_stem, notch_in_pixels, page_of_write, page_owes_a_rewrite,
-        parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width, sheet_matches, wheel_pan,
-        wheel_zoom_factor, zoom_text, Confirmation, PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH,
+        palette_at, palette_centre, palette_colours, palette_face, palette_id, palette_in_hand,
+        palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width,
+        sheet_matches, spun, wheel_pan, wheel_zoom_factor, zoom_text, Confirmation, PalettePart,
+        PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS,
+        PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS,
+        PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH,
         WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
     };
-    use crate::ink::Notes;
+    use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
+    use crate::ink::{Notes, Tool};
+    use gpui_kit::ElementId;
     use std::time::{Duration, Instant};
 
     /// A destructive command is reachable only through an answer.
@@ -5017,6 +5729,284 @@ mod tests {
             "and not twice for one move"
         );
         assert!(page_owes_a_rewrite(10, 10, 2, 1));
+    }
+
+    /// The palette's ring is a clock face: a table's first colour at the top, and the table's own order
+    /// going clockwise — which is what makes a palette *learnt* rather than hunted for.
+    #[test]
+    fn the_ring_reads_like_a_clock() {
+        let middle = [200.0, 200.0];
+        let near = |at: [f32; 2], want: [f32; 2]| {
+            (at[0] - want[0]).abs() < 0.01 && (at[1] - want[1]).abs() < 0.01
+        };
+        let at = |place| palette_point(middle, 100.0, place, 4);
+
+        // Twelve, three, six and nine o'clock — with `y` growing *down*, so three o'clock is to the right.
+        assert!(near(at(0), [200.0, 100.0]), "{:?}", at(0));
+        assert!(near(at(1), [300.0, 200.0]), "{:?}", at(1));
+        assert!(near(at(2), [200.0, 300.0]), "{:?}", at(2));
+        assert!(near(at(3), [100.0, 200.0]), "{:?}", at(3));
+
+        // A ring of twelve keeps the same reading: the fourth place is a quarter turn on, whatever the
+        // count, because the step is the count's and the *reading* is the clock's.
+        assert!(near(palette_point(middle, 100.0, 3, 12), [300.0, 200.0]));
+    }
+
+    /// A tap belongs to the control it landed on, and to none of the ones it did not.
+    ///
+    /// The gaps are the whole of what makes a ring pressable with a pen, and the reach is what they are
+    /// wide enough to clear (see [`PALETTE_REACH`]) — the next test is that property, and this one is what
+    /// it buys: every control reachable, and the space between two of them, or the middle, reaching
+    /// nothing at all.
+    #[test]
+    fn a_tap_takes_what_it_landed_on() {
+        let middle = [400.0, 400.0];
+        let colours = INK_COLORS.len();
+
+        for place in 0..colours {
+            let at = palette_point(middle, PALETTE_RING_RADIUS, place, colours);
+
+            assert_eq!(
+                palette_at(middle, at, colours),
+                Some(PalettePart::Colour(place)),
+                "place {place} of the ring"
+            );
+        }
+
+        for place in 0..PALETTE_TOOLS.len() {
+            let at = palette_point(middle, PALETTE_TOOL_RADIUS, place, PALETTE_TOOLS.len());
+
+            assert_eq!(
+                palette_at(middle, at, colours),
+                Some(PalettePart::Tool(place)),
+                "tool {place} of the inner ring"
+            );
+        }
+
+        // The middle of the palette is the colour in hand, which is a *readout* rather than a control: a
+        // tap there is the palette's own background, and putting the palette away is what that means.
+        assert_eq!(palette_at(middle, middle, colours), None);
+
+        // And halfway between the first colour and the second — the closest two places on a ring of twelve
+        // get to each other — is neither of them.
+        let here = palette_point(middle, PALETTE_RING_RADIUS, 0, colours);
+        let there = palette_point(middle, PALETTE_RING_RADIUS, 1, colours);
+        let between = [(here[0] + there[0]) / 2.0, (here[1] + there[1]) / 2.0];
+
+        assert_eq!(
+            palette_at(middle, between, colours),
+            None,
+            "a tap between two colours takes neither"
+        );
+    }
+
+    /// No two controls are inside one reach of the same point: the property [`PALETTE_REACH`] claims, and
+    /// the one thing that makes a ring answered by distance workable at all.
+    #[test]
+    fn no_two_controls_are_within_one_reach_of_a_point() {
+        let colours = INK_COLORS.len();
+        let mut places: Vec<[f32; 2]> = (0..colours)
+            .map(|place| palette_point([0.0, 0.0], PALETTE_RING_RADIUS, place, colours))
+            .collect();
+
+        places.extend((0..PALETTE_TOOLS.len()).map(|place| {
+            palette_point([0.0, 0.0], PALETTE_TOOL_RADIUS, place, PALETTE_TOOLS.len())
+        }));
+
+        for (one, here) in places.iter().enumerate() {
+            for there in places.iter().skip(one + 1) {
+                let apart = ((here[0] - there[0]).powi(2) + (here[1] - there[1]).powi(2)).sqrt();
+
+                assert!(
+                    apart > PALETTE_REACH * 2.0,
+                    "{here:?} and {there:?} are {apart} apart: inside two reaches"
+                );
+            }
+        }
+    }
+
+    /// The palette's zones stay the shape they were drawn as: the tools inside the well and the well clear
+    /// of the ring of colours, the hub clear of the tools, and the colours clear of the palette's own edge.
+    ///
+    /// This pins the *drawing* rather than any behaviour — the reach test above is what holds the taps up —
+    /// and every one of these numbers was chosen for how the palette looks. They are the relationships that
+    /// make it read as two zones rather than as thirteen discs on a field, and they are exactly what a
+    /// change made for another reason would break by accident: a disc widened by four pixels, a hub by ten,
+    /// and one thing is growing into the next.
+    #[test]
+    fn the_palettes_zones_do_not_grow_into_each_other() {
+        let (ring, disc, tool_ring, tool, well, hub) = (
+            PALETTE_RING_RADIUS,
+            PALETTE_DISC_BOX / 2.0,
+            PALETTE_TOOL_RADIUS,
+            PALETTE_TOOL_DISC / 2.0,
+            PALETTE_WELL / 2.0,
+            PALETTE_HUB / 2.0,
+        );
+
+        // The ring of colours is inside the palette, with room for the shadow the palette casts and for
+        // the white a disc's box is placed with: a ring of discs tangent to the rim is a ring of discs that
+        // looks drawn by accident (which is what this was before the white was added).
+        assert!(
+            ring + disc + PALETTE_MARGIN <= PALETTE_RADIUS,
+            "the discs reach the palette's own edge"
+        );
+
+        // The well holds the chips with the gap it was given, and stops short of the colours: a disc drawn
+        // on the well's rim would be a colour in the tools' zone.
+        assert!(
+            tool_ring + tool + PALETTE_WELL_PAD <= well,
+            "a tool chip is not inside the well"
+        );
+        assert!(well <= ring - disc, "the well reaches the ring of colours");
+
+        // And the hub is the middle of the middle: inside the well, and clear of the tools around it — the
+        // ring of white it is drawn in counted, because that ring is part of what it is.
+        assert!(
+            hub + PALETTE_HUB_RING <= tool_ring - tool,
+            "the hub and the tools are not clear of each other"
+        );
+    }
+
+    /// The keyboard walks the ring and wraps at both ends: a ring has no end, so no arrow is a key that
+    /// does nothing.
+    #[test]
+    fn the_keyboard_walks_the_ring_and_wraps() {
+        assert_eq!(spun(0, 1, 12), 1);
+        assert_eq!(spun(0, -1, 12), 11);
+        assert_eq!(spun(11, 1, 12), 0);
+        assert_eq!(spun(3, -13, 4), 2, "more than a lap is still a place");
+        assert_eq!(spun(5, 0, 12), 5, "and no step leaves it where it was");
+        assert_eq!(
+            spun(9, 1, 0),
+            0,
+            "a ring with nothing on it has nowhere to walk"
+        );
+    }
+
+    /// The ring is the palette of the tool in hand — and the *pen's* for the tools that have no palette
+    /// of their own, because a colour is what a pen writes with (see [`palette_colours`]).
+    #[test]
+    fn the_palette_follows_the_tool_in_hand() {
+        let ring = |tool| {
+            palette_colours(tool)
+                .iter()
+                .map(|swatch| swatch.color)
+                .collect::<Vec<u32>>()
+        };
+        let inks: Vec<u32> = INK_COLORS.iter().map(|swatch| swatch.color).collect();
+        let markers: Vec<u32> = HIGHLIGHTER_COLORS
+            .iter()
+            .map(|swatch| swatch.color)
+            .collect();
+
+        assert_eq!(ring(Tool::Pen), inks, "the pen draws with the pen's table");
+        assert_eq!(
+            ring(Tool::Highlighter),
+            markers,
+            "the marker with the marker's"
+        );
+        assert_eq!(
+            ring(Tool::Eraser),
+            inks,
+            "and an eraser is handed the pen's"
+        );
+        assert_eq!(ring(Tool::Lasso), inks);
+    }
+
+    /// A chooser opens on the value it holds: the ring's own place starts on the colour in hand, and
+    /// falls back to the first place for a palette that does not hold it (see [`palette_in_hand`]).
+    #[test]
+    fn the_ring_starts_on_the_colour_in_hand() {
+        let inks = palette_colours(Tool::Pen);
+
+        for (place, swatch) in INK_COLORS.iter().enumerate() {
+            assert_eq!(
+                palette_in_hand(inks, swatch.color),
+                place,
+                "{}",
+                swatch.name
+            );
+        }
+
+        // The marker's yellow is not one of the pen's colours, so the pen's ring has no place for it.
+        assert_eq!(palette_in_hand(inks, HIGHLIGHTER_COLORS[0].color), 0);
+    }
+
+    /// The inner ring is the pen, the marker and the eraser — and not the lasso, which is a sweep rather
+    /// than a press (see [`PALETTE_TOOLS`]).
+    #[test]
+    fn the_ring_offers_three_tools_and_not_the_lasso() {
+        assert_eq!(PALETTE_TOOLS.len(), 3);
+
+        for tool in PALETTE_TOOLS {
+            let (id, _, label) = palette_face(tool).expect("a face for every tool on the ring");
+
+            assert!(
+                label.len() > 1,
+                "a button a person cannot read is not offered"
+            );
+            assert!(
+                id.starts_with("palette-"),
+                "the ring's ids are its own, so they cannot collide with the bar's: {id}"
+            );
+        }
+
+        assert_eq!(
+            palette_face(Tool::Lasso),
+            None,
+            "the lasso stays on the bar, where a sweep belongs"
+        );
+    }
+
+    /// The palette is kept on the screen wherever the pen is: a ring at the window's edge is moved in
+    /// rather than drawn half off it, and a pen in the middle is not moved at all.
+    #[test]
+    fn the_palette_is_kept_on_the_screen() {
+        let window = [1_280.0, 900.0];
+        let least = PALETTE_RADIUS + PALETTE_MARGIN;
+
+        for near in [
+            [0.0, 0.0],
+            [1_280.0, 0.0],
+            [0.0, 900.0],
+            [1_280.0, 900.0],
+            [640.0, 450.0],
+        ] {
+            let at = palette_centre(near, window, PALETTE_RADIUS);
+
+            assert!(at[0] >= least, "{near:?} -> {at:?}");
+            assert!(at[0] <= window[0] - least, "{near:?} -> {at:?}");
+            assert!(at[1] >= least, "{near:?} -> {at:?}");
+            assert!(at[1] <= window[1] - least, "{near:?} -> {at:?}");
+        }
+
+        // A pen in the middle is where the hand is, and the clamp is there for the edges rather than for
+        // every tap: the palette arrives under the nib it was opened at.
+        assert_eq!(
+            palette_centre([640.0, 450.0], window, PALETTE_RADIUS),
+            [640.0, 450.0]
+        );
+
+        // A window too small to hold the palette puts it in the middle rather than somewhere off it.
+        assert_eq!(
+            palette_centre([0.0, 0.0], [100.0, 100.0], PALETTE_RADIUS),
+            [50.0, 50.0]
+        );
+    }
+
+    /// Element ids address the whole tree, and the bar's swatches and the palette's discs are drawn at
+    /// the same moment — the palette floats over the bar — so the two sets of ids cannot be the same ids.
+    #[test]
+    fn the_palettes_discs_are_not_the_bars_swatches() {
+        for swatch in INK_COLORS.iter().chain(HIGHLIGHTER_COLORS.iter()) {
+            assert_ne!(
+                palette_id(swatch),
+                ElementId::from(swatch.id),
+                "the palette's disc for the {} colour would share the bar's swatch id",
+                swatch.name
+            );
+        }
     }
 }
 

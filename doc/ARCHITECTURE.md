@@ -376,6 +376,12 @@ There is one rule that decides what a piece of interface is allowed to be, and t
   the note's marked pages, the document's contents. While one is in front, the app is in a state, and
   the pen lays no ink at all. Two of these screens are deliberate twins — same list, same keys, same
   right-click menu — because a person who has used one has used both.
+* The **palette at the pen** (`Ctrl+Shift+C`) is the fourth kind, and the one that is neither a line nor a
+  screen: the frame draws it over the sheet — a ring of the tool's colours around the tools in hand — and it
+  is a *state* like a screen, because the pen writes nothing while it is up and a reading that lands on a
+  colour is the choice. It is the one control the pen is aimed at rather than written on, which is why the
+  tap is answered by distance from the reading's own position rather than by the element under the pointer:
+  the pen is captured by the window and never reaches the element tree ([VIEW.md](VIEW.md), §6).
 * The **ghost cursor** is neither: it is a layered window of its own, drawn from the pen thread the
   instant a reading lands, and the system pointer is hidden exactly while it is on screen. What it draws is a
   *preview of the next stroke* — the ink's colour and the ink's own width, so a heavier pen has a heavier dot and a
@@ -527,6 +533,13 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
     setting: it is not stored and not restored, so a note always opens with the pen in hand. This is the invariant
     whose failure is silent — a page that hands back the tool it was last written with puts the marker in a reader's
     hand on the page they meant to write on ([VIEW.md](VIEW.md), §7, *Turning a page*).
+
+21. **The palette at the pen is one state read in three places.** `NoteApp::palette` is what refuses the ink
+    (`consume_ink`), what takes a pen's tap as a choice (`palette_from_pen`) and what the frame draws
+    (`palette_overlay`) — so a palette that is up cannot be a palette the pen writes under, and the colour it
+    takes is looked up in the same table the bar's swatch draws (`palette_colours`). Its position is fixed
+    where it opened and clamped onto the screen, because a ring that followed the hand could not be aimed at
+    and a ring half off the window has half its colours ([VIEW.md](VIEW.md), §6).
 
 ## 12. Requirements, building, running
 

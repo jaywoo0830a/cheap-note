@@ -12,6 +12,12 @@ Pdfium is not in the repository: it is downloaded into `vendor/` (see `vendor/RE
 copies it next to the executable. A fresh clone starts, draws and writes ink without it; only opening a
 PDF needs it.
 
+A release build is the window and nothing else — no console beside it — because the executable is linked
+as a *windows* subsystem program (see the crate attribute in `src/main.rs`): started by double-click, by
+a shortcut, or through a file association, it opens without the black window a console-subsystem program
+gets. Debug builds and `cargo test` keep the console, where the diagnostics a run can print and the
+measurements the timing tests take are readable.
+
 ## What is where
 
 | Document | Answers |

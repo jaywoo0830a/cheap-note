@@ -59,6 +59,15 @@
 //! cargo run --release
 //! ```
 //!
+//! A release build is the window and nothing else: no console appears beside it, because the
+//! executable is linked as a *windows* subsystem program rather than as a console one (see the crate
+//! attribute below). Windows creates a console window for a console-subsystem executable whenever it
+//! is started *without* one already attached — which is what double-clicking it does — and this is an
+//! application with a window of its own, not a command that prints. The cost is that the diagnostics
+//! a run can print (see [`theme`]: the bundled font failing to register) go nowhere in release: with
+//! no console attached, Rust discards what is written to `stderr`. A debug build, and every test
+//! build, keeps the console — the measurements the tests print are the point of them.
+//!
 //! Pdfium is loaded at run time from `vendor/lib/pdfium.dll`, which a build copies next to the
 //! executable it produces (`build.rs`; `vendor/README.md` says where the library comes from). The app
 //! starts and draws without it; only opening a PDF needs it.
@@ -71,6 +80,22 @@
 //! Escape from any note returns to it. The list is built from `%LOCALAPPDATA%\cheap-note\recent.json`
 //! (see [`recent`]): a *cache* beside the notes, which a launch reads with a `stat` per note rather
 //! than a database read. A path on the command line opens that instead, and skips the list.
+
+// No console beside the window: this is a graphical application, so the linker is told to mark the
+// image as a *windows* subsystem one (`/SUBSYSTEM:WINDOWS`). Without it the image is a console
+// executable, and Windows opens a console window for one of those whenever the process is started
+// with none already attached — double-clicking the executable, a shortcut, a file association, or a
+// drag onto it — which is the black window that used to appear next to the app.
+//
+// Left to the debug and test builds on purpose. A run started *from* a terminal (`cargo run`) shares
+// that terminal's console and would show either way, and `cargo test` prints the measurements its
+// timing tests take: `cfg(test)` covers the test build of this crate, including `cargo test
+// --release`, so those prints survive. What is lost in release is only a diagnostic (the font failing
+// to register — `theme`) and a panic message, and only when there is no console to write them to.
+#![cfg_attr(
+    all(windows, not(debug_assertions), not(test)),
+    windows_subsystem = "windows"
+)]
 
 mod app;
 mod bookmarks;

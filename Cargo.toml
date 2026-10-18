@@ -101,6 +101,12 @@ windows-numerics = "0.3"
 # Named types for the raw window handle GPUI hands out (used to bind the pen capture).
 raw-window-handle = "0.6"
 
+# Windows-only, build-time: compiles `assets/app.rc` into the executable, which is what puts the
+# app's icon on the desktop, in the task bar, in Alt-Tab and on the window itself. The same crate
+# and the same version GPUI's own build script already uses for its manifest. See `build.rs`.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "=3.0.11"
+
 # Keep debug builds usable: the UI stack is compiled with optimizations while the
 # application's own crates stay fast to rebuild and debuggable.
 [profile.dev.package]

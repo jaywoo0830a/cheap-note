@@ -1,4 +1,4 @@
-//! Puts the vendored Pdfium next to the executable a build produces.
+//! Puts the vendored Pdfium next to the executable a build produces, and the app's icon in it.
 //!
 //! ## Why a build script is doing this
 //!
@@ -18,10 +18,26 @@
 //! app is designed to run without it: it starts, draws, writes ink, and reports that a PDF cannot be
 //! opened. What a build must not do is *look* like it has PDF support, which is why the absence is a
 //! warning on every build rather than silence.
+//!
+//! ## The application's icon
+//!
+//! Windows finds a program's icon in the program itself, and both halves of Windows look in the
+//! same place: Explorer, the desktop, the task bar and Alt-Tab read the icon resource, and GPUI's
+//! own Windows backend loads that same resource — by id 1 — and hands it to the window class it
+//! registers. Embedding the icon is therefore the whole job, and the app calls nothing to set it.
+//!
+//! `assets/app.rc` names `assets/app.ico` and is compiled by `embed-resource`, the crate GPUI's own
+//! build script uses for its manifest. This needs a resource compiler, which comes with the
+//! Visual Studio toolchain rather than with Rust, so — like the library above — what it does when
+//! that is missing is nothing, loudly: the program runs, it just looks like every other program.
 
 use std::path::{Path, PathBuf};
 
 fn main() {
+    // The host, which for this app is the target: it builds on Windows and runs on Windows.
+    #[cfg(windows)]
+    embed_the_icon();
+
     let shipped = vendor_directory().join("lib");
     // The library is not a source file, so Cargo has to be told that the build depends on it: a
     // download into `vendor/lib` after the first build would otherwise not be noticed.
@@ -53,6 +69,34 @@ fn main() {
                 copy.display()
             );
         }
+    }
+}
+
+/// Puts the application's icon in the executable, from `assets/app.rc`.
+///
+/// The icon is not a source file, so Cargo has to be told when it changes: the `.rc` names the
+/// `.ico`, so both are watched — a new drawing, or a new id, re-runs this.
+///
+/// A resource compiler that cannot be found is the failure worth surviving. An executable without
+/// an icon is a worse-looking program rather than a broken one, and the warning is what keeps the
+/// absence from being mistaken for an icon that is being embedded.
+#[cfg(windows)]
+fn embed_the_icon() {
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+    let resource = assets.join("app.rc");
+
+    println!("cargo:rerun-if-changed={}", resource.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        assets.join("app.ico").display()
+    );
+
+    if let Err(error) = embed_resource::compile(&resource, embed_resource::NONE).manifest_optional()
+    {
+        println!(
+            "cargo:warning={} was not embedded: {error}",
+            resource.display()
+        );
     }
 }
 

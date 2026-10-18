@@ -1,0 +1,9 @@
+// The application's icon, compiled into the executable by `build.rs`.
+//
+// The id has to be 1. That is the id Windows asks for when it wants "the" icon of a program — the
+// one on the desktop, in the task bar, in Alt-Tab — and it is the id GPUI's Windows backend loads
+// and gives to the window class it registers, so one resource answers all of them.
+//
+// The path is relative to this file: `embed-resource` runs the resource compiler in the directory
+// the `.rc` lives in.
+1 ICON "app.ico"

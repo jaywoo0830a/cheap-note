@@ -885,6 +885,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crc32fast",
+ "embed-resource",
  "gpui-kit",
  "image",
  "lz4_flex",

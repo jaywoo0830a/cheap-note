@@ -544,6 +544,10 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
 ## 12. Requirements, building, running
 
 * **Windows**, x64, and **a GPU with Direct3D 11** — see the end of §2; there is no software path.
+  The requirement is vendor-neutral: Direct3D 11, Direct2D 1.1 and DirectComposition are Windows APIs, and
+  an AMD, Intel or NVIDIA driver provides them alike. What cannot run this app is a machine with no hardware
+  Direct3D 11 device at all — a remote session, a virtual machine without a graphics processor, or a driver
+  older than WDDM 1.2 — and `InkLayer::install` reports that reason, once, at startup.
 * **Rust 1.90+** (see `Cargo.toml`), and the pinned dependency versions in it.
 * **Pdfium is not in the repository.** It is downloaded into `vendor/` (`vendor/README.md`), and a build
   copies `vendor/lib/*.dll` next to the executable it produces, so a release build is a *pair* of files

@@ -550,8 +550,8 @@ is closed in that half-second.
 
 A page's bitmap width is **quantised onto a ladder** (`PDF_PIXEL_WIDTHS`: 1024, 1536, 2304, 3456 px),
 because a page is rasterised whenever the requested width *changes*, and rasterising is the one part of a
-frame that costs milliseconds — measured on a blank A4 page: 1.0 ms at 720 px wide, 3.4 at 1440, 13.4 at
-2880, 54.5 at 5760, with the bitmap itself reaching 178 MB at the last of those. A zoom gesture asks for a
+frame that costs milliseconds — measured on a blank A4 page: 1.4 ms at 720 px wide, 4.7 at 1440, 16.9 at
+2880, 66.5 at 5760, with the bitmap itself reaching 179 MB at the last of those. A zoom gesture asks for a
 new width on *every event*, so an exact width means a pinch across a PDF re-rasterises the page hundreds
 of times and never finishes a frame. Quantising turns that into a handful of rasterisations per gesture,
 and nothing needs to be exact: GPUI scales the bitmap to the bounds it is painted into, so a page rendered

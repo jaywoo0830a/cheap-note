@@ -24,11 +24,10 @@ pen-windows = { git = "https://github.com/jaywoo0830a/pen-windows", tag = "0.3.0
 # executable a build produces, so that a release build is a pair of files rather than a path that
 # works only when the program is started from the project root. See `vendor/README.md`.
 #
-# The app resolves the handful of C entry points it calls itself — see `src/pdfium.rs` — because it
-# needs the *progressive* render (`IFSDK_PAUSE`), which `pdfium-render` does not surface, and because
-# the wrapper keeps its document and page handles private. `pdfium-render` is therefore a *test*
-# dependency: it builds the fixture documents and cross-checks this app's rendering against a second
-# implementation of the same API.
+# The app resolves the handful of C entry points it calls itself — see `src/pdfium/` — because it
+# needs the *progressive* render (`IFSDK_PAUSE`), which `pdfium-render` does not surface. The wrapper
+# declares only the entry points the app uses, checks every one as the library loads, and keeps the
+# document and page handles private; there is no third-party Pdfium binding in the dependency graph.
 
 # Serialisable application state. Pinned exactly, at the versions this project was built and measured
 # against. What is written is JSON: the index of what has been opened (see `src/recent.rs`) and a
@@ -71,7 +70,7 @@ windows = { version = "0.62", features = [
     # that same window, so the two procedures coexist without either knowing about the other.
     "Win32_UI_Shell",
     # LoadLibraryW / GetProcAddress: resolving Pdfium's own entry points, including the progressive
-    # render the wrapper crate does not expose. See `src/pdfium.rs`.
+    # render the wrapper crate does not expose. See `src/pdfium/api.rs`.
     "Win32_System_LibraryLoader",
     # The ghost cursor's own window (see `src/cursor_overlay.rs`): a top-down 32-bit DIB section, a
     # memory device context to hold it, and `UpdateLayeredWindow` to put it on screen — the pen's

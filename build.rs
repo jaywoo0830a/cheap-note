@@ -3,7 +3,7 @@
 //! ## Why a build script is doing this
 //!
 //! Pdfium is a shared library the app *loads* at run time rather than links against (see
-//! `src/pdfium.rs`), so the linker cannot put it anywhere: a `cargo build --release` used to produce a
+//! `src/pdfium/`), so the linker cannot put it anywhere: a `cargo build --release` used to produce a
 //! `target/release/cheap-note.exe` that could only find `pdfium.dll` if it happened to be started from
 //! the project root, where `vendor/lib` is. Started the way a release executable *is* started — by its
 //! own directory, or from anywhere else at all — it reported the library missing.
@@ -38,10 +38,25 @@ fn main() {
     #[cfg(windows)]
     embed_the_icon();
 
-    let shipped = vendor_directory().join("lib");
+    let vendor = vendor_directory();
+    let shipped = vendor.join("lib");
     // The library is not a source file, so Cargo has to be told that the build depends on it: a
-    // download into `vendor/lib` after the first build would otherwise not be noticed.
+    // download into `vendor/lib` after the first build would otherwise not be noticed. `VERSION`
+    // is watched as well, so an update that replaces the library and its headers re-runs this even
+    // when the DLL's timestamp happens to be preserved.
+    println!(
+        "cargo:rerun-if-changed={}",
+        vendor.join("VERSION").display()
+    );
     println!("cargo:rerun-if-changed={}", shipped.display());
+
+    // The version a load failure should name. There is no ABI version function in Pdfium's public
+    // API, so this is the build's provenance: it tells a person looking at a missing symbol which
+    // headers and which DLL were meant to go together.
+    println!(
+        "cargo:rustc-env=CHEAP_NOTE_PDFIUM_VERSION={}",
+        pdfium_version(&vendor)
+    );
 
     let Some(beside) = beside_the_executable() else {
         return;
@@ -103,6 +118,35 @@ fn embed_the_icon() {
 /// The directory this package keeps its downloaded libraries in.
 fn vendor_directory() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor")
+}
+
+/// The version of the Pdfium build in `vendor/`, from its `VERSION` file.
+///
+/// The file is four `KEY=value` lines written by `pdfium-binaries`. A clone without a vendored
+/// library has no such file, and `unknown` is the honest answer rather than a guess.
+fn pdfium_version(vendor: &Path) -> String {
+    let text = std::fs::read_to_string(vendor.join("VERSION")).unwrap_or_default();
+    let mut parts = [""; 4];
+
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let slot = match key.trim() {
+            "MAJOR" => 0,
+            "MINOR" => 1,
+            "BUILD" => 2,
+            "PATCH" => 3,
+            _ => continue,
+        };
+        parts[slot] = value.trim();
+    }
+
+    if parts.iter().any(|part| part.is_empty()) {
+        String::from("unknown")
+    } else {
+        parts.join(".")
+    }
 }
 
 /// The shared libraries in a directory, in a name order: `pdfium.dll`, and anything built beside it.

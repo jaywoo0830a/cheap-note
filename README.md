@@ -5,7 +5,7 @@ page, and the ink is on the disk as you write it.
 
 ```text
 cargo run --release        # the app; `cargo run --release -- <file.pdf>` opens that file's note
-cargo test                 # 231 tests, some of which install a real canvas on a real window
+cargo test                 # 313 tests, some of which install a real canvas on a real window
 ```
 
 Pdfium is not in the repository: it is downloaded into `vendor/` (see `vendor/README.md`), and a build

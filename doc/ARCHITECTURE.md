@@ -234,7 +234,7 @@ sequenceDiagram
 
 | On every wake | Rule |
 |---|---|
-| pay for the page the view is waiting for, in slices | a slice is bounded by `pdf::SLICE_BUDGET` (~4 ms); a whole page is 13.4 ms at 2880 px wide, so a synchronous render would be a frame that never arrives |
+| pay for the page the view is waiting for, in slices | a slice is bounded by `pdf::SLICE_BUDGET` (~4 ms); a whole page is 16.9 ms at 2880 px wide, so a synchronous render would be a frame that never arrives |
 | skip that page render while the pen is laying ink | the ink pump shares the thread; a page render is paid for out of `PDF_QUIET_INTERVAL` (120 ms) of stillness |
 | hand over ink still in memory | `BATCH_INTERVAL` 500 ms / `BATCH_STROKES` 200, whichever comes first |
 | drain what the writer has to say | an export that finished, or a write that failed — a writer that failed silently would be ink that is not being saved and an app that looks like it is |
@@ -247,15 +247,17 @@ A PDF is opened once per note and its pages are rasterised on demand, on the win
 Four decisions keep that from being the thing that makes writing stutter:
 
 * **The width is quantised onto a ladder** (`PDF_PIXEL_WIDTHS`: 1024, 1536, 2304, 3456 px), because a
-  pinch asks for a new width on every event and a rasterisation costs 1.0 ms at 720 px, 3.4 at 1440,
-  13.4 at 2880 and 54.5 at 5760. Four rungs cover 5% to 1600% of zoom in a handful of rasterisations
+  pinch asks for a new width on every event and a rasterisation costs 1.4 ms at 720 px, 4.7 at 1440,
+  16.9 at 2880 and 66.5 at 5760. Four rungs cover 5% to 1600% of zoom in a handful of rasterisations
   per gesture, and a page rendered a rung off is simply a little softer — GPUI scales the bitmap to
   the bounds it is painted into.
 * **A render is sliced, not synchronous.** Pdfium's progressive render (`IFSDK_PAUSE`, reached through
-  this app's own declarations in `src/pdfium.rs`) stops between the pieces of a page, so a slice ends
+  this app's own declarations in `src/pdfium/`) stops between the pieces of a page, so a slice ends
   when its budget does rather than when the page does. Cancellation needs no flag: a view that moved
-  on simply stops advancing the job, and dropping it is what releases the page and the unfinished
-  bitmap.
+  on simply stops advancing the job, and dropping it closes the render and releases the page and the
+  unfinished bitmap. The wrapper exposes no raw handle and declares only the thirty-two public entry
+  points it uses; a page keeps its document alive, and every failure to resolve a symbol is reported
+  by name when the library is loaded.
 * **The cache key is what the bitmap depends on**: page, rung, whether it is grayscale, and which way
   the reader has turned the page. The grayscale toggle therefore invalidates nothing by hand — the
   bitmaps it changed are simply not the bitmaps the cache holds — and a page turned after it was read
@@ -549,14 +551,14 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
   Direct3D 11 device at all — a remote session, a virtual machine without a graphics processor, or a driver
   older than WDDM 1.2 — and `InkLayer::install` reports that reason, once, at startup.
 * **Rust 1.90+** (see `Cargo.toml`), and the pinned dependency versions in it.
-* **Pdfium is not in the repository.** It is downloaded into `vendor/` (`vendor/README.md`), and a build
-  copies `vendor/lib/*.dll` next to the executable it produces, so a release build is a *pair* of files
-  that work from anywhere. A fresh clone starts, draws and writes ink without it; only opening a PDF
-  needs it, and the status line says so when it is missing.
+* **Pdfium is not in the repository.** It is downloaded into `vendor/` (`vendor/README.md`; the current
+  build is 158.0.8125.0), and a build copies `vendor/lib/*.dll` next to the executable it produces, so
+  a release build is a *pair* of files that work from anywhere. A fresh clone starts, draws and writes
+  ink without it; only opening a PDF needs it, and the status line says so when it is missing.
 
 ```text
 cargo run --release        # the app: it opens on the home list, and Escape returns to it
-cargo test                 # 231 tests, including ones that install a real canvas on a window
+cargo test                 # 313 tests, including ones that install a real canvas on a window
 ```
 
 `cargo run` with a path argument opens that file's note and skips the list — which is what a file

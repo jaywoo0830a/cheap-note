@@ -25,7 +25,7 @@ pub enum AppError {
     /// A PDF document could not be opened, or a page could not be rendered.
     ///
     /// The message, rather than a wrapped error type: the app talks to Pdfium through its own C
-    /// declarations (`src/pdfium.rs`), so what comes back is already a sentence about what failed.
+    /// declarations (`src/pdfium/`), so what comes back is already a sentence about what failed.
     #[error("the PDF document could not be read: {0}")]
     Pdf(String),
 

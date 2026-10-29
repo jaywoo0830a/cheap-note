@@ -603,8 +603,9 @@ fn sane_radius(radius: f32) -> f32 {
 /// reading cannot say.
 ///
 /// These five numbers are the whole of what the app knows and the overlay does not. `suppressed`
-/// means "there is nothing to draw a ghost for here" — the home list is up, or the Tilt switch is
-/// off — and it is published rather than inferred because only the frame knows it.
+/// means "there is nothing to draw a ghost for here" — the home list is up, or the app is asking a
+/// question the pen must not write under — and it is published rather than inferred because only the
+/// frame knows it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Screen {
     /// Physical pixels per logical pixel, as the frame laid the window out.
@@ -789,7 +790,7 @@ impl CursorFeed {
     ///
     /// Called from the frame, and only when something in here has changed: a scale factor that
     /// moved, the paper's colour, where the bar ends, and whether this screen wants a ghost at all.
-    /// Publishing is what makes a switch take effect at once — a suppressed ghost is hidden here
+    /// Publishing is what makes a change take effect at once — a suppressed ghost is hidden here
     /// rather than left on screen until the pen next moves.
     pub fn set_screen(&self, screen: Screen) {
         let hidden = screen.suppressed;

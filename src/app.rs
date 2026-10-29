@@ -1635,25 +1635,22 @@ impl NoteApp {
         self.settings.show_status = shown;
         self.finish_setting(cx);
     }
-    /// Shows or hides the pen's ghost cursor.
-    fn set_tilt_cursor_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
-        self.settings.show_tilt_cursor = shown;
-        self.finish_setting(cx);
-    }
 
-    /// The cursor the pen's most recent reading describes, whatever the ghost is set to.
+    /// The cursor the pen's most recent reading describes.
     fn last_cursor(&self) -> Option<PenCursor> {
         self.ink
             .last_sample()
             .and_then(|sample| PenCursor::from_sample(sample, self.scale))
     }
 
-    /// The cursor to draw, if the ghost cursor is switched on.
+    /// The cursor to draw.
+    ///
+    /// There is no switch: the ghost *is* the cursor. A Windows pointer is a fixed bitmap, so the system
+    /// can say which cursor to show and never which angle — and a pen held at forty degrees has no arrow
+    /// that means it. Turning the ghost off would leave a pen with no cursor of its own at all, which is
+    /// a state nobody asked for. The two switches that remain are about the bar, and are the bar's own
+    /// business (see [`Self::command_row`]).
     fn pen_cursor(&self) -> Option<PenCursor> {
-        if !self.settings.show_tilt_cursor {
-            return None;
-        }
-
         self.last_cursor()
     }
 
@@ -1695,7 +1692,7 @@ impl NoteApp {
             // The line above which a reading belongs to a control rather than to the page. The same
             // estimate the pointer rule uses ([`Self::pen_has_its_own_cursor`]), in physical pixels.
             sheet_top: BAR_HEIGHT * self.scale,
-            suppressed: self.home_is_open() || self.asking() || !self.settings.show_tilt_cursor,
+            suppressed: self.home_is_open() || self.asking(),
         });
     }
 
@@ -1749,10 +1746,6 @@ impl NoteApp {
         // the page as it was a moment ago (see [`Self::refresh_page_text`]).
         self.refresh_page_text();
         self.touch_status();
-        // A setting can change whether the pen has a cursor of its own — the Tilt switch does — and
-        // the pump may not wake for a while if the pen is away. Handing the pointer back here means
-        // the switch takes effect the moment it is flipped.
-        self.follow_pen_with_pointer();
         cx.notify();
     }
 
@@ -3953,6 +3946,9 @@ impl NoteApp {
             .into_any_element(),
         );
 
+        // The bar's own switches: what is shown of the *interface*, and nothing about the writer. The pen's
+        // ghost is deliberately not one of them — it is the cursor, and a pen with none is not a state
+        // anybody chose (see [`Self::pen_cursor`]).
         let switches = vec![
             visibility_switch(
                 "show-bar",
@@ -3970,15 +3966,6 @@ impl NoteApp {
                 cx,
                 |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
                     app.set_status_shown(on, cx)
-                },
-            ),
-            visibility_switch(
-                "show-tilt",
-                "Tilt",
-                self.settings.show_tilt_cursor,
-                cx,
-                |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
-                    app.set_tilt_cursor_shown(on, cx)
                 },
             ),
         ];

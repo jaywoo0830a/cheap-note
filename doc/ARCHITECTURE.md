@@ -564,7 +564,7 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
 
 ```text
 cargo run --release        # the app: it opens on the home list, and Escape returns to it
-cargo test --workspace     # 389 tests, including ones that install a real canvas on a window
+cargo test --workspace     # 390 tests, including ones that install a real canvas on a window
 ```
 
 `cargo run` with a path argument opens that file's note and skips the list — which is what a file

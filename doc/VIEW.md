@@ -248,7 +248,8 @@ The pen's tilt is drawn as a ghost — a nib mark with the pen's body leaning aw
 Windows cursor is a fixed bitmap: the system can choose *which* cursor to show, never which angle, and
 there is no arrow that means "a pen held at 40 degrees". The system pointer is taken out of the way by
 `system_cursor` exactly while the ghost is on screen, so the ghost *is* the cursor rather than a marker
-beside one.
+beside one — and there is no switch for it. Turning the ghost off would leave the pen with no cursor of
+its own at all, which is a state nobody asked for; what the bar's switches turn off is the bar.
 
 Five facts about the ghost are decided here, and each of them is something a pen reading cannot say:
 
@@ -257,7 +258,7 @@ Five facts about the ghost are decided here, and each of them is something a pen
 | whether the pen has a cursor of its own at all | the **ink model**, not a batch, so the cursor survives the batches that lay nothing — most of them, while the pen is merely held over the window — and disappears only when the pen does |
 | where it is and how it leans | the pen's newest reading, in window coordinates, with no sign flip: lean right and the ghost extends right of the nib |
 | where it is *not* drawn | **only below the bar**: over the bar it would be drawn behind an opaque background, where it cannot be seen — and **never on the home screen**, which has no sheet to point at and is meant to be tapped |
-| the scale, the colours on this paper, and where the bar ends | published to the overlay (`publish_screen`) on the frames where they change, so an effect like the Tilt switch takes hold at once rather than at the next reading |
+| the scale, the colours on this paper, and where the bar ends | published to the overlay (`publish_screen`) on the frames where they change, so a new pen colour or paper takes hold at once rather than at the next reading |
 | how **thick** the mark is | the same publication (`Screen::nib_radius`): half the width the tool in hand lays, which only the app knows — the pen's weight is a setting, and the marker's band is the tool's |
 
 **The nib's dot is the colour in hand, and it is as wide as the line in hand.** The mark is drawn in the ink the next

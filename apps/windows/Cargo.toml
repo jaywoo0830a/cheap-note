@@ -1,0 +1,80 @@
+[package]
+name = "cheap-note"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "Minimal, high-performance handwriting note-taking prototype (pen input + PDF pages)."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# The Windows app: the platform half of the view, and nothing else. Every module here is an
+# implementation of a trait the view declared — nothing in this crate is imported by anything above
+# it — plus `main`, which assembles them and hands them over.
+#
+# That is what makes the next platform a rewrite of *this* crate and not of the application. A macOS
+# build would replace the canvas, the pen capture, the ghost cursor's window and Pdfium's loader, and
+# leave `crates/note-ui` untouched.
+[dependencies]
+# The view: everything above the seam.
+note-ui = { path = "../../crates/note-ui" }
+# The format, for the handful of types the platform services name (a stroke, an error).
+note-format = { path = "../../crates/note-format" }
+
+# UI framework: the canvas's own renderer registers a window plugin with it, and `main` boots it.
+gpui-kit = "=0.7.3"
+
+# Low-latency pen input on Windows. This crate is not published on crates.io, so it is pinned to the
+# 0.3.0 git tag. Earlier tags worked out a reading's delay by subtracting a 32-bit stamp from a
+# 32-bit clock read, which wrapped whenever the stamp was a millisecond or two *ahead* of the read:
+# the status line showed `delay 4294967287 ms`, and that one reading pinned the worst-seen figure at
+# the top of its range for the rest of the session. 0.3.0 answers a wrapped subtraction as no delay
+# at all.
+pen-windows = { git = "https://github.com/jaywoo0830a/pen-windows", tag = "0.3.0", features = ["window-handle"] }
+
+# Ergonomic error propagation: the device and the canvas are built out of fallible calls.
+anyhow = "=1.0.104"
+
+# Windows-only: the pen capture's window hook, the ghost cursor's layered window, the pointer
+# hook, and the Direct3D 11 / Direct2D 1.1 / DirectComposition canvas.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    # WM_SETCURSOR, SetCursor, HTCLIENT, IDC_ARROW, LoadCursorW: hiding the system pointer over
+    # the client area while the pen is in range.
+    "Win32_UI_WindowsAndMessaging",
+    # SetWindowSubclass / DefSubclassProc / RemoveWindowSubclass: answering WM_SETCURSOR before
+    # GPUI's own window procedure does. This is the comctl32 chain pen-windows already hooks on
+    # that same window, so the two procedures coexist without either knowing about the other.
+    "Win32_UI_Shell",
+    # The ghost cursor's own window (see `src/platform/cursor_overlay.rs`): a top-down 32-bit DIB
+    # section, a memory device context to hold it, and `UpdateLayeredWindow` to put it on screen —
+    # the pen's cursor, drawn outside the frame.
+    "Win32_Graphics_Gdi",
+    # The canvas's own renderer (see `src/platform/ink_layer`): a Direct3D 11 device of the app's
+    # own, a composition swap chain to present, and the DirectComposition visual that places it
+    # *under* GPUI's, in the one window both draw in.
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    # And Direct2D, which draws it: retained geometry per stroke, analytic antialiasing, and one
+    # command batch per frame rather than one multisampled pass per batch.
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    # Not called into: the Direct2D *1.1* interface — the one that bakes a stroke's geometry into a
+    # shape the device keeps triangles for (see `src/platform/ink_layer/render.rs`) — is only
+    # declared by the bindings when these two are on as well.
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Imaging",
+] }
+# Direct2D's geometry is placed with a matrix, and that matrix type is this crate's.
+windows-numerics = "0.3"
+# Named types for the raw window handle GPUI hands out (used to bind the pen capture).
+raw-window-handle = "0.6"
+
+# Build-time: compiles `assets/app.rc` into the executable, which is what puts the app's icon on the
+# desktop, in the task bar, in Alt-Tab and on the window itself. The same crate and the same version
+# GPUI's own build script already uses for its manifest. See `build.rs`.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "=3.0.11"

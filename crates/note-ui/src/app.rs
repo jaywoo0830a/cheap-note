@@ -35,22 +35,22 @@ use crate::canvas::{
     HIGHLIGHTER_COLORS, INK_COLORS, PAPER_COLORS,
 };
 use crate::cursor::{nib_radius_for_width, PenCursor};
-use crate::cursor_overlay::{CursorFeed, Screen};
 use crate::home::Home;
 use crate::ink::{
     paper_of_drawn, paper_of_page_point, with_alpha, InkTransform, Notes, Stroke, TextChar,
     TextLayout, Tool, HIGHLIGHTER_ALPHA, HIGHLIGHTER_WIDTH,
 };
-use crate::ink_layer::render::ink_colour;
-use crate::ink_layer::{Canvas, Ink, InkLayer, Page, Rect};
+use crate::ink_layer::ink_colour;
+use crate::ink_layer::{Canvas, Ink, Page, Rect};
+use crate::input::PenInbox;
+use crate::input::Reading;
 use crate::note::{self, Note, NoteWriter, Report};
 use crate::outline::{Outline, OutlinePages};
 use crate::pages::{swaps_axes, Pages, Quarters};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
-use crate::pen::{capture_config, BatchTap, PenInbox, PenService};
+use crate::platform::{GhostFeed, InkSurface, PenSource, Platform, Screen, SystemPointer};
 use crate::recent::{self, Recent};
 use crate::settings::{PenWeight, Settings};
-use crate::system_cursor::SystemCursor;
 use crate::timing::{measure, Measurement, Timings};
 use crate::view::{Fit, Viewport};
 
@@ -615,13 +615,13 @@ pub struct NoteApp {
     /// The PDF being annotated, if any.
     pdf: PdfDocumentView,
     /// The pen capture and its queue.
-    pen: PenService,
+    pen: Box<dyn PenSource>,
     /// The hook that hides the system pointer while the pen has a cursor of its own.
-    system_cursor: Option<SystemCursor>,
+    system_cursor: Option<Box<dyn SystemPointer>>,
     /// The window the pen's ghost cursor is drawn in, outside the frame.
-    cursor: Option<CursorFeed>,
+    cursor: Option<Arc<dyn GhostFeed>>,
     /// The canvas, drawn by a renderer of the app's own rather than by a frame.
-    ink_layer: Option<InkLayer>,
+    ink_layer: Option<Box<dyn InkSurface>>,
     /// Counts the rebuilds of the ink's own outlines.
     ink_revision: u64,
     /// When the canvas layer last presented: the rate the ink reaches the screen at, which is not the frame rate.
@@ -723,38 +723,36 @@ pub struct NoteApp {
     home: Home,
 }
 
-/// The pen thread's tap on the readings: every batch goes to the ghost cursor's window.
-fn cursor_tap(feed: &CursorFeed) -> BatchTap {
-    let feed = feed.clone();
-
-    Arc::new(move |samples: &[pen_windows::PenSample]| feed.offer(samples))
-}
-
 impl NoteApp {
-    /// Builds the view, attaches the pen, and starts the frame loop.
-    pub fn new(window: &mut Window, start: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+    /// Builds the view around what the platform lent it, and starts the frame loop.
+    ///
+    /// `platform` is the whole of what a machine hands over — a pen, a ghost cursor, a pointer hook and
+    /// a surface (see [`Platform`]) — and this constructor keeps all four for as long as the app lives.
+    /// That is what stops the pen thread and closes the ghost's window when the app goes away, and it is
+    /// the reason the view never names a platform: what it holds are the traits.
+    pub fn new(
+        window: &mut Window,
+        start: Option<PathBuf>,
+        platform: Platform,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Nothing to load and nowhere to load it from — no note is open — so this is the shipped set. It
         // is not a *global* set: whatever is opened below takes it over (see [`crate::settings`]).
         let settings = Settings::default();
         let mut message = String::new();
 
-        // The ghost cursor's window, installed before the capture: the pen thread is handed the tap
-        // that feeds it, and that tap has to exist when the thread starts. Failing to install one is
-        // not an error — the app keeps the system pointer, and the pen has no ghost of its own.
-        let cursor = CursorFeed::install(window);
+        // The four services, taken apart again. The pen's thread and the ghost's window are already
+        // running by the time this returns, because installing them is the platform's job (see
+        // `apps/windows/src/platform`); what is kept here is the handle on each.
+        let Platform {
+            ink: ink_layer,
+            ghost: cursor,
+            pointer: system_cursor,
+            pen,
+        } = platform;
 
-        // The capture must be attached on the thread that owns the window, which is this one.
-        let pen = PenService::attach(window, capture_config(), cursor.as_ref().map(cursor_tap));
-
-        // Installed after the capture, so this hook runs first in the subclass chain and gets to
-        // answer `WM_SETCURSOR` before anything else can put a cursor back.
-        let system_cursor = SystemCursor::install(window);
-
-        // The canvas's own renderer, which this app requires: a machine that cannot give Direct3D 11
-        // a hardware device cannot run this app at all, and saying so here — once, at startup, with
-        // the reason — is the whole of the report (see [`crate::ink_layer`]).
-        let ink_layer = Some(InkLayer::install(window).expect("a canvas for the window"));
-
+        // What the pen says about itself, or the reason it could not be read — a pen that cannot be
+        // read is a pen that draws with the mouse, and the status line is where a person is told so.
         if message.is_empty() {
             message = pen.status().to_string();
         }
@@ -975,7 +973,7 @@ impl NoteApp {
                         .record(woke.saturating_duration_since(previous));
                 }
 
-                if batch.samples.is_empty() {
+                if batch.readings.is_empty() {
                     return;
                 }
 
@@ -992,7 +990,7 @@ impl NoteApp {
                 // this is the one control the pen is aimed at instead of written on — and either way
                 // no ink is laid while it is there (see [`NoteApp::palette_from_pen`]).
                 if app.palette_is_open() {
-                    app.palette_from_pen(&batch.samples, cx);
+                    app.palette_from_pen(&batch.readings, cx);
                     return;
                 }
 
@@ -1006,7 +1004,7 @@ impl NoteApp {
 
                 // Ink is the only part of a reading the frame has: a pen in range but not touching lays
                 // none, and its ghost is drawn elsewhere (see [`crate::cursor_overlay`]).
-                let laid_ink = app.consume_ink(&batch.samples);
+                let laid_ink = app.consume_ink(&batch.readings);
                 if laid_ink {
                     // The clock the page render waits on: see `serve_pdf`.
                     app.last_ink_at = woke;
@@ -1192,7 +1190,7 @@ impl NoteApp {
     }
 
     /// Reads a batch of readings into the ink model, timed.
-    fn consume_ink(&mut self, samples: &[pen_windows::PenSample]) -> bool {
+    fn consume_ink(&mut self, samples: &[Reading]) -> bool {
         // The pen is not a pen while something is in front of the sheet: a name being typed, or a screen
         // drawn over a sheet nobody can see. This is why the lists are screens rather than panels — the pen
         // obeys an app state, not a rectangle (see [`crate::bookmarks`]).
@@ -1660,7 +1658,7 @@ impl NoteApp {
         // no overlay there is nothing to put in the pointer's place, and hiding the pointer would leave
         // the window with no cursor at all. The same answer goes to the overlay (see
         // [`Self::publish_screen`]), so the two cannot disagree.
-        if !self.cursor.as_ref().is_some_and(CursorFeed::is_alive) {
+        if !self.cursor.as_ref().is_some_and(|feed| feed.is_alive()) {
             return false;
         }
 
@@ -1990,7 +1988,7 @@ impl NoteApp {
     /// converted exactly as the ghost cursor converts its own (see [`PenCursor::from_sample`]): a palette
     /// that answered a different point than the ghost is drawn at would take a colour the hand never
     /// touched.
-    fn palette_from_pen(&mut self, samples: &[pen_windows::PenSample], cx: &mut Context<Self>) {
+    fn palette_from_pen(&mut self, samples: &[Reading], cx: &mut Context<Self>) {
         let Some(palette) = self.palette else {
             return;
         };
@@ -1998,7 +1996,7 @@ impl NoteApp {
         let colours = palette_colours(self.ink.mode()).len();
         let landed = samples
             .iter()
-            .filter(|sample| sample.phase == pen_windows::PenPhase::Down)
+            .filter(|sample| sample.phase == crate::input::Phase::Down)
             .find_map(|sample| {
                 let at = PenCursor::from_sample(*sample, self.scale)?.position();
 
@@ -3630,13 +3628,13 @@ impl NoteApp {
         match self.pen.stats() {
             Some(stats) => {
                 parts.push(format!(
-                    "{stats}  {:.1} readings/message",
-                    stats.mean_batch()
+                    "{}  {:.1} readings/message",
+                    stats.summary, stats.mean_batch
                 ));
 
                 // What the digitizer can report is worth showing: a pen whose mask never
                 // mentions pressure is a pen to judge by its line, not by its force.
-                let axes: Vec<&str> = stats.mask.names().collect();
+                let axes: Vec<&str> = stats.axes.clone();
                 parts.push(format!(
                     "pen: {}",
                     if axes.is_empty() {

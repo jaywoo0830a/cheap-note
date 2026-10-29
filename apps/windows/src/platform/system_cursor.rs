@@ -194,3 +194,13 @@ impl Drop for SystemCursor {
         }
     }
 }
+
+/// What the view asks of it: the seam's one method.
+///
+/// The hook is installed once, and after that this is a flag: the subclass answers WM_SETCURSOR from
+/// it, and the call below is what makes the change take effect now rather than at the next move.
+impl note_ui::platform::SystemPointer for SystemCursor {
+    fn follow(&mut self, pen_has_its_own_cursor: bool) {
+        SystemCursor::follow(self, pen_has_its_own_cursor)
+    }
+}

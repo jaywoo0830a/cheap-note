@@ -1,6 +1,6 @@
 # Why the view is the way it is
 
-This document is the reasoning behind `src/app.rs` — the arguments that used to be written out in the
+This document is the reasoning behind `crates/note-ui/src/app.rs` — the arguments that used to be written out in the
 file itself. The code keeps one-line reasons where a reader needs them at the line they are reading;
 this keeps the arguments, in the order a person meets them.
 
@@ -714,7 +714,7 @@ counts the rebuilds a zoom's change of detail forced (see `ink_layer/render.rs`)
 
 ## Where this document and the code part company
 
-`src/app.rs` keeps the reasoning where a reader needs it *at the line they are reading* — one line, and
+`crates/note-ui/src/app.rs` keeps the reasoning where a reader needs it *at the line they are reading* — one line, and
 usually just the surprising half of it. This file keeps the argument: the measurements, the alternatives
 that were tried, and the failures that are the reason a rule exists.
 

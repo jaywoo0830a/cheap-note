@@ -11,12 +11,13 @@ use thiserror::Error;
 /// Everything the application can refuse to do.
 #[derive(Debug, Error)]
 pub enum AppError {
-    /// The Windows pen capture could not be attached to the window.
+    /// The pen could not be read — the platform's capture refused to attach, or failed while reading.
     ///
-    /// This is *not* fatal: an app that cannot read the pen is an app that draws with the
-    /// mouse, and the status bar says so. See [`crate::pen::PenService`].
+    /// This is *not* fatal: an app that cannot read the pen is an app that draws with the mouse, and
+    /// the status bar says so. The sentence rather than a wrapped error type, because what a platform
+    /// reports is its own: the view names the failure and the platform says what happened.
     #[error("pen input is unavailable: {0}")]
-    Pen(#[from] pen_windows::Error),
+    Pen(String),
 
     /// The Pdfium shared library could not be located or loaded.
     #[error("the Pdfium library could not be loaded: {0}")]

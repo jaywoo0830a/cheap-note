@@ -92,7 +92,7 @@ GPUI draws its window into a swap chain of its own and hands it to DirectComposi
 `WS_EX_NOREDIRECTIONBITMAP`, so that visual is the whole of the window's content. The canvas layer
 makes a *second* target for the same handle, with `topmost = false`, and its visual lands **behind**
 GPUI's. That one assumption — a `topmost = false` target renders behind a window whose content is a
-topmost one — is what the whole canvas rests on (see `src/ink_layer/device.rs`).
+topmost one — is what the whole canvas rests on (see `apps/windows/src/platform/ink_layer/device.rs`).
 
 ```mermaid
 flowchart TB
@@ -127,10 +127,10 @@ cannot have subpixel text rendering, so the interface is drawn in grayscale anti
 
 | File | Job |
 |---|---|
-| `src/ink_layer/device.rs` | the Direct3D 11 device, the composition swap chain, the visual behind GPUI's, and the resize |
-| `src/ink_layer/render.rs` | Direct2D: the geometry each stroke is baked into, the ruling, the page's bitmap, and the present |
-| `src/ink_layer/canvas.rs` | what the app hands over: rectangles, colours, and the ink — all in *logical* window pixels, with the scale travelling alongside |
-| `src/ink_layer/mod.rs` | the layer as the app sees it: install it, describe a canvas to it, and draw |
+| `apps/windows/src/platform/ink_layer/device.rs` | the Direct3D 11 device, the composition swap chain, the visual behind GPUI's, and the resize |
+| `apps/windows/src/platform/ink_layer/render.rs` | Direct2D: the geometry each stroke is baked into, the ruling, the page's bitmap, and the present |
+| `crates/note-ui/src/ink_layer/canvas.rs` | what the app hands over: rectangles, colours, and the ink — all in *logical* window pixels, with the scale travelling alongside |
+| `apps/windows/src/platform/ink_layer/mod.rs` | the layer as the view sees it through the seam: install it, describe a canvas to it (`InkSurface::draw`), and the window plugin that leaves the surface unpainted |
 
 A GPU is **required**: there is no software renderer here and no WARP device to make. A machine that
 cannot give Direct3D 11 a hardware device cannot run this app at all — which is already true of the
@@ -205,7 +205,7 @@ while writing.
 
 ## 4. The rest of the time: the housekeeping pump
 
-The second async task wakes every `HOUSEKEEPING_INTERVAL` (`src/app.rs`) — one millisecond — and
+The second async task wakes every `HOUSEKEEPING_INTERVAL` (`crates/note-ui/src/app.rs`) — one millisecond — and
 does everything that is not the ink. None of it is on the display's clock, and the point of it being
 here is that **a rasterisation can never delay a stroke**:
 
@@ -252,7 +252,7 @@ Four decisions keep that from being the thing that makes writing stutter:
   per gesture, and a page rendered a rung off is simply a little softer — GPUI scales the bitmap to
   the bounds it is painted into.
 * **A render is sliced, not synchronous.** Pdfium's progressive render (`IFSDK_PAUSE`, reached through
-  this app's own declarations in `src/pdfium/`) stops between the pieces of a page, so a slice ends
+  this app's own declarations in `crates/note-ui/src/pdfium/`) stops between the pieces of a page, so a slice ends
   when its budget does rather than when the page does. Cancellation needs no flag: a view that moved
   on simply stops advancing the job, and dropping it closes the render and releases the page and the
   unfinished bitmap. The wrapper exposes no raw handle and declares only the thirty-two public entry
@@ -439,7 +439,7 @@ swallows the note's keys entirely (it did, from opening a note until a rename).
 
 ## 10. What is measured
 
-Every hot path records its own duration into a `Meter` (`src/timing.rs`), and the status line prints
+Every hot path records its own duration into a `Meter` (`crates/note-ui/src/timing.rs`), and the status line prints
 one line built from all of them, so "the writing feels laggy" is answered with a number rather than an
 opinion:
 
@@ -551,19 +551,23 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
   Direct3D 11 device at all — a remote session, a virtual machine without a graphics processor, or a driver
   older than WDDM 1.2 — and `InkLayer::install` reports that reason, once, at startup.
 * **Rust 1.90+** (see `Cargo.toml`), and the pinned dependency versions in it.
-* **Two crates.** The repository is a workspace: this app, and `crates/note-format` — the note's file
-  format, with no window, no pen, no GPU and no PDF renderer in it. Everything that is about a note
-  on disk belongs to the format crate; everything about a reader in front of a window belongs here.
-  That split is what a build for another platform needs: the format is the part worth sharing, and a
-  crate boundary is the only kind the compiler enforces. The app's `store`, `note`, `pages`,
-  `settings` and `history` modules are re-exports, so no path inside the app changed.
+* **Three crates, and the seams face opposite ways.** The repository is a workspace:
+  `crates/note-format` is what a note *is* on disk (no window, no pen, no GPU, no PDF renderer);
+  `crates/note-ui` is everything the application *does* — the bar, the home screen, the sheet, the
+  page cache, the ink model, the frame loop — with no platform's own API in it; and `apps/windows` is
+  the platform: the canvas, the pen capture, the ghost cursor's window, the pointer hook, Pdfium's
+  entry points, and `main`. The view depends on the format and the platform depends on the view, which
+  is what a build for another platform needs: `note-ui`'s `platform.rs` is four traits — a pen, a
+  ghost, a pointer, a surface — and a macOS build is `apps/windows` rewritten behind them. The view's
+  `store`, `note`, `pages`, `settings` and `history` modules are re-exports of the format's, so no
+  path inside the view changed.
 * **Pdfium is not in the repository.** It is downloaded into `vendor/` (`vendor/README.md`; the current
   build is 158.0.8125.0), and a build copies `vendor/lib/*.dll` next to the executable it produces, so
   a release build is a *pair* of files that work from anywhere. A fresh clone starts, draws and writes
   ink without it; only opening a PDF needs it, and the status line says so when it is missing.
 
 ```text
-cargo run --release        # the app: it opens on the home list, and Escape returns to it
+cargo run -p cheap-note --release   # the app: it opens on the home list, and Escape returns to it
 cargo test --workspace     # 390 tests, including ones that install a real canvas on a window
 ```
 

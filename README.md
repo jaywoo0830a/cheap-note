@@ -4,7 +4,7 @@ A minimal, high-performance handwriting note-taking prototype for Windows: write
 page, and the ink is on the disk as you write it.
 
 ```text
-cargo run --release        # the app; `cargo run --release -- <file.pdf>` opens that file's note
+cargo run -p cheap-note --release        # the app; add `-- <file.pdf>` to open that file's note
 cargo test --workspace     # 390 tests: the app's, the format's, and the format's black-box suite
 ```
 
@@ -13,28 +13,31 @@ copies it next to the executable. A fresh clone starts, draws and writes ink wit
 PDF needs it.
 
 A release build is the window and nothing else — no console beside it — because the executable is linked
-as a *windows* subsystem program (see the crate attribute in `src/main.rs`): started by double-click, by
+as a *windows* subsystem program (see the crate attribute in `apps/windows/src/main.rs`): started by double-click, by
 a shortcut, or through a file association, it opens without the black window a console-subsystem program
 gets. Debug builds and `cargo test` keep the console, where the diagnostics a run can print and the
 measurements the timing tests take are readable.
 
-## Two crates
+## Three crates
 
-The repository is a workspace, and the split is the point of it:
+The repository is a workspace, and the splits are the point of it:
 
 | Crate | What it is |
 |---|---|
-| `cheap-note` (the root) | the Windows app: the Direct2D canvas, the pen capture, Pdfium, the view. Nothing here is portable, and nothing here needs to be. |
 | [`crates/note-format`](crates/note-format) | the note itself: SQLite schema, the ink's byte format, the page list, the settings, the zip a note is carried in. **No window, no pen, no GPU, no PDF renderer.** |
+| [`crates/note-ui`](crates/note-ui) | the view: the bar, the home screen, the sheet, the gestures, the PDF page cache, the ink model, the frame loop. **No platform's own API** — it asks for what it needs through the traits in `platform.rs`. |
+| [`apps/windows`](apps/windows) | the platform: the Direct2D canvas, the pen capture, the ghost cursor's window, the pointer hook, Pdfium's entry points, and `main`. Nothing here is portable, and nothing here needs to be. |
 
-That is what makes a second application possible. The format is a crate rather than a set of modules
-because a crate boundary is the only kind the compiler enforces: `note-format` cannot reach into the
-app even by accident, so a build on another platform gets the whole format and none of Windows. The
-app depends on the format; the format depends on nothing of the app's.
+Each boundary is a question the compiler can ask, and they face opposite ways: the view depends on the
+format, and the platform depends on the view — never the other way round. That is what makes a second
+application possible without a second application's worth of code: a macOS build is
+[`apps/windows`](apps/windows) rewritten (Metal or CoreGraphics instead of Direct2D, `NSEvent` instead
+of `pen-windows`, the ghost drawn in the frame instead of in a window of its own, `libpdfium.dylib`
+behind `dlopen`), and everything in `note-ui` above the seam stays as it is.
 
-The app's `src/store.rs`, `src/note.rs`, `src/pages.rs`, `src/settings.rs` and `src/history.rs` are
-re-exports of their `note-format` counterparts, so every path inside the app still reads
-`crate::store::NoteStore` — the split moved the code without renaming anything.
+The view's `store.rs`, `note.rs`, `pages.rs`, `settings.rs` and `history.rs` are re-exports of their
+`note-format` counterparts, so a path inside the view still reads `crate::store::NoteStore` — the
+split moved the code without renaming anything.
 
 The format has **two test suites**, and both matter:
 [`crates/note-format/src`](crates/note-format/src) holds the unit tests, which may look inside a module;
@@ -51,6 +54,6 @@ platform has to satisfy.
 | [`doc/VIEW.md`](doc/VIEW.md) | why the view is the way it is: the frame loop, the bar, the sheet, the gestures, the pen's rules |
 | [`doc/STORE.md`](doc/STORE.md) | one stroke's journey to the disk and back — which is the format crate's story |
 
-Every module in `src/` and `crates/note-format/src/` opens with the same kind of short account of
+Every module in the three `src/` trees opens with the same kind of short account of
 itself — the *why* at the point of use — and those are the place to look before changing something
 inside one file.

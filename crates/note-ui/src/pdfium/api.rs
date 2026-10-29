@@ -114,15 +114,33 @@ pub(super) struct LibraryConfig {
 type Library = *mut c_void;
 
 /// The file name Pdfium is built as on this platform.
+///
+/// Named on every platform even though only Windows loads one through `LoadLibrary`: the stub below
+/// reports what it *would* have looked for, and a macOS build's first step is to load this file rather
+/// than to guess what it is called.
 #[cfg(windows)]
 const LIBRARY_NAME: &str = "pdfium.dll";
+/// The same library, built for macOS.
+#[cfg(target_os = "macos")]
+const LIBRARY_NAME: &str = "libpdfium.dylib";
+/// The same library, built for everything else.
+#[cfg(not(any(windows, target_os = "macos")))]
+const LIBRARY_NAME: &str = "libpdfium.so";
 
 /// The Pdfium release these declarations were written against, from `vendor/VERSION`.
 ///
 /// Pdfium's public API has no version function, so a mismatch cannot be detected by calling the
 /// library. Naming the intended release in a load failure is the next best thing: it tells a person
 /// looking at a missing symbol that the headers and the DLL have to come from the same archive.
-const VENDORED_VERSION: &str = env!("CHEAP_NOTE_PDFIUM_VERSION");
+/// The Pdfium release this build was made against, or a sentence saying it is unpinned.
+///
+/// The app's build script prints the version from `vendor/VERSION`; a build of *this* crate on its own
+/// has no vendor directory and no library to load either, so the message it produces says the one thing
+/// that is true rather than a version it does not know.
+const VENDORED_VERSION: &str = match option_env!("CHEAP_NOTE_PDFIUM_VERSION") {
+    Some(version) => version,
+    None => "an unpinned build",
+};
 
 /// The functions this app calls, resolved once and kept for the process.
 ///

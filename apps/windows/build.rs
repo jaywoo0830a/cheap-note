@@ -117,7 +117,21 @@ fn embed_the_icon() {
 
 /// The directory this package keeps its downloaded libraries in.
 fn vendor_directory() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor")
+    // The repository's `vendor/`, which is *above* this crate: the app lives in `apps/windows`, and
+    // the library is downloaded once for the repository rather than per crate. So this walks up from
+    // the crate's own directory until it finds one, and falls back to the first candidate — which is
+    // what a build with no vendored library reports, and the sentence is the same either way.
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    for ancestor in manifest.ancestors() {
+        let candidate = ancestor.join("vendor");
+
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+
+    manifest.join("vendor")
 }
 
 /// The version of the Pdfium build in `vendor/`, from its `VERSION` file.

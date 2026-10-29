@@ -28,6 +28,13 @@ a person carries — this is what the *Save* button writes:
 chapter-3.zip                the carried form: a standalone copy of note.db, plus the two above
 ```
 
+The three names *inside* a note are the format, and they are the same on every platform. The folder
+above them is the platform's: Windows uses `%LOCALAPPDATA%`, macOS
+`~/Library/Application Support/cheap-note/notes`, and a Linux desktop `$XDG_DATA_HOME/cheap-note/notes`
+(see `note::root`). So a note can be read on a machine the app was never built for, which is the reason
+the format is a crate rather than a set of modules — see [`crates/note-format`](../crates/note-format)
+and `README.md`.
+
 While it is open, `note.db-wal` and `note.db-shm` sit beside it. That is the write-ahead log, it is
 normal, and it is the whole reason a write does not stop a read (§6): it is folded back into `note.db`
 when the pen has been still, and always before the note is exported (§8).
@@ -211,7 +218,7 @@ migrated — and the three ways a row can fail to be there are three different a
 
 * **a row this build does not know is never read, written or deleted**, so a note written by a build
   that knew more settings — or one somebody added a row to by hand — keeps them. Adding a setting is
-  four small edits: a field and its default in `src/settings.rs`, and one line each in
+  four small edits: a field and its default in `crates/note-format/src/settings.rs`, and one line each in
   `NoteStore::read_settings` and `NoteStore::set_settings`;
 * **a row that is not there is not a failure**: the note does not say, and the app's own answer stands;
 * **a row that is there and cannot be understood *is* a failure**, reported to the person — something
@@ -358,7 +365,7 @@ where the note last saw it. The page therefore carries a second number — how m
 *shifted* — and the app remembers the value it last wrote, beside the stroke count. One move, or twelve,
 marks the page for a rewrite the same way a deletion does, and nothing is written for a drag that was put
 down where it started. That count is per page and in memory only: it is a fact about what has *not* been
-written yet, and the ink itself says everything else (see `src/ink.rs`).
+written yet, and the ink itself says everything else (see `crates/note-format/src/ink.rs`).
 
 **What a crash costs.** At most the ink of the batches that had not been sent yet: the last 500 ms, or
 the last 200 strokes, whichever is smaller. Everything else is in `note.db`, committed. Pressing *Save*
@@ -458,16 +465,32 @@ note only needs to be told about a tail of edits and the cursor it ends at.
 
 ## 11. Where the code is
 
+Everything above the last three rows is the **format**, and lives in the `note-format` crate; the app
+keeps only what is about a reader — the page in memory, the list of what has been opened, and when to
+write. That is the boundary: a note's shape is portable, a reader's timing is not.
+
 | Module | Responsibility |
 |---|---|
-| `src/store.rs` | the database: schema, PRAGMAs, the batch write, compaction, the read path, the history's log, checkpoint, `VACUUM INTO`, and the rows of `meta` |
-| `src/chunk.rs` | the blob format: encode, decode, integrity, chunk boundaries, the sealed frame a dirty row and an edit share |
-| `src/history.rs` | what an edit *is*: apply and revert, a page's history, and the bytes the note's log holds |
-| `src/settings.rs` | every setting a note remembers, and the row each one is written in |
-| `src/note.rs` | the note folder, the writer thread and its job queue, the zip container |
-| `src/ink.rs` | strokes in memory: what a stroke is, and where each page's ink is kept |
+| `crates/note-format/src/store.rs` | the database: schema, PRAGMAs, the batch write, compaction, the read path, the history's log, checkpoint, `VACUUM INTO`, and the rows of `meta` |
+| `crates/note-format/src/chunk.rs` | the blob format: encode, decode, integrity, chunk boundaries, the sealed frame a dirty row and an edit share |
+| `crates/note-format/src/history.rs` | what an edit *is*: apply and revert, a page's history, and the bytes the note's log holds |
+| `crates/note-format/src/settings.rs` | every setting a note remembers, and the row each one is written in |
+| `crates/note-format/src/note.rs` | the note folder, the writer thread and its job queue, the zip container |
+| `crates/note-format/src/ink.rs` | the ink itself: a point, a stroke, its colour, and the geometry derived from it |
+| `crates/note-format/src/pages.rs`, `paper.rs` | the page list and its rotations; the sheet sizes and styles a note can be written on |
+| `src/ink.rs` | the page in memory: the tools, the eraser, the lasso, undo, and the document a reader turns |
 | `src/recent.rs`, `src/home.rs` | the index of what has been opened, and the list that shows it |
 | `src/app.rs` | when to write: the batch clock, page close, the checkpoint rule, and the UI |
+
+The app's `src/store.rs`, `src/note.rs`, `src/pages.rs`, `src/settings.rs` and `src/history.rs` are
+re-exports of the modules above, so nothing inside the app had to be renamed when the split was made:
+`crate::store::NoteStore` is `note_format::store::NoteStore`.
+
+Each of those modules has **two** sets of tests: the unit tests inside it, and a black-box file of the
+same name in `crates/note-format/tests/`. The second kind uses nothing but the public API, and opens the
+files with SQLite, a zip reader and a JSON parser rather than with this crate — which is the only way to
+test a *format* rather than an implementation. A note written here has to be readable by something that
+has never seen this code, so the tests that matter most are the ones that pretend not to have.
 
 | Function | What it does |
 |---|---|
@@ -542,7 +565,7 @@ CREATE TABLE bookmarks (               -- the pages a person marked: one row per
 CREATE TABLE edits (                   -- a page's history: one row per edit, in the order made: see §3
     page_id    INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
     ord        INTEGER NOT NULL,       -- the cursor's ordinal space; never restarts, gaps at the bottom
-    data       BLOB NOT NULL,          -- the edit, as ink: see §4 and src/history.rs
+    data       BLOB NOT NULL,          -- the edit, as ink: see §4 and crates/note-format/src/history.rs
     created_at INTEGER NOT NULL,
     PRIMARY KEY (page_id, ord)
 ) STRICT;
@@ -593,4 +616,4 @@ default for the rest of its life. This one was found by a test, which is the rea
 | `app::CHECKPOINT_INTERVAL` | 5 min | the least time between two checkpoints |
 | `note::NOTE_DB` / `NOTE_PDF` / `ATTACHMENTS` | `note.db` / `source.pdf` / `attachments` | the three names inside a note folder |
 
-The settings a note remembers are not listed here: `src/settings.rs` is the list, one row each (§3).
+The settings a note remembers are not listed here: `crates/note-format/src/settings.rs` is the list, one row each (§3).

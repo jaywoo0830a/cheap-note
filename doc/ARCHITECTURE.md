@@ -294,7 +294,7 @@ sequenceDiagram
 ## 6. The note's pages
 
 Three things can disagree about what "page 4" means — a document's own pages, a note written on blank
-sheets, and a page inserted or deleted — so `src/pages.rs` owns one list: one entry per page, in
+sheets, and a page inserted or deleted — so `crates/note-format/src/pages.rs` owns one list: one entry per page, in
 reading order, saying what it shows. Ink is keyed by the *position in that list*, which is what makes
 an insert two small renames rather than a rewrite: **an insert renames the pages after it, and the ink
 goes with the sheet it was written on** (in memory and on disk, in one transaction — see `store.rs`).
@@ -503,7 +503,7 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
 15. **Every change to a page is an `Edit`**, and an edit knows how to put itself back: `history::Edit` holds the
     strokes a change is about — written, removed, or moved — and undo is one edit at a time per page. This is
     what replaced a list of strokes that undo popped and redo pushed back, and the difference is the whole of
-    why the eraser, a lasso's drag, and *Clear* can be taken back (see `src/history.rs`, and §7 of
+    why the eraser, a lasso's drag, and *Clear* can be taken back (see `crates/note-format/src/history.rs`, and §7 of
     [VIEW.md](VIEW.md)).
 16. **A page's history is written down beside its ink, in one transaction.** `store::NoteStore`'s writes take a
     `history::HistoryUpdate` — the tail of applied edits the note has not heard about, and the cursor that tail
@@ -551,6 +551,12 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
   Direct3D 11 device at all — a remote session, a virtual machine without a graphics processor, or a driver
   older than WDDM 1.2 — and `InkLayer::install` reports that reason, once, at startup.
 * **Rust 1.90+** (see `Cargo.toml`), and the pinned dependency versions in it.
+* **Two crates.** The repository is a workspace: this app, and `crates/note-format` — the note's file
+  format, with no window, no pen, no GPU and no PDF renderer in it. Everything that is about a note
+  on disk belongs to the format crate; everything about a reader in front of a window belongs here.
+  That split is what a build for another platform needs: the format is the part worth sharing, and a
+  crate boundary is the only kind the compiler enforces. The app's `store`, `note`, `pages`,
+  `settings` and `history` modules are re-exports, so no path inside the app changed.
 * **Pdfium is not in the repository.** It is downloaded into `vendor/` (`vendor/README.md`; the current
   build is 158.0.8125.0), and a build copies `vendor/lib/*.dll` next to the executable it produces, so
   a release build is a *pair* of files that work from anywhere. A fresh clone starts, draws and writes
@@ -558,7 +564,7 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
 
 ```text
 cargo run --release        # the app: it opens on the home list, and Escape returns to it
-cargo test                 # 313 tests, including ones that install a real canvas on a window
+cargo test --workspace     # 389 tests, including ones that install a real canvas on a window
 ```
 
 `cargo run` with a path argument opens that file's note and skips the list — which is what a file

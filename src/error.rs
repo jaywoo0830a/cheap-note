@@ -42,6 +42,10 @@ pub enum AppError {
     IndexFormat(#[from] serde_json::Error),
 
     /// A saved note — the zip holding the PDF and the ink — could not be read or written.
+    ///
+    /// Mostly arrived from the format crate, whose own [`note_format::Error`] is converted into
+    /// this one by [`From`] below: the app decides what the status line says, but *what* can go
+    /// wrong with a note is the format's to name.
     #[error("the note file could not be read or written: {0}")]
     Note(String),
 
@@ -52,3 +56,23 @@ pub enum AppError {
 
 /// `Result` with this application's [`AppError`].
 pub type Result<T> = std::result::Result<T, AppError>;
+
+/// A refusal from the format crate becomes one of the app's, with the sentence intact.
+///
+/// The two error types are deliberately not the same type: the format's cannot mention a pen, a
+/// Pdfium load or a PDF render, and this one has to (see [`AppError::Pen`] and [`AppError::Pdf`]).
+/// This is the one place they meet, so `?` works at every call that opens, reads or writes a note
+/// without either side knowing about the other.
+impl From<note_format::Error> for AppError {
+    fn from(error: note_format::Error) -> Self {
+        match error {
+            note_format::Error::Note(text) => AppError::Note(text),
+            note_format::Error::Other(text) => AppError::Other(text),
+            // The two wrapped variants are the format's own plumbing — an io failure or a page of
+            // JSON that would not parse — and the app has never had a better sentence for either
+            // than the one the format already built.
+            note_format::Error::Io(error) => AppError::Note(error.to_string()),
+            note_format::Error::Json(error) => AppError::Note(error.to_string()),
+        }
+    }
+}

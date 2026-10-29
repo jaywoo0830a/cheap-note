@@ -809,22 +809,17 @@ name = "cheap-note"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "crc32fast",
  "embed-resource",
  "gpui-kit",
  "image",
- "lz4_flex",
+ "note-format",
  "pen-windows",
  "raw-window-handle",
- "rayon",
- "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "windows 0.62.2",
  "windows-numerics 0.3.1",
- "zip",
- "zstd",
 ]
 
 [[package]]
@@ -3877,6 +3872,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b11ce00d2594068e8a27c9146fdc5cf9f3ac38eb42c7cd34d05fea618873ac9f"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "note-format"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "lz4_flex",
+ "rayon",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "zip",
+ "zstd",
 ]
 
 [[package]]

@@ -31,20 +31,26 @@
 //! | [`system_cursor`] | hiding the system pointer while the pen is in range          |
 //! | [`ink_layer`] | the canvas's own renderer: the desk, the paper and the ink, outside the frame |
 //! | [`pdf`]     | the Pdfium document, page rendering, and the page cache            |
-//! | [`pages`]   | what a note's pages are, and what each one shows                   |
+//! | [`pages`]   | what a note's pages are, and what each one shows (the format's)     |
 //! | [`bookmarks`] | the pages a note has marked, and the screen that lists them      |
 //! | [`outline`] | the document's own table of contents, and the screen that lists it  |
 //! | [`pdfium`]  | Pdfium's own C API: documents, pages, and the sliced render        |
-//! | [`store`]   | the note's SQLite file: the schema, the batch write, the read path |
-//! | [`chunk`]   | a page of ink as one blob: SoA, varints, zstd, CRC32               |
-//! | [`note`]    | a note as a folder, the writer thread, and the file it is carried in |
+//! | [`store`]   | the note's SQLite file: the schema, the batch write, the read path (the format's) |
+//! | [`note`]    | a note as a folder, the writer thread, and the file it is carried in (the format's) |
 //! | [`recent`]  | what has been opened, and the index of it the app keeps             |
 //! | [`home`]    | the screen that offers what was opened, and what it does            |
 //! | [`app`]     | the view: the bar and the pills, canvas painting, the two pumps     |
 //! | [`timing`]  | what every hot path costs, measured rather than guessed            |
-//! | [`settings`]| what a note remembers, one row at a time                           |
+//! | [`settings`]| what a note remembers, one row at a time (the format's)             |
 //! | [`theme`]   | the palette, the bundled font, and the icons' asset source         |
 //! | [`error`]   | the error type every fallible boundary returns                     |
+//!
+//! Four of those — [`pages`], [`store`], [`note`] and [`settings`] — are re-exports. What a note
+//! *is* on disk is not the application's, so it lives in the `note-format` crate, together with the
+//! chunk codec (a page of ink as one compressed, checksummed blob) and the stroke itself
+//! ([`ink::Stroke`]). Nothing in that crate knows about a window, a pen or a GPU, and that is the
+//! point of it: a second application, on another platform, can be built against the same format and
+//! read and write the same notes. The app depends on the format; the format depends on nothing here.
 //!
 //! ## The documents
 //!
@@ -100,7 +106,6 @@
 mod app;
 mod bookmarks;
 mod canvas;
-mod chunk;
 mod cursor;
 mod cursor_overlay;
 mod error;

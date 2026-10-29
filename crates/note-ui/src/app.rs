@@ -3633,14 +3633,15 @@ impl NoteApp {
                 ));
 
                 // What the digitizer can report is worth showing: a pen whose mask never
-                // mentions pressure is a pen to judge by its line, not by its force.
-                let axes: Vec<&str> = stats.axes.clone();
+                // mentions pressure is a pen to judge by its line, not by its force. Borrowed rather
+                // than cloned, because this line is rebuilt whenever the status changes and the list
+                // is already allocated by the platform's own report.
                 parts.push(format!(
                     "pen: {}",
-                    if axes.is_empty() {
+                    if stats.axes.is_empty() {
                         String::from("position only")
                     } else {
-                        axes.join("+")
+                        stats.axes.join("+")
                     }
                 ));
             }

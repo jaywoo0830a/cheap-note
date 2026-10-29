@@ -300,6 +300,12 @@ Everything else a key does is registered by **the screen that is showing**, as a
 it paints, so a key reaches a window with nothing focused — and so a *character* reaches a list's filter
 without a text field to type it into.
 
+The table below writes its chords the way Windows writes them. On a Mac the command key replaces `Ctrl`
+and the app says so the Mac way — `⌘Z`, `⇧⌘B`, `⌥⇧⌘R` — because the bindings are on GPUI's *secondary*
+modifier (`Ctrl` on Windows, `⌘` on macOS) and because the interface's own labels are computed from the
+chord instead of typed into a string (`crates/note-ui/src/keys.rs`). Nothing in the view knows which
+platform it is running on: `gpui` answers both questions.
+
 | Keys | What they do |
 |---|---|
 | `Escape` | leaves the note for the home list — and while a name is being typed, closes the field instead: an open field that `Escape` did not close would leave a person typing into a box they cannot leave |

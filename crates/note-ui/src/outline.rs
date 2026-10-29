@@ -40,6 +40,7 @@ use gpui_kit::*;
 
 use crate::app::NoteApp;
 use crate::bookmarks::Bookmarks;
+use crate::keys;
 use crate::pages::Pages;
 use crate::pdfium::OutlineEntry;
 
@@ -260,7 +261,7 @@ impl Outline {
             .size_full()
             .bg(desk)
             .text_color(ink)
-            // The chords that are the app's rather than the list's: `Ctrl+B` still marks the page the list
+            // The chords that are the app's rather than the list's: the bookmark chord still marks the page the list
             // is pointing at. Everything else the keyboard does here belongs to the list, which has the
             // focus. `title` is the note's name, which the app passes in rather than this screen reaching
             // for it: the same arrangement the other screen uses.
@@ -538,9 +539,10 @@ impl ListDelegate for OutlineDelegate {
             .header(
                 EmptyHeader::new()
                     .title(EmptyTitle::new().child("No contents"))
-                    .description(EmptyDescription::new().child(
-                        "This document was not made with a table of contents. Pages of the note can still be marked with Ctrl+B, and listed from the bar.",
-                    )),
+                    .description(EmptyDescription::new().child(format!(
+                        "This document was not made with a table of contents. Pages of the note can still be marked with {}, and listed from the bar.",
+                        keys::label(keys::chord::MARK)
+                    ))),
             )
             .into_any_element()
     }

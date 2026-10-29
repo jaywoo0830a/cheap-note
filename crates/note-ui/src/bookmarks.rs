@@ -39,6 +39,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IndexPath};
 use gpui_kit::*;
 
 use crate::app::NoteApp;
+use crate::keys;
 use crate::pages::Pages;
 
 /// The pages of a note that have a bookmark, in the note's reading order.
@@ -315,7 +316,7 @@ impl Marks {
             .size_full()
             .bg(desk)
             .text_color(ink)
-            // The chords that are the app's rather than the list's: `Ctrl+B` still marks the page the
+            // The chords that are the app's rather than the list's: the bookmark chord still marks the page the
             // list is pointing at. Everything else the keyboard does here belongs to the list, which has
             // the focus.
             .on_key_down(cx.listener(|app, event: &KeyDownEvent, window, cx| {
@@ -351,8 +352,9 @@ impl Marks {
         let count = self.count(cx);
 
         let caption = if count == 0 {
-            String::from(
-                "nothing is marked yet \u{2014} mark a page with Ctrl+B, or with the bookmark button on the bar",
+            format!(
+                "nothing is marked yet \u{2014} mark a page with {}, or with the bookmark button on the bar",
+                keys::label(keys::chord::MARK)
             )
         } else {
             format!(
@@ -569,9 +571,10 @@ impl ListDelegate for MarksDelegate {
             .header(
                 EmptyHeader::new()
                     .title(EmptyTitle::new().child("No page is marked"))
-                    .description(EmptyDescription::new().child(
-                        "Mark the page you are on \u{2014} Ctrl+B, or the bookmark button on the bar \u{2014} and it waits here, a place to come back to.",
-                    )),
+                    .description(EmptyDescription::new().child(format!(
+                        "Mark the page you are on \u{2014} {}, or the bookmark button on the bar \u{2014} and it waits here, a place to come back to.",
+                        keys::label(keys::chord::MARK)
+                    ))),
             )
             .into_any_element()
     }

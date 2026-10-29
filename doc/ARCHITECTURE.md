@@ -393,7 +393,9 @@ There is one rule that decides what a piece of interface is allowed to be, and t
   window with no cursor at all.
 
 The keyboard follows the same idea: the app has no focusable canvas and no text field, so the chords
-that are the *app's* (undo, redo, `Ctrl+N`, `Ctrl+O`, `Ctrl+S`, `Ctrl+B`, `Ctrl+M`) are registered as
+that are the *app's* (undo, redo, `Ctrl+N`, `Ctrl+O`, `Ctrl+S`, `Ctrl+B`, `Ctrl+M` — written here in
+Windows spelling, because the bindings are on GPUI's *secondary* modifier, which is `⌘` on macOS) are
+registered as
 actions and global handlers, while the keys a *list* needs (arrows, Enter, Escape, typing into its
 search box) belong to the list that has the focus. One rule hands the focus over —
 `claim_sheet_keyboard`, which runs on the single frame that a screen changed — because the alternative
@@ -562,9 +564,13 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
   `store`, `note`, `pages`, `settings` and `history` modules are re-exports of the format's, so no
   path inside the view changed.
 * **Pdfium is not in the repository.** It is downloaded into `vendor/` (`vendor/README.md`; the current
-  build is 158.0.8125.0), and a build copies `vendor/lib/*.dll` next to the executable it produces, so
+  build is 158.0.8125.0), and a build copies the platform's library (`pdfium.dll`; the loader also
+  knows `libpdfium.dylib` and `libpdfium.so`) from `vendor/lib` next to the executable it produces, so
   a release build is a *pair* of files that work from anywhere. A fresh clone starts, draws and writes
-  ink without it; only opening a PDF needs it, and the status line says so when it is missing.
+  ink without it; only opening a PDF needs it, and the status line says so when it is missing. The
+  loader is `libloading` — one `dlopen`/`LoadLibrary` behind one API — which is why this is the one
+  thing in the view that would otherwise have needed a platform crate: there is not one in its manifest
+  at all.
 
 ```text
 cargo run -p cheap-note --release   # the app: it opens on the home list, and Escape returns to it

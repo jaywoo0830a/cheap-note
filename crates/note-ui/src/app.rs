@@ -44,6 +44,7 @@ use crate::ink_layer::ink_colour;
 use crate::ink_layer::{Canvas, Ink, Page, Rect};
 use crate::input::PenInbox;
 use crate::input::Reading;
+use crate::keys;
 use crate::note::{self, Note, NoteWriter, Report};
 use crate::outline::{Outline, OutlinePages};
 use crate::pages::{swaps_axes, Pages, Quarters};
@@ -86,11 +87,9 @@ const BAR_MARGIN: f32 = 12.0;
 /// How tall the top bar is, in logical pixels, as an estimate.
 const BAR_HEIGHT: f32 = 148.0;
 
-/// The key that starts and stops a measurement session.
-const MEASURE_KEY: &str = "Ctrl+M";
-
-/// The key that puts the palette at the pen, and takes it away again.
-const PALETTE_KEY: &str = "Ctrl+Shift+C";
+// The two chords the status line names are `keys::chord::MEASURE` and `keys::chord::PALETTE`, written
+// out where they are shown by `keys::label` — never typed here, because the words for them are the
+// platform's (`Ctrl+M` on Windows, `⌘M` on macOS).
 
 /// How far from the palette's centre a colour is placed, in logical pixels.
 ///
@@ -1543,8 +1542,9 @@ impl NoteApp {
     fn on_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
         let pointer = (event.position.x.into(), event.position.y.into());
 
-        if event.modifiers.control {
-            // A wheel with `Ctrl` is a zoom, and a locked view does not take one: this is the gesture the lock exists
+        if keys::is_primary(event.modifiers) {
+            // A wheel with the command modifier held is a zoom (`Ctrl`+wheel on Windows, where a trackpad's pinch
+            // arrives as the same event), and a locked view does not take one: this is the gesture the lock exists
             // for — a roll of the wheel beside a page that is being read (see [`Settings::zoom_locked`]). The pan below
             // is not a zoom and is left alone.
             if !self.settings.gestures_zoom() {
@@ -2405,7 +2405,10 @@ impl NoteApp {
         self.marks.show(marked, cx);
 
         self.message = if self.bookmarks.is_empty() {
-            String::from("no page is marked yet \u{2014} Ctrl+B marks the page in front")
+            format!(
+                "no page is marked yet \u{2014} {} marks the page in front",
+                keys::label(keys::chord::MARK)
+            )
         } else {
             format!("{} marked in this note", self.bookmarks.len())
         };
@@ -2464,7 +2467,10 @@ impl NoteApp {
     /// What the two steps say when there is nowhere further to go.
     fn no_mark_message(&self, direction: &str) -> String {
         if self.bookmarks.is_empty() {
-            String::from("no page is marked yet \u{2014} Ctrl+B marks the page in front")
+            format!(
+                "no page is marked yet \u{2014} {} marks the page in front",
+                keys::label(keys::chord::MARK)
+            )
         } else {
             format!("no marked page {direction} this one")
         }
@@ -2878,7 +2884,7 @@ impl NoteApp {
     ) {
         let keystroke = &event.keystroke;
 
-        if keystroke.modifiers.control {
+        if keys::is_primary(keystroke.modifiers) {
             match keystroke.key.as_str() {
                 "n" => self.new_blank_sheet(cx),
                 "o" => self.prompt_for_pdf(cx),
@@ -3160,7 +3166,7 @@ impl NoteApp {
                 "right" | "down" => self.palette_spin(1, cx),
                 // The chord that put it up takes it away again; a press on the palette's own
                 // background is the other way out (see [`Self::palette_overlay`]).
-                "c" if keystroke.modifiers.control && keystroke.modifiers.shift => {
+                "c" if keys::is_primary(keystroke.modifiers) && keystroke.modifiers.shift => {
                     self.close_palette(cx)
                 }
                 _ => {}
@@ -3170,15 +3176,17 @@ impl NoteApp {
         }
 
         // The palette at the pen: `C` for colour, on the one chord every drawing app spells it with —
-        // and on *both* modifiers, so that the `Ctrl+C` the field beside this one would expect stays
+        // and on *both* modifiers, so that the plain `Ctrl+C` a text field would expect stays
         // where it is.
-        if keystroke.modifiers.control && keystroke.modifiers.shift && keystroke.key.as_str() == "c"
+        if keys::is_primary(keystroke.modifiers)
+            && keystroke.modifiers.shift
+            && keystroke.key.as_str() == "c"
         {
             self.open_palette(window, cx);
             return;
         }
 
-        if !keystroke.modifiers.control {
+        if !keys::is_primary(keystroke.modifiers) {
             match keystroke.key.as_str() {
                 "escape" => {
                     if self.asking() {
@@ -3209,9 +3217,10 @@ impl NoteApp {
             return;
         }
 
-        // The bookmark chords first, because the letter is shared: `Ctrl+B` marks the page in front and
-        // `Ctrl+Shift+B` opens the list of what is marked — the two halves of one idea, which is why
-        // they are the two halves of one key.
+        // The bookmark chords first, because the letter is shared: the command chord with `B` marks the
+        // page in front and with `Shift+B` opens the list of what is marked (`Ctrl+B` and `Ctrl+Shift+B`
+        // on Windows, `⌘B` and `⇧⌘B` on macOS) — the two halves of one idea, which is why they are the
+        // two halves of one key.
         if keystroke.key.as_str() == "b" {
             if keystroke.modifiers.shift {
                 self.show_marks(cx);
@@ -3261,7 +3270,7 @@ impl NoteApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !event.keystroke.modifiers.control {
+        if !keys::is_primary(event.keystroke.modifiers) {
             return;
         }
 
@@ -3281,7 +3290,7 @@ impl NoteApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !event.keystroke.modifiers.control {
+        if !keys::is_primary(event.keystroke.modifiers) {
             return;
         }
 
@@ -3702,16 +3711,22 @@ impl NoteApp {
         // The measurement session, in front of the live meters rather than instead of them: the meters are
         // what is happening now, and this is the stretch that was measured (see [`crate::timing::Session`]).
         if self.session_at.is_some() {
-            parts.push(format!("measuring: {MEASURE_KEY} stops it"));
+            parts.push(format!(
+                "measuring: {} stops it",
+                keys::label(keys::chord::MEASURE)
+            ));
         } else if let Some(measured) = self.measured {
             parts.push(measured.summary());
         }
 
         // The palette at the pen says how to leave it, the way a running session says how to stop it:
         // the ring is on screen but the *key* is not on it, and this line is where the app names the
-        // states a reader is in (see [`PALETTE_KEY`]).
+        // states a reader is in (see [`keys::chord::PALETTE`]).
         if self.palette_is_open() {
-            parts.push(format!("palette: {PALETTE_KEY} or Esc puts it away"));
+            parts.push(format!(
+                "palette: {} or Esc puts it away",
+                keys::label(keys::chord::PALETTE)
+            ));
         }
 
         parts.push(self.timings.summary());
@@ -3875,7 +3890,7 @@ impl NoteApp {
             icon_button(
                 "undo",
                 IconName::Undo2,
-                "Undo (Ctrl+Z)",
+                keys::tooltip::UNDO.as_str(),
                 self.ink.can_undo(),
                 cx,
                 |app, cx| app.undo(cx),
@@ -3884,7 +3899,7 @@ impl NoteApp {
             icon_button(
                 "redo",
                 IconName::Redo2,
-                "Redo (Ctrl+Y)",
+                keys::tooltip::REDO.as_str(),
                 self.ink.can_redo(),
                 cx,
                 |app, cx| app.redo(cx),
@@ -4628,7 +4643,7 @@ impl NoteApp {
             icon_button(
                 "page-turn-ccw",
                 IconName::RotateCcw,
-                "Turn this page counter-clockwise (Ctrl+Shift+R)",
+                keys::tooltip::TURN_PAGE_CCW.as_str(),
                 true,
                 cx,
                 |app, cx| app.turn_page(-1, cx),
@@ -4637,7 +4652,7 @@ impl NoteApp {
             icon_button(
                 "page-turn-cw",
                 IconName::RotateCw,
-                "Turn this page clockwise (Ctrl+R)",
+                keys::tooltip::TURN_PAGE_CW.as_str(),
                 true,
                 cx,
                 |app, cx| app.turn_page(1, cx),
@@ -4647,7 +4662,7 @@ impl NoteApp {
             icon_button(
                 "pages-turn-ccw",
                 IconName::RotateCcwSquare,
-                "Turn every page counter-clockwise (Ctrl+Alt+Shift+R)",
+                keys::tooltip::TURN_PAGES_CCW.as_str(),
                 true,
                 cx,
                 |app, cx| app.turn_every_page(-1, cx),
@@ -4656,7 +4671,7 @@ impl NoteApp {
             icon_button(
                 "pages-turn-cw",
                 IconName::RotateCwSquare,
-                "Turn every page clockwise (Ctrl+Alt+R)",
+                keys::tooltip::TURN_PAGES_CW.as_str(),
                 true,
                 cx,
                 |app, cx| app.turn_every_page(1, cx),
@@ -4670,7 +4685,7 @@ impl NoteApp {
                 } else {
                     IconName::Bookmark
                 },
-                "Bookmark this page (Ctrl+B)",
+                keys::tooltip::MARK.as_str(),
                 marked,
                 cx,
                 |app, cx| app.toggle_bookmark(cx),
@@ -4679,7 +4694,7 @@ impl NoteApp {
             icon_button(
                 "page-marks",
                 IconName::BookMarked,
-                "The bookmarked pages (Ctrl+Shift+B)",
+                keys::tooltip::MARKED.as_str(),
                 true,
                 cx,
                 |app, cx| app.show_marks(cx),
@@ -4692,7 +4707,7 @@ impl NoteApp {
             icon_button(
                 "page-contents",
                 IconName::ListTree,
-                "The document's own contents (Ctrl+Shift+O)",
+                keys::tooltip::CONTENTS.as_str(),
                 self.pdf.has_outline(),
                 cx,
                 |app, cx| app.show_outline(cx),
@@ -5027,7 +5042,7 @@ impl Render for NoteApp {
             .size_full()
             .bg(desk)
             .text_color(foreground)
-            // A trackpad's pinch, and a wheel with `Ctrl` held, both arrive here: the canvas is the
+            // A trackpad's pinch, and a wheel with the command modifier held, both arrive here: the canvas is the
             // whole window's only interactive element, so it is what the gestures hit.
             .on_scroll_wheel(
                 cx.listener(|app, event: &ScrollWheelEvent, _, cx| app.on_wheel(event, cx)),

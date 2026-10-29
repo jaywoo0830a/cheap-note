@@ -30,7 +30,8 @@
 //! The list takes the keyboard when it has focus: arrows move, Enter opens, Escape cancels, and a
 //! typed character lands in the search box the list draws for itself — which is how a screen with no
 //! text field of its own is still typed into. The chords that are the *app's* rather than the list's
-//! (`Ctrl+N`, `Ctrl+O`, `Ctrl+S`) are bound as actions, the way [`crate::app`]'s undo and redo are.
+//! (a new sheet, an open and a save — `Ctrl+N`/`O`/`S` on Windows, `⌘N`/`O`/`S` on macOS) are bound
+//! as actions, the way [`crate::app`]'s undo and redo are.
 //!
 //! ## The mouse
 //!

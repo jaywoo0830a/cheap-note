@@ -35,8 +35,9 @@ anyhow = "=1.0.104"
 image = { version = "0.25", default-features = false }
 
 # Pdfium is loaded at run time rather than linked, so the handful of C entry points this view calls
-# (`src/pdfium/`) have to be declared once. The declarations are `#[cfg(windows)]` under the target
-# below and the loader is a stub elsewhere, which is why this crate builds on any platform while PDF
-# support does not: the macOS build needs the dylib name and a `dlopen` (`src/pdfium/api.rs`).
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_System_LibraryLoader"] }
+# (`src/pdfium/`) have to be declared once. `libloading` is the loader: one `dlopen`/`LoadLibrary`
+# behind one API, so the same code finds `pdfium.dll`, `libpdfium.dylib` or `libpdfium.so`
+# (`src/pdfium/api.rs`). It is the only `unsafe` the view does not write itself, and it is the only
+# dependency here that exists to call into C at all — which is the point: before it, this manifest
+# carried the `windows` crate for `LoadLibraryW` and the other two platforms had a stub.
+libloading = "=0.9.0"

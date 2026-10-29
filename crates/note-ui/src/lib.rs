@@ -23,6 +23,7 @@
 //! | ----------- | ------------------------------------------------------------------ |
 //! | [`input`]   | one pen reading in the app's own terms, and the queue it arrives through |
 //! | [`platform`]| the seam: the four things a platform lends the view                |
+//! | `keys`      | the chords, and how this platform writes them (`Ctrl+Z`, `⌘Z`)     |
 //! | [`ink`]     | readings to strokes: edges, resampling, width, erasing             |
 //! | [`canvas`]  | the sheet's size, colour and ruling                                |
 //! | [`ink_layer`] | the canvas *description*: what the surface is asked to paint     |
@@ -83,6 +84,7 @@ mod canvas;
 mod history;
 mod home;
 mod ink;
+mod keys;
 mod note;
 mod outline;
 mod pages;
@@ -131,10 +133,15 @@ pub fn run(installer: Installer) {
 
         // The keyboard's way to undo and redo, which the bar's buttons are the other way to reach (see
         // the `actions!` declaration in `app`). Three bindings for two commands, because Windows
-        // applications reach redo with `Ctrl+Y` while everything else reaches it with `Ctrl+Shift+Z`,
-        // and there is no text field anywhere in this app for either to collide with.
+        // applications reach redo with `Ctrl+Y` while everything else reaches it with `⇧⌘Z` — and
+        // there is no text field anywhere in this app for either to collide with.
         //
-        // Everything else a key does — the home screen's list, Escape, `Ctrl+N`, `Ctrl+O`, `Ctrl+S` —
+        // The chords say `secondary` rather than `ctrl`: that is the modifier the *platform* uses for
+        // commands, and `gpui` resolves it per target (⌘ on macOS, Ctrl elsewhere). The specs come
+        // from `keys`, which is also what the interface names them from, so a binding and the tooltip
+        // that mentions it cannot disagree.
+        //
+        // Everything else a key does — the home screen's list, Escape, the new/open/save chords —
         // is handled by the screen that is showing, as a listener the painted element registers. That
         // is what lets a key reach a window with nothing focused, and lets a *character* reach the
         // list's filter without a text field to type it into. See [`home`].
@@ -142,9 +149,9 @@ pub fn run(installer: Installer) {
         // Registered on the application rather than on the view: a binding belongs to the window that
         // will receive the keystroke, and the view does not exist yet at this point.
         cx.bind_keys([
-            KeyBinding::new("ctrl-z", Undo, None),
-            KeyBinding::new("ctrl-y", Redo, None),
-            KeyBinding::new("ctrl-shift-z", Redo, None),
+            KeyBinding::new(keys::chord::UNDO, Undo, None),
+            KeyBinding::new(keys::chord::REDO, Redo, None),
+            KeyBinding::new(keys::chord::REDO_ALT, Redo, None),
         ]);
 
         // What the app was asked to open: a path on the command line, which is what a file

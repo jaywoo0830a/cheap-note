@@ -28,7 +28,7 @@
 //! ## Where the library comes from, and where it is looked for
 //!
 //! The repository does not carry Pdfium: it is downloaded into `vendor/` (see `vendor/README.md`),
-//! and `/vendor` is ignored by git. A build copies `vendor/lib/*.dll` next to the executable it
+//! and `/vendor` is ignored by git. A build copies the platform's library next to the executable it
 //! produces (`build.rs`), and that is the first place this module looks — so a release build is a
 //! *pair* of files that can be started from anywhere, or carried to another machine, and PDFs
 //! open.
@@ -39,10 +39,21 @@
 //! release build is normally started). A fresh clone has none of this, and that is a state the app
 //! is built for: it starts, draws, writes ink, and refuses to open a PDF with a message naming
 //! where the library belongs rather than crashing.
+//!
+//! ## One loader, three platforms
+//!
+//! `libloading` is the loader, and it is the whole of what makes this file portable: it is
+//! `LoadLibraryW` on Windows and `dlopen` everywhere else, behind one `Library` type and one `get`.
+//! Nothing here is `#[cfg]`-ed by platform any more — what changes between Windows, macOS and Linux
+//! is the *file name* ([`LIBRARY_NAME`]) and where a build puts it, and both are named rather than
+//! guessed. The handle is kept inside [`Api`] for the life of the process, because dropping it would
+//! unmap the code while a document is still open (see the initialisation note above).
 
-use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void, CString};
+use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+use libloading::Library;
 
 use crate::error::{AppError, Result};
 
@@ -110,14 +121,11 @@ pub(super) struct LibraryConfig {
     v8_embedder_slot: c_uint,
 }
 
-/// A loaded shared library, as an opaque handle.
-type Library = *mut c_void;
-
 /// The file name Pdfium is built as on this platform.
 ///
-/// Named on every platform even though only Windows loads one through `LoadLibrary`: the stub below
-/// reports what it *would* have looked for, and a macOS build's first step is to load this file rather
-/// than to guess what it is called.
+/// The one platform-shaped fact in this file, and it is a *name* rather than a call: `libloading`
+/// loads whichever of these the build put beside the executable, so Windows, macOS and Linux differ
+/// here and nowhere else.
 #[cfg(windows)]
 const LIBRARY_NAME: &str = "pdfium.dll";
 /// The same library, built for macOS.
@@ -196,6 +204,13 @@ pub(super) struct Api {
     pub(super) text_unicode: unsafe extern "C" fn(FpdfTextPage, c_int) -> c_uint,
     pub(super) text_char_box:
         unsafe extern "C" fn(FpdfTextPage, c_int, *mut f64, *mut f64, *mut f64, *mut f64) -> c_int,
+    /// The library those functions came from, held so that it is never unmapped.
+    ///
+    /// Every pointer in this struct points *into* this mapping, so dropping it would leave the app
+    /// with functions that no longer exist — and Pdfium's own documentation forbids unloading while a
+    /// document is alive. [`API`] is a `OnceLock`, so holding it here is exactly the lifetime the
+    /// library asks for: the process.
+    _library: Library,
 }
 
 /// The process-wide library, or the message explaining why there is none.
@@ -243,46 +258,47 @@ fn load_api() -> Result<Api> {
 
     unsafe {
         let api = Api {
-            init_library: resolve(library, "FPDF_InitLibraryWithConfig")?,
-            load_memory_document: resolve(library, "FPDF_LoadMemDocument64")?,
-            close_document: resolve(library, "FPDF_CloseDocument")?,
-            page_count: resolve(library, "FPDF_GetPageCount")?,
-            page_size: resolve(library, "FPDF_GetPageSizeByIndexF")?,
-            load_page: resolve(library, "FPDF_LoadPage")?,
-            close_page: resolve(library, "FPDF_ClosePage")?,
-            page_rotation: resolve(library, "FPDFPage_GetRotation")?,
-            bitmap_create_ex: resolve(library, "FPDFBitmap_CreateEx")?,
-            bitmap_fill: resolve(library, "FPDFBitmap_FillRect")?,
-            bitmap_buffer: resolve(library, "FPDFBitmap_GetBuffer")?,
-            bitmap_stride: resolve(library, "FPDFBitmap_GetStride")?,
-            bitmap_width: resolve(library, "FPDFBitmap_GetWidth")?,
-            bitmap_height: resolve(library, "FPDFBitmap_GetHeight")?,
-            bitmap_destroy: resolve(library, "FPDFBitmap_Destroy")?,
-            render_start: resolve(library, "FPDF_RenderPageBitmap_Start")?,
-            render_continue: resolve(library, "FPDF_RenderPage_Continue")?,
+            init_library: resolve(&library, "FPDF_InitLibraryWithConfig")?,
+            load_memory_document: resolve(&library, "FPDF_LoadMemDocument64")?,
+            close_document: resolve(&library, "FPDF_CloseDocument")?,
+            page_count: resolve(&library, "FPDF_GetPageCount")?,
+            page_size: resolve(&library, "FPDF_GetPageSizeByIndexF")?,
+            load_page: resolve(&library, "FPDF_LoadPage")?,
+            close_page: resolve(&library, "FPDF_ClosePage")?,
+            page_rotation: resolve(&library, "FPDFPage_GetRotation")?,
+            bitmap_create_ex: resolve(&library, "FPDFBitmap_CreateEx")?,
+            bitmap_fill: resolve(&library, "FPDFBitmap_FillRect")?,
+            bitmap_buffer: resolve(&library, "FPDFBitmap_GetBuffer")?,
+            bitmap_stride: resolve(&library, "FPDFBitmap_GetStride")?,
+            bitmap_width: resolve(&library, "FPDFBitmap_GetWidth")?,
+            bitmap_height: resolve(&library, "FPDFBitmap_GetHeight")?,
+            bitmap_destroy: resolve(&library, "FPDFBitmap_Destroy")?,
+            render_start: resolve(&library, "FPDF_RenderPageBitmap_Start")?,
+            render_continue: resolve(&library, "FPDF_RenderPage_Continue")?,
             // Closing the render is not the same as closing the page: Pdfium keeps resources for
             // a progressive render until this is called, whether it finished or was abandoned.
-            render_page_close: resolve(library, "FPDF_RenderPage_Close")?,
-            last_error: resolve(library, "FPDF_GetLastError")?,
+            render_page_close: resolve(&library, "FPDF_RenderPage_Close")?,
+            last_error: resolve(&library, "FPDF_GetLastError")?,
             // The outline: what the document's own table of contents is made of. Reading it is not
             // rendering, so it needs no page handle — a title, a destination, and the two ways of
             // walking the tree.
-            bookmark_first_child: resolve(library, "FPDFBookmark_GetFirstChild")?,
-            bookmark_next_sibling: resolve(library, "FPDFBookmark_GetNextSibling")?,
-            bookmark_title: resolve(library, "FPDFBookmark_GetTitle")?,
-            bookmark_dest: resolve(library, "FPDFBookmark_GetDest")?,
-            bookmark_action: resolve(library, "FPDFBookmark_GetAction")?,
-            action_type: resolve(library, "FPDFAction_GetType")?,
-            action_dest: resolve(library, "FPDFAction_GetDest")?,
-            dest_page_index: resolve(library, "FPDFDest_GetDestPageIndex")?,
+            bookmark_first_child: resolve(&library, "FPDFBookmark_GetFirstChild")?,
+            bookmark_next_sibling: resolve(&library, "FPDFBookmark_GetNextSibling")?,
+            bookmark_title: resolve(&library, "FPDFBookmark_GetTitle")?,
+            bookmark_dest: resolve(&library, "FPDFBookmark_GetDest")?,
+            bookmark_action: resolve(&library, "FPDFBookmark_GetAction")?,
+            action_type: resolve(&library, "FPDFAction_GetType")?,
+            action_dest: resolve(&library, "FPDFAction_GetDest")?,
+            dest_page_index: resolve(&library, "FPDFDest_GetDestPageIndex")?,
             // The text of a page: what a highlighter snaps to. Reading it is not rendering — the
             // char boxes are in the page's own coordinates — so this needs no bitmap and no
             // render, which is what lets a page's text be read the moment it is turned to.
-            text_load_page: resolve(library, "FPDFText_LoadPage")?,
-            text_close_page: resolve(library, "FPDFText_ClosePage")?,
-            text_count_chars: resolve(library, "FPDFText_CountChars")?,
-            text_unicode: resolve(library, "FPDFText_GetUnicode")?,
-            text_char_box: resolve(library, "FPDFText_GetCharBox")?,
+            text_load_page: resolve(&library, "FPDFText_LoadPage")?,
+            text_close_page: resolve(&library, "FPDFText_ClosePage")?,
+            text_count_chars: resolve(&library, "FPDFText_CountChars")?,
+            text_unicode: resolve(&library, "FPDFText_GetUnicode")?,
+            text_char_box: resolve(&library, "FPDFText_GetCharBox")?,
+            _library: library,
         };
 
         // Once, for the process: every document lives inside this initialisation, and Pdfium's own
@@ -299,20 +315,20 @@ fn load_api() -> Result<Api> {
         };
         (api.init_library)(&config);
 
-        // The library handle is not stored: Windows keeps a loaded module in the process until it
-        // exits, and `FPDF_DestroyLibrary` is deliberately not called (see the module docs).
+        // `FPDF_DestroyLibrary` is deliberately not called (see the module docs), and the handle
+        // travels with the API so that the mapping is never unmapped either.
         Ok(api)
     }
 }
 
 /// Loads the shared library, from the places the app ships it or a build puts it.
-#[cfg(windows)]
+///
+/// One implementation for every platform: `libloading` is `LoadLibraryW` on Windows and `dlopen`
+/// elsewhere, so the only thing that changes between them is [`LIBRARY_NAME`]. Whichever file is
+/// found first wins, and the ones that were found but refused are named in the failure — a library
+/// that exists and will not load (a missing C runtime, a wrong architecture) reads differently from
+/// one that does not exist at all, and only the first is worth looking for again.
 fn open_library() -> Result<Library> {
-    use std::os::windows::ffi::OsStrExt as _;
-
-    use windows::core::PCWSTR;
-    use windows::Win32::System::LibraryLoader::LoadLibraryW;
-
     let candidates = library_candidates();
     let mut tried: Vec<String> = Vec::new();
 
@@ -322,14 +338,10 @@ fn open_library() -> Result<Library> {
             continue;
         }
 
-        let wide: Vec<u16> = candidate
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
-        match unsafe { LoadLibraryW(PCWSTR(wide.as_ptr())) } {
-            Ok(module) => return Ok(module.0 as Library),
+        // The whole of the `unsafe` is this call: the code the loader maps is kept for the life of
+        // the process (the handle lives in `Api`), so no pointer taken from it can outlive it.
+        match unsafe { Library::new(&candidate) } {
+            Ok(library) => return Ok(library),
             Err(error) => tried.push(format!("{}: {error}", candidate.display())),
         }
     }
@@ -349,14 +361,6 @@ fn open_library() -> Result<Library> {
     } else {
         tried.join("; ")
     }))
-}
-
-/// The platforms this build does not ship a library for: there is nothing to load.
-#[cfg(not(windows))]
-fn open_library() -> Result<Library> {
-    Err(AppError::PdfiumLibrary(format!(
-        "Pdfium is loaded from {LIBRARY_NAME}, which is the Windows build's library"
-    )))
 }
 
 /// Where the app looks for the shared library, nearest first.
@@ -402,35 +406,19 @@ fn candidates_for(executable: Option<&Path>, working_directory: Option<&Path>) -
 
 /// One exported function, by the name Pdfium exports it under.
 ///
-/// `T` is the function's own type, and the cast from the loader's untyped pointer is the assertion
-/// that the declaration above matches the library — which is why every name is spelled out exactly
-/// once, in [`load_api`], and checked for existence as it is resolved.
-#[cfg(windows)]
-unsafe fn resolve<T: Copy>(library: Library, name: &str) -> Result<T> {
-    use windows::core::PCSTR;
-    use windows::Win32::Foundation::HMODULE;
-    use windows::Win32::System::LibraryLoader::GetProcAddress;
-
-    let spelled = CString::new(name)
-        .map_err(|_| AppError::PdfiumLibrary(format!("{name} is not a valid symbol name")))?;
-
-    let address = unsafe { GetProcAddress(HMODULE(library), PCSTR(spelled.as_ptr() as *const u8)) };
-
-    match address {
-        Some(address) => Ok(unsafe { std::mem::transmute_copy(&address) }),
-        None => Err(AppError::PdfiumLibrary(format!(
+/// `T` is the function's own type, and the loader's untyped address is copied into it — the assertion
+/// that the declaration above matches the library, which is why every name is spelled out exactly
+/// once, in [`load_api`], and checked for existence as it is resolved. A symbol's own lifetime is tied
+/// to the library it came from, which is why the copy happens here: what leaves this function is a
+/// plain function pointer, and the library it points into is held by [`Api`] for the process.
+unsafe fn resolve<T: Copy>(library: &Library, name: &str) -> Result<T> {
+    match unsafe { library.get::<T>(name.as_bytes()) } {
+        Ok(symbol) => Ok(*symbol),
+        Err(_) => Err(AppError::PdfiumLibrary(format!(
             "{name} is missing from this build of {LIBRARY_NAME}; the library and vendor/include \
              should both be Pdfium {VENDORED_VERSION}"
         ))),
     }
-}
-
-/// A symbol that cannot be resolved without a library to resolve it from.
-#[cfg(not(windows))]
-unsafe fn resolve<T: Copy>(_library: Library, name: &str) -> Result<T> {
-    Err(AppError::PdfiumLibrary(format!(
-        "{name} cannot be resolved without the Windows library"
-    )))
 }
 
 #[cfg(test)]

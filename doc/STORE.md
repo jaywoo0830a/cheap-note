@@ -455,7 +455,7 @@ half-imported is a worse thing to explain than one that was refused.
 | anything global | there is nothing global to store: every setting is a row of the note it was changed in (§3), so a note carried to another machine arrives as it was left. The one file outside a note is the index of what has been opened, and that is a cache (§1) |
 | attachments (for now) | the container carries an `attachments\` folder faithfully, but nothing in this build writes one yet — it is where a pasted image or a recording will go |
 | rendered PDF pages | a cache, rebuilt from `source.pdf` whenever they are needed |
-| the document's outline | it belongs to the *document* — which the note carries inside itself — so it is read again at every open: a note whose document was replaced arrives with the new contents (see `src/outline.rs`) |
+| the document's outline | it belongs to the *document* — which the note carries inside itself — so it is read again at every open: a note whose document was replaced arrives with the new contents (see `crates/note-ui/src/outline.rs`) |
 
 Undo/redo history used to be in this table, as "a property of the session, not of the note". It is stored
 now (§3, *The history*): a page keeps its last few thousand edits beside its ink, so a note opened on Friday
@@ -478,11 +478,11 @@ write. That is the boundary: a note's shape is portable, a reader's timing is no
 | `crates/note-format/src/note.rs` | the note folder, the writer thread and its job queue, the zip container |
 | `crates/note-format/src/ink.rs` | the ink itself: a point, a stroke, its colour, and the geometry derived from it |
 | `crates/note-format/src/pages.rs`, `paper.rs` | the page list and its rotations; the sheet sizes and styles a note can be written on |
-| `src/ink.rs` | the page in memory: the tools, the eraser, the lasso, undo, and the document a reader turns |
-| `src/recent.rs`, `src/home.rs` | the index of what has been opened, and the list that shows it |
-| `src/app.rs` | when to write: the batch clock, page close, the checkpoint rule, and the UI |
+| `crates/note-ui/src/ink.rs` | the page in memory: the tools, the eraser, the lasso, undo, and the document a reader turns |
+| `crates/note-ui/src/recent.rs`, `crates/note-ui/src/home.rs` | the index of what has been opened, and the list that shows it |
+| `crates/note-ui/src/app.rs` | when to write: the batch clock, page close, the checkpoint rule, and the UI |
 
-The app's `src/store.rs`, `src/note.rs`, `src/pages.rs`, `src/settings.rs` and `src/history.rs` are
+The view's `crates/note-ui/src/store.rs`, `note.rs`, `pages.rs`, `settings.rs` and `history.rs` are
 re-exports of the modules above, so nothing inside the app had to be renamed when the split was made:
 `crate::store::NoteStore` is `note_format::store::NoteStore`.
 

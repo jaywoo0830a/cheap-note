@@ -811,13 +811,10 @@ dependencies = [
  "anyhow",
  "embed-resource",
  "gpui-kit",
- "image",
  "note-format",
+ "note-ui",
  "pen-windows",
  "raw-window-handle",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
  "windows 0.62.2",
  "windows-numerics 0.3.1",
 ]
@@ -3887,6 +3884,20 @@ dependencies = [
  "thiserror 2.0.21",
  "zip",
  "zstd",
+]
+
+[[package]]
+name = "note-ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui-kit",
+ "image",
+ "note-format",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "windows 0.62.2",
 ]
 
 [[package]]

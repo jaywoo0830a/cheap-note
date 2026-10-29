@@ -46,7 +46,8 @@
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use pen_windows::PenSample;
+use note_ui::input::Reading;
+use note_ui::platform::Screen;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
@@ -64,7 +65,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-use crate::cursor::{
+use note_ui::cursor::{
     PenCursor, BODY_ALPHA, BODY_HALO_ALPHA, BODY_HALO_GROW, BODY_LENGTH, NIB_ALPHA,
     NIB_BLOOM_ALPHA, NIB_BLOOM_SPREAD, NIB_RADIUS_MAX, NIB_RADIUS_MIN,
 };
@@ -153,7 +154,7 @@ pub struct CursorShape {
     /// The frame's answer, for the same reason `colour` is one — only the app knows the pen's weight and what is in
     /// hand — and the mark is where the *ink* is previewed, so its size says how thick the ink will be: a heavier pen
     /// has a heavier dot, and a highlighter's mark is as wide as the band it is about to lay
-    /// ([`crate::cursor::nib_radius_for_width`]). The drawing holds it between [`NIB_RADIUS_MIN`] and
+    /// ([`note_ui::cursor::nib_radius_for_width`]). The drawing holds it between [`NIB_RADIUS_MIN`] and
     /// [`NIB_RADIUS_MAX`] whatever arrives.
     pub nib_radius: f32,
     /// The line the ghost is drawn below, in physical client pixels.
@@ -517,7 +518,7 @@ fn row_bounds(top: f32, bottom: f32, height: usize) -> Option<(usize, usize)> {
 /// Turns a body's seven outline points into the closed polygon the filler wants, mapping each point
 /// to the surface on the way.
 ///
-/// The order of the points is [`crate::cursor::Body::outline`]'s contract — nib-left, flank
+/// The order of the points is [`note_ui::cursor::Body::outline`]'s contract — nib-left, flank
 /// control, far-left, cap control, far-right, flank control, nib-right — which is three quadratics
 /// and the closing line back to the nib. It is flattened here rather than in the filler because a
 /// curve is a shape's business and a scanline's crossings are the filler's.
@@ -587,7 +588,7 @@ fn sane_scale(scale: f32) -> f32 {
 
 /// A nib mark's radius that can be draw with, held between the two the shape declares.
 ///
-/// [`crate::cursor::nib_radius_for_width`] already clamps what the app sends, so this is the *drawing's* own
+/// [`note_ui::cursor::nib_radius_for_width`] already clamps what the app sends, so this is the *drawing's* own
 /// defence rather than a second opinion: a surface is a public thing to hand a shape to, and a radius that is
 /// not finite would draw nothing at all — a cursor with no dot in it, which is the one part of it that has to
 /// be exact.
@@ -599,57 +600,11 @@ fn sane_radius(radius: f32) -> f32 {
     }
 }
 
-/// What the frame publishes about the screen the ghost is drawn on: everything about it that a
-/// reading cannot say.
-///
-/// These five numbers are the whole of what the app knows and the overlay does not. `suppressed`
-/// means "there is nothing to draw a ghost for here" — the home list is up, or the app is asking a
-/// question the pen must not write under — and it is published rather than inferred because only the
-/// frame knows it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Screen {
-    /// Physical pixels per logical pixel, as the frame laid the window out.
-    pub scale: f32,
-    /// The colour the ghost's mark is drawn in, as `0xRRGGBB`.
-    pub colour: u32,
-    /// The colour of the soft edge under it, and of the nib's bloom.
-    ///
-    /// The frame's own answer for the paper in front: the ghost's mark is the *ink's* colour, which can be the
-    /// colour of the paper it is drawn on, and this is what keeps a white pen or a highlighter's pale yellow
-    /// findable.
-    pub halo: u32,
-    /// How wide the ghost's nib mark is, in logical pixels: half the width of the line the tool in hand lays.
-    ///
-    /// Published for the same reason the colour is — the app is the only thing that knows the pen's weight — and it is
-    /// what makes the mark a preview of the ink rather than a point. See [`CursorShape::nib_radius`].
-    pub nib_radius: f32,
-    /// The line the ghost is drawn below, in physical client pixels: the bar's bottom edge.
-    pub sheet_top: f32,
-    /// Whether the ghost is switched off, or the pen is not on the sheet at all.
-    pub suppressed: bool,
-}
-
-impl Default for Screen {
-    /// The state before the first frame has said anything: no ghost, which is the honest answer for
-    /// a screen nobody has described yet. The mark is the smallest one, because nothing has said what
-    /// is in hand — and it is not drawn at all while `suppressed` is set, which is what this is.
-    fn default() -> Self {
-        Screen {
-            scale: 1.0,
-            colour: 0x00_00_00,
-            halo: 0x00_00_00,
-            nib_radius: NIB_RADIUS_MIN,
-            sheet_top: 0.0,
-            suppressed: true,
-        }
-    }
-}
-
 /// The newest reading, and what the frame last said about the screen.
 #[derive(Clone, Copy, Debug)]
 struct Pending {
     /// The newest reading the pen thread offered, if any.
-    sample: Option<PenSample>,
+    sample: Option<Reading>,
     /// What the frame published.
     screen: Screen,
 }
@@ -662,7 +617,7 @@ struct Pending {
 ///
 /// It answers the reading as well as the shape because the drawing still needs the pen's own
 /// position: the shape is in logical pixels, and the surface it is drawn on is in physical ones.
-fn cursor_for(sample: PenSample, screen: &Screen) -> Option<(PenSample, CursorShape)> {
+fn cursor_for(sample: Reading, screen: &Screen) -> Option<(Reading, CursorShape)> {
     if screen.suppressed || sample.pixel.y <= screen.sheet_top {
         return None;
     }
@@ -816,8 +771,8 @@ impl CursorFeed {
     /// there is a ghost in it — that thread is the one with the scale factor and the sheet's edge to
     /// hand. A batch is taken by its newest reading, because the ones behind it describe a position
     /// the pen has already left.
-    pub fn offer(&self, samples: &[PenSample]) {
-        let Some(sample) = samples.last() else {
+    pub fn offer(&self, readings: &[Reading]) {
+        let Some(sample) = readings.last() else {
             return;
         };
 
@@ -826,6 +781,25 @@ impl CursorFeed {
         // when the window arrives.
         self.shared.pending().sample = Some(*sample);
         self.shared.wake();
+    }
+}
+
+/// What the view asks of the ghost: the three methods above, under the seam's names.
+///
+/// The view holds an `Arc<dyn GhostFeed>` and never learns whether the ghost is a layered window of its
+/// own (as it is here), a view inside the frame, or nothing at all — that is the whole of what a
+/// platform chooses.
+impl note_ui::platform::GhostFeed for CursorFeed {
+    fn offer(&self, readings: &[Reading]) {
+        CursorFeed::offer(self, readings)
+    }
+
+    fn set_screen(&self, screen: Screen) {
+        CursorFeed::set_screen(self, screen)
+    }
+
+    fn is_alive(&self) -> bool {
+        CursorFeed::is_alive(self)
     }
 }
 
@@ -1150,29 +1124,29 @@ unsafe extern "system" fn window_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pen_windows::{PenPhase, Point, Tilt};
+    use note_ui::input::{Phase, Point, Tilt};
 
     /// A reading at a position, with a phase and a lean.
-    fn reading(phase: PenPhase, pixel: (f32, f32), tilt: Option<(f32, f32)>) -> PenSample {
-        PenSample {
+    fn reading(phase: Phase, pixel: (f32, f32), tilt: Option<(f32, f32)>) -> Reading {
+        Reading {
             phase,
             id: 1,
             pixel: Point::new(pixel.0, pixel.1),
             tilt: tilt.map(|(x, y)| Tilt::new(x, y)),
-            ..PenSample::default()
+            ..Reading::at(phase, Point::new(pixel.0, pixel.1))
         }
     }
 
     /// A screen that wants a ghost, with nothing in the way.
     ///
-    /// The mark is the pen this app ships with — [`crate::settings::Settings::default`]'s widest press, halved —
+    /// The mark is the pen this app ships with — [`note_format::settings::Settings::default`]'s widest press, halved —
     /// because the *size* is the app's answer and these tests are about what the drawing does with one.
     fn screen() -> Screen {
         Screen {
             scale: 1.0,
             colour: 0x00_00_00,
             halo: 0x00_00_00,
-            nib_radius: crate::cursor::nib_radius_for_width(4.5),
+            nib_radius: note_ui::cursor::nib_radius_for_width(4.5),
             sheet_top: 0.0,
             suppressed: false,
         }
@@ -1180,7 +1154,7 @@ mod tests {
 
     /// The shape a reading asks for.
     fn shape(pixel: (f32, f32), tilt: Option<(f32, f32)>) -> CursorShape {
-        cursor_for(reading(PenPhase::Hover, pixel, tilt), &screen())
+        cursor_for(reading(Phase::Hover, pixel, tilt), &screen())
             .expect("a pen on the sheet has a ghost")
             .1
     }
@@ -1496,12 +1470,12 @@ mod tests {
     /// The ghost is asked for only where there is a sheet to draw it on.
     #[test]
     fn a_ghost_is_asked_for_only_on_the_sheet() {
-        let hidden = |screen: Screen, phase: PenPhase| {
+        let hidden = |screen: Screen, phase: Phase| {
             cursor_for(reading(phase, (100.0, 300.0), Some((10.0, 10.0))), &screen).is_none()
         };
 
         assert!(
-            !hidden(screen(), PenPhase::Hover),
+            !hidden(screen(), Phase::Hover),
             "a pen on the sheet has one"
         );
         assert!(hidden(
@@ -1509,7 +1483,7 @@ mod tests {
                 suppressed: true,
                 ..screen()
             },
-            PenPhase::Hover
+            Phase::Hover
         ));
         assert!(
             hidden(
@@ -1517,15 +1491,15 @@ mod tests {
                     sheet_top: 320.0,
                     ..screen()
                 },
-                PenPhase::Hover
+                Phase::Hover
             ),
             "above the bar's edge the pointer is the cursor, not the ghost"
         );
         assert!(
-            hidden(screen(), PenPhase::Leave),
+            hidden(screen(), Phase::Leave),
             "a pen out of range has no position to draw"
         );
-        assert!(hidden(screen(), PenPhase::Cancel));
+        assert!(hidden(screen(), Phase::Cancel));
     }
 
     /// The body leans up out of a clip and is cut there: nothing above the line, and nothing lost

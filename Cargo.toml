@@ -1,106 +1,18 @@
 [workspace]
-# The note's file format, on its own. It is a member rather than a module because the boundary is
-# the point: the format is what a second application — on macOS, on Linux, or a checker that draws
-# nothing — can share, and a crate boundary is the only kind that the compiler enforces. This
-# package is the Windows app, and it is the one that depends on the other way round.
-members = ["crates/note-format"]
+# Three crates, and each boundary is a question the compiler can ask:
+#
+#   note-format   what a note *is* on disk — no window, no pen, no GPU, no PDF renderer;
+#   note-ui       what the app looks like and does — GPUI, and a seam where a platform goes;
+#   the app       one per platform, and nothing but the platform: the canvas, the pen, the ghost
+#                 cursor, the pointer hook, Pdfium's own entry points, and `main`.
+#
+# The point of the middle one is the next platform: everything above the seam is written once, and
+# everything below it is what a macOS build would rewrite.
+members = ["crates/note-format", "crates/note-ui", "apps/windows"]
 resolver = "2"
 
-[package]
-name = "cheap-note"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.90"
-description = "Minimal, high-performance handwriting note-taking prototype (pen input + PDF pages)."
-license = "MIT OR Apache-2.0"
-publish = false
-
-[dependencies]
-# The format: a note as a folder of SQLite and ink, and as the one file it is carried in. Nothing
-# in it knows what a window, a pen or a GPU is — which is what makes a build for another platform
-# possible at all. Everything this app writes to disk goes through it.
-note-format = { path = "crates/note-format" }
-# UI framework. GPUI Kit 0.7.3 pulls in GPUI + gpui-base + gpui-component; the app never
-# lists GPUI itself. `component` and `assets` are on by default.
-gpui-kit = "=0.7.3"
-
-# Low-latency pen input on Windows. This crate is not published on crates.io, so it is
-# pinned to the 0.3.0 git tag. Earlier tags worked out a reading's delay by subtracting a
-# 32-bit stamp from a 32-bit clock read, which wrapped whenever the stamp was a
-# millisecond or two *ahead* of the read: the status line showed `delay 4294967287 ms`,
-# and that one reading pinned the worst-seen figure at the top of its range for the rest
-# of the session. 0.3.0 answers a wrapped subtraction as no delay at all.
-pen-windows = { git = "https://github.com/jaywoo0830a/pen-windows", tag = "0.3.0", features = ["window-handle"] }
-
-# PDF: Pdfium, loaded at run time from `vendor/lib/pdfium.dll` — which `build.rs` copies next to the
-# executable a build produces, so that a release build is a pair of files rather than a path that
-# works only when the program is started from the project root. See `vendor/README.md`.
-#
-# The app resolves the handful of C entry points it calls itself — see `src/pdfium/` — because it
-# needs the *progressive* render (`IFSDK_PAUSE`), which `pdfium-render` does not surface. The wrapper
-# declares only the entry points the app uses, checks every one as the library loads, and keeps the
-# document and page handles private; there is no third-party Pdfium binding in the dependency graph.
-
-# Serialisable state of the app's own: the index of what has been opened (see `src/recent.rs`), and
-# the bundled palette. Pinned exactly, at the versions this project was built and measured against.
-# A *note*'s JSON — its page list and its settings — is serialised by `note-format`, which pins the
-# same versions; nothing here writes a note's rows.
-serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "1"
-# Ergonomic custom error types.
-thiserror = "=2.0.21"
-# Ergonomic error propagation at the application boundary.
-anyhow = "=1.0.104"
-# Raw pixel buffers, used to hand a rendered PDF page to GPUI's image pipeline.
-image = { version = "0.25", default-features = false }
-
-# Windows-only: the pen capture's window hook and Pdfium's own entry points.
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = [
-    "Win32_Foundation",
-    # WM_SETCURSOR, SetCursor, HTCLIENT, IDC_ARROW, LoadCursorW: hiding the system pointer over
-    # the client area while the pen is in range.
-    "Win32_UI_WindowsAndMessaging",
-    # SetWindowSubclass / DefSubclassProc / RemoveWindowSubclass: answering WM_SETCURSOR before
-    # GPUI's own window procedure does. This is the comctl32 chain pen-windows already hooks on
-    # that same window, so the two procedures coexist without either knowing about the other.
-    "Win32_UI_Shell",
-    # LoadLibraryW / GetProcAddress: resolving Pdfium's own entry points, including the progressive
-    # render the wrapper crate does not expose. See `src/pdfium/api.rs`.
-    "Win32_System_LibraryLoader",
-    # The ghost cursor's own window (see `src/cursor_overlay.rs`): a top-down 32-bit DIB section, a
-    # memory device context to hold it, and `UpdateLayeredWindow` to put it on screen — the pen's
-    # cursor, drawn outside the frame.
-    "Win32_Graphics_Gdi",
-    # The canvas's own renderer (see `src/ink_layer`): a Direct3D 11 device of the app's own, a
-    # composition swap chain to present, and the DirectComposition visual that places it *under*
-    # GPUI's, in the one window both draw in.
-    "Win32_Graphics_Direct3D",
-    "Win32_Graphics_Direct3D11",
-    "Win32_Graphics_DirectComposition",
-    "Win32_Graphics_Dxgi",
-    "Win32_Graphics_Dxgi_Common",
-    # And Direct2D, which draws it: retained geometry per stroke, analytic antialiasing, and one
-    # command batch per frame rather than one multisampled pass per batch.
-    "Win32_Graphics_Direct2D",
-    "Win32_Graphics_Direct2D_Common",
-    # Not called into: the Direct2D *1.1* interface — the one that bakes a stroke's geometry into a
-    # shape the device keeps triangles for (see `src/ink_layer/render.rs`) — is only declared by the
-    # bindings when these two are on as well, and a geometry that is outlined on every frame is what
-    # this whole canvas was written to stop doing.
-    "Win32_Graphics_DirectWrite",
-    "Win32_Graphics_Imaging",
-] }
-# Direct2D's geometry is placed with a matrix, and that matrix type is this crate's.
-windows-numerics = "0.3"
-# Named types for the raw window handle GPUI hands out (used to bind the pen capture).
-raw-window-handle = "0.6"
-
-# Windows-only, build-time: compiles `assets/app.rc` into the executable, which is what puts the
-# app's icon on the desktop, in the task bar, in Alt-Tab and on the window itself. The same crate
-# and the same version GPUI's own build script already uses for its manifest. See `build.rs`.
-[target.'cfg(windows)'.build-dependencies]
-embed-resource = "=3.0.11"
+# The apps' and the crates' own dependencies live in their manifests. What is left here is what
+# Cargo insists a workspace root holds: the profiles.
 
 # Keep debug builds usable: the UI stack is compiled with optimizations while the
 # application's own crates stay fast to rebuild and debuggable.

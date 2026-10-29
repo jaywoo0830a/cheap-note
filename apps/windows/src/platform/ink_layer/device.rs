@@ -54,8 +54,8 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
-use super::canvas::Canvas;
 use super::render::Renderer;
+use note_ui::ink_layer::Canvas;
 
 /// How many buffers the swap chain is made with.
 ///

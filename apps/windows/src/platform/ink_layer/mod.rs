@@ -64,14 +64,13 @@ use gpui_kit::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::HWND;
 
-pub mod canvas;
 mod device;
 /// The canvas's own renderer. `pub(crate)` rather than private because a *colour* crosses the other way: the app
 /// describes a highlight in the one conversion the brush understands ([`render::ink_colour`]), so that a preview
 /// and the ink it previews cannot come out two different colours.
 pub(crate) mod render;
 
-pub use canvas::{Canvas, Ink, Page, Rect};
+use note_ui::ink_layer::Canvas;
 
 use device::Device;
 
@@ -157,5 +156,16 @@ impl InkLayer {
         self.device
             .render(canvas)
             .map_err(|error| format!("{error:#}"))
+    }
+}
+
+/// What the view asks of it: the seam's one method, with the reason as a sentence.
+///
+/// The error is a `String` rather than a type because the only thing the view can do with it is print
+/// it in the status line, once — a canvas that fails is a canvas that stops being drawn, not an app
+/// that stops working (see [`InkLayer::install`] for the failure that *is* fatal).
+impl note_ui::platform::InkSurface for InkLayer {
+    fn draw(&mut self, canvas: &Canvas) -> Result<(), String> {
+        InkLayer::draw(self, canvas)
     }
 }

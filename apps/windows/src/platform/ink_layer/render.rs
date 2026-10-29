@@ -38,7 +38,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use gpui_kit::{rgb, rgba, Hsla, ImageId, Rgba};
+use gpui_kit::{Hsla, ImageId, Rgba};
 // `cast`: asking a context for the later interface whose method bakes a geometry into a realization.
 use windows::core::Interface as _;
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -58,9 +58,10 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISurface};
 use windows_numerics::{Matrix3x2, Vector2};
 
-use crate::ink::Stroke;
-use crate::ink_layer::canvas::{Canvas, Fill, Page, Rect};
-use crate::pages::Quarters;
+use note_format::ink::Stroke;
+use note_format::pages::Quarters;
+use note_ui::ink_layer::canvas::{Canvas, Fill, Page, Rect};
+use note_ui::ink_layer::ink_colour;
 
 /// One unit in one pixel, whatever the display's own scale is (see the module docs).
 const DOTS_PER_INCH: f32 = 96.0;
@@ -600,7 +601,7 @@ fn flattening_tolerance(zoom: f32) -> f32 {
 /// The rotation is the *mapping's* and not any stroke's: the ink never moves when a page is turned, so
 /// what changes is where the paper's coordinates land on the screen.
 ///
-/// The matrix is derived from [`crate::ink::drawn_of_paper`] — the paper's origin and its two unit steps,
+/// The matrix is derived from [`note_ui::paint::drawn_of_paper`] — the paper's origin and its two unit steps,
 /// mapped and scaled — rather than written out case by case. It is the same function the pen's readings
 /// are turned back through, so the layer and the ink model cannot come to disagree about which way is
 /// clockwise; a table here would be a second opinion about that, and the only way it would ever be
@@ -613,9 +614,9 @@ fn ink_matrix(
     turns: Quarters,
 ) -> Matrix3x2 {
     let drawn = scale * zoom;
-    let (ox, oy) = crate::ink::drawn_of_paper((0.0, 0.0), paper, turns);
-    let (xx, xy) = crate::ink::drawn_of_paper((1.0, 0.0), paper, turns);
-    let (yx, yy) = crate::ink::drawn_of_paper((0.0, 1.0), paper, turns);
+    let (ox, oy) = note_ui::paint::drawn_of_paper((0.0, 0.0), paper, turns);
+    let (xx, xy) = note_ui::paint::drawn_of_paper((1.0, 0.0), paper, turns);
+    let (yx, yy) = note_ui::paint::drawn_of_paper((0.0, 1.0), paper, turns);
 
     Matrix3x2 {
         M11: (xx - ox) * drawn,
@@ -682,18 +683,7 @@ fn point_of(point: [f32; 2]) -> Vector2 {
 /// A highlighter is drawn exactly as a pen stroke is — the same ribbon, the same geometry realization, the same
 /// brush — and the whole of the difference is here. `rgba` takes `0xRRGGBBAA` while a stroke's colour carries its
 /// alpha in the *top* byte (`0xAARRGGBB`), so the two have to be moved to where Direct2D's brush reads them; and a
-/// colour with no alpha byte is opaque, which is what every pen stroke is (see [`crate::ink::alpha_of`]).
-pub(crate) fn ink_colour(color: u32) -> Hsla {
-    let alpha = crate::ink::alpha_of(color);
-    if alpha >= 1.0 {
-        return rgb(color).into();
-    }
-
-    let byte = (alpha * 255.0).round() as u32;
-    let (r, g, b) = ((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
-
-    rgba((r << 24) | (g << 16) | (b << 8) | byte).into()
-}
+/// colour with no alpha byte is opaque, which is what every pen stroke is (see [`note_ui::paint::alpha_of`]).
 
 /// Straight (not premultiplied) red, green, blue, alpha in `0..=1`. Not the byte order of a BGRA
 /// *pixel* — that is the surface's business, and Direct2D is the one that writes it.
@@ -711,8 +701,8 @@ fn colour_of(hsla: Hsla) -> D2D1_COLOR_F {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ink_layer::canvas::Ink;
     use gpui_kit::rgba;
+    use note_ui::ink_layer::canvas::Ink;
 
     /// The colour conversion, against the one mistake worth catching: a channel swap. The surface is
     /// BGRA and Direct2D's colour is not — passing the surface's byte order through here would turn
@@ -727,8 +717,8 @@ mod tests {
     /// A highlighter's ink is drawn with its alpha, and a pen's is drawn opaque: the two are one path.
     #[test]
     fn a_highlighter_keeps_its_alpha() {
-        let alpha = crate::ink::HIGHLIGHTER_ALPHA;
-        let band = colour_of(ink_colour(crate::ink::with_alpha(0xFF_EB_3B, alpha)));
+        let alpha = note_ui::paint::HIGHLIGHTER_ALPHA;
+        let band = colour_of(ink_colour(note_ui::paint::with_alpha(0xFF_EB_3B, alpha)));
         let pen = colour_of(ink_colour(0x1C_1C_1E));
 
         assert!(
@@ -792,7 +782,7 @@ mod tests {
     /// function against itself proves nothing. The convention: a page turned clockwise takes its own
     /// top-left corner to the sheet's top-right, and every corner stays inside the sheet it is drawn in.
     /// The ink model is turned back through the same function (see
-    /// [`crate::ink::paper_of_drawn`], and the round trip the ink tests check), so this is the half that
+    /// [`note_ui::ink::paper_of_drawn`], and the round trip the ink tests check), so this is the half that
     /// is pinned here.
     #[test]
     fn a_turned_page_is_drawn_where_the_reader_sees_it() {

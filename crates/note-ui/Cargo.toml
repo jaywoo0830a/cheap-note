@@ -1,0 +1,42 @@
+[package]
+name = "note-ui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "The cheap-note view: the bar, the home screen, the sheet, the frame loop, and the seam a platform plugs into."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# What is here is everything a note-taking application *does* — the element tree, the gestures, the
+# pages, the PDF page cache — and none of what a particular operating system does. The two traits in
+# `platform.rs` are where an OS plugs in: a canvas to draw the desk and the ink on, a pen to read, a
+# ghost cursor to follow the nib, and a pointer to hide while it does.
+#
+# So the rule for this manifest is the same one `note-format` has, one layer up: nothing here may
+# name a platform's own API. `gpui-kit` is not an exception — it is a cross-platform toolkit, and
+# `gpui-pre-platform` picks the windowing backend per target.
+[dependencies]
+note-format = { path = "../note-format" }
+
+# UI framework. GPUI Kit 0.7.3 pulls in GPUI + gpui-base + gpui-component; the view never lists GPUI
+# itself. On Windows, macOS and Linux the platform crates behind it choose the backend.
+gpui-kit = "=0.7.3"
+
+# Serialisable state of the app's own: the index of what has been opened (see `src/recent.rs`) and
+# the bundled palette (see `src/theme.rs`). A *note*'s JSON — its page list and its settings — is
+# serialised by `note-format`, which pins the same versions.
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "1"
+# Ergonomic custom error types.
+thiserror = "=2.0.21"
+# Ergonomic error propagation at the application boundary.
+anyhow = "=1.0.104"
+# Raw pixel buffers, used to hand a rendered PDF page to GPUI's image pipeline.
+image = { version = "0.25", default-features = false }
+
+# Pdfium is loaded at run time rather than linked, so the handful of C entry points this view calls
+# (`src/pdfium/`) have to be declared once. The declarations are `#[cfg(windows)]` under the target
+# below and the loader is a stub elsewhere, which is why this crate builds on any platform while PDF
+# support does not: the macOS build needs the dylib name and a `dlopen` (`src/pdfium/api.rs`).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_System_LibraryLoader"] }

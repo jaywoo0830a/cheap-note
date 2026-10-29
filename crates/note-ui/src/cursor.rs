@@ -55,7 +55,7 @@
 //! reporting. Its shadow is what makes a faint rod findable on paper that is nearly the colour of
 //! the rod itself.
 
-use pen_windows::{PenPhase, PenSample, Tilt};
+use crate::input::{Phase, Reading, Tilt};
 
 /// How long the drawn body is, in logical pixels, when the pen is laid flat.
 ///
@@ -188,9 +188,9 @@ impl PenCursor {
     /// The phases that end a visit yield `None`. The pen has left detection range, or the system
     /// has taken the pointer away, and a cursor left behind at the last position it was seen would
     /// be a lie about where the pen is.
-    pub fn from_sample(sample: PenSample, scale: f32) -> Option<Self> {
+    pub fn from_sample(sample: Reading, scale: f32) -> Option<Self> {
         match sample.phase {
-            PenPhase::Idle | PenPhase::Leave | PenPhase::Cancel => None,
+            Phase::Idle | Phase::Leave | Phase::Cancel => None,
             _ => {
                 let scale = if scale > 0.0 { scale } else { 1.0 };
 
@@ -366,21 +366,21 @@ impl Body {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pen_windows::Point;
+    use crate::input::{Phase, Point, Reading, Tilt};
 
     /// A reading at a position with the given phase and lean.
-    fn reading(phase: PenPhase, tilt: Option<(f32, f32)>) -> PenSample {
-        PenSample {
+    fn reading(phase: Phase, tilt: Option<(f32, f32)>) -> Reading {
+        Reading {
             phase,
             id: 1,
             pixel: Point::new(100.0, 200.0),
             tilt: tilt.map(|(x, y)| Tilt::new(x, y)),
-            ..PenSample::default()
+            ..Reading::default()
         }
     }
 
     /// The cursor for a reading.
-    fn cursor(phase: PenPhase, tilt: Option<(f32, f32)>) -> Option<PenCursor> {
+    fn cursor(phase: Phase, tilt: Option<(f32, f32)>) -> Option<PenCursor> {
         PenCursor::from_sample(reading(phase, tilt), 1.0)
     }
 
@@ -394,11 +394,11 @@ mod tests {
     #[test]
     fn a_cursor_is_only_drawn_while_the_pen_is_here() {
         for phase in [
-            PenPhase::Enter,
-            PenPhase::Hover,
-            PenPhase::Down,
-            PenPhase::Move,
-            PenPhase::Up,
+            Phase::Enter,
+            Phase::Hover,
+            Phase::Down,
+            Phase::Move,
+            Phase::Up,
         ] {
             assert!(
                 cursor(phase, None).is_some(),
@@ -406,7 +406,7 @@ mod tests {
             );
         }
 
-        for phase in [PenPhase::Idle, PenPhase::Leave, PenPhase::Cancel] {
+        for phase in [Phase::Idle, Phase::Leave, Phase::Cancel] {
             assert!(
                 cursor(phase, None).is_none(),
                 "{phase:?} leaves no cursor behind"
@@ -429,7 +429,7 @@ mod tests {
         ];
 
         for (tilt, expected) in cases {
-            let direction = cursor(PenPhase::Hover, Some(tilt))
+            let direction = cursor(Phase::Hover, Some(tilt))
                 .expect("a hovering pen has a cursor")
                 .lean_direction()
                 .expect("a leaning pen has a direction");
@@ -445,7 +445,7 @@ mod tests {
     /// A lean of 45 degrees on both axes lies between the two, and is a unit vector.
     #[test]
     fn a_lean_on_both_axes_points_between_them() {
-        let direction = cursor(PenPhase::Hover, Some((45.0, 45.0)))
+        let direction = cursor(Phase::Hover, Some((45.0, 45.0)))
             .expect("a hovering pen has a cursor")
             .lean_direction()
             .expect("a leaning pen has a direction");
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn an_upright_pen_shows_no_body() {
         for tilt in [(0.0, 0.0), (2.0, -1.0)] {
-            let cursor = cursor(PenPhase::Hover, Some(tilt)).expect("a hovering pen has a cursor");
+            let cursor = cursor(Phase::Hover, Some(tilt)).expect("a hovering pen has a cursor");
 
             assert!(
                 cursor.body_shape().is_none(),
@@ -483,7 +483,7 @@ mod tests {
     /// A pen that reports no tilt at all still gets a cursor: the nib mark does not depend on it.
     #[test]
     fn a_pen_without_a_tilt_sensor_still_has_a_cursor() {
-        let cursor = cursor(PenPhase::Hover, None).expect("a hovering pen has a cursor");
+        let cursor = cursor(Phase::Hover, None).expect("a hovering pen has a cursor");
 
         assert!(cursor.tilt().is_none());
         assert_eq!(
@@ -501,7 +501,7 @@ mod tests {
         let lengths: Vec<f32> = [10.0, 30.0, 60.0, 85.0]
             .into_iter()
             .map(|lean| {
-                cursor(PenPhase::Hover, Some((lean, 0.0)))
+                cursor(Phase::Hover, Some((lean, 0.0)))
                     .expect("a hovering pen has a cursor")
                     .body_length()
             })
@@ -533,7 +533,7 @@ mod tests {
     /// off: the direction cannot be misread, and there is no corner left to catch the eye.
     #[test]
     fn the_body_is_a_taper_with_a_round_far_end() {
-        let cursor = cursor(PenPhase::Hover, Some((60.0, 0.0))).expect("a hovering pen has one");
+        let cursor = cursor(Phase::Hover, Some((60.0, 0.0))).expect("a hovering pen has one");
         let body = cursor.body_shape().expect("a leaning pen has a body");
         let outline = body.outline(0.0);
         let far = body.far();
@@ -579,7 +579,7 @@ mod tests {
     /// together are one shape with a soft edge rather than two shapes.
     #[test]
     fn the_soft_edge_wraps_the_body() {
-        let body = cursor(PenPhase::Hover, Some((50.0, 0.0)))
+        let body = cursor(Phase::Hover, Some((50.0, 0.0)))
             .expect("a hovering pen has one")
             .body_shape()
             .expect("a leaning pen has a body");
@@ -610,7 +610,7 @@ mod tests {
     #[test]
     fn the_body_arrives_as_its_lean_grows() {
         let fade = |lean: f32| {
-            cursor(PenPhase::Hover, Some((lean, 0.0)))
+            cursor(Phase::Hover, Some((lean, 0.0)))
                 .expect("a hovering pen has one")
                 .body_fade()
         };
@@ -659,10 +659,10 @@ mod tests {
     /// Whatever the window's DPI, the ghost lands on the ink.
     #[test]
     fn the_dpi_scale_is_applied_once() {
-        let physical = PenSample {
-            phase: PenPhase::Hover,
+        let physical = Reading {
+            phase: Phase::Hover,
             pixel: Point::new(200.0, 400.0),
-            ..PenSample::default()
+            ..Reading::default()
         };
 
         let doubled = PenCursor::from_sample(physical, 2.0).expect("a hovering pen has one");

@@ -1,3 +1,11 @@
+[workspace]
+# The note's file format, on its own. It is a member rather than a module because the boundary is
+# the point: the format is what a second application — on macOS, on Linux, or a checker that draws
+# nothing — can share, and a crate boundary is the only kind that the compiler enforces. This
+# package is the Windows app, and it is the one that depends on the other way round.
+members = ["crates/note-format"]
+resolver = "2"
+
 [package]
 name = "cheap-note"
 version = "0.1.0"
@@ -8,6 +16,10 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+# The format: a note as a folder of SQLite and ink, and as the one file it is carried in. Nothing
+# in it knows what a window, a pen or a GPU is — which is what makes a build for another platform
+# possible at all. Everything this app writes to disk goes through it.
+note-format = { path = "crates/note-format" }
 # UI framework. GPUI Kit 0.7.3 pulls in GPUI + gpui-base + gpui-component; the app never
 # lists GPUI itself. `component` and `assets` are on by default.
 gpui-kit = "=0.7.3"
@@ -29,28 +41,12 @@ pen-windows = { git = "https://github.com/jaywoo0830a/pen-windows", tag = "0.3.0
 # declares only the entry points the app uses, checks every one as the library loads, and keeps the
 # document and page handles private; there is no third-party Pdfium binding in the dependency graph.
 
-# Serialisable application state. Pinned exactly, at the versions this project was built and measured
-# against. What is written is JSON: the index of what has been opened (see `src/recent.rs`) and a
-# note's rows, of which the page list is the one that is a list rather than a value.
+# Serialisable state of the app's own: the index of what has been opened (see `src/recent.rs`), and
+# the bundled palette. Pinned exactly, at the versions this project was built and measured against.
+# A *note*'s JSON — its page list and its settings — is serialised by `note-format`, which pins the
+# same versions; nothing here writes a note's rows.
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "1"
-# The note store: SQLite, statically compiled into the binary — `bundled` builds the amalgamation
-# with `cc`, so the user never installs anything. See `src/store.rs` for the schema, and
-# `doc/STORE.md` for why this replaced a zip of JSON.
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
-# Chunk codec. A page's strokes are encoded as a structure-of-arrays blob (see `src/chunk.rs`),
-# compressed, and sealed with a CRC32; `codec` in the `chunks` table names which compressor was
-# used, and lz4 is the cheap fallback to zstd.
-zstd = "=0.14.0"
-lz4_flex = "=0.14.0"
-crc32fast = "=1.5.2"
-# Chunks are decompressed in parallel: a page is a handful of independent 64-256 KB blobs, so
-# opening one is a rayon broadcast rather than a loop.
-rayon = "=1.12.0"
-# The note container: a zip holding the note's SQLite file, the original PDF and its attachments —
-# the *transfer* form of a note, which is what a person moves between devices. Deflate only: the
-# SQLite file and a PDF are compressed already, so deflating them spends time to save nothing.
-zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 # Ergonomic custom error types.
 thiserror = "=2.0.21"
 # Ergonomic error propagation at the application boundary.

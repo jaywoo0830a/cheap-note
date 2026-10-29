@@ -299,6 +299,48 @@ fn the_settings_a_note_keeps_are_its_own() {
     assert_eq!(read, settings, "a note keeps every setting it is given");
 }
 
+/// A setting this build no longer keeps is ignored, and left where it is.
+///
+/// The ghost cursor used to be switchable and is not any more: the pen's marker is the cursor, and a pen
+/// with none is not a state anybody chose. A note written by the build that had the switch still holds
+/// its row — and the rule the format states for exactly this case is that nothing here reads a row it
+/// does not know, and nothing deletes one either. So the row changes no answer, and survives a save.
+#[test]
+fn a_setting_this_build_no_longer_keeps_is_ignored_and_left_alone() {
+    let (store, path) = note("retired-setting");
+    drop(store);
+
+    sql(&path)
+        .execute(
+            "INSERT INTO meta (key, value) VALUES ('show_tilt_cursor', 'false')
+             ON CONFLICT(key) DO UPDATE SET value = 'false'",
+            [],
+        )
+        .expect("a row an older build wrote");
+
+    let mut store = NoteStore::open(&path).expect("the note");
+
+    let mut read = Settings::default();
+    store.read_settings(&mut read).expect("the settings");
+    assert_eq!(
+        read,
+        Settings::default(),
+        "a row this build does not know changed an answer"
+    );
+
+    // And writing the whole set back — which is what every setting change does — leaves it be.
+    store.set_settings(&read).expect("the settings written");
+
+    let kept: i64 = sql(&path)
+        .query_row(
+            "SELECT COUNT(*) FROM meta WHERE key = 'show_tilt_cursor'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("a look at the rows");
+    assert_eq!(kept, 1, "the row an older build knew was deleted");
+}
+
 /// A page's history is written with the ink it describes, and read back with it.
 ///
 /// The log is one row per edit, in the order made, and it survives a compaction — the ink changing

@@ -150,8 +150,9 @@ impl SystemCursor {
     /// pointer back when it does not.
     ///
     /// Driven by the ghost cursor rather than by the pen's range on purpose. Hiding the pointer
-    /// with nothing drawn in its place would leave the user with no cursor at all, and tying the
-    /// two to one switch means the Tilt toggle cannot produce that state.
+    /// with nothing drawn in its place would leave the user with no cursor at all, so this follows
+    /// the ghost: the pointer goes exactly while the ghost is on screen, and comes back when the
+    /// ghost is not — on the home screen, or under a question.
     ///
     /// The change takes effect immediately rather than waiting for the next `WM_SETCURSOR`, because
     /// Windows only asks when the pointer moves and a pen can enter range without moving anything.

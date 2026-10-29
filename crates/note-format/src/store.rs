@@ -1212,8 +1212,6 @@ impl NoteStore {
         into.erase_radius = row_value(conn, "erase_radius", into.erase_radius, number_of)?;
         into.show_toolbar = row_value(conn, "show_toolbar", into.show_toolbar, flag_of)?;
         into.show_status = row_value(conn, "show_status", into.show_status, flag_of)?;
-        into.show_tilt_cursor =
-            row_value(conn, "show_tilt_cursor", into.show_tilt_cursor, flag_of)?;
 
         // A path is text with nothing to look up, and *no row* is the honest answer for "no place
         // remembered yet" — an empty row would be a place with no name.
@@ -1226,7 +1224,7 @@ impl NoteStore {
 
     /// Writes every setting the note keeps, in one transaction.
     ///
-    /// *Every* setting, every time something changes: eighteen small rows in one commit, and writing the
+    /// *Every* setting, every time something changes: seventeen small rows in one commit, and writing the
     /// whole set is what makes the note the authority — a note written by a build that knew fewer
     /// settings, or one whose rows were edited by hand, is given this build's complete answer the first
     /// time anything changes. A row this build does not know is not in the list, so it is neither
@@ -1256,7 +1254,6 @@ impl NoteStore {
         put_row(&tx, "erase_radius", settings.erase_radius)?;
         put_flag(&tx, "show_toolbar", settings.show_toolbar)?;
         put_flag(&tx, "show_status", settings.show_status)?;
-        put_flag(&tx, "show_tilt_cursor", settings.show_tilt_cursor)?;
 
         match &settings.export_dir {
             Some(dir) => put_row(&tx, "export_dir", dir.display())?,
@@ -2316,7 +2313,6 @@ mod tests {
             export_dir: Some(PathBuf::from("C:/carry")),
             show_toolbar: false,
             show_status: false,
-            show_tilt_cursor: false,
         };
         let grid_settings = Settings {
             ink_color: 0x1D_4E_D8,
@@ -2338,7 +2334,6 @@ mod tests {
             export_dir: None,
             show_toolbar: true,
             show_status: true,
-            show_tilt_cursor: true,
         };
 
         ruled.set_settings(&ruled_settings).expect("settings");

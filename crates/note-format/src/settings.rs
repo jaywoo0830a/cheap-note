@@ -36,7 +36,7 @@
 //! | `page_display_width` | a number: logical pixels |
 //! | `grayscale_pages` | a flag |
 //! | `zoom` | a number, where `1.0` is the size the paper asks for |
-//! | `show_toolbar`, `show_status`, `show_tilt_cursor` | flags |
+//! | `show_toolbar`, `show_status` | flags |
 //! | `export_dir` | a path, or no row at all |
 //!
 //! **Adding a setting is four small edits, and no note is ever migrated for it**: a field and its
@@ -45,6 +45,10 @@
 //! those two lists mechanical. **Taking a setting away is easier still**: the field and its two lines go,
 //! and the rows a note already holds are left where they are — nothing here writes a row it does not
 //! read, so the answers of a build that knew more of them are never overwritten or deleted.
+//!
+//! The ghost cursor's switch went that way: the pen's marker is not a *setting* any more, because a pen
+//! with no cursor of its own is not a state anybody chose. A note that still holds the row is read as
+//! this build reads every note — the cursor is there, and the row is left alone.
 //!
 //! ## Why the numbers are data, not constants
 //!
@@ -319,14 +323,6 @@ pub struct Settings {
     /// that has to be re-shaped and re-laid-out. It is the part of the interface a person is
     /// most likely to want gone while writing, so it has its own switch.
     pub show_status: bool,
-
-    /// Whether the pen's ghost cursor is drawn.
-    ///
-    /// The ghost is a mark at the nib with the pen's body extending from it in the direction the
-    /// pen leans, so a digitizer's tilt becomes something the user can see rather than data the app
-    /// keeps to itself. It is switchable because a second marker beside the system pointer is a
-    /// matter of taste, not of correctness.
-    pub show_tilt_cursor: bool,
 }
 
 impl Default for Settings {
@@ -372,9 +368,6 @@ impl Default for Settings {
             export_dir: None,
             show_toolbar: true,
             show_status: true,
-            // On by default: a digitizer's tilt is data the user paid for, and a cursor that shows
-            // it is the only place it is ever visible.
-            show_tilt_cursor: true,
         }
     }
 }

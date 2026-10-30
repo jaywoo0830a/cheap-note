@@ -5,7 +5,7 @@ page, and the ink is on the disk as you write it.
 
 ```text
 cargo run -p cheap-note --release        # the app; add `-- <file.pdf>` to open that file's note
-cargo test --workspace     # 390 tests: the app's, the format's, and the format's black-box suite
+cargo test --workspace     # 397 tests: the app's, the format's, and the format's black-box suite
 ```
 
 Pdfium is not in the repository: it is downloaded into `vendor/` (see `vendor/README.md`), and a build
@@ -53,6 +53,7 @@ platform has to satisfy.
 | [`doc/ARCHITECTURE.md`](doc/ARCHITECTURE.md) | the shape of the program: what runs where, which thread owns what, and what may wait for what |
 | [`doc/VIEW.md`](doc/VIEW.md) | why the view is the way it is: the frame loop, the bar, the sheet, the gestures, the pen's rules |
 | [`doc/STORE.md`](doc/STORE.md) | one stroke's journey to the disk and back — which is the format crate's story |
+| [`doc/MACOS.md`](doc/MACOS.md) | the macOS port: what the seam already gives you, and what only a Mac can do |
 
 Every module in the three `src/` trees opens with the same kind of short account of
 itself — the *why* at the point of use — and those are the place to look before changing something

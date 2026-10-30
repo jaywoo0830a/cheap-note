@@ -574,7 +574,7 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
 
 ```text
 cargo run -p cheap-note --release   # the app: it opens on the home list, and Escape returns to it
-cargo test --workspace     # 390 tests, including ones that install a real canvas on a window
+cargo test --workspace     # 397 tests, including ones that install a real canvas on a window
 ```
 
 `cargo run` with a path argument opens that file's note and skips the list — which is what a file
@@ -587,6 +587,7 @@ The documents are meant to be read together:
 | [ARCHITECTURE.md](ARCHITECTURE.md) | this one: what runs where, and what may wait for what |
 | [VIEW.md](VIEW.md) | why the view is the way it is: the frame loop, the bar, the sheet, the gestures, the pen's rules |
 | [STORE.md](STORE.md) | one stroke's journey to the disk and back |
+| [MACOS.md](MACOS.md) | the macOS port: what the seam gives you, and what only a Mac can do |
 
 
 

@@ -53,7 +53,8 @@
 //! Below this crate is a platform, and it depends on this crate rather than the other way round. What
 //! a platform lends is in [`platform`] — a pen to read, a ghost cursor to follow the nib, a pointer to
 //! hide, and a surface to paint the desk and the ink on — and `apps/windows` is one implementation of
-//! those four. A macOS build would be another, and would leave everything above the seam alone.
+//! those four. A macOS build would be another, and would leave everything above the seam alone; the
+//! work that build needs is written down in `doc/MACOS.md`.
 //!
 //! ## The documents
 //!

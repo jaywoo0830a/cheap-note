@@ -1,0 +1,39 @@
+[package]
+name = "cheap-note-macos"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "cheap-note on macOS: the platform half of the view, and nothing else."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# The package name is not `cheap-note`, and the binary name is: Cargo refuses two packages of one name
+# in a workspace, and both apps are one program as far as a person is concerned.
+[[bin]]
+name = "cheap-note"
+path = "src/main.rs"
+
+# The platform half of the view: every module here implements a trait `note-ui` declared, and nothing in
+# this crate is imported by anything above it.
+[dependencies]
+note-ui = { path = "../../crates/note-ui" }
+note-format = { path = "../../crates/note-format" }
+gpui-kit = "=0.7.3"
+
+# The pen: `NSEvent`'s tablet fields, read on the thread that draws (see its own docs).
+pen-macos = { path = "pen-macos" }
+
+# The handle the pen is attached with.
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The system pointer, and the view the ink is drawn in.
+objc2-app-kit = { version = "0.3", features = ["NSCursor", "NSView", "NSWindow"] }
+objc2 = "0.6"
+objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+objc2-core-foundation = "0.3"
+foreign-types-shared = "0.3"
+# The canvas itself: Core Graphics into a bitmap, the bitmap as a layer's contents.
+core-graphics = "0.24"
+# `CHEAP_NOTE_CANVAS`/`CHEAP_NOTE_TRACE`: a PNG of the canvas, for looking at it without a screen recorder.
+png = "0.17"

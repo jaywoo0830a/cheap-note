@@ -820,6 +820,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cheap-note-macos"
+version = "0.1.0"
+dependencies = [
+ "core-graphics 0.24.0",
+ "foreign-types-shared",
+ "gpui-kit",
+ "note-format",
+ "note-ui",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-quartz-core 0.3.2",
+ "pen-macos",
+ "png 0.17.16",
+ "raw-window-handle",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"

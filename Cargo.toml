@@ -8,7 +8,7 @@
 #
 # The point of the middle one is the next platform: everything above the seam is written once, and
 # everything below it is what a macOS build would rewrite.
-members = ["crates/note-format", "crates/note-ui", "apps/windows", "apps/macos/pen-macos"]
+members = ["crates/note-format", "crates/note-ui", "apps/windows", "apps/macos", "apps/macos/pen-macos"]
 resolver = "2"
 
 # The apps' and the crates' own dependencies live in their manifests. What is left here is what

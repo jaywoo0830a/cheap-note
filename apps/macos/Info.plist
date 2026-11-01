@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  What Finder, the Dock and Gatekeeper read about the app.
+
+  The executable is `cheap-note` and it lives in `Contents/MacOS`, beside `libpdfium.dylib`: Pdfium is
+  loaded at run time (see `crates/note-ui/src/pdfium`), so it is found by looking beside the process, which
+  inside a bundle means the same directory (see `apps/macos/build.rs`).
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>cheap-note</string>
+    <key>CFBundleDisplayName</key>
+    <string>Cheap Note</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.cheap-note.app</string>
+    <key>CFBundleExecutable</key>
+    <string>cheap-note</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+</dict>
+</plist>

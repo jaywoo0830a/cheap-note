@@ -7,3 +7,6 @@ cheap-note.settings.json
 *.txt
 *.log
 *.ps1
+
+# The packaged app a release build produces (see apps/macos/bundle.sh).
+dist/

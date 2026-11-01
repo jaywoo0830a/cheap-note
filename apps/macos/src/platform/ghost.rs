@@ -57,7 +57,7 @@ use objc2_foundation::{NSRect, NSPoint, NSSize};
 use objc2_quartz_core::{CALayer, CATransaction};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-use crate::platform::canvas::Bitmap;
+use crate::platform::bitmap::Bitmap;
 
 /// How far the body's shadow is dropped, in logical pixels — the Windows overlay's own offset, so that the
 /// two builds' ghosts are one drawing.

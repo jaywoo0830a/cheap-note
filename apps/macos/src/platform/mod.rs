@@ -1,7 +1,9 @@
 //! The services the view asks for, on macOS, and the assembly of them.
 
+pub mod bitmap;
 pub mod canvas;
 pub mod ghost;
+pub mod metal;
 pub mod pen;
 pub mod pointer;
 

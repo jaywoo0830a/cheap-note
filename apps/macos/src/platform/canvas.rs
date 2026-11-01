@@ -103,14 +103,14 @@ pub struct InkCanvas {
 }
 
 /// One bitmap and the context that draws into it.
-struct Bitmap {
-    context: CGContext,
-    width: usize,
-    height: usize,
+pub(super) struct Bitmap {
+    pub(super) context: CGContext,
+    pub(super) width: usize,
+    pub(super) height: usize,
 }
 
 impl Bitmap {
-    fn new(width: usize, height: usize) -> Option<Self> {
+    pub(super) fn new(width: usize, height: usize) -> Option<Self> {
         let space = CGColorSpace::create_device_rgb();
         let context =
             CGContext::create_bitmap_context(None, width, height, 8, width * 4, &space, BGRA);
@@ -133,7 +133,7 @@ impl Bitmap {
         })
     }
 
-    fn image(&self) -> Option<CGImage> {
+    pub(super) fn image(&self) -> Option<CGImage> {
         self.context.create_image()
     }
 }
@@ -320,6 +320,7 @@ fn restore(context: &CGContext) {
     unsafe { CGContextRestoreGState(context.as_ptr().cast()) }
 }
 
+
 impl InkSurface for InkCanvas {
     /// Draws one description of the canvas.
     ///
@@ -370,7 +371,7 @@ impl InkSurface for InkCanvas {
                 .as_ref()
                 .and_then(|stroke| stroke_box(stroke, &mapping));
 
-            if let Some(damaged) = damaged(self.open, open) {
+            if let Some(damaged) = damaged(&[self.open, open]) {
                 self.restore(damaged);
 
                 if let Some(stroke) = &canvas.ink.open {
@@ -669,15 +670,10 @@ fn open_key(stroke: &note_format::ink::Stroke) -> (usize, usize, [u32; 4]) {
     )
 }
 
-/// What has to be put back before the stroke is drawn again: its old box and its new one, with a pixel of
-/// slack for the antialiased edge.
-fn damaged(previous: Option<CGRect>, current: Option<CGRect>) -> Option<CGRect> {
-    let region = match (previous, current) {
-        (Some(a), Some(b)) => Some(union(a, b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    }?;
+/// What has to be put back before the stroke is drawn again: the boxes it covered before
+/// and the ones they cover now, with a pixel of slack for the antialiased edge.
+fn damaged(boxes: &[Option<CGRect>]) -> Option<CGRect> {
+    let region = boxes.iter().flatten().copied().reduce(union)?;
 
     Some(CGRect::new(
         &CGPoint::new(region.origin.x - 1.0, region.origin.y - 1.0),
@@ -696,6 +692,7 @@ fn union(a: CGRect, b: CGRect) -> CGRect {
         &CGSize::new(right - left, bottom - top),
     )
 }
+
 
 /// The page's pixels as Core Graphics sees them, prepared once per rasterised page.
 ///

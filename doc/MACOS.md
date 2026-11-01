@@ -176,6 +176,11 @@ Two things about the *shape* of the mac capture, and they are not the Windows sh
 while the ghost is on screen). Re-assert after a window activation or a `.mouseEntered`: AppKit puts the
 arrow back on its own, and a ghost plus an arrow is two cursors.
 
+Both halves matter, and the counter alone is not enough — one `hide` is undone by the interface setting
+the arrow again on the pen's next move. So `follow(true)` replaces the arrow with a cursor made from an
+**empty image** *and* takes a `hide` on every reading the pen produces, keeping the count so that the
+pointer is given back exactly (an `unhide` per `hide`, once) when the nib leaves the sheet.
+
 ### 4.3 `platform/ghost.rs` — `GhostFeed`
 
 `Screen` is the whole interface — scale, colour, halo, nib radius, sheet top, suppressed — and
@@ -186,6 +191,24 @@ as-is. Two implementations, and the choice follows §5:
   `backgroundColor = .clear`, a high `level`), drawn from the pen thread — the same shape as Windows,
   and the fastest;
 * **in the frame** (a GPUI overlay), which needs the frame to paint it — see §5.
+
+The window is what was built (`apps/macos/src/platform/ghost.rs`). Two things the first version got wrong,
+both only visible once the pen was in hand:
+
+* **implicit animation** — a layer animates `frame` and `contents` for a quarter of a second by default, so
+  the ghost *eases* towards the nib and reads as lag rather than as a mark: set both inside
+  `CATransaction.setDisableActions(true)`;
+* **coordinates** — a reading is in the window's client pixels from the top left, while AppKit's window and
+  screen coordinates grow upwards from the bottom left. Flip, then `convertPointToScreen`: a second screen
+  or a rotation is then AppKit's arithmetic rather than ours;
+* **the lean's sign** — `NSEvent.tilt.y` counts the up-and-down lean the other way round from the
+  convention the shared geometry was written against, so `pen.rs` negates the vertical component as it
+  builds the app's `Reading`. Flipped once, at the seam; the geometry that Windows also uses is untouched.
+
+The body itself is `PenCursor::body_shape()` painted in three passes — shadow (`BODY_SHADOW_DROP`, the
+widest and faintest), soft edge (`BODY_HALO_GROW`), then the body in the ink's colour — with the nib's
+bloom and mark on top, which is the order and the alphas the Windows overlay draws. The panel is sized to
+the outline it covers, so leaning grows the window by a few pixels rather than by a window's width.
 
 Start with a plain disc at the nib and let it grow into the pen's body later: the first version's job is
 to prove the *feed* (batch in, screen published, alive), not the drawing.
@@ -259,7 +282,8 @@ that the mac crate only *uses* it.
 - [ ] a PDF opens and renders (dylib in `vendor/lib`, and `build.rs` copied it)
 - [ ] pressure and tilt change the line, and the line lands *under* the nib — the scale factor and the
       y-flip are the two places a port goes wrong
-- [ ] the ghost follows the nib and leans; the system pointer is hidden exactly while it is on screen
+- [x] the ghost follows the nib and leans, above the app's own windows; the system pointer is hidden
+      exactly while it is on screen
 - [ ] ink reaches the disk while writing; killing the app mid-stroke loses at most half a second
 - [ ] *Save* writes a zip, and **that zip opens on Windows** with the same ink — and a Windows zip
       opens on the Mac
@@ -273,9 +297,11 @@ that the mac crate only *uses* it.
 | bundled SQLite | `libsqlite3-sys` compiles C | `xcode-select --install` |
 | `vendor/` | the repository's copy is the **Windows** build (`pdfium.dll`, 158.0.8125.0) | download the mac archive from `pdfium-binaries` (`mac-arm64`), `libpdfium.dylib` into `vendor/lib/` |
 | cross-checking from Windows is impossible | `cargo check --target aarch64-apple-darwin` fails at the SQLite C compile (no cross `cc`) | the first real compile is the Mac's |
-| `apps/windows/build.rs` | filters `.dll`, embeds a `.ico` | copy it, filter `.dylib`, drop the icon step |
+| `apps/windows/build.rs` | filters `.dll`, embeds a `.ico` | copied as `apps/macos/build.rs`: `.dylib`, no icon step — a release build now carries its Pdfium beside it |
+| AppKit's "valid only for this event kind" properties | `-[NSEvent subtype]` and `isEnteringProximity` raise `NSInternalInconsistencyException` ("Invalid message sent to event") for kinds that have no such field — a `MouseEntered` did it | ask them only of the kinds that carry one (`subtype_of` in `pen-macos`); an ObjC exception cannot unwind through a callback, and `panic = "abort"` leaves only "panic in a function that cannot unwind" |
+| a release crash says nothing | `panic = "abort"` drops the message of a panic inside an AppKit callback | `std::panic::set_hook` in `main` prints it before the abort (and a backtrace with `RUST_BACKTRACE`) |
 | gpui's mac backend | `gpui-pre 0.3.9` publishes `gpui-pre-macos` + `gpui-pre-apple` | nothing: the resolution is already verified |
-| the ghost's "outside the frame" window | the Windows one is a layered window; AppKit has no `UpdateLayeredWindow` | a borderless `NSPanel`, or the in-frame overlay (§4.3, §5) |
+| the ghost's "outside the frame" window | the Windows one is a layered window; AppKit has no `UpdateLayeredWindow` | a borderless `NSWindow` at floating level, click-through and never key — done, `platform/ghost.rs` (§4.3) |
 
 ## 9. Where the pieces are
 

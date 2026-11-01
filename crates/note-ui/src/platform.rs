@@ -111,10 +111,8 @@ pub trait SystemPointer {
 
 /// The surface the desk, the paper and the ink are painted on: the view says what, this says how.
 pub trait InkSurface {
-    /// Paints one frame of the canvas.
-    ///
-    /// The error is a sentence rather than a type: it is shown in the status line, once, and the app
-    /// keeps running without a canvas rather than failing to start.
+    /// Paints one frame of the canvas. The error is a sentence rather than a type: it is shown in the
+    /// status line, once, and the app keeps running without a canvas rather than failing to start.
     fn draw(&mut self, canvas: &Canvas) -> Result<(), String>;
 }
 

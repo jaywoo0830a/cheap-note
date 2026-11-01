@@ -296,7 +296,33 @@ const CAPABILITY_PRESSURE: u64 = 0x0400;
 /// Whether an event is a proximity report, in either of the two ways AppKit delivers one.
 fn is_proximity(event: &NSEvent) -> bool {
     event.r#type() == NSEventType::TabletProximity
-        || event.subtype() == NSEventSubtype::TabletProximity
+        || subtype_of(event) == Some(NSEventSubtype::TabletProximity)
+}
+
+/// The subtype of an event that has one, and `None` for an event that does not.
+///
+/// `-[NSEvent subtype]` **raises** `NSInternalInconsistencyException` — "Invalid message sent to event" —
+/// for the kinds of event that have no subtype field, and an Objective-C exception cannot unwind through
+/// this callback: the release profile aborts and all that is left is "panic in a function that cannot
+/// unwind". A `MouseEntered` did exactly that, on a plain mouse move across the window.
+///
+/// So the question is asked only of the kinds that carry one: the four AppKit gives subtypes to, and the
+/// mouse reports a pen sends its tablet data through. `MouseEntered` and `MouseExited` are deliberately
+/// absent — they cannot be a pen's report, and asking them was the crash.
+fn subtype_of(event: &NSEvent) -> Option<NSEventSubtype> {
+    let carries_one = matches!(
+        event.r#type(),
+        NSEventType::AppKitDefined
+            | NSEventType::SystemDefined
+            | NSEventType::ApplicationDefined
+            | NSEventType::Periodic
+            | NSEventType::LeftMouseDown
+            | NSEventType::LeftMouseUp
+            | NSEventType::LeftMouseDragged
+            | NSEventType::MouseMoved
+    );
+
+    carries_one.then(|| event.subtype())
 }
 
 /// One reading from one event, or `None` when the event is not about the pointer at all.
@@ -313,18 +339,24 @@ unsafe fn reading_of(
     now: f64,
 ) -> Option<Reading> {
     let kind = event.r#type();
-    let subtype = event.subtype();
+    let subtype = subtype_of(event);
 
     // A pen arrives as a mouse event carrying the tablet subtype, or as a tablet event of its own — and
     // a driver is free to send both.
-    let tablet = kind == NSEventType::TabletPoint || subtype == NSEventSubtype::TabletPoint;
+    let tablet = kind == NSEventType::TabletPoint || subtype == Some(NSEventSubtype::TabletPoint);
+    let proximity = kind == NSEventType::TabletProximity || subtype == Some(NSEventSubtype::TabletProximity);
     let tip_down = tablet && event.buttonMask().contains(NSEventButtonMask::PenTip);
 
-    let phase = phase_of(kind, subtype, event.isEnteringProximity(), tip_down, last_phase)?;
+    // `isEnteringProximity` is a proximity event's own property, and asking any other kind raises
+    // `NSInternalInconsistencyException` ("Invalid message sent to event") — which cannot unwind through
+    // this callback: the release profile aborts. So it is asked only where it means something, and the
+    // other questions below are guarded the same way.
+    let entering = proximity && event.isEnteringProximity();
+
+    let phase = phase_of(kind, subtype, entering, tip_down, last_phase)?;
 
     // One fact on macOS: which end of the pen is down.
-    let eraser =
-        (tablet || is_proximity(event)) && event.pointingDeviceType() == NSPointingDeviceType::Eraser;
+    let eraser = (tablet || proximity) && event.pointingDeviceType() == NSPointingDeviceType::Eraser;
 
     // SAFETY: the caller's contract.
     let (x, y) = unsafe { pixel_of(event, view) };
@@ -351,14 +383,14 @@ unsafe fn reading_of(
 /// start or finish a stroke.
 fn phase_of(
     kind: NSEventType,
-    subtype: NSEventSubtype,
+    subtype: Option<NSEventSubtype>,
     entering_proximity: bool,
     tip_down: bool,
     last: Phase,
 ) -> Option<Phase> {
     // Proximity is its own event in both spellings, and it is the only place AppKit says the pen has
     // arrived or left rather than moved.
-    if kind == NSEventType::TabletProximity || subtype == NSEventSubtype::TabletProximity {
+    if kind == NSEventType::TabletProximity || subtype == Some(NSEventSubtype::TabletProximity) {
         return Some(if entering_proximity {
             Phase::Enter
         } else {
@@ -487,7 +519,7 @@ mod tests {
     /// about the pointer.
     #[test]
     fn the_mouse_reports_the_edges_a_stroke_needs() {
-        let plain = NSEventSubtype::MouseEvent;
+        let plain = Some(NSEventSubtype::MouseEvent);
         let idle = Phase::Idle;
 
         assert_eq!(
@@ -525,7 +557,7 @@ mod tests {
         assert_eq!(
             phase_of(
                 NSEventType::TabletProximity,
-                NSEventSubtype::TabletProximity,
+                Some(NSEventSubtype::TabletProximity),
                 true,
                 false,
                 idle
@@ -535,7 +567,7 @@ mod tests {
         assert_eq!(
             phase_of(
                 NSEventType::TabletProximity,
-                NSEventSubtype::TabletProximity,
+                Some(NSEventSubtype::TabletProximity),
                 false,
                 false,
                 idle
@@ -549,7 +581,7 @@ mod tests {
     #[test]
     fn a_tablet_point_event_gets_its_edges_from_the_tip_bit() {
         let point = NSEventType::TabletPoint;
-        let tablet = NSEventSubtype::TabletPoint;
+        let tablet = Some(NSEventSubtype::TabletPoint);
 
         assert_eq!(
             phase_of(point, tablet, false, true, Phase::Hover),

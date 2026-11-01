@@ -7,6 +7,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::platform::ghost::Ghost;
 use note_ui::input::{PenInbox, PenStats, Phase, Point, Reading, Tilt};
 use note_ui::platform::PenSource;
 use pen_macos::Pen;
@@ -30,7 +31,7 @@ impl PenService {
     /// Must be called on the thread that owns the window: the monitor's block is AppKit's to call, on
     /// that thread, and it converts coordinates with the window's view. A capture that cannot attach is
     /// not an error: the app keeps running and says why the pen is silent.
-    pub fn attach<W: HasWindowHandle>(window: &W) -> Self {
+    pub fn attach<W: HasWindowHandle>(window: &W, ghost: Option<Arc<Ghost>>) -> Self {
         let inbox = Arc::new(PenInbox::default());
         let capabilities = Arc::new(AtomicU64::new(0));
 
@@ -42,7 +43,16 @@ impl PenService {
         // never contended and a waker that is usually asleep.
         let tap: pen_macos::ReadingTap = Arc::new(move |reading: pen_macos::Reading| {
             counted.store(reading.capabilities, Ordering::Relaxed);
-            tapped.push(&[reading_of(&reading)]);
+
+            let reading = reading_of(&reading);
+
+            // The ghost goes first, and from the same reading: it follows the pen rather than the frame, so
+            // the disc and the stroke it belongs to are never a frame apart.
+            if let Some(ghost) = &ghost {
+                note_ui::platform::GhostFeed::offer(&**ghost, std::slice::from_ref(&reading));
+            }
+
+            tapped.push(&[reading]);
         });
 
         match Pen::attach(window, tap) {
@@ -132,7 +142,12 @@ fn reading_of(reading: &pen_macos::Reading) -> Reading {
         // this is a physical client pixel, which is what the view divides by its own scale.
         pixel: Point::new(reading.x, reading.y),
         pressure: reading.pressure,
-        tilt: reading.tilt.map(|tilt| Tilt::new(tilt.x, tilt.y)),
+        // AppKit counts the up-and-down lean the other way round from the convention the cursor geometry is
+        // written in — `note_ui::cursor` has a positive `y` tilting the body towards the *bottom* of the
+        // window, which is what a `NSEvent` on the Windows side of the port gives it. The vertical part is
+        // therefore flipped here, once, at the seam: the shared geometry stays as it was written and tested,
+        // and nothing else in the app reads tilt for geometry.
+        tilt: reading.tilt.map(|tilt| Tilt::new(tilt.x, -tilt.y)),
         inverted: reading.eraser,
         eraser: reading.eraser,
         at_us: reading.at_us,

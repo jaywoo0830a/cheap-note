@@ -1,17 +1,21 @@
 //! The services the view asks for, on macOS, and the assembly of them.
 
 pub mod canvas;
+pub mod ghost;
 pub mod pen;
 pub mod pointer;
+
+use std::sync::Arc;
 
 use gpui_kit::base::{Root, RootPlugin};
 use gpui_kit::{
     div, rgba, App, Context, Div, IntoElement, Refineable as _, Render, Stateful, StyleRefinement,
     Styled as _, Window, WindowBackgroundAppearance,
 };
-use note_ui::platform::{Installer, Platform};
+use note_ui::platform::{GhostFeed, Installer, Platform};
 
 use crate::platform::canvas::InkCanvas;
+use crate::platform::ghost::Ghost;
 use crate::platform::pen::PenService;
 use crate::platform::pointer::SystemCursor;
 
@@ -60,22 +64,24 @@ fn install(window: &mut Window) -> Platform {
     // this the canvas is painted behind an opaque surface and nothing shows.
     window.set_background_appearance(WindowBackgroundAppearance::Transparent);
 
+    // The ghost first: the pen's tap is handed it, and the tap has to exist when the capture starts.
+    let ghost = Arc::new(Ghost::install(window).expect("a ghost for the window"));
+
     // The capture must be attached on the thread that owns the window, which is this one: the monitor's
     // block is AppKit's to call, on that thread, and it converts coordinates with the window's view.
-    let pen = PenService::attach(window);
+    let pen = PenService::attach(window, Some(Arc::clone(&ghost)));
 
     // After the capture, so the pointer has the last word on a window that is activated or entered.
     let pointer = SystemCursor::install().map(|cursor| Box::new(cursor) as Box<_>);
 
     // The canvas, which is the platform's own renderer here rather than the frame's. The app cannot run
     // without one: the frame leaves the desk to it (see `NoteApp::render`).
+    // with the stroke under the pen.
     let ink = Some(Box::new(InkCanvas::install(window).expect("a canvas for the window")) as Box<_>);
 
     Platform {
         ink,
-        // The nib's ghost is not written yet: without it the app keeps the system pointer, which is a
-        // cursor, and the rules that depend on it already say so.
-        ghost: None,
+        ghost: Some(Arc::clone(&ghost) as Arc<dyn GhostFeed>),
         pointer,
         pen: Box::new(pen),
     }

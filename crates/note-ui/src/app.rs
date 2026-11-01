@@ -1019,7 +1019,8 @@ impl NoteApp {
                 if !laid_ink {
                     // Nothing on screen changed — a reading the resampler dropped, or a hover that moved
                     // the ghost and nothing else — and repainting an identical scene is what made the top
-                    // of the window flicker.
+                    // of the window flicker. The ghost is not the frame's work: it is a window of the
+                    // platform's own, moved by the pen's tap (see the platform's `ghost`).
                     return;
                 }
 
@@ -5630,7 +5631,9 @@ mod tests {
     /// A message about a file names the file, not its whole path.
     #[test]
     fn a_file_is_labelled_by_its_name() {
-        // `Path` is spelled out because the test module also has GPUI's own `Path` in scope.
+        // A Windows path is only a path on Windows: on the Mac a backslash is an ordinary character, and
+        // the whole string is the name — which is the platform's answer, not a bug in `file_label`.
+        #[cfg(windows)]
         assert_eq!(
             file_label(std::path::Path::new(r"C:\notes\chapter-3.zip")),
             "chapter-3.zip"

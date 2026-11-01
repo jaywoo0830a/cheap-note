@@ -28,10 +28,11 @@ raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The system pointer, and the view the ink is drawn in.
-objc2-app-kit = { version = "0.3", features = ["NSCursor", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSCursor", "NSColor", "NSImage", "NSView", "NSWindow"] }
 objc2 = "0.6"
-objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "CATransaction"] }
 objc2-core-foundation = "0.3"
+objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 foreign-types-shared = "0.3"
 # The canvas itself: Core Graphics into a bitmap, the bitmap as a layer's contents.
 core-graphics = "0.24"

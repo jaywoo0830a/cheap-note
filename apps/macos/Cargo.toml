@@ -52,7 +52,5 @@ objc2-metal = { version = "0.3", features = [
 ] }
 objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 foreign-types-shared = "0.3"
-# The canvas itself: Core Graphics into a bitmap, the bitmap as a layer's contents.
+# The canvas itself: geometry on the GPU, drawn by `metal.rs`; Core Graphics only for a scale factor's type.
 core-graphics = "0.24"
-# `CHEAP_NOTE_CANVAS`/`CHEAP_NOTE_TRACE`: a PNG of the canvas, for looking at it without a screen recorder.
-png = "0.17"

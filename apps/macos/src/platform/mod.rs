@@ -1,6 +1,5 @@
 //! The services the view asks for, on macOS, and the assembly of them.
 
-pub mod bitmap;
 pub mod canvas;
 pub mod ghost;
 pub mod metal;
@@ -66,8 +65,8 @@ fn install(window: &mut Window) -> Platform {
     // this the canvas is painted behind an opaque surface and nothing shows.
     window.set_background_appearance(WindowBackgroundAppearance::Transparent);
 
-    // The ghost first: the pen's tap is handed it, and the tap has to exist when the capture starts.
-    let ghost = Arc::new(Ghost::install(window).expect("a ghost for the window"));
+    // The pen's mark first: the pen's tap is handed it, and the tap has to exist when the capture starts.
+    let ghost = Arc::new(Ghost::install().expect("the pen's state"));
 
     // The capture must be attached on the thread that owns the window, which is this one: the monitor's
     // block is AppKit's to call, on that thread, and it converts coordinates with the window's view.
@@ -79,7 +78,10 @@ fn install(window: &mut Window) -> Platform {
     // The canvas, which is the platform's own renderer here rather than the frame's. The app cannot run
     // without one: the frame leaves the desk to it (see `NoteApp::render`).
     // with the stroke under the pen.
-    let ink = Some(Box::new(InkCanvas::install(window).expect("a canvas for the window")) as Box<_>);
+    let ink = Some(
+        Box::new(InkCanvas::install(window, Arc::clone(&ghost)).expect("a canvas for the window"))
+            as Box<_>,
+    );
 
     Platform {
         ink,

@@ -1,18 +1,18 @@
-//! Hiding the system pointer while the pen has a cursor of its own.
+//! The system pointer, got out of the way.
 //!
-//! The view drives this: it asks for `true` exactly while a ghost is over the sheet, and the ghost is the
-//! nib's mark the canvas paints (see [`crate::platform::ghost`]), so the two cannot disagree.
+//! The strategy (`cursor.md`): never ask AppKit to draw a pen — take the arrow away with a **transparent
+//! cursor** and let the app draw the pen itself. What is left here is the taking-away.
 //!
-//! ## Why an invisible cursor, and not a hidden one
+//! ## What this does not do, and why
 //!
-//! `NSCursor.hide()` is a counter, and a process that ends with it positive leaves the desktop without a
-//! pointer. It also loses a race: the interface sets the arrow again whenever the pointer moves, so a
-//! single `hide` is undone by the next event the pen generates. What is done instead is the ordinary
-//! drawing-app trick — the arrow is *replaced* by a cursor with nothing in it, on **every reading**, which
-//! is the pen's own rate and faster than the arrow can come back. When the pen leaves the sheet the arrow
-//! is put back once.
+//! `NSCursor.hide()` is not used at all. It is a counter — a process that ends with it positive leaves the
+//! desktop without a pointer — and it takes the hardware cursor plane out of play, which is the path that
+//! costs a frame while the cursor changes. A transparent cursor keeps the plane active and drawing nothing,
+//! which is the whole of what "hidden" is supposed to mean.
 //!
-//! The counter is still used, but only as a fallback for the case where the empty cursor cannot be made.
+//! The cursor is made once. It is set again per reading, because AppKit puts the arrow back whenever the
+//! interface handles an event and the pen's readings are the moments that count — a `set` on a cached cursor,
+//! which is not the `resetCursorRects` path the strategy rejects.
 
 use note_ui::platform::SystemPointer;
 use objc2::rc::Retained;
@@ -23,55 +23,58 @@ use objc2_foundation::{NSPoint, NSSize};
 /// The system pointer, invisible exactly while the pen has a mark of its own.
 pub struct SystemCursor {
     /// A cursor that draws nothing: what the arrow is replaced by.
-    invisible: Option<Retained<NSCursor>>,
-    /// How many hides this type has taken that it owes an unhide for.
-    hides: usize,
+    transparent: Option<Retained<NSCursor>>,
+    /// Whether the arrow is currently ours to give back.
+    hidden: bool,
 }
 
 impl SystemCursor {
-    /// Installs the pointer hook. Nothing can fail: an AppKit class method always exists.
+    /// Installs the pointer. Nothing can fail: an AppKit class method always exists.
     pub fn install() -> Option<Self> {
-        // An image with nothing in it, and a cursor made from it: where the arrow was, nothing is drawn.
-        let image = NSImage::initWithSize(NSImage::alloc(), NSSize::ZERO);
-        let invisible = NSCursor::initWithImage_hotSpot(NSCursor::alloc(), &image, NSPoint::ZERO);
-
         Some(SystemCursor {
-            invisible: Some(invisible),
-            hides: 0,
+            transparent: transparent(),
+            hidden: false,
         })
     }
+}
+
+/// A 1×1 image with nothing in it, as a cursor.
+///
+/// One pixel and not none: a cursor needs a size to be a cursor, and the strategy's whole point is that the
+/// arrow is replaced by something *valid* that draws nothing — not removed, which is what costs a frame.
+fn transparent() -> Option<Retained<NSCursor>> {
+    let image = NSImage::initWithSize(NSImage::alloc(), NSSize::new(1.0, 1.0));
+
+    Some(NSCursor::initWithImage_hotSpot(
+        NSCursor::alloc(),
+        &image,
+        NSPoint::ZERO,
+    ))
 }
 
 impl SystemPointer for SystemCursor {
     fn follow(&mut self, pen_has_its_own_cursor: bool) {
         if pen_has_its_own_cursor {
-            if let Some(invisible) = &self.invisible {
-                invisible.set();
+            if let Some(transparent) = &self.transparent {
+                transparent.set();
             }
 
-            // And the counter too. AppKit counts hides against unhides, and the interface puts the arrow
-            // back on the next event it handles: one `hide` is a snapshot, a `hide` per reading is a rule.
-            // The count is kept so the pointer can be given back exactly, rather than approximately.
-            NSCursor::hide();
-            let first = self.hides == 0;
-            self.hides += 1;
+            if !self.hidden {
+                self.hidden = true;
 
-            if first && std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
-                eprintln!("pointer: the pen has its own cursor — arrow hidden");
+                if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
+                    eprintln!("pointer: the pen has its own cursor — arrow replaced");
+                }
             }
 
             return;
         }
 
-        if self.hides == 0 {
+        if !self.hidden {
             return;
         }
 
-        for _ in 0..self.hides {
-            NSCursor::unhide();
-        }
-
-        self.hides = 0;
+        self.hidden = false;
         NSCursor::arrowCursor().set();
 
         if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
@@ -82,12 +85,11 @@ impl SystemPointer for SystemCursor {
 
 impl Drop for SystemCursor {
     /// Gives the pointer back if it was taken, so a window that closes mid-stroke does not leave the
-    /// desktop without one.
+    /// desktop with an invisible arrow.
     fn drop(&mut self) {
-        for _ in 0..self.hides {
-            NSCursor::unhide();
+        if self.hidden {
+            self.hidden = false;
+            NSCursor::arrowCursor().set();
         }
-
-        self.hides = 0;
     }
 }

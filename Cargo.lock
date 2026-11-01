@@ -835,7 +835,6 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "pen-macos",
- "png 0.17.16",
  "raw-window-handle",
 ]
 

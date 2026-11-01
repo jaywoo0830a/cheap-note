@@ -25,8 +25,14 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use note_ui::ink_layer::canvas::Rect;
+use note_ui::cursor::{
+    BODY_ALPHA, BODY_HALO_ALPHA, BODY_HALO_GROW, NIB_ALPHA, NIB_BLOOM_ALPHA, NIB_BLOOM_SPREAD,
+    NIB_RADIUS_MAX, NIB_RADIUS_MIN,
+};
 use note_ui::ink_layer::{ink_colour, Canvas};
 use note_ui::paint::drawn_of_paper;
+
+use crate::platform::ghost::Mark;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
@@ -565,6 +571,86 @@ fn trapezoid(
     ]);
 }
 
+/// How far the body's shadow is dropped, in logical pixels — the Windows overlay's own offset, so that the
+/// two builds' cursors are one drawing.
+const BODY_SHADOW_DROP: [f32; 2] = [3.0, 3.6];
+
+/// How opaque the body's shadow is at full lean: the widest and faintest of the three passes.
+const BODY_SHADOW_ALPHA: f32 = 0.26;
+
+/// The pen, where the nib is: the body when it leans, and the nib's own disc.
+///
+/// The same drawing the Windows overlay makes, from the same geometry (`note_ui::cursor`) and the same
+/// constants — so a pen looks the same on both platforms. It is drawn here, in the canvas's pass, rather
+/// than in a window of its own: a cursor is above the ink and below the interface, and only this pass is.
+fn cursor_vertices(vertices: &mut Vec<Vertex>, mark: &Mark, scale: f32) {
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let position = mark.cursor.position();
+    let nib = (position[0] * scale, position[1] * scale);
+    let fade = mark.cursor.body_fade();
+
+    if let Some(body) = mark.cursor.body_shape() {
+        // Shadow, soft edge, body: the order and the colours the Windows overlay uses.
+        polygon(
+            vertices,
+            &shifted(body.outline(0.0), BODY_SHADOW_DROP),
+            scale,
+            mark.halo,
+            BODY_SHADOW_ALPHA * fade,
+        );
+        polygon(vertices, &body.outline(BODY_HALO_GROW), scale, mark.halo, BODY_HALO_ALPHA * fade);
+        polygon(vertices, &body.outline(0.0), scale, mark.colour, BODY_ALPHA * fade);
+    }
+
+    let radius = if mark.nib_radius.is_finite() {
+        mark.nib_radius.clamp(NIB_RADIUS_MIN, NIB_RADIUS_MAX)
+    } else {
+        NIB_RADIUS_MIN
+    } * scale;
+
+    // Over a bloom, so that a nib of the paper's own colour can still be found.
+    disc(
+        vertices,
+        nib,
+        radius + NIB_BLOOM_SPREAD * scale,
+        shaded(mark.halo, NIB_BLOOM_ALPHA),
+    );
+    disc(vertices, nib, radius, shaded(mark.colour, NIB_ALPHA));
+}
+
+/// One of the body's passes: its outline, filled with the nonzero rule like any other polygon.
+fn polygon(vertices: &mut Vec<Vertex>, outline: &[[f32; 2]; 7], scale: f32, colour: u32, alpha: f32) {
+    if alpha <= 0.0 {
+        return;
+    }
+
+    let points: Vec<(f32, f32)> = outline
+        .iter()
+        .map(|corner| (corner[0] * scale, corner[1] * scale))
+        .collect();
+
+    tessellate(vertices, &points, shaded(colour, alpha));
+}
+
+/// The body's outline, moved by a drop in logical pixels.
+fn shifted(outline: [[f32; 2]; 7], by: [f32; 2]) -> [[f32; 2]; 7] {
+    let mut moved = outline;
+
+    for corner in &mut moved {
+        corner[0] += by[0];
+        corner[1] += by[1];
+    }
+
+    moved
+}
+
+/// A colour and an opacity, as the app's own colour type.
+fn shaded(colour: u32, alpha: f32) -> gpui_kit::Hsla {
+    let alpha = (alpha.clamp(0.0, 1.0) * 255.0).round() as u32;
+
+    gpui_kit::rgba(((colour & 0x00FF_FFFF) << 8) | alpha).into()
+}
+
 /// A stroke as a ribbon: a quad per segment, and a disc at every joint.
 ///
 /// The model's `outline` is the ribbon's edge, and a fan of triangles over it is only correct when that
@@ -794,13 +880,24 @@ fn page_quad(canvas: &Canvas, scale: f32) -> Vec<PageVertex> {
 
 
 impl Surface {
-    /// Draws one description of the canvas. `false` when there was no drawable to draw into.
-    pub(super) fn draw(&mut self, canvas: &Canvas) -> bool {
-        if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
-            report::drawn(self.ink.len(), canvas.ink.open.as_deref().map_or(0, |s| s.outline.len()));
+    /// Draws one description of the canvas, and the pen's mark over it. `false` when there was no drawable.
+    pub(super) fn draw(&mut self, canvas: &Canvas, mark: Option<&Mark>) -> bool {
+        let scale = if canvas.scale > 0.0 { canvas.scale } else { 1.0 };
+
+        // The pen's mark: above the ink, below the interface. Built before the trace, so that "no cursor
+        // drawn" and "no cursor to draw" can be told apart.
+        let mut pointer = Vec::new();
+        if let Some(mark) = mark {
+            cursor_vertices(&mut pointer, mark, scale);
         }
 
-        let scale = if canvas.scale > 0.0 { canvas.scale } else { 1.0 };
+        if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
+            report::drawn(
+                self.ink.len(),
+                canvas.ink.open.as_deref().map_or(0, |stroke| stroke.outline.len()),
+                pointer.len(),
+            );
+        }
         let (width, height) = (self.width as f32, self.height as f32);
 
         // Behind the page: the desk, the shadow's steps, the sheet and the ruling, in the order painted.
@@ -902,6 +999,12 @@ impl Surface {
             self.solid(&encoder, &buffer, open.len(), width, height);
         }
 
+        // The pen, over everything the canvas drew: a cursor is the one thing on the sheet that has to be
+        // visible above the ink it is about to write.
+        if let Some(buffer) = self.buffer(&pointer) {
+            self.solid(&encoder, &buffer, pointer.len(), width, height);
+        }
+
         encoder.endEncoding();
 
         // SAFETY: `presentDrawable:` is the command buffer's own method for the drawable it was handed.
@@ -998,12 +1101,14 @@ mod report {
     static DRAWS: AtomicU64 = AtomicU64::new(0);
     static FINISHED: AtomicU64 = AtomicU64::new(0);
     static OPEN: AtomicU64 = AtomicU64::new(0);
+    static POINTER: AtomicU64 = AtomicU64::new(0);
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
 
-    pub fn drawn(finished: usize, open: usize) {
+    pub fn drawn(finished: usize, open: usize, pointer: usize) {
         DRAWS.fetch_add(1, Ordering::Relaxed);
         FINISHED.store(finished as u64, Ordering::Relaxed);
         OPEN.store(open as u64, Ordering::Relaxed);
+        POINTER.store(pointer as u64, Ordering::Relaxed);
 
         let mut last = LAST.lock().unwrap_or_else(|poison| poison.into_inner());
         let now = Instant::now();
@@ -1015,10 +1120,11 @@ mod report {
         *last = Some(now);
 
         println!(
-            "canvas: {} draws/s · {} finished vertices · {} under the pen",
+            "canvas: {} draws/s · {} finished vertices · {} under the pen · {} in the cursor",
             DRAWS.swap(0, Ordering::Relaxed),
             FINISHED.load(Ordering::Relaxed),
-            OPEN.load(Ordering::Relaxed)
+            OPEN.load(Ordering::Relaxed),
+            POINTER.load(Ordering::Relaxed)
         );
     }
 }

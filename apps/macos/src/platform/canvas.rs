@@ -10,7 +10,9 @@ use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindowOrderingMode};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use std::sync::Arc;
 
+use crate::platform::ghost::Ghost;
 use crate::platform::metal::Surface;
 
 /// The ink, drawn by the platform.
@@ -19,11 +21,13 @@ pub struct InkCanvas {
     view: Retained<NSView>,
     /// The GPU surface inside it.
     surface: Surface,
+    /// Where the pen is, for the mark this canvas draws over the ink.
+    ghost: Arc<Ghost>,
 }
 
 impl InkCanvas {
     /// Installs the canvas in a window that has just been made: a view of ours under GPUI's.
-    pub fn install(window: &gpui_kit::Window) -> Option<Self> {
+    pub fn install(window: &gpui_kit::Window, ghost: Arc<Ghost>) -> Option<Self> {
         let handle = HasWindowHandle::window_handle(window).ok()?;
         let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
             return None;
@@ -51,7 +55,11 @@ impl InkCanvas {
         // Below GPUI's view: the interface is painted over the ink, never the other way round.
         parent.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Below, Some(gpui_view));
 
-        let mut canvas = InkCanvas { view, surface };
+        let mut canvas = InkCanvas {
+            view,
+            surface,
+            ghost,
+        };
         canvas.follow(scale);
 
         Some(canvas)
@@ -85,7 +93,8 @@ impl InkSurface for InkCanvas {
         };
 
         self.follow(scale);
-        self.surface.draw(canvas);
+        // The pen's mark is part of the frame, now: above the ink, below the interface.
+        self.surface.draw(canvas, self.ghost.mark().as_ref());
 
         Ok(())
     }

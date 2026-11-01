@@ -262,7 +262,7 @@ impl Surface {
                 continue;
             }
 
-            ribbon(&mut self.ink, stroke, &mapping, (0.0, 0.0), ink_colour(stroke.color));
+            fill(&mut self.ink, stroke, &mapping, (0.0, 0.0), ink_colour(stroke.color));
         }
 
         // The ink in hand, where a drag has taken it, and once more in the selection's colour.
@@ -272,10 +272,10 @@ impl Surface {
                     continue;
                 }
 
-                ribbon(&mut self.ink, stroke, &mapping, ink.offset, ink_colour(stroke.color));
+                fill(&mut self.ink, stroke, &mapping, ink.offset, ink_colour(stroke.color));
 
                 if let Some(colour) = ink.selection {
-                    ribbon(&mut self.ink, stroke, &mapping, ink.offset, colour);
+                    fill(&mut self.ink, stroke, &mapping, ink.offset, colour);
                 }
             }
         }
@@ -283,7 +283,7 @@ impl Surface {
         // The lasso's loop: the ring the reader is drawing, in the selection's colour.
         if let Some(stroke) = &ink.lasso {
             let colour = ink.selection.unwrap_or_else(|| ink_colour(stroke.color));
-            ribbon(&mut self.ink, stroke, &mapping, (0.0, 0.0), colour);
+            fill(&mut self.ink, stroke, &mapping, (0.0, 0.0), colour);
         }
     }
 
@@ -415,6 +415,154 @@ impl Vertex {
             a: rgba.a,
         }
     }
+}
+
+/// A finished stroke, filled exactly: its outline, tessellated once and kept.
+///
+/// The outline is the ribbon's edge, and it is a polygon — one Direct2D fills in a single primitive on
+/// Windows, which is why a stroke that crosses itself there is ink and not a hole. Metal has no such fill,
+/// so the polygon is cut into triangles here, once per stroke, and the triangles are cached with the rest of
+/// the ink (see [`InkKey`]).
+fn fill(
+    vertices: &mut Vec<Vertex>,
+    stroke: &note_format::ink::Stroke,
+    mapping: &Mapping,
+    shift: (f32, f32),
+    colour: gpui_kit::Hsla,
+) {
+    if stroke.outline.len() < 3 {
+        return;
+    }
+
+    let polygon: Vec<(f32, f32)> = stroke
+        .outline
+        .iter()
+        .map(|point| mapping.point(*point, shift))
+        .collect();
+
+    tessellate(vertices, &polygon, colour);
+}
+
+/// Cuts a closed polygon into triangles with the **nonzero winding** rule.
+///
+/// Nonzero, and not even-odd: a stroke that crosses itself has a region the pen passed through twice, and
+/// that region is ink. Filled even-odd it would be a hole — a highlighter would show the page through the
+/// wrong places — and the rule Direct2D fills with on Windows is nonzero too.
+///
+/// The polygon is swept as a stack of trapezoids: every height where it has a vertex bounds a band, no edge
+/// crosses a band's top or bottom inside it, and a band's fill is the run of x-intervals where the winding
+/// is not zero. That is exact for any single closed loop, self-intersecting or not, and needs no ear to be
+/// clipped. One loop is all a stroke's outline ever is: a hole would need a second loop joined to the first
+/// by a bridge, which the ink model has no reason to make.
+fn tessellate(vertices: &mut Vec<Vertex>, polygon: &[(f32, f32)], colour: gpui_kit::Hsla) {
+    if polygon.len() < 3 {
+        return;
+    }
+
+    let mut bands: Vec<f32> = polygon.iter().map(|point| point.1).collect();
+    bands.sort_by(|left, right| left.total_cmp(right));
+    bands.dedup_by(|left, right| (*left - *right).abs() < f32::EPSILON);
+
+    // One crossing of a band: where it is at the band's middle (which is what orders two crossings), which
+    // way its edge runs, and where it meets the band's own bottom and top — one crossing gives a trapezoid
+    // two of its corners.
+    struct Crossing {
+        middle: f32,
+        winding: i32,
+        bottom: f32,
+        top: f32,
+    }
+
+    let mut crossings: Vec<Crossing> = Vec::new();
+
+    for band in bands.windows(2) {
+        let (bottom, top) = (band[0], band[1]);
+
+        if top - bottom < f32::EPSILON {
+            continue;
+        }
+
+        let middle = (bottom + top) * 0.5;
+        crossings.clear();
+
+        for index in 0..polygon.len() {
+            let (a, b) = (polygon[index], polygon[(index + 1) % polygon.len()]);
+
+            if a.1 == b.1 {
+                continue;
+            }
+
+            let (low, high) = if a.1 < b.1 { (a, b) } else { (b, a) };
+
+            // A band's ends are vertex heights, so an edge either covers it whole or does not reach it.
+            if low.1 > bottom || high.1 < top {
+                continue;
+            }
+
+            let at = |y: f32| a.0 + (b.0 - a.0) * (y - a.1) / (b.1 - a.1);
+
+            crossings.push(Crossing {
+                middle: at(middle),
+                winding: if b.1 > a.1 { 1 } else { -1 },
+                bottom: at(bottom),
+                top: at(top),
+            });
+        }
+
+        crossings.sort_by(|left, right| left.middle.total_cmp(&right.middle));
+
+        let mut winding = 0;
+        let mut span: Option<(f32, f32)> = None;
+
+        for crossing in &crossings {
+            let before = winding;
+            winding += crossing.winding;
+
+            match (before == 0, winding == 0) {
+                (true, false) => span = Some((crossing.bottom, crossing.top)),
+                (false, true) => {
+                    if let Some((left_bottom, left_top)) = span.take() {
+                        trapezoid(
+                            vertices,
+                            (left_bottom, bottom),
+                            (left_top, top),
+                            (crossing.top, top),
+                            (crossing.bottom, bottom),
+                            colour,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// One trapezoid of a band, as two triangles.
+fn trapezoid(
+    vertices: &mut Vec<Vertex>,
+    left_bottom: (f32, f32),
+    left_top: (f32, f32),
+    right_top: (f32, f32),
+    right_bottom: (f32, f32),
+    colour: gpui_kit::Hsla,
+) {
+    if (right_bottom.0 - left_bottom.0).abs() < f32::EPSILON
+        && (right_top.0 - left_top.0).abs() < f32::EPSILON
+    {
+        return;
+    }
+
+    let vertex = |corner: (f32, f32)| Vertex::new(corner.0, corner.1, colour);
+
+    vertices.extend_from_slice(&[
+        vertex(left_bottom),
+        vertex(right_bottom),
+        vertex(right_top),
+        vertex(left_bottom),
+        vertex(right_top),
+        vertex(left_top),
+    ]);
 }
 
 /// A stroke as a ribbon: a quad per segment, and a disc at every joint.
@@ -913,6 +1061,70 @@ mod tests {
         let canvas = Canvas::default();
 
         assert!(InkKey::of(&canvas) == InkKey::of(&canvas));
+    }
+}
+
+
+#[cfg(test)]
+mod fill_tests {
+    use super::*;
+
+    /// The area of the triangles a fill produced: half a cross product each, summed.
+    fn area(vertices: &[Vertex]) -> f32 {
+        vertices
+            .chunks_exact(3)
+            .map(|triangle| {
+                let (a, b, c) = (triangle[0], triangle[1], triangle[2]);
+                ((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)).abs() * 0.5
+            })
+            .sum()
+    }
+
+    fn colour() -> gpui_kit::Hsla {
+        gpui_kit::rgba(0x00FF_00FF).into()
+    }
+
+    /// A square comes out as a square: covered once, and its area is its own.
+    #[test]
+    fn a_square_is_filled_once() {
+        let square = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let mut vertices = Vec::new();
+
+        tessellate(&mut vertices, &square, colour());
+
+        assert!((area(&vertices) - 100.0).abs() < 0.01, "area {}", area(&vertices));
+    }
+
+    /// A square traced twice is still one square. This is the highlighter's case — a stroke that passes over
+    /// itself is ink, not a hole — and the reason the fill is nonzero rather than even-odd.
+    #[test]
+    fn a_region_traced_twice_is_still_ink() {
+        let one = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let mut twice: Vec<(f32, f32)> = one.to_vec();
+        twice.extend_from_slice(&one);
+
+        let mut vertices = Vec::new();
+        tessellate(&mut vertices, &twice, colour());
+
+        assert!((area(&vertices) - 100.0).abs() < 0.01, "area {}", area(&vertices));
+    }
+
+    /// Every triangle stays inside the shape it came from: a fill that spills is ink where nobody wrote.
+    #[test]
+    fn nothing_is_filled_outside_the_polygon() {
+        let polygon = [(0.0, 0.0), (40.0, 0.0), (40.0, 30.0), (0.0, 30.0)];
+        let mut vertices = Vec::new();
+
+        tessellate(&mut vertices, &polygon, colour());
+
+        for vertex in &vertices {
+            assert!(
+                (-0.01..=40.01).contains(&vertex.x) && (-0.01..=30.01).contains(&vertex.y),
+                "a corner at ({}, {}) is outside the polygon",
+                vertex.x,
+                vertex.y
+            );
+        }
     }
 }
 

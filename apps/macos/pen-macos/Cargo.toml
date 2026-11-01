@@ -1,0 +1,37 @@
+[package]
+name = "pen-macos"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "Pen input on macOS, read out of NSEvent: position, pressure and tilt, on the thread that draws."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Three readings, and nothing else: where the nib is, how hard it is pressed, and how it leans. No ink
+# engine, no smoothing, no window of its own, no thread of its own — a caller's closure is offered each
+# reading on the main thread, from inside AppKit's own event delivery.
+[dependencies]
+# The window to read, and the view that turns AppKit's coordinates into client pixels.
+raw-window-handle = "0.6"
+
+# The local event monitor, and the two AppKit classes it asks.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSEvent", "NSView", "NSWindow", "block2"] }
+# `NSProcessInfo.systemUptime` is the clock AppKit's `NSEvent.timestamp` is stamped on.
+objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSProcessInfo"] }
+
+# The example is a plain AppKit window: no GPUI, no app, so that the readings can be looked at on their
+# own. Its extra features are only paid for when examples are built.
+[dev-dependencies]
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSEvent", "NSView", "NSWindow", "block2"] }
+objc2-core-foundation = "0.3"
+objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString"] }
+# The example draws the line itself: Core Graphics into a bitmap, a layer to show it.
+core-graphics = "0.24"
+foreign-types-shared = "0.3"
+objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+
+[[example]]
+name = "watch"
+path = "examples/watch.rs"

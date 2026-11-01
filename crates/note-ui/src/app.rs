@@ -1016,24 +1016,22 @@ impl NoteApp {
                 // about whether the pen has a cursor of its own.
                 app.follow_pen_with_pointer();
 
-                if !laid_ink {
-                    // Nothing on screen changed — a reading the resampler dropped, or a hover that moved
-                    // the ghost and nothing else — and repainting an identical scene is what made the top
-                    // of the window flicker. The ghost is not the frame's work: it is a window of the
-                    // platform's own, moved by the pen's tap (see the platform's `ghost`).
-                    return;
-                }
-
-                // The canvas draws itself here, on the pen's own wake: the ink is the one part of it that
-                // changes between frames, and a frame costs several times what the ink does (see
+                // The canvas draws itself here, on the pen's own wake: it is the one part of the window that
+                // changes between readings, and a frame costs several times what the ink does (see
                 // [`Self::draw_canvas`]).
-                {
-                    app.draw_canvas();
-                }
+                //
+                // A reading that laid no ink still moved the pen — a hover, the mouse crossing the sheet —
+                // and the pen's mark is drawn by this canvas now: a hover that is not drawn is a cursor
+                // that does not move. What the early return this replaces was protecting is the
+                // *interface*, and that is still protected: the counters are only worth a frame when ink
+                // was laid.
+                app.draw_canvas();
 
                 // The counters have moved too, but the line waits for a change the user made: re-shaping
                 // text is work a frame drawn to show ink does not have to carry.
-                cx.notify();
+                if laid_ink {
+                    cx.notify();
+                }
             });
 
             if alive.is_err() {

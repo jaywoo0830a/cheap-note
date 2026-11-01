@@ -236,6 +236,26 @@ surface point), `alpha_of`, `with_alpha`, `HIGHLIGHTER_ALPHA`. The strokes carry
 colours; the outline is built by the platform from `drawn_of_paper` and the stroke's width. The
 description itself (`ink_layer/canvas.rs`) is the view's, and a mac canvas must not need to change it.
 
+#### What that renderer must not do: rebuild the ink to scroll
+
+The canvas keeps every stroke's geometry in the **paper's own units** and says separately where the paper
+is drawn and how large (`Ink::origin`, `Ink::zoom`, `Ink::rotation`, `Canvas::scale`). That split is what
+lets a pan be a *transform* rather than a redraw, and a renderer that bakes the origin into its triangles
+throws it away: on a Magic Trackpad, which reports its movement a hundred times a second, every reading
+then costs a full tessellation of the page. Measured on the mac port, with the release build and a page of
+300 strokes: **27 ms and 2.8 million vertices per reading** — a second of scrolling cost more than a second
+of CPU, and the canvas stuttered for exactly as long.
+
+So: bake in the paper's units, and pass the placement to the shader as one uniform (scale + shift in device
+pixels). `apps/macos/src/platform/metal.rs` does this in `Mapping` (paper → drawn) and `Transform`
+(drawn → window), and the ink's cache key deliberately leaves `origin`, `zoom` and `scale` out. The one
+thing that can move while the ink stays valid is the *culling* rectangle, which is grown by `CULL_SLACK`
+before the cull and re-culled once the sheet has scrolled that far.
+
+The same rule applies above the seam: `note-ui` collects a frame's worth of scroll readings and spends them
+once (`NoteApp::spend_scroll`), and holds the pan inside the layout's bounds (`Viewport::hold_pan`) so a
+wheel turned past the end of a sheet leaves no invisible offset for the next turn to pay off.
+
 ## 5. The one seam change the port may need
 
 If the canvas is **A**, or the ghost paints in the frame, the frame has to be able to paint it — and the

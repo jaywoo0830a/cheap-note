@@ -9,6 +9,10 @@
 //!
 //! * **Nothing is copied per reading.** The finished ink is built once and kept in a vertex buffer; a
 //!   reading rebuilds only the stroke under the pen, which is a few hundred vertices.
+//! * **Scrolling is a uniform, not a rebuild.** The ink is baked in the paper's own units — the units
+//!   `note_ui`'s canvas keeps its geometry in — and where the paper is drawn, how large, and which way up
+//!   is one transform the shader applies. A trackpad sends a hundred readings a second; rebuilding a page
+//!   of triangles for each of them is what made scrolling stutter, and it is what this does not do.
 //! * **Four draw calls.** Desk and paper, the page's texture, the finished ink, the open stroke. The GPU
 //!   does in microseconds what Core Graphics did in milliseconds of bitmap work.
 //! * **One drawable per present.** `CAMetalLayer` hands the compositor a surface it already owns, instead of
@@ -64,9 +68,12 @@ static inline float4 place(float2 position, float2 viewport) {
 
 vertex Varyings solid_vertex(uint id [[vertex_id]],
                              constant Vertex *vertices [[buffer(0)]],
-                             constant float2 &viewport [[buffer(1)]]) {
+                             constant float2 &viewport [[buffer(1)]],
+                             constant float4 &transform [[buffer(2)]]) {
+    // The ink is baked in the paper's own units and placed by `transform` — a scale and a shift, in device
+    // pixels. The desk, the page and the pen's mark are already placed, and are drawn through the identity.
     Varyings out;
-    out.position = place(vertices[id].position, viewport);
+    out.position = place(vertices[id].position * transform.xy + transform.zw, viewport);
     out.colour = float4(vertices[id].r, vertices[id].g, vertices[id].b, vertices[id].a);
     return out;
 }
@@ -132,6 +139,11 @@ pub(super) struct Surface {
     ink: Vec<Vertex>,
     /// What `ink` was built from — see [`InkKey`].
     ink_key: Option<InkKey>,
+    /// The part of the sheet that was on screen when `ink` was built, in the paper's units.
+    ///
+    /// The one thing that moves while the ink stays valid: a build leaves out every stroke that was off
+    /// screen, so scrolling towards one has to bring it back (see [`CULL_SLACK`]).
+    ink_visible: [f32; 4],
     /// The document's page on the GPU, and the identity of the rasterisation it holds.
     page_texture: Option<(usize, Retained<ProtocolObject<dyn MTLTexture>>)>,
     /// The multisampled target the passes draw into, resolved into the drawable. Made with the size.
@@ -184,6 +196,7 @@ impl Surface {
             layer,
             ink: Vec::new(),
             ink_key: None,
+            ink_visible: [0.0; 4],
             page_texture: None,
             msaa: None,
             width: 1,
@@ -248,23 +261,34 @@ fn pipeline(
 
 impl Surface {
     /// Rebuilds the finished ink, when what the triangles are a function of has changed.
-    fn refresh_ink(&mut self, canvas: &Canvas) {
+    fn refresh_ink(&mut self, canvas: &Canvas, scale: f32) {
         let key = InkKey::of(canvas);
+        let ink = &canvas.ink;
 
-        if self.ink_key.as_ref() == Some(&key) {
+        // How far the sheet may scroll before a stroke left out of the build could be back on screen: the
+        // culling rectangle is grown by this, and the ink is drawn again once the sheet has moved past it.
+        let slack = CULL_SLACK / (ink.zoom * scale).max(f32::MIN_POSITIVE);
+        let stale = moved(self.ink_visible, ink.visible) > slack;
+
+        if self.ink_key.as_ref() == Some(&key) && !stale {
             return;
         }
 
         self.ink.clear();
         self.ink_key = Some(key);
+        self.ink_visible = ink.visible;
 
-        let list = canvas.ink.strokes.as_slice();
+        if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
+            report::rebuilt();
+        }
+
+        let list = ink.strokes.as_slice();
         let mapping = Mapping::of(canvas);
-        let ink = &canvas.ink;
+        let cull = grow(ink.visible, slack);
         let in_hand = |index: usize| ink.selected.get(index).copied().unwrap_or(false);
 
         for (index, stroke) in list.iter().enumerate() {
-            if in_hand(index) || !stroke.visible_in(ink.visible) {
+            if in_hand(index) || !stroke.visible_in(cull) {
                 continue;
             }
 
@@ -671,12 +695,12 @@ fn ribbon(
     };
 
     let at = |point: &note_format::ink::InkPoint| mapping.point([point.x, point.y], shift);
-    // The ink's widths are in the paper's own units, and the mapping scales those by the zoom and the
-    // display's scale — so a width becomes pixels by the same two factors.
-    let pixels = |width: f32| width * 0.5 * mapping.zoom * mapping.scale;
+    // The ink's widths are in the paper's own units, as its triangles are: the transform that places the
+    // paper is what turns a half width into pixels.
+    let half = |width: f32| width * 0.5;
 
     if points.len() == 1 {
-        disc(vertices, at(first), pixels(first.width), colour);
+        disc(vertices, at(first), half(first.width), colour);
         return;
     }
 
@@ -691,7 +715,7 @@ fn ribbon(
             continue;
         }
 
-        let (ha, hb) = (pixels(a.width), pixels(b.width));
+        let (ha, hb) = (half(a.width), half(b.width));
         let (nx, ny) = (-dy / length, dx / length);
         let vertex = |p: (f32, f32)| Vertex::new(p.0, p.1, colour);
 
@@ -711,7 +735,7 @@ fn ribbon(
     }
 
     // The ends: a nib is round, and so is a highlighter's.
-    disc(vertices, at(first), pixels(first.width), colour);
+    disc(vertices, at(first), half(first.width), colour);
 }
 
 /// A disc as a fan of triangles: a joint of the ribbon, or a stroke of a single point.
@@ -747,24 +771,29 @@ fn disc(vertices: &mut Vec<Vertex>, centre: (f32, f32), radius: f32, colour: gpu
 /// Windows: Metal has no per-primitive coverage, so the edge is sampled instead.
 const SAMPLES: usize = 4;
 
+/// How far the sheet may be scrolled before the ink's culling rectangle is drawn again, in device pixels.
+///
+/// The ink is baked in the paper's units and placed by a transform, so scrolling is not a reason to rebuild
+/// anything — but a build leaves out the strokes that were off screen, and scrolling towards one has to
+/// bring it back. Growing the culling rectangle by this much is what bounds how far the sheet can move
+/// while the ink stays as it is: several screens of scrolling, and a rebuild that lands once in that
+/// distance is not a rebuild anybody sees.
+const CULL_SLACK: f32 = 4096.0;
+
 /// What the finished ink's triangles were built from.
 ///
-/// Every triangle is in **device pixels**, so it is a function of everything that decides where a point of
-/// the paper lands on the screen. The stroke list alone is not enough, and that is not a detail: scrolling
-/// moves the paper and leaves the ink untouched, so a key of "the same strokes" would keep the triangles
-/// where they were — and the page would slide out from under its own handwriting.
+/// Every triangle is in the **paper's own units** — the same numbers at every zoom and every scroll — so the
+/// strokes, the detail they were built at and the shape of the page are the whole of it. Where the paper is
+/// drawn is *not* here: it is [`Transform`], applied by the shader, which is what makes a scroll a uniform
+/// update instead of a page of geometry rebuilt a hundred times a second.
 #[derive(PartialEq)]
 struct InkKey {
     len: usize,
     first: Option<usize>,
     last: Option<usize>,
     revision: u64,
-    origin: [u32; 2],
-    zoom: u32,
     rotation: u8,
-    scale: u32,
     paper: [u32; 2],
-    visible: [u32; 4],
     offset: [u32; 2],
     selection: Option<[u32; 4]>,
     lasso: Option<(usize, usize, [u32; 4])>,
@@ -780,12 +809,8 @@ impl InkKey {
             first: list.first().map(|stroke| Arc::as_ptr(stroke) as usize),
             last: list.last().map(|stroke| Arc::as_ptr(stroke) as usize),
             revision: ink.revision,
-            origin: [ink.origin.0.to_bits(), ink.origin.1.to_bits()],
-            zoom: ink.zoom.to_bits(),
             rotation: ink.rotation,
-            scale: canvas.scale.to_bits(),
             paper: [ink.paper.0.to_bits(), ink.paper.1.to_bits()],
-            visible: ink.visible.map(f32::to_bits),
             offset: [ink.offset.0.to_bits(), ink.offset.1.to_bits()],
             selection: ink.selection.map(|colour| {
                 [
@@ -806,12 +831,30 @@ impl InkKey {
     }
 }
 
-/// The ink's coordinates to the screen's: where the paper is drawn, how large, which way up, and how the
+/// A culling rectangle, grown by `by` on every side.
+fn grow(rect: [f32; 4], by: f32) -> [f32; 4] {
+    [rect[0] - by, rect[1] - by, rect[2] + by, rect[3] + by]
+}
+
+/// How far one rectangle's edges are from another's: the largest movement of any of the four.
+///
+/// A rectangle of infinities — "everything is visible" — is infinitely far from anything else, which is
+/// `NaN` once subtracted; `f32::max` keeps the zero instead, so the ink is not redrawn for a rectangle that
+/// cannot be compared.
+fn moved(from: [f32; 4], to: [f32; 4]) -> f32 {
+    (0..4)
+        .map(|edge| (to[edge] - from[edge]).abs())
+        .fold(0.0, f32::max)
+}
+
+/// The ink's coordinates to the sheet's *drawn* ones: the same numbers at every zoom, turned the way the
 /// page is turned.
+///
+/// This is where the ink is baked, and it is the reason a scroll costs nothing: a stroke's outline is in
+/// the paper's own units, so the triangles built from it are the same triangles wherever the paper sits and
+/// however large it is drawn. Where it sits is [`Transform`], which the shader applies — see
+/// `note_ui::ink_layer::canvas`, whose contract this follows.
 struct Mapping {
-    origin: (f32, f32),
-    zoom: f32,
-    scale: f32,
     base: (f32, f32),
     step_x: (f32, f32),
     step_y: (f32, f32),
@@ -826,9 +869,6 @@ impl Mapping {
         let along_y = drawn_of_paper((0.0, 1.0), paper, turns);
 
         Mapping {
-            origin: canvas.ink.origin,
-            zoom: canvas.ink.zoom,
-            scale: canvas.scale,
             base,
             step_x: (along_x.0 - base.0, along_x.1 - base.1),
             step_y: (along_y.0 - base.0, along_y.1 - base.1),
@@ -840,10 +880,38 @@ impl Mapping {
         let across = self.base.0 + x * self.step_x.0 + y * self.step_y.0;
         let down = self.base.1 + x * self.step_x.1 + y * self.step_y.1;
 
-        (
-            (self.origin.0 + across * self.zoom) * self.scale,
-            (self.origin.1 + down * self.zoom) * self.scale,
-        )
+        (across, down)
+    }
+}
+
+/// Where the sheet's drawn coordinates land in the window: a scale and a shift, in device pixels.
+///
+/// The one thing a scroll, a zoom or a change of screen changes. `note_ui`'s canvas says where the paper is
+/// drawn and how large, and this is that "where" in the form the shader takes it — which is why panning is
+/// a uniform and not a page of triangles.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Transform {
+    scale: [f32; 2],
+    shift: [f32; 2],
+}
+
+impl Transform {
+    /// Window pixels as they are: the desk, the page's quad, the pen's mark — everything already placed.
+    const WINDOW: Transform = Transform {
+        scale: [1.0, 1.0],
+        shift: [0.0, 0.0],
+    };
+
+    /// The sheet, where the view has put it and as large as it is drawn.
+    fn of(canvas: &Canvas) -> Self {
+        let scale = if canvas.scale > 0.0 { canvas.scale } else { 1.0 };
+        let ink = &canvas.ink;
+
+        Transform {
+            scale: [ink.zoom * scale, ink.zoom * scale],
+            shift: [ink.origin.0 * scale, ink.origin.1 * scale],
+        }
     }
 }
 
@@ -926,8 +994,12 @@ impl Surface {
             }
         }
 
-        self.refresh_ink(canvas);
+        self.refresh_ink(canvas, scale);
         let open = self.open_stroke(canvas);
+
+        // Where the paper's own units land in the window: the one thing a scroll, a zoom or a change of
+        // screen changes, and the reason none of them rebuilds a triangle.
+        let sheet = Transform::of(canvas);
         let page = self
             .page_texture(canvas)
             .map(|texture| (page_quad(canvas, scale), texture));
@@ -959,14 +1031,14 @@ impl Surface {
 
         // Behind: the desk, the shadow, the sheet, the ruling.
         if let Some(buffer) = self.buffer(&behind) {
-            self.solid(&encoder, &buffer, behind.len(), width, height);
+            self.solid(&encoder, &buffer, behind.len(), width, height, Transform::WINDOW);
         }
 
         // The document's page.
         if let Some((quad, texture)) = &page {
             if let Some(buffer) = self.buffer(quad) {
                 encoder.setRenderPipelineState(&self.page);
-                self.bind(&encoder, &buffer, width, height);
+                self.bind(&encoder, &buffer, width, height, Transform::WINDOW);
 
                 // SAFETY: a texture this surface keeps, and the sampler its pipeline was built with.
                 unsafe {
@@ -988,21 +1060,21 @@ impl Surface {
         // The finished ink, then the highlight, then the stroke under the pen: the order the page was
         // painted in when Core Graphics drew it.
         if let Some(buffer) = self.buffer(&self.ink) {
-            self.solid(&encoder, &buffer, self.ink.len(), width, height);
+            self.solid(&encoder, &buffer, self.ink.len(), width, height, sheet);
         }
 
         if let Some(buffer) = self.buffer(&front) {
-            self.solid(&encoder, &buffer, front.len(), width, height);
+            self.solid(&encoder, &buffer, front.len(), width, height, Transform::WINDOW);
         }
 
         if let Some(buffer) = self.buffer(&open) {
-            self.solid(&encoder, &buffer, open.len(), width, height);
+            self.solid(&encoder, &buffer, open.len(), width, height, sheet);
         }
 
         // The pen, over everything the canvas drew: a cursor is the one thing on the sheet that has to be
         // visible above the ink it is about to write.
         if let Some(buffer) = self.buffer(&pointer) {
-            self.solid(&encoder, &buffer, pointer.len(), width, height);
+            self.solid(&encoder, &buffer, pointer.len(), width, height, Transform::WINDOW);
         }
 
         encoder.endEncoding();
@@ -1047,18 +1119,25 @@ impl Surface {
         Some(buffer)
     }
 
-    /// Binds a run of vertices, and the window they are placed in.
+    /// Binds a run of vertices, the window they are placed in, and how the paper's units land in it.
     fn bind(
         &self,
         encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
         buffer: &ProtocolObject<dyn MTLBuffer>,
         width: f32,
         height: f32,
+        transform: Transform,
     ) {
         let viewport: [f32; 2] = [width, height];
+        let transform: [f32; 4] = [
+            transform.scale[0],
+            transform.scale[1],
+            transform.shift[0],
+            transform.shift[1],
+        ];
 
-        // SAFETY: the buffer holds the vertices the draw call reads, and the viewport is eight bytes the
-        // encoder copies before this function returns.
+        // SAFETY: the buffer holds the vertices the draw call reads, and the two values after it are bytes
+        // the encoder copies before this function returns.
         unsafe {
             encoder.setVertexBuffer_offset_atIndex(Some(buffer), 0, 0);
             encoder.setVertexBytes_length_atIndex(
@@ -1066,19 +1145,26 @@ impl Surface {
                 std::mem::size_of_val(&viewport),
                 1,
             );
+            encoder.setVertexBytes_length_atIndex(
+                NonNull::new(transform.as_ptr() as *mut c_void).unwrap(),
+                std::mem::size_of_val(&transform),
+                2,
+            );
         }
     }
 
     /// One run of coloured vertices, in one draw call.
-    fn solid(&self,
+    fn solid(
+        &self,
         encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
         buffer: &ProtocolObject<dyn MTLBuffer>,
         count: usize,
         width: f32,
         height: f32,
+        transform: Transform,
     ) {
         encoder.setRenderPipelineState(&self.solid);
-        self.bind(encoder, buffer, width, height);
+        self.bind(encoder, buffer, width, height, transform);
 
         // SAFETY: `count` vertices, all of them in the buffer just bound.
         unsafe {
@@ -1092,7 +1178,9 @@ impl Surface {
 ///
 /// Two numbers that matter: how often the canvas reached a drawable — a frame that cannot get one is a
 /// frame nobody sees — and how much ink was in it, so that "nothing drew" and "nothing to draw" can be
-/// told apart.
+/// told apart. A third says how often the ink was *built*: a scroll, a zoom or a still frame has no
+/// business rebuilding a page of triangles, and a count that moves while the hand does nothing is the
+/// regression this module exists to keep out (see [`Transform`]).
 mod report {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
@@ -1102,7 +1190,13 @@ mod report {
     static FINISHED: AtomicU64 = AtomicU64::new(0);
     static OPEN: AtomicU64 = AtomicU64::new(0);
     static POINTER: AtomicU64 = AtomicU64::new(0);
+    static REBUILDS: AtomicU64 = AtomicU64::new(0);
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+
+    /// One build of the finished ink's triangles.
+    pub fn rebuilt() {
+        REBUILDS.fetch_add(1, Ordering::Relaxed);
+    }
 
     pub fn drawn(finished: usize, open: usize, pointer: usize) {
         DRAWS.fetch_add(1, Ordering::Relaxed);
@@ -1120,11 +1214,12 @@ mod report {
         *last = Some(now);
 
         println!(
-            "canvas: {} draws/s · {} finished vertices · {} under the pen · {} in the cursor",
+            "canvas: {} draws/s · {} finished vertices · {} under the pen · {} in the cursor · {} rebuilds/s",
             DRAWS.swap(0, Ordering::Relaxed),
             FINISHED.load(Ordering::Relaxed),
             OPEN.load(Ordering::Relaxed),
-            POINTER.load(Ordering::Relaxed)
+            POINTER.load(Ordering::Relaxed),
+            REBUILDS.swap(0, Ordering::Relaxed)
         );
     }
 }
@@ -1134,29 +1229,66 @@ mod report {
 mod tests {
     use super::*;
 
-    /// A scroll moves the paper and leaves the strokes exactly as they were: the ink's triangles, which are
-    /// in pixels, have to be rebuilt — this is the bug that had the page slide out from under its writing.
+    /// A scroll moves the paper and leaves the strokes exactly as they were, so the ink is *not* drawn
+    /// again: the triangles are in the paper's own units and the scroll is a [`Transform`]. That difference
+    /// is the whole of why scrolling stutters or does not — the triangles used to be in device pixels, and
+    /// every reading of a trackpad rebuilt them.
     #[test]
-    fn a_scroll_is_a_new_ink_key() {
+    fn a_scroll_is_a_transform_and_not_a_new_ink_key() {
         let mut canvas = Canvas::default();
         let before = InkKey::of(&canvas);
+        let placed = Transform::of(&canvas);
 
         canvas.ink.origin = (0.0, -120.0);
-        let after = InkKey::of(&canvas);
 
-        assert!(before != after, "a scroll left the ink's key alone");
+        assert!(
+            before == InkKey::of(&canvas),
+            "a scroll asked for the ink to be drawn again"
+        );
+        assert!(
+            placed.shift != Transform::of(&canvas).shift,
+            "a scroll left the sheet where it was"
+        );
     }
 
-    /// A zoom is the same story, and so is a turn of the page.
+    /// A zoom is the same story, and so is the screen's own scale: how large the paper is drawn is the
+    /// transform. The *detail* a zoom asks for is another matter — `note_ui` says so with the ink's
+    /// revision, which is in the key — so a zoom that crosses a rung still draws the ink again.
     #[test]
-    fn a_zoom_is_a_new_ink_key() {
+    fn a_zoom_is_a_transform_and_not_a_new_ink_key() {
+        let mut canvas = Canvas::default();
+        let before = InkKey::of(&canvas);
+        let placed = Transform::of(&canvas);
+
+        canvas.ink.zoom = 1.5;
+
+        assert!(
+            before == InkKey::of(&canvas),
+            "a zoom asked for the ink to be drawn again"
+        );
+        assert!(
+            placed.scale != Transform::of(&canvas).scale,
+            "a zoom left the sheet its own size"
+        );
+
+        canvas.ink.revision = 1;
+        assert!(
+            before != InkKey::of(&canvas),
+            "a new detail left the ink's key alone"
+        );
+    }
+
+    /// A turn of the page *is* a change to the ink: the paper's own units are turned with it, and every
+    /// triangle moves.
+    #[test]
+    fn a_turn_of_the_page_is_a_new_ink_key() {
         let mut canvas = Canvas::default();
         let before = InkKey::of(&canvas);
 
-        canvas.ink.zoom = 1.5;
+        canvas.ink.rotation = 1;
         assert!(
             before != InkKey::of(&canvas),
-            "a zoom left the ink's key alone"
+            "a turn left the ink's key alone"
         );
     }
 
@@ -1167,6 +1299,56 @@ mod tests {
         let canvas = Canvas::default();
 
         assert!(InkKey::of(&canvas) == InkKey::of(&canvas));
+    }
+
+    /// The transform places the paper exactly where the old mapping did: a point of the paper lands at
+    /// `(origin + drawn * zoom) * scale`, which is the arithmetic that drew the sheet when the triangles
+    /// were in device pixels. Baking them in the paper's units must not move anything.
+    #[test]
+    fn the_transform_lands_the_paper_where_the_mapping_did() {
+        let mut canvas = Canvas::default();
+        canvas.scale = 2.0;
+        canvas.ink.paper = (720.0, 1018.0);
+        canvas.ink.zoom = 1.5;
+        canvas.ink.origin = (24.0, -120.0);
+
+        let mapping = Mapping::of(&canvas);
+        let transform = Transform::of(&canvas);
+
+        for point in [[0.0, 0.0], [10.0, 20.0], [719.0, 1017.0]] {
+            let drawn = mapping.point(point, (0.0, 0.0));
+            let placed = (
+                drawn.0 * transform.scale[0] + transform.shift[0],
+                drawn.1 * transform.scale[1] + transform.shift[1],
+            );
+            let expected = (
+                (canvas.ink.origin.0 + point[0] * canvas.ink.zoom) * canvas.scale,
+                (canvas.ink.origin.1 + point[1] * canvas.ink.zoom) * canvas.scale,
+            );
+
+            assert!(
+                (placed.0 - expected.0).abs() < 0.001 && (placed.1 - expected.1).abs() < 0.001,
+                "{point:?} landed at {placed:?}, not {expected:?}"
+            );
+        }
+    }
+
+    /// The culling rectangle is the one thing that moves while the ink stays valid, and the ink is drawn
+    /// again once it has moved further than the slack the cull was grown by.
+    #[test]
+    fn a_scroll_that_leaves_the_culling_behind_asks_for_the_ink_again() {
+        assert_eq!(moved([0.0; 4], [0.0; 4]), 0.0);
+        assert_eq!(
+            moved([0.0, 0.0, 100.0, 100.0], [0.0, -50.0, 100.0, 50.0]),
+            50.0
+        );
+
+        // "Everything is visible" cannot be compared with itself — the difference of two infinities is
+        // `NaN` — and a rectangle that cannot be compared must not ask for a redraw on every frame.
+        let everything = [f32::NEG_INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::INFINITY];
+        assert_eq!(moved(everything, everything), 0.0);
+
+        assert_eq!(grow([0.0, 0.0, 10.0, 10.0], 5.0), [-5.0, -5.0, 15.0, 15.0]);
     }
 }
 

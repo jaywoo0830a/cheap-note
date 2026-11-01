@@ -193,6 +193,26 @@ impl Viewport {
         true
     }
 
+    /// Keeps the pan where the layout can show it, reporting whether that moved it.
+    ///
+    /// [`Self::pan_by`] accumulates and [`axis_origin`] only clamps what it *draws*, so a wheel turned past
+    /// the end of the sheet keeps adding to an offset nobody can see. The sheet then sits still for as long
+    /// as it takes to unwind that debt when the wheel is turned back — on a trackpad, whose momentum goes on
+    /// arriving after the fingers have left, that is most of a gesture spent getting back to where the page
+    /// still was. Holding the pan inside its own bounds is what makes the end of a sheet an end.
+    pub fn hold_pan(&mut self, sheet: (f32, f32), window: (f32, f32), margin: f32) -> bool {
+        let drawn = self.drawn(sheet);
+        let held = (
+            pan_for(margin + self.offset.0, drawn.0, window.0, margin),
+            pan_for(margin + self.offset.1, drawn.1, window.1, margin),
+        );
+
+        let was = self.offset;
+        self.offset = held;
+
+        was != self.offset
+    }
+
     /// Where the sheet's top-left corner is drawn, in window logical pixels.
     pub fn origin(&self, sheet: (f32, f32), window: (f32, f32), margin: f32) -> (f32, f32) {
         let drawn = self.drawn(sheet);
@@ -308,6 +328,52 @@ mod tests {
     /// The window the app's own default opens at.
     const WINDOW: (f32, f32) = (1280.0, 900.0);
     const MARGIN: f32 = 24.0;
+
+    /// The end of the sheet is an end: a wheel turned past it leaves no debt to unwind.
+    ///
+    /// The pan used to accumulate while the drawing clamped it, so a scroll past the bottom of a page
+    /// built up an invisible offset and the next scroll *up* was spent paying it back — which is a page
+    /// that sits still under a hand that is moving.
+    #[test]
+    fn a_pan_held_at_the_end_of_the_sheet_owes_nothing_back() {
+        // Twice A4, so it fits on neither axis and the pan is what decides what is on screen.
+        let sheet = (SHEET.0 * 2.0, SHEET.1 * 2.0);
+        let mut view = Viewport::new(2.0);
+
+        // Far past the bottom of the sheet, and held there.
+        view.pan_by((0.0, -1.0e6));
+        assert!(view.hold_pan(sheet, WINDOW, MARGIN));
+
+        let at_the_end = view.origin(sheet, WINDOW, MARGIN);
+
+        // One notch back up moves the sheet at once.
+        view.pan_by((0.0, 40.0));
+        view.hold_pan(sheet, WINDOW, MARGIN);
+
+        assert!(
+            view.origin(sheet, WINDOW, MARGIN).1 > at_the_end.1,
+            "the sheet stayed still after a pan back from the end: {:?} → {:?}",
+            at_the_end,
+            view.origin(sheet, WINDOW, MARGIN)
+        );
+    }
+
+    /// A sheet that fits is centred, so there is no pan to hold — and no offset kept either.
+    #[test]
+    fn a_sheet_that_fits_has_no_pan_to_hold() {
+        // Half an A4, which the default window has room for on both axes.
+        let sheet = (SHEET.0 * 0.5, SHEET.1 * 0.5);
+        let mut view = Viewport::new(1.0);
+
+        view.pan_by((120.0, -240.0));
+
+        assert!(view.hold_pan(sheet, WINDOW, MARGIN));
+        assert_eq!(view.pan(), (0.0, 0.0), "a sheet that fits kept a pan");
+        assert_eq!(
+            view.origin(sheet, WINDOW, MARGIN),
+            ((WINDOW.0 - sheet.0) / 2.0, (WINDOW.1 - sheet.1) / 2.0)
+        );
+    }
 
     /// A page opens at its own top, and comes back to the place it was left at.
     ///

@@ -639,6 +639,15 @@ pub struct NoteApp {
     scale: f32,
     /// How large the sheet is drawn, and where it sits in the window.
     view: Viewport,
+    /// The scroll readings the wheel has left for the frame that will show them, in logical pixels.
+    ///
+    /// A trackpad reports its movement faster than the screen takes frames — a hundred or so readings a
+    /// second against sixty — and a reading spent on its own is a pan nobody sees and a canvas asked to
+    /// draw a place the hand has already left. Collected here and spent once per frame, the sheet moves by
+    /// exactly the distance the hand did, and the canvas is asked for one frame's worth of it.
+    scroll_waiting: (f32, f32),
+    /// Whether a frame has been asked for to spend [`Self::scroll_waiting`].
+    scroll_asked: bool,
     /// Where each page was being read, for as long as the note in hand is open.
     ///
     /// The *page's* place rather than the reader's: turning to a page added at the end of a note opens that page at
@@ -840,6 +849,8 @@ impl NoteApp {
             page_index: 0,
             scale: window.scale_factor(),
             view,
+            scroll_waiting: (0.0, 0.0),
+            scroll_asked: false,
             pans: HashMap::new(),
             sheet: Sheet::default(),
             bar_bottom: Rc::new(Cell::new(None)),
@@ -1538,7 +1549,7 @@ impl NoteApp {
     }
 
     /// Zooms or pans with the wheel — which is also where a trackpad's two-finger gesture arrives.
-    fn on_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+    fn on_wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let pointer = (event.position.x.into(), event.position.y.into());
 
         if keys::is_primary(event.modifiers) {
@@ -1571,8 +1582,52 @@ impl NoteApp {
             ScrollDelta::Pixels(delta) => (delta.x.into(), delta.y.into()),
         };
         let in_pixels = matches!(event.delta, ScrollDelta::Pixels(_));
+        let distance = wheel_pan((dx, dy), in_pixels);
 
-        if self.view.pan_by(wheel_pan((dx, dy), in_pixels)) {
+        if !distance.0.is_finite() || !distance.1.is_finite() {
+            return;
+        }
+
+        // Left for the frame that shows it, not spent here: the readings arrive faster than frames do, and a
+        // pan the compositor never draws is a canvas asked to move somewhere the hand has already left (see
+        // [`Self::scroll_waiting`]).
+        self.scroll_waiting = (
+            self.scroll_waiting.0 + distance.0,
+            self.scroll_waiting.1 + distance.1,
+        );
+
+        if !self.scroll_asked {
+            self.scroll_asked = true;
+            cx.on_next_frame(window, |app, window, cx| app.spend_scroll(window, cx));
+        }
+    }
+
+    /// Pans the sheet by everything the wheel has left, once, in the frame that shows it.
+    fn spend_scroll(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_asked = false;
+
+        let distance = std::mem::take(&mut self.scroll_waiting);
+        if distance == (0.0, 0.0) {
+            return;
+        }
+
+        // The trace is how a scroll can be watched from outside: one line per *frame*, not per reading,
+        // which is what the coalescing above is for — and the canvas's own line beside it says how many
+        // times the ink was rebuilt, which while scrolling should be none.
+        if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
+            eprintln!("pan: ({:.1}, {:.1})", distance.0, distance.1);
+        }
+
+        // Held where the layout can show it, so that a wheel turned past the end of the sheet leaves no debt
+        // for the next turn to pay off (see [`Viewport::hold_pan`]). A sheet no frame has drawn yet has no
+        // bounds to be held inside — the pan is left alone rather than clamped into a window of nothing.
+        let sheet = self.sheet;
+        let moved = self.view.pan_by(distance);
+        let held = sheet.window.0 > 0.0
+            && sheet.window.1 > 0.0
+            && self.view.hold_pan(sheet.paper, sheet.window, PAGE_MARGIN);
+
+        if moved || held {
             cx.notify();
         }
     }
@@ -5044,7 +5099,9 @@ impl Render for NoteApp {
             // A trackpad's pinch, and a wheel with the command modifier held, both arrive here: the canvas is the
             // whole window's only interactive element, so it is what the gestures hit.
             .on_scroll_wheel(
-                cx.listener(|app, event: &ScrollWheelEvent, _, cx| app.on_wheel(event, cx)),
+                cx.listener(|app, event: &ScrollWheelEvent, window, cx| {
+                    app.on_wheel(event, window, cx)
+                }),
             )
             .on_pinch(cx.listener(|app, event: &PinchEvent, _, cx| app.on_pinch(event, cx)))
             // The note's keyboard: Esc for the home screen, the two arrows for the page, and the three

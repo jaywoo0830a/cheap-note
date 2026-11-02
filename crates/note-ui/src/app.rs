@@ -1632,6 +1632,26 @@ impl NoteApp {
         }
     }
 
+    /// Pans the sheet by whole wheel-lines: what the wheel does, on a key.
+    ///
+    /// The distance is added to [`Self::scroll_waiting`] rather than handed to the view, for the reason the
+    /// wheel's is: the frame that shows a pan is the frame that spends it, and `hold_pan` then keeps the
+    /// sheet inside its own bounds. A held key repeats faster than a frame is drawn, so the readings are
+    /// coalesced exactly as a trackpad's are.
+    fn pan_step(&mut self, lines: (f32, f32), window: &mut Window, cx: &mut Context<Self>) {
+        let distance = wheel_pan(lines, false);
+
+        self.scroll_waiting = (
+            self.scroll_waiting.0 + distance.0,
+            self.scroll_waiting.1 + distance.1,
+        );
+
+        if !self.scroll_asked {
+            self.scroll_asked = true;
+            cx.on_next_frame(window, |app, window, cx| app.spend_scroll(window, cx));
+        }
+    }
+
     /// Zooms with a trackpad's pinch, about the point between the fingers.
     fn on_pinch(&mut self, event: &PinchEvent, cx: &mut Context<Self>) {
         // A pinch is the likeliest of the accidents a lock is for: a palm settling onto a trackpad is a pinch as far as
@@ -3266,6 +3286,17 @@ impl NoteApp {
                 // arrows belong to the field, and a caret that turned the page instead would be a trap.
                 "left" if self.naming.is_none() => self.previous_page(cx),
                 "right" if self.naming.is_none() => self.next_page(cx),
+                // The left hand's six keys: the pen is in the right hand, so moving the sheet is asked for by
+                // the hand that is not writing. Plain keys and not chords, because the command modifier is
+                // `Ctrl` on one platform and `⌘` on the other — the same chord would be a different physical
+                // key on each — while these six sit in the same two rows on both. Not while a name is being
+                // typed, for the reason the arrows above give.
+                "q" if self.naming.is_none() => self.zoom_out(cx),
+                "e" if self.naming.is_none() => self.zoom_in(cx),
+                "w" if self.naming.is_none() => self.pan_step((0.0, 1.0), window, cx),
+                "s" if self.naming.is_none() => self.pan_step((0.0, -1.0), window, cx),
+                "a" if self.naming.is_none() => self.pan_step((1.0, 0.0), window, cx),
+                "d" if self.naming.is_none() => self.pan_step((-1.0, 0.0), window, cx),
                 _ => {}
             }
             return;

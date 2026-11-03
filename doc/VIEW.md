@@ -348,7 +348,9 @@ puts it away, and nothing else a key means reaches the sheet or the bar under it
   tool is on the bar and for the same reason: an icon alone on a white field is a smudge. The hub is the
   colour the next stroke will be written in, and it is *not* a control, so it is set in a ring of white —
   the one filled circle in the middle that cannot be pressed does not look like the three that can. Its
-  measurements are in §12 with the rest of them.
+  measurements are in §12 with the rest of them — and they are the design's, in 96-DPI logical pixels, so
+  what is drawn is those numbers times `Platform::unit_scale`: a macOS point is four thirds of one, and
+  the same numbers there would be a third too large (`PaletteGeometry`).
 
 The two list screens keep the app's own chords and nothing else: the arrows, Enter and Escape belong to
 the list that has the focus, and the same chords work there as on the note, because a person looking at
@@ -717,6 +719,12 @@ counts the rebuilds a zoom's change of detail forced (see `ink_layer/render.rs`)
 | `BATCH_INTERVAL` / `BATCH_STROKES` | 500 ms / 200 | how long ink may wait in memory, and how much of it may |
 | `CHECKPOINT_QUIET_INTERVAL` / `CHECKPOINT_INTERVAL` | 5 s / 5 min | when the write-ahead log may be folded back into the note file, and how rarely |
 | `PAGE_SHADOW` | three steps | the spread, the offset beyond the spread, and the colour of each of the three rectangles a sheet's shadow is made of, widest and faintest first |
+
+Every `PALETTE_*` length above is a *design* number, in the 96-DPI logical pixels a Windows display
+measures in. The palette is drawn at those numbers times `Platform::unit_scale` — `1.0` on Windows and
+`0.75` on macOS, whose logical pixel is a point — so it is the same size in the hand on both
+(`PaletteGeometry`). The rings, the discs, the well, the margin and the reach of a tap all move by that
+one factor, which is what keeps the gaps the palette's tests pin proportional at either size.
 
 ## Where this document and the code part company
 

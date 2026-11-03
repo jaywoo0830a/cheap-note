@@ -87,6 +87,9 @@ fn install(window: &mut Window) -> Platform {
         ink,
         ghost: Some(Arc::clone(&ghost) as Arc<dyn GhostFeed>),
         pointer,
+        // A macOS logical pixel is a *point*, four thirds of the 96-DPI one the design is written in:
+        // lengths multiplied by three quarters are the same size in the hand as they are on Windows.
+        unit_scale: 0.75,
         pen: Box::new(pen),
     }
 }

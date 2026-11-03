@@ -158,6 +158,104 @@ const PALETTE_PAD: f32 = 14.0;
 /// The radius of the square the whole palette fits in: the outer ring, half a disc, and that white.
 const PALETTE_RADIUS: f32 = PALETTE_RING_RADIUS + PALETTE_DISC / 2.0 + PALETTE_PAD;
 
+/// The palette's measurements in the logical pixels of the screen it is drawn on.
+///
+/// Every number above is the *design's*, in the 96-DPI logical pixels a Windows display measures in.
+/// macOS measures in points, four thirds of one, so the same palette there has to be three quarters of
+/// those numbers to be the same size in the hand — at the design's numbers it is a third too large,
+/// which is what a 266-pixel ring drawn in points looks like.
+///
+/// One factor applied to every length is what makes this a *size* rather than a different shape: the
+/// rings, the discs, the well and the reach of a tap all move together, so the gaps the palette's own
+/// tests pin stay proportional at any unit. The factor comes from the platform
+/// ([`crate::platform::Platform::unit_scale`]) because only the platform knows how its logical pixels
+/// are measured.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PaletteGeometry {
+    /// How large one of the design's logical pixels is here: `1.0` on Windows, `0.75` on macOS.
+    unit: f32,
+}
+
+impl PaletteGeometry {
+    /// The geometry for a platform whose logical pixel is `unit` of the design's.
+    ///
+    /// A unit that is not a positive number is the design's own: a platform that cannot say how its
+    /// pixels are measured gets the sizes the tests and the eye were tuned at, not a palette of none.
+    fn of(unit: f32) -> Self {
+        PaletteGeometry {
+            unit: if unit.is_finite() && unit > 0.0 {
+                unit
+            } else {
+                1.0
+            },
+        }
+    }
+
+    /// The half-width of the square the whole palette fits in.
+    fn radius(self) -> f32 {
+        PALETTE_RADIUS * self.unit
+    }
+
+    /// How far out the ring of colours sits.
+    fn ring(self) -> f32 {
+        PALETTE_RING_RADIUS * self.unit
+    }
+
+    /// How far out the ring of tools sits.
+    fn tool_ring(self) -> f32 {
+        PALETTE_TOOL_RADIUS * self.unit
+    }
+
+    /// The diameter of one colour disc.
+    fn disc(self) -> f32 {
+        PALETTE_DISC * self.unit
+    }
+
+    /// The box one colour disc draws in: the disc, plus the ring and the white gap around it.
+    ///
+    /// The gap and the ring are a hairline's width and do not shrink with the palette — they are the
+    /// two pixels each side that [`PALETTE_DISC_BOX`] adds — so this is the disc at this unit plus
+    /// those, which is the size the element actually comes out at.
+    fn disc_box(self) -> f32 {
+        self.disc() + (PALETTE_DISC_BOX - PALETTE_DISC)
+    }
+
+    /// The diameter of the chip one tool is drawn in.
+    fn tool_disc(self) -> f32 {
+        PALETTE_TOOL_DISC * self.unit
+    }
+
+    /// The size of the icon inside a tool chip.
+    fn tool_icon(self) -> f32 {
+        PALETTE_TOOL_ICON * self.unit
+    }
+
+    /// The diameter of the hub at the middle.
+    fn hub(self) -> f32 {
+        PALETTE_HUB * self.unit
+    }
+
+    /// How wide the ring of white around the hub's colour is.
+    fn hub_ring(self) -> f32 {
+        PALETTE_HUB_RING * self.unit
+    }
+
+    /// The diameter of the well the hub and the tools sit in.
+    fn well(self) -> f32 {
+        PALETTE_WELL * self.unit
+    }
+
+    /// The least gap between the palette and the window's edge.
+    fn margin(self) -> f32 {
+        PALETTE_MARGIN * self.unit
+    }
+
+    /// How near a tap has to come to a control's centre to be that control.
+    fn reach(self) -> f32 {
+        PALETTE_REACH * self.unit
+    }
+}
+
 /// How much of the window's width the status pill may take, as a fraction of it.
 const STATUS_PILL_WIDTH: f32 = 0.6;
 
@@ -479,7 +577,13 @@ fn palette_point(centre: [f32; 2], radius: f32, place: usize, count: usize) -> [
 /// colour the same way. The outer ring is asked first, because a colour is what a hand reaching into
 /// this palette is reaching for; a point within reach of nothing is the palette's own background, and
 /// putting the palette away is what a press on that means (see [`NoteApp::palette_overlay`]).
-fn palette_at(centre: [f32; 2], point: [f32; 2], colours: usize) -> Option<PalettePart> {
+fn palette_at(
+    geometry: PaletteGeometry,
+    centre: [f32; 2],
+    point: [f32; 2],
+    colours: usize,
+) -> Option<PalettePart> {
+    let reach = geometry.reach();
     let nearest = |radius: f32, count: usize| {
         (0..count)
             .map(|place| {
@@ -488,14 +592,14 @@ fn palette_at(centre: [f32; 2], point: [f32; 2], colours: usize) -> Option<Palet
 
                 (place, (dx * dx + dy * dy).sqrt())
             })
-            .filter(|(_, away)| *away <= PALETTE_REACH)
+            .filter(|(_, away)| *away <= reach)
             .min_by(|one, other| one.1.total_cmp(&other.1))
             .map(|(place, _)| place)
     };
 
-    nearest(PALETTE_RING_RADIUS, colours)
+    nearest(geometry.ring(), colours)
         .map(PalettePart::Colour)
-        .or_else(|| nearest(PALETTE_TOOL_RADIUS, PALETTE_TOOLS.len()).map(PalettePart::Tool))
+        .or_else(|| nearest(geometry.tool_ring(), PALETTE_TOOLS.len()).map(PalettePart::Tool))
 }
 
 /// Where the palette may be centred and still be on the screen.
@@ -504,9 +608,10 @@ fn palette_at(centre: [f32; 2], point: [f32; 2], colours: usize) -> Option<Palet
 /// written down the margin — and a ring half off the screen is a ring with half its colours. A window
 /// too small to hold the palette puts it in the middle and lets it overhang, which is the one case
 /// where there is no better answer.
-fn palette_centre(near: [f32; 2], window: [f32; 2], radius: f32) -> [f32; 2] {
+fn palette_centre(geometry: PaletteGeometry, near: [f32; 2], window: [f32; 2]) -> [f32; 2] {
+    let (radius, margin) = (geometry.radius(), geometry.margin());
     let keep = |at: f32, extent: f32| {
-        let (low, high) = (radius + PALETTE_MARGIN, extent - radius - PALETTE_MARGIN);
+        let (low, high) = (radius + margin, extent - radius - margin);
 
         if low > high {
             extent / 2.0
@@ -637,6 +742,9 @@ pub struct NoteApp {
     page_index: usize,
     /// The window's DPI scale factor, captured each frame.
     scale: f32,
+    /// How large one of the design's logical pixels is on this platform, as a factor: what the palette
+    /// is drawn at (see [`crate::platform::Platform::unit_scale`]).
+    unit_scale: f32,
     /// How large the sheet is drawn, and where it sits in the window.
     view: Viewport,
     /// The scroll readings the wheel has left for the frame that will show them, in logical pixels.
@@ -756,6 +864,7 @@ impl NoteApp {
             ink: ink_layer,
             ghost: cursor,
             pointer: system_cursor,
+            unit_scale,
             pen,
         } = platform;
 
@@ -848,6 +957,7 @@ impl NoteApp {
             selection_colour: cx.theme().accent.opacity(SELECTION_TINT),
             page_index: 0,
             scale: window.scale_factor(),
+            unit_scale,
             view,
             scroll_waiting: (0.0, 0.0),
             scroll_asked: false,
@@ -1963,9 +2073,9 @@ impl NoteApp {
 
         self.palette = Some(Palette {
             centre: palette_centre(
+                PaletteGeometry::of(self.unit_scale),
                 near,
                 [size.width.into(), size.height.into()],
-                PALETTE_RADIUS,
             ),
             chosen: palette_in_hand(palette_colours(self.ink.mode()), self.ink_colour_in_hand()),
         });
@@ -2068,13 +2178,14 @@ impl NoteApp {
         };
 
         let colours = palette_colours(self.ink.mode()).len();
+        let geometry = PaletteGeometry::of(self.unit_scale);
         let landed = samples
             .iter()
             .filter(|sample| sample.phase == crate::input::Phase::Down)
             .find_map(|sample| {
                 let at = PenCursor::from_sample(*sample, self.scale)?.position();
 
-                palette_at(palette.centre, at, colours)
+                palette_at(geometry, palette.centre, at, colours)
             });
 
         if let Some(part) = landed {
@@ -4235,23 +4346,26 @@ impl NoteApp {
 
         let mode = self.ink.mode();
         let colours = palette_colours(mode);
+        // The palette's own size on this platform: the design's numbers, in the logical pixels the
+        // screen it is drawn on measures in (see [`PaletteGeometry`]).
+        let geometry = PaletteGeometry::of(self.unit_scale);
 
         // Where the ring is measured from *inside* this palette's own square: its middle, which is one
         // radius in from each side. Every placement below is in the box's coordinates, so the box is put
         // where the pen was and nothing else has to know about that.
-        let middle = [PALETTE_RADIUS, PALETTE_RADIUS];
+        let middle = [geometry.radius(), geometry.radius()];
 
         // Collected before they are chained, for the reason the bar collects its own: each
         // `cx.listener` takes the context mutably (see [`Self::top_bar`]).
         let mut discs: Vec<AnyElement> = Vec::new();
         for (place, swatch) in colours.iter().enumerate() {
-            let at = palette_point(middle, PALETTE_RING_RADIUS, place, colours.len());
+            let at = palette_point(middle, geometry.ring(), place, colours.len());
 
             discs.push(
                 placed(
                     at,
-                    PALETTE_DISC_BOX,
-                    palette_disc(swatch, place, palette.chosen == place, accent, cx),
+                    geometry.disc_box(),
+                    palette_disc(swatch, place, palette.chosen == place, accent, geometry, cx),
                 )
                 .into_any_element(),
             );
@@ -4263,13 +4377,13 @@ impl NoteApp {
                 continue;
             };
 
-            let at = palette_point(middle, PALETTE_TOOL_RADIUS, place, PALETTE_TOOLS.len());
+            let at = palette_point(middle, geometry.tool_ring(), place, PALETTE_TOOLS.len());
 
             tools.push(
                 placed(
                     at,
-                    PALETTE_TOOL_DISC,
-                    palette_tool_chip(id, icon, label, *tool == mode, cx, move |app, cx| {
+                    geometry.tool_disc(),
+                    palette_tool_chip(id, icon, label, *tool == mode, geometry, cx, move |app, cx| {
                         app.palette_take(PalettePart::Tool(place), cx)
                     }),
                 )
@@ -4282,10 +4396,10 @@ impl NoteApp {
         // field, and it is the first child so that everything else sits *in* it.
         let well = div()
             .absolute()
-            .left(px(middle[0] - PALETTE_WELL / 2.0))
-            .top(px(middle[1] - PALETTE_WELL / 2.0))
-            .w(px(PALETTE_WELL))
-            .h(px(PALETTE_WELL))
+            .left(px(middle[0] - geometry.well() / 2.0))
+            .top(px(middle[1] - geometry.well() / 2.0))
+            .w(px(geometry.well()))
+            .h(px(geometry.well()))
             .rounded_full()
             .bg(well_fill);
 
@@ -4296,10 +4410,10 @@ impl NoteApp {
 
         let hub = div()
             .absolute()
-            .left(px(middle[0] - PALETTE_HUB / 2.0))
-            .top(px(middle[1] - PALETTE_HUB / 2.0))
-            .w(px(PALETTE_HUB))
-            .h(px(PALETTE_HUB))
+            .left(px(middle[0] - geometry.hub() / 2.0))
+            .top(px(middle[1] - geometry.hub() / 2.0))
+            .w(px(geometry.hub()))
+            .h(px(geometry.hub()))
             .flex()
             .items_center()
             .justify_center()
@@ -4308,7 +4422,7 @@ impl NoteApp {
             .shadow_sm()
             .child(colour_chip(
                 in_hand,
-                PALETTE_HUB - PALETTE_HUB_RING * 2.0,
+                geometry.hub() - geometry.hub_ring() * 2.0,
                 colour_edge(in_hand, cx.theme()),
                 true,
             ));
@@ -4325,10 +4439,10 @@ impl NoteApp {
                 div()
                     .id("palette")
                     .absolute()
-                    .left(px(palette.centre[0] - PALETTE_RADIUS))
-                    .top(px(palette.centre[1] - PALETTE_RADIUS))
-                    .w(px(PALETTE_RADIUS * 2.0))
-                    .h(px(PALETTE_RADIUS * 2.0))
+                    .left(px(palette.centre[0] - geometry.radius()))
+                    .top(px(palette.centre[1] - geometry.radius()))
+                    .w(px(geometry.radius() * 2.0))
+                    .h(px(geometry.radius() * 2.0))
                     .rounded_full()
                     .bg(surface)
                     .border_1()
@@ -4532,10 +4646,15 @@ impl NoteApp {
         // Zoom stays when the bar is hidden, unlike the controls up there: the switch that brings the bar
         // back lives *in* the bar, so a sheet zoomed into a corner with the bar away would have no way
         // out. It is reading rather than writing, which is what the page pill and the counters share.
+        //
+        // The right margin is written here rather than left to the row's own padding: an absolutely
+        // positioned child is placed against its parent's padding box, not its content, so the `px`
+        // above reaches the page pill and not this one. `BAR_MARGIN` is what the pill has below it —
+        // the row itself sits that far from the bottom edge — so the two margins are the same.
         row = row.child(
             div()
                 .absolute()
-                .right_0()
+                .right(px(BAR_MARGIN))
                 .bottom_0()
                 .child(self.zoom_pill(cx)),
         );
@@ -5358,6 +5477,7 @@ fn palette_disc(
     place: usize,
     chosen: bool,
     ring: Hsla,
+    geometry: PaletteGeometry,
     cx: &mut Context<NoteApp>,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -5376,7 +5496,7 @@ fn palette_disc(
         .on_click(
             cx.listener(move |app, _, _, cx| app.palette_take(PalettePart::Colour(place), cx)),
         )
-        .child(colour_chip(swatch.color, PALETTE_DISC, edge, true))
+        .child(colour_chip(swatch.color, geometry.disc(), edge, true))
 }
 
 /// One tool of the palette at the pen: a chip with the tool's icon in it, washed in the accent when the
@@ -5392,6 +5512,7 @@ fn palette_tool_chip(
     icon: IconName,
     label: &'static str,
     active: bool,
+    geometry: PaletteGeometry,
     cx: &mut Context<NoteApp>,
     handler: impl Fn(&mut NoteApp, &mut Context<NoteApp>) + 'static,
 ) -> impl IntoElement {
@@ -5413,8 +5534,8 @@ fn palette_tool_chip(
         // An icon says nothing to a screen reader: the name is what it needs to hear ([`palette_face`]).
         .aria_label(label)
         .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
-        .w(px(PALETTE_TOOL_DISC))
-        .h(px(PALETTE_TOOL_DISC))
+        .w(px(geometry.tool_disc()))
+        .h(px(geometry.tool_disc()))
         .flex()
         .items_center()
         .justify_center()
@@ -5432,7 +5553,7 @@ fn palette_tool_chip(
 
     chip.child(
         Icon::new(icon)
-            .with_size(px(PALETTE_TOOL_ICON))
+            .with_size(px(geometry.tool_icon()))
             .text_color(if active { accent } else { idle }),
     )
 }
@@ -5481,8 +5602,8 @@ mod tests {
         confirmed, file_label, file_stem, notch_in_pixels, page_of_write, page_owes_a_rewrite,
         palette_at, palette_centre, palette_colours, palette_face, palette_id, palette_in_hand,
         palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width,
-        sheet_matches, spun, wheel_pan, wheel_zoom_factor, zoom_text, Confirmation, PalettePart,
-        PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS,
+        sheet_matches, spun, wheel_pan, wheel_zoom_factor, zoom_text, Confirmation, PaletteGeometry,
+        PalettePart, PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS,
         PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS,
         PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH,
         WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
@@ -5842,6 +5963,13 @@ mod tests {
         assert!(near(palette_point(middle, 100.0, 3, 12), [300.0, 200.0]));
     }
 
+    /// The palette's geometry at the unit its design was written in: the numbers the palette's tests
+    /// below were tuned at. The platform's own unit is what
+    /// [`a_smaller_unit_scales_the_ring_and_the_reach_of_a_tap`] is about.
+    fn design_palette() -> PaletteGeometry {
+        PaletteGeometry::of(1.0)
+    }
+
     /// A tap belongs to the control it landed on, and to none of the ones it did not.
     ///
     /// The gaps are the whole of what makes a ring pressable with a pen, and the reach is what they are
@@ -5852,12 +5980,13 @@ mod tests {
     fn a_tap_takes_what_it_landed_on() {
         let middle = [400.0, 400.0];
         let colours = INK_COLORS.len();
+        let geometry = design_palette();
 
         for place in 0..colours {
             let at = palette_point(middle, PALETTE_RING_RADIUS, place, colours);
 
             assert_eq!(
-                palette_at(middle, at, colours),
+                palette_at(geometry, middle, at, colours),
                 Some(PalettePart::Colour(place)),
                 "place {place} of the ring"
             );
@@ -5867,7 +5996,7 @@ mod tests {
             let at = palette_point(middle, PALETTE_TOOL_RADIUS, place, PALETTE_TOOLS.len());
 
             assert_eq!(
-                palette_at(middle, at, colours),
+                palette_at(geometry, middle, at, colours),
                 Some(PalettePart::Tool(place)),
                 "tool {place} of the inner ring"
             );
@@ -5875,7 +6004,7 @@ mod tests {
 
         // The middle of the palette is the colour in hand, which is a *readout* rather than a control: a
         // tap there is the palette's own background, and putting the palette away is what that means.
-        assert_eq!(palette_at(middle, middle, colours), None);
+        assert_eq!(palette_at(geometry, middle, middle, colours), None);
 
         // And halfway between the first colour and the second — the closest two places on a ring of twelve
         // get to each other — is neither of them.
@@ -5884,7 +6013,7 @@ mod tests {
         let between = [(here[0] + there[0]) / 2.0, (here[1] + there[1]) / 2.0];
 
         assert_eq!(
-            palette_at(middle, between, colours),
+            palette_at(geometry, middle, between, colours),
             None,
             "a tap between two colours takes neither"
         );
@@ -6054,6 +6183,7 @@ mod tests {
     #[test]
     fn the_palette_is_kept_on_the_screen() {
         let window = [1_280.0, 900.0];
+        let geometry = design_palette();
         let least = PALETTE_RADIUS + PALETTE_MARGIN;
 
         for near in [
@@ -6063,7 +6193,7 @@ mod tests {
             [1_280.0, 900.0],
             [640.0, 450.0],
         ] {
-            let at = palette_centre(near, window, PALETTE_RADIUS);
+            let at = palette_centre(geometry, near, window);
 
             assert!(at[0] >= least, "{near:?} -> {at:?}");
             assert!(at[0] <= window[0] - least, "{near:?} -> {at:?}");
@@ -6074,15 +6204,55 @@ mod tests {
         // A pen in the middle is where the hand is, and the clamp is there for the edges rather than for
         // every tap: the palette arrives under the nib it was opened at.
         assert_eq!(
-            palette_centre([640.0, 450.0], window, PALETTE_RADIUS),
+            palette_centre(geometry, [640.0, 450.0], window),
             [640.0, 450.0]
         );
 
         // A window too small to hold the palette puts it in the middle rather than somewhere off it.
         assert_eq!(
-            palette_centre([0.0, 0.0], [100.0, 100.0], PALETTE_RADIUS),
+            palette_centre(geometry, [0.0, 0.0], [100.0, 100.0]),
             [50.0, 50.0]
         );
+    }
+
+    /// A platform's unit changes every length, and the reach of a tap with them.
+    ///
+    /// The design is written in 96-DPI logical pixels and macOS measures in points, four thirds of one,
+    /// so the palette there is drawn at three quarters of the design's size. What has to move with the
+    /// drawing is the *answer to a tap*: a ring drawn smaller and hit-tested at the design's reach would
+    /// take presses outside its discs, and one drawn at three quarters with a reach that stayed behind
+    /// would refuse the edge of its own. Both are the same property at two scales, which is what this
+    /// pins.
+    #[test]
+    fn a_smaller_unit_scales_the_ring_and_the_reach_of_a_tap() {
+        let centre = [300.0, 300.0];
+        let colours = INK_COLORS.len();
+
+        for unit in [1.0f32, 0.75] {
+            let geometry = PaletteGeometry::of(unit);
+            let on = palette_point(centre, geometry.ring(), 4, colours);
+
+            assert_eq!(
+                palette_at(geometry, centre, on, colours),
+                Some(PalettePart::Colour(4)),
+                "the point on the ring is the colour, at a unit of {unit}"
+            );
+
+            // Further out than the reach allows — on the same spoke, so the nearest control is the
+            // colour — is not that colour any more. Had the reach stayed at the design's number, this
+            // would still be inside it at 0.75.
+            let away = palette_point(centre, geometry.ring() + geometry.reach() * 1.5, 4, colours);
+
+            assert_ne!(
+                palette_at(geometry, centre, away, colours),
+                Some(PalettePart::Colour(4)),
+                "a tap past the reach is not the colour, at a unit of {unit}"
+            );
+        }
+
+        // A unit a platform cannot mean is the design's own, rather than a palette of no size at all.
+        assert_eq!(PaletteGeometry::of(0.0), design_palette());
+        assert_eq!(PaletteGeometry::of(f32::NAN), design_palette());
     }
 
     /// Element ids address the whole tree, and the bar's swatches and the palette's discs are drawn at

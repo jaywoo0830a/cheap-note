@@ -66,6 +66,8 @@ fn install(window: &mut Window) -> Platform {
         ink,
         ghost,
         pointer,
+        // The design's numbers are this platform's own: a Windows logical pixel is a 96-DPI one.
+        unit_scale: 1.0,
         pen: Box::new(pen),
     }
 }

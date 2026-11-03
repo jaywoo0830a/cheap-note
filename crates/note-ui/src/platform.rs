@@ -140,6 +140,14 @@ pub struct Platform {
     pub ghost: Option<Arc<dyn GhostFeed>>,
     /// The pointer hook, when one could be installed.
     pub pointer: Option<Box<dyn SystemPointer>>,
+    /// How large one of the design's logical pixels is on this platform, as a factor.
+    ///
+    /// The lengths this crate writes down — the palette's rings and its reach, a stroke's width — are
+    /// the logical pixels a **Windows** display measures in (96 to the inch). macOS measures in
+    /// *points*, four thirds as large, so a shape that should look the same in the hand is three
+    /// quarters of those numbers there; a platform that measures in the design's own unit answers
+    /// `1.0`. Every length that has to look the same on both is multiplied by this.
+    pub unit_scale: f32,
     /// The pen. Always there, because a pen that cannot be read is a pen that draws with the mouse —
     /// a service that says so in its status rather than an absence to handle everywhere.
     pub pen: Box<dyn PenSource>,

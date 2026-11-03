@@ -277,9 +277,15 @@ pub trait InkSurface {
 ```
 
 and, in `NoteApp::render`, one element when the answer is `true`. `GhostFeed` gets the same treatment if
-the ghost is in-frame. That is the only change above the seam the port should need — and it is worth
+the ghost is in-frame. That is the one change above the seam the *canvas* needs — and it is worth
 making on Windows first (with the default answering `false`, the Windows build is byte-identical), so
 that the mac crate only *uses* it.
+
+`Platform::unit_scale` is the port's other seam addition, and it is a number rather than a method: the
+factor a length designed in 96-DPI logical pixels is multiplied by to be the same physical size here.
+macOS answers `0.75` — a point is four thirds of a Windows logical pixel — and `PaletteGeometry` is what
+reads it, so the palette is the same size in the hand as it is on Windows rather than a third larger.
+Windows answers `1.0`, and nothing it draws changes.
 
 ## 6. What must not change
 

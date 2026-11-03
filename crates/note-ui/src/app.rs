@@ -85,6 +85,10 @@ const PAGE_MARGIN: f32 = 24.0;
 const BAR_MARGIN: f32 = 12.0;
 
 /// How tall the top bar is, in logical pixels, as an estimate.
+///
+/// Used only by [`bar_line`], and there only while the bar is up and no frame has measured it yet:
+/// the edge the last frame laid out is the real line, and everything that asks where the bar ends —
+/// the ink, the ghost cursor, the system pointer — asks it there.
 const BAR_HEIGHT: f32 = 148.0;
 
 // The two chords the status line names are `keys::chord::MEASURE` and `keys::chord::PALETTE`, written
@@ -1190,12 +1194,13 @@ impl NoteApp {
 
     /// How far down the window the bar reaches: above it a reading belongs to a control, below it to the
     /// page. `0.0` when there is no bar.
+    ///
+    /// One line for everything about the pen: ink refuses a `Down` above it, the ghost cursor is not
+    /// drawn above it, and the system pointer is the cursor there. They have to be one line — a pen
+    /// that can write where its own cursor has given way to the arrow is a pen writing through the
+    /// interface (see [`bar_line`]).
     fn bar_edge(&self) -> f32 {
-        if !self.settings.show_toolbar {
-            return 0.0;
-        }
-
-        self.bar_bottom.get().unwrap_or(0.0)
+        bar_line(self.settings.show_toolbar, self.bar_bottom.get())
     }
 
     /// Reads a batch of readings into the ink model, timed.
@@ -1697,8 +1702,15 @@ impl NoteApp {
     }
 
     /// Shows or hides the whole top bar.
+    ///
+    /// The line the ghost is drawn below and the pointer gives way above is the bar's, so the two are
+    /// told *now* rather than at the frame that redraws the bar: the switch that hides the bar is
+    /// inside the strip it is about to give back to the page, and a frame's delay there is the
+    /// system arrow appearing under the hand that hid it (see [`Self::bar_edge`]).
     fn set_toolbar_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.settings.show_toolbar = shown;
+        self.publish_screen();
+        self.follow_pen_with_pointer();
         self.finish_setting(cx);
     }
 
@@ -1727,24 +1739,38 @@ impl NoteApp {
     }
 
     /// Whether the pen has a cursor of its own where it is, so the system pointer should be out of the way.
+    ///
+    /// This is the platform-agnostic half of "is the ghost on screen": the ghost is handed the same
+    /// answer (see [`Self::publish_screen`]), because a pointer taken away with nothing drawn in its
+    /// place is a window with no cursor at all. There is no ghost without a platform to draw one, with
+    /// something over the sheet, or above the bar's own edge — so the pointer is the system's in exactly
+    /// those places.
     fn pen_has_its_own_cursor(&self) -> bool {
-        // The ghost is drawn in a window of its own, so this is first a question about that window: with
-        // no overlay there is nothing to put in the pointer's place, and hiding the pointer would leave
-        // the window with no cursor at all. The same answer goes to the overlay (see
-        // [`Self::publish_screen`]), so the two cannot disagree.
         if !self.cursor.as_ref().is_some_and(|feed| feed.is_alive()) {
             return false;
         }
 
-        if self.home_is_open() {
+        if self.ghost_suppressed() {
             return false;
         }
 
+        // Below the bar's own edge — and a bar that is hidden has no edge, so the strip its switch sat
+        // in is page again (see [`Self::bar_edge`]).
         self.pen_cursor()
-            .is_some_and(|cursor| cursor.position()[1] > BAR_HEIGHT)
+            .is_some_and(|cursor| cursor.position()[1] > self.bar_edge())
     }
 
-    /// Tells the ghost cursor's window what this frame knows about the screen it is drawn on.
+    /// Whether something is over the sheet, so the pen has no cursor of its own: the home list, or a
+    /// question waiting for an answer.
+    ///
+    /// One answer, read by the platform that draws the ghost ([`Screen::suppressed`]) and by the
+    /// system pointer ([`Self::pen_has_its_own_cursor`]) alike. The two disagreeing is a pointer taken
+    /// away with no ghost in its place: the page keeps a cursor, or the window has none.
+    fn ghost_suppressed(&self) -> bool {
+        self.home_is_open() || self.asking()
+    }
+
+    /// Tells the ghost's platform what this frame knows about the screen it is drawn on.
     fn publish_screen(&self) {
         let Some(cursor) = &self.cursor else {
             return;
@@ -1761,10 +1787,11 @@ impl NoteApp {
             // And how thick that stroke will be, for the same reason: the mark is a preview of the
             // ink, so a heavy pen's dot is heavy (see [`Self::nib_width`]).
             nib_radius: nib_radius_for_width(self.nib_width()),
-            // The line above which a reading belongs to a control rather than to the page. The same
-            // estimate the pointer rule uses ([`Self::pen_has_its_own_cursor`]), in physical pixels.
-            sheet_top: BAR_HEIGHT * self.scale,
-            suppressed: self.home_is_open() || self.asking(),
+            // The line above which a reading belongs to a control rather than to the page: the bar's
+            // own edge, as the last frame measured it — and no line at all when the bar is hidden
+            // (see [`Self::bar_edge`]) — in physical pixels, which is what a reading is in.
+            sheet_top: self.bar_edge() * self.scale,
+            suppressed: self.ghost_suppressed(),
         });
     }
 
@@ -5478,14 +5505,14 @@ mod tests {
     // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
     // scope and shadow the attribute this module needs.
     use super::{
-        confirmed, file_label, file_stem, notch_in_pixels, page_of_write, page_owes_a_rewrite,
-        palette_at, palette_centre, palette_colours, palette_face, palette_id, palette_in_hand,
-        palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width,
-        sheet_matches, spun, wheel_pan, wheel_zoom_factor, zoom_text, Confirmation, PalettePart,
-        PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS,
-        PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS,
-        PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH,
-        WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
+        bar_line, confirmed, file_label, file_stem, notch_in_pixels, page_of_write,
+        page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face, palette_id,
+        palette_in_hand, palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor,
+        quantise_width, sheet_matches, spun, wheel_pan, wheel_zoom_factor, zoom_text, Confirmation,
+        PalettePart, BAR_HEIGHT, PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN,
+        PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC,
+        PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL,
+        WHEEL_LINES_PER_NOTCH, WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
     };
     use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
     use crate::ink::{Notes, Tool};
@@ -6085,6 +6112,38 @@ mod tests {
         );
     }
 
+    /// A bar that is not there has no line, and a bar that is there has the edge a frame measured.
+    ///
+    /// The two answers this pins are the two ways the line used to be wrong. A hidden bar kept the
+    /// estimate, so the strip its own switch sat in stayed "interface": the ghost was not drawn there
+    /// and the system arrow came out under the hand that had just hidden the bar. And a bar that
+    /// wrapped taller than the estimate would have let the ghost be drawn across the bar itself. The
+    /// measured edge is the one line both answers need — and the estimate is only what the frame
+    /// before the first measurement falls back to.
+    #[test]
+    fn a_hidden_bar_has_no_line_and_a_shown_one_has_the_measured_edge() {
+        assert_eq!(
+            bar_line(false, Some(200.0)),
+            0.0,
+            "a hidden bar is page, even where its switch was"
+        );
+        assert_eq!(
+            bar_line(false, None),
+            0.0,
+            "and it is page before it was ever measured"
+        );
+        assert_eq!(
+            bar_line(true, Some(133.0)),
+            133.0,
+            "the edge the frame measured wins over the estimate"
+        );
+        assert_eq!(
+            bar_line(true, None),
+            BAR_HEIGHT,
+            "the estimate is only the frame before the first measurement"
+        );
+    }
+
     /// Element ids address the whole tree, and the bar's swatches and the palette's discs are drawn at
     /// the same moment — the palette floats over the bar — so the two sets of ids cannot be the same ids.
     #[test]
@@ -6106,6 +6165,26 @@ const PAGE_SHADOW: [(f32, f32, u32); 3] = [
     (7.0, 2.5, 0x0000_000C),
     (3.0, 1.0, 0x0000_0014),
 ];
+
+/// The line the bar's own bottom edge is on, in logical window pixels: `0.0` when there is no bar.
+///
+/// The measured edge is the real line, and it is one line for everything about the pen — ink refuses
+/// a `Down` above it, the ghost is not drawn above it, and the system pointer is the cursor there (see
+/// [`NoteApp::bar_edge`]). A hidden bar has no edge at all, even if it was measured a moment ago: the
+/// strip it covered is page again, and the switch that hid it was *inside* that strip — the one place
+/// where keeping the old edge would put the system arrow under the hand that had just hidden it.
+///
+/// [`BAR_HEIGHT`] is only the estimate for the frame before the bar has been measured. It is not a
+/// second answer: once a frame has laid the bar out, the measured edge wins, so a bar that wrapped
+/// taller than the estimate hides the ghost across all of itself and a short one leaves the page
+/// under it as page.
+fn bar_line(shown: bool, measured: Option<f32>) -> f32 {
+    if !shown {
+        return 0.0;
+    }
+
+    measured.unwrap_or(BAR_HEIGHT)
+}
 
 /// Describes a frame's canvas: the desk, the page's shadow, and the sheet — in the order painted.
 fn describe_canvas(canvas: &mut Canvas, sheet: &Sheet, scale: f32, paper: Hsla, desk: Hsla) {

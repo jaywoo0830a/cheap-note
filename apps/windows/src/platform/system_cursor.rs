@@ -115,8 +115,8 @@ pub struct SystemCursor {
     /// What the window procedure reads. Boxed for an address that does not move, and freed only
     /// after the hook that points at it is gone.
     hidden: Box<AtomicBool>,
-    /// Whether the pointer is hidden right now, so that the platform is called on transitions
-    /// rather than on every frame.
+    /// Whether the pointer was hidden at the last answer, so that the arrow is given back once rather
+    /// than on every reading — and a pen that has the pointer has it re-asserted.
     is_hidden: bool,
 }
 
@@ -156,20 +156,20 @@ impl SystemCursor {
     ///
     /// The change takes effect immediately rather than waiting for the next `WM_SETCURSOR`, because
     /// Windows only asks when the pointer moves and a pen can enter range without moving anything.
+    /// The hidden state is re-asserted on **every** call, not only on the transition, for the same
+    /// reason on this platform as on the Mac: the interface sets a cursor of its own over a control
+    /// the pointer is hovering, and that call does not go through this window procedure's question —
+    /// so a transition-only hook would leave a pointing hand over the pen's ghost until the next move.
     pub fn follow(&mut self, pen_has_its_own_cursor: bool) {
-        if pen_has_its_own_cursor == self.is_hidden {
-            return;
-        }
-
-        self.is_hidden = pen_has_its_own_cursor;
+        let was_hidden = std::mem::replace(&mut self.is_hidden, pen_has_its_own_cursor);
         self.hidden.store(pen_has_its_own_cursor, Ordering::Relaxed);
 
         unsafe {
-            SetCursor(if pen_has_its_own_cursor {
-                None
-            } else {
-                arrow()
-            });
+            if pen_has_its_own_cursor {
+                SetCursor(None);
+            } else if was_hidden {
+                SetCursor(arrow());
+            }
         }
     }
 }
@@ -197,8 +197,10 @@ impl Drop for SystemCursor {
 
 /// What the view asks of it: the seam's one method.
 ///
-/// The hook is installed once, and after that this is a flag: the subclass answers WM_SETCURSOR from
-/// it, and the call below is what makes the change take effect now rather than at the next move.
+/// The hook is installed once, and after that `follow` is both the flag the subclass answers
+/// `WM_SETCURSOR` from and a cursor set *now* — the view calls it on every reading and whenever the
+/// bar's line moves, so the answer is re-asserted for as long as it holds rather than only when it
+/// changes.
 impl note_ui::platform::SystemPointer for SystemCursor {
     fn follow(&mut self, pen_has_its_own_cursor: bool) {
         SystemCursor::follow(self, pen_has_its_own_cursor)

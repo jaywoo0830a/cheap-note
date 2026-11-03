@@ -28,8 +28,10 @@ raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The system pointer, and the view the ink is drawn in.
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSCursor", "NSColor", "NSImage", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSCursor", "NSColor", "NSEvent", "NSImage", "NSView", "NSWindow", "block2"] }
 objc2 = "0.6.5"
+# The local monitor that answers AppKit's cursor updates while the ghost is up (see `platform/pointer.rs`).
+block2 = "0.6"
 objc2-quartz-core = { version = "0.3", features = ["CALayer", "CATransaction", "CAMetalLayer"] }
 objc2-core-foundation = "0.3"
 # The canvas's own surface: one texture, one quad, one drawable per present.

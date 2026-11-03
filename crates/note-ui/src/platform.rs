@@ -63,7 +63,12 @@ pub struct Screen {
     /// Published for the same reason the colour is — the view is the only thing that knows the pen's
     /// weight — and it is what makes the mark a preview of the ink rather than a point.
     pub nib_radius: f32,
-    /// The line the ghost is drawn below, in physical client pixels: the bar's bottom edge.
+    /// The line the ghost is drawn below, in physical client pixels: the bar's own bottom edge, as the
+    /// view measured it (`NoteApp::bar_edge`).
+    ///
+    /// It is the same line the ink is refused above and the system pointer is the cursor on — one line,
+    /// three consumers. A ghost drawn below a different line than the ink obeys is a cursor pointing at
+    /// a page the pen cannot write on, or an arrow over a place the ghost says is the pen's.
     pub sheet_top: f32,
     /// Whether there is nothing to draw a ghost for on this screen.
     pub suppressed: bool,
@@ -106,6 +111,14 @@ pub trait GhostFeed: Send + Sync {
 /// drawn in its place would leave the window with no cursor at all.
 pub trait SystemPointer {
     /// Follows the pen: `true` while a ghost is on screen, `false` when the pointer is the cursor again.
+    ///
+    /// `true` is a **state, not an event**: while it holds, the system pointer has to stay out of the
+    /// way until the next `false`. The view calls this on every pen reading and whenever the line the
+    /// ghost is drawn below moves (a bar shown or hidden, a window resized), and it does not call again
+    /// in between — so a platform whose pointer can be put back by the system itself has to answer
+    /// that on its own. Windows answers its window's `WM_SETCURSOR` for as long as the flag is set;
+    /// macOS watches `NSEventTypeCursorUpdate`, because AppKit re-applies the cursor rect under the
+    /// pointer and a `set` that hopes to be last loses to it. A plain `set` is not enough on either.
     fn follow(&mut self, pen_has_its_own_cursor: bool);
 }
 

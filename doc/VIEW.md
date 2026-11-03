@@ -28,11 +28,14 @@ avoids.
 The overlay costs the pen **one number**: where the bar ends (`NoteApp::bar_edge`). A reading that
 lands on the bar is a press on a control rather than ink, so that line has to be the bar's *real* bottom
 edge — observed from the frame, since only the toolkit knows how the bar wrapped — while no ink point
-is ever *moved* by the bar existing, which is the offset this design avoids. `BAR_HEIGHT` (148 px) is
-only an estimate, for the two things that cannot wait for a frame: where the ghost cursor hides, and
-where it cuts the pen's leaning body so a pen just below the bar does not lean a body across it. **Ink
-does not use the estimate**, because a reading refused in a strip of *visible* page is a pen that does
-not write where the user can see it.
+is ever *moved* by the bar existing, which is the offset this design avoids. That one line is where
+everything about the pen changes its mind: ink refuses a `Down` above it, the ghost cursor is not drawn
+above it, and the system pointer is the cursor there. `BAR_HEIGHT` (148 px) is only the estimate the
+line falls back to on the frame before the bar has been measured; every frame after that uses the
+measured edge, so a bar that wrapped taller than the estimate hides the ghost across all of itself and
+a page under a short one is page. A bar that is hidden has no edge at all (`0`), even though the switch
+that hid it was inside the strip it gives back — and the toggle publishes the new line *before* the
+frame that redraws the bar, so the hand that hid it is not left with the arrow.
 
 Two margins go with it: `PAGE_MARGIN` (24 px) between the sheet and the window's edges — the bar covers
 that strip, which is the price of the overlay — and `BAR_MARGIN` (12 px) between the floating bar and
@@ -700,7 +703,7 @@ counts the rebuilds a zoom's change of detail forced (see `ink_layer/render.rs`)
 |---|---|---|
 | `PAGE_MARGIN` | 24 logical px | the margin between the sheet and the window's edges — the strip the floating bar covers |
 | `BAR_MARGIN` | 12 logical px | how far the floating bar and the page pill sit from the window's edges: the desk showing in that gap is what makes the sheet read as paper on a desk |
-| `BAR_HEIGHT` | 148 logical px | an *estimate* of the bar's height, used only by the ghost cursor (where it hides, where it cuts the pen's leaning body). Ink never uses it — ink uses `bar_edge`, measured from the frame |
+| `BAR_HEIGHT` | 148 logical px | the estimate `bar_edge` falls back to only on the frame before the bar has been measured; the *measured* edge is the one line ink, the ghost cursor and the system pointer all use |
 | `STATUS_PILL_WIDTH` | 0.6 | the fraction of the window the status pill may use; it wraps, and the fraction is what decides into how many lines |
 | `STATUS_LIFT` | 40 logical px | how far above the desk's bottom row the status pill floats (the page pill's height plus `BAR_MARGIN`) |
 | `MEASURE_KEY` | `Ctrl+M` | the session's one key, for starting and for stopping: named once, and the line that reports on a session says it out loud |

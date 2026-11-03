@@ -172,14 +172,25 @@ Two things about the *shape* of the mac capture, and they are not the Windows sh
 
 ### 4.2 `platform/pointer.rs` — `SystemPointer`
 
-`NSCursor.hide()` / `NSCursor.unhide()`, driven by the boolean the view already computes (hide exactly
-while the ghost is on screen). Re-assert after a window activation or a `.mouseEntered`: AppKit puts the
-arrow back on its own, and a ghost plus an arrow is two cursors.
+A **transparent cursor** rather than `NSCursor.hide()` / `unhide()`: the hide counter takes the hardware
+cursor plane out of the loop and is desktop state rather than window state, while a 1×1 empty cursor
+keeps the plane drawing nothing (see `cursor.md`). `follow(true)` replaces the arrow with that cursor,
+and `follow(false)` gives the arrow back.
 
-Both halves matter, and the counter alone is not enough — one `hide` is undone by the interface setting
-the arrow again on the pen's next move. So `follow(true)` replaces the arrow with a cursor made from an
-**empty image** *and* takes a `hide` on every reading the pen produces, keeping the count so that the
-pointer is given back exactly (an `unhide` per `hide`, once) when the nib leaves the sheet.
+A `set` is not enough on its own. AppKit re-applies whatever **cursor rect** is under the pointer on a
+`cursorUpdate:`, and GPUI installs one over its whole view (`resetCursorRects` in `gpui-pre-macos`) and
+invalidates it whenever its own style changes — so the arrow comes back over a window whose ghost says
+the pointer is the pen's. The answer is the one Windows gives `WM_SETCURSOR`
+(`apps/windows/src/platform/system_cursor.rs`): a **local monitor for `NSEventTypeCursorUpdate`** sets
+the transparent cursor before the view sees the update and swallows that event while the ghost is up. The
+cursor is still set again on every reading as well, because AppKit puts the arrow back whenever the
+interface handles an event and a pen can enter range without moving anything.
+
+The seam's `follow` is written as a *state* rather than an event for this reason: the view calls it on
+every reading and whenever the bar's line moves, and the monitor is what keeps the answer true between
+those calls. The line itself is the view's — one `bar_edge` for the ink, the ghost and the pointer (see
+[VIEW.md](VIEW.md) §1) — so the pen over the bar is a place the ghost is not drawn and the pointer is
+the system's, and the monitor is out of the way there because `hidden` is false.
 
 ### 4.3 `platform/ghost.rs` — `GhostFeed`
 

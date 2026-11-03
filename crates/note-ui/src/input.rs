@@ -208,14 +208,14 @@ impl Reading {
     }
 }
 
-/// What the pen is telling the frame, and how much of it: the status line's own numbers.
+/// What the pen is telling the frame, and how much of it: the capture's own report.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PenStats {
-    /// The line the status bar shows about the capture: what it is attached to, and how fast.
+    /// The capture's own summary: what it is attached to, and how fast.
     pub summary: String,
     /// Readings per message from the system, which is how coarse the batch shape is.
     pub mean_batch: f32,
-    /// The axes the digitizer can report — `pressure`, `tilt`, and so on — for the same line.
+    /// The axes the digitizer can report — `pressure`, `tilt`, and so on — for the same clause.
     pub axes: Vec<&'static str>,
 }
 

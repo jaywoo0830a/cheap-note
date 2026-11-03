@@ -63,7 +63,11 @@ pub struct PenService {
     quit: Arc<AtomicBool>,
     /// The parked thread that drains the ring.
     worker: Option<JoinHandle<()>>,
-    /// What to tell the user about the pen, successful or not.
+    /// What to tell the user about the pen when it cannot be read; empty when it can.
+    ///
+    /// A capture that attached has nothing to report: "pen attached" on every launch is a sentence
+    /// about the driver rather than about the note, and the status line shows only what both
+    /// platforms can say (see the capture clause under `CHEAP_NOTE_TRACE`).
     status: String,
 }
 
@@ -92,7 +96,7 @@ impl PenService {
                     inbox,
                     quit,
                     worker,
-                    status: String::from("pen attached"),
+                    status: String::new(),
                 }
             }
             Err(error) => PenService::unavailable(error.to_string()),

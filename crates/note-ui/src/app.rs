@@ -3830,42 +3830,6 @@ impl NoteApp {
         if !self.bookmarks.is_empty() {
             parts.push(format!("{} marked", self.bookmarks.len()));
         }
-        match self.pen.stats() {
-            Some(stats) => {
-                parts.push(format!(
-                    "{}  {:.1} readings/message",
-                    stats.summary, stats.mean_batch
-                ));
-
-                // What the digitizer can report is worth showing: a pen whose mask never
-                // mentions pressure is a pen to judge by its line, not by its force. Borrowed rather
-                // than cloned, because this line is rebuilt whenever the status changes and the list
-                // is already allocated by the platform's own report.
-                parts.push(format!(
-                    "pen: {}",
-                    if stats.axes.is_empty() {
-                        String::from("position only")
-                    } else {
-                        stats.axes.join("+")
-                    }
-                ));
-            }
-            None => parts.push(self.pen.status().to_string()),
-        }
-
-        // Worth saying only when it is missing. A window whose pointer could not be hooked still
-        // works — it simply shows two cursors — and this line is the only way to know which of the
-        // two is happening.
-        if self.system_cursor.is_none() {
-            parts.push(String::from("no pointer hook"));
-        }
-
-        // The live lean, when the pen is here to have one. This is the number the ghost cursor is
-        // drawing, so it is where a person checks that the cursor is telling the truth about which
-        // way the pen leans — worth reporting whether or not the ghost itself is drawn.
-        if let Some(tilt) = self.last_cursor().and_then(PenCursor::tilt) {
-            parts.push(format!("lean {tilt}"));
-        }
 
         let ink = self.ink.stats();
         parts.push(format!(
@@ -3926,6 +3890,45 @@ impl NoteApp {
         }
 
         parts.push(self.timings.summary());
+
+        // What the platform's own capture says about itself — how it is attached, how coarsely it
+        // batches readings, which axes the digitizer can report, whether the pointer hook took, and
+        // which way the pen leans — is diagnostic rather than data. None of it is a fact about the
+        // note, and it is the one part of this line that is spelled by the platform, so leaving it out
+        // is what makes the line the same sentence on every OS. `CHEAP_NOTE_TRACE` is where it is read
+        // (the canvas and the pointer keep their own lines there too).
+        if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
+            match self.pen.stats() {
+                Some(stats) => {
+                    parts.push(format!(
+                        "{}  {:.1} readings/message",
+                        stats.summary, stats.mean_batch
+                    ));
+                    parts.push(format!(
+                        "pen: {}",
+                        if stats.axes.is_empty() {
+                            String::from("position only")
+                        } else {
+                            stats.axes.join("+")
+                        }
+                    ));
+                }
+                None => parts.push(self.pen.status().to_string()),
+            }
+
+            // Worth saying only when it is missing. A window whose pointer could not be hooked still
+            // works — it simply shows two cursors — and this is the only way to know which of the two
+            // it is (see [`crate::platform::SystemPointer`]).
+            if self.system_cursor.is_none() {
+                parts.push(String::from("no pointer hook"));
+            }
+
+            // The live lean, when the pen is here to have one: the number the ghost cursor is drawing,
+            // and where a person checks that the cursor tells the truth about which way the pen leans.
+            if let Some(tilt) = self.last_cursor().and_then(PenCursor::tilt) {
+                parts.push(format!("lean {tilt}"));
+            }
+        }
 
         if !self.message.is_empty() {
             parts.push(self.message.clone());
@@ -4631,11 +4634,16 @@ impl NoteApp {
 
         // Built only when it is wanted: `compose_status` returns an empty line for a hidden status,
         // and a pill drawn around nothing is still a pill.
+        //
+        // The left margin is written here for the reason the zoom pill's right one is: an absolutely
+        // positioned child is placed against its parent's padding box, so the row's `px` above does not
+        // reach this one. `BAR_MARGIN` is what the zoom pill has on the right, and what the row itself
+        // sits above the bottom edge — so the counters, the page and the zoom share one margin.
         if self.settings.show_status {
             row = row.child(
                 div()
                     .absolute()
-                    .left_0()
+                    .left(px(BAR_MARGIN))
                     // A row higher than the page pill, because the line wraps into a wide box and the
                     // page pill is in the middle of this one: see [`STATUS_LIFT`].
                     .bottom(px(STATUS_LIFT))
@@ -4928,12 +4936,14 @@ impl NoteApp {
     }
 
     /// The counters, in a translucent pill on the desk.
+    /// The counters' pill: a readout of text, so it is given the air a row of buttons would get from
+    /// their own padding rather than the tighter box the page and zoom pills wear.
     fn status_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
         div()
-            .px_2()
-            .py_1()
+            .px(px(10.0))
+            .py(px(6.0))
             .rounded(theme.radius)
             .bg(theme.title_bar.opacity(0.92))
             .text_size(px(11.0))

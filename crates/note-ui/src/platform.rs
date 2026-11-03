@@ -120,9 +120,16 @@ pub trait InkSurface {
 pub trait PenSource {
     /// The queue the view parks on and drains.
     fn inbox(&self) -> Arc<PenInbox>;
-    /// The line the status bar shows about the capture.
+    /// What to tell the user about the pen when it cannot be read; empty when it can.
+    ///
+    /// The status line shows this only as a *problem* — a capture that attached says nothing — and a
+    /// line that names the platform is the one thing a person can act on when the pen is silent.
     fn status(&self) -> &str;
     /// What the capture can report about the digitizer, or `None` when there is no capture.
+    ///
+    /// Diagnostic rather than data: it is the platform's own report — how the capture is attached, how
+    /// coarsely it batches, which axes the digitizer has — and it is read under `CHEAP_NOTE_TRACE`
+    /// rather than in the status line, which is the same sentence on every OS without it.
     fn stats(&self) -> Option<PenStats>;
 }
 

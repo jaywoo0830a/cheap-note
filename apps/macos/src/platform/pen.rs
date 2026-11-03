@@ -21,7 +21,11 @@ pub struct PenService {
     inbox: Arc<PenInbox>,
     /// What the device says it can report, from the last proximity report.
     capabilities: Arc<AtomicU64>,
-    /// What to tell the user about the pen, successful or not.
+    /// What to tell the user about the pen when it cannot be read; empty when it can.
+    ///
+    /// A capture that attached has nothing to report: "pen attached" on every launch is a sentence
+    /// about the driver rather than about the note, and the status line shows only what both
+    /// platforms can say (see the capture clause under `CHEAP_NOTE_TRACE`).
     status: String,
 }
 
@@ -60,7 +64,7 @@ impl PenService {
                 pen: Some(pen),
                 inbox,
                 capabilities,
-                status: String::from("pen attached"),
+                status: String::new(),
             },
             None => PenService {
                 pen: None,

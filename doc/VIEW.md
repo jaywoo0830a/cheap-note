@@ -149,14 +149,17 @@ The counters sit in a translucent pill **on the desk**, out of the bar, because 
 than a control — and because the line changes four times a second: text in the bar would re-lay-out the
 bar, while text in a pill of its own re-lays-out the pill.
 
-It wraps, and is allowed 60% of the window's width (`STATUS_PILL_WIDTH`), because of what the line has
-grown into: the pen's readings, the ink's counts, the page cache's ratio, the zoom and the frame's own
-timings are some three hundred characters, which is more than fifteen hundred logical pixels at this
-size. Set on one nowrap line of 460 pixels — what this pill used to do — the timings were the part that
-fell off the end, and the timings are the whole reason to read the line while something is being
-measured. It floats `STATUS_LIFT` (40 px) above the desk's bottom row — the page pill's height plus a
-margin — because a readout drawn over the control a person is reaching for is worse than one a row
-higher, and it grows *upward* from the corner it is anchored to rather than down off the window.
+It wraps, and is allowed 60% of the window's width (`STATUS_PILL_WIDTH`), because of what the line
+carries: the document and the page, the ink's counts, the page cache's ratio, the zoom and the frame's
+own timings. Set on one nowrap line of 460 pixels — what this pill used to do — the timings were the
+part that fell off the end, and the timings are the whole reason to read the line while something is
+being measured. And it carries only what **both platforms can say**: a capture's own report (how it is
+attached, how coarsely it batches readings, which axes the digitizer has) and the pen's lean are
+diagnostic, and they are read under `CHEAP_NOTE_TRACE` instead, which is what keeps the line the same
+sentence on Windows and on the Mac. It floats `STATUS_LIFT` (40 px) above the desk's bottom row — the
+page pill's height plus a margin — because a readout drawn over the control a person is reaching for is
+worse than one a row higher, and it grows *upward* from the corner it is anchored to rather than down
+off the window.
 
 **It is not on a clock.** It is rebuilt by the change that made it stale — a key, a tool, a page, a
 session started or stopped — and never on a tick of its own: a line that moves on its own is a line

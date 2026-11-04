@@ -645,6 +645,10 @@ cheap-note is on its home list; Start+Select toggles the desktop job. The system
 platform's (Core Graphics on macOS, behind its Accessibility permission); the view only says how far
 and which way.
 
+While a note is in front, the shoulders are the page's instead: **LB is the previous page and RB the
+next**, the same two commands the page pill's arrows and the arrow keys use. A shoulder is a *press*,
+not a hold: one page per press, and the edge is what the gamepad module reports.
+
 The numbers behind that are all *derived* rather than picked:
 
 | Number | Value | Where it comes from |
@@ -655,7 +659,7 @@ The numbers behind that are all *derived* rather than picked:
 | a trackpad's notch | 96 px | `WHEEL_LINES_PER_NOTCH` × `WHEEL_LINE_HEIGHT` — the distance that asks for what a notch asks for. Without it the pixel path zooms three times faster per gesture than the line path, and it *was* three times too fast the first time this was written |
 | `GAMEPAD_PAN_SPEED` | 1000 logical px/s | a wheel spun at ten notches a second (10 × 96 px), because a stick is held rather than flicked and has to cross a sheet in about the time a hand expects |
 | `GAMEPAD_ZOOM_RATE` | 1 doubling/s | full deflection doubles the sheet in a second — half deflection is the square root of that, because the zoom is an exponent rather than a sum |
-| `GAMEPAD_POINTER_SPEED` | 900 logical px/s | how fast a fully deflected right stick moves the system pointer while another app is in front: half the in-app pan, because a cursor is aimed rather than swept |
+| `GAMEPAD_POINTER_SPEED` | 500 logical px/s | how fast a fully deflected right stick moves the system pointer while another app is in front: half the in-app pan, because a cursor is aimed rather than swept |
 | `GAMEPAD_POINTER_DEADZONE` | 0.2 | how far that stick must leave its centre before the pointer moves: twice `gilrs`'s own dead zone, because a cursor shows a drift a page would hide |
 | `GAMEPAD_SCROLL_SPEED` | 900 logical px/s | how fast a fully deflected left stick scrolls that app; a little slower than the in-app pan because the content is not a sheet at a known size |
 | `GAMEPAD_LONGEST_STEP` | 100 ms | the longest wake the sticks are paid for: a laptop that slept must not wake to a sheet a minute's worth of pan or zoom away |
@@ -752,7 +756,7 @@ counts the rebuilds a zoom's change of detail forced (see `ink_layer/render.rs`)
 | `WHEEL_ZOOM_STEP` | 1.25 | one notch of a wheel, and one press of the toolbar's zoom buttons — the same question, answered at the same rate |
 | `WHEEL_LINES_PER_NOTCH` | 3 | what the platform turns one notch into; 32 logical px per line; 96 px is a trackpad's notch |
 | `WHEEL_LINE_HEIGHT` | 32 logical px | what one line of a scroll is worth when panning |
-| `GAMEPAD_PAN_SPEED` / `GAMEPAD_ZOOM_RATE` / `GAMEPAD_POINTER_SPEED` / `GAMEPAD_SCROLL_SPEED` / `GAMEPAD_LONGEST_STEP` | 1000 px/s / 1 doubling per second / 900 px/s / 900 px/s / 100 ms | the left stick's pan and scroll, the right stick's zoom and pointer, and the longest wake either is paid for — a wheel spun at ten notches a second, held rather than flicked |
+| `GAMEPAD_PAN_SPEED` / `GAMEPAD_ZOOM_RATE` / `GAMEPAD_POINTER_SPEED` / `GAMEPAD_SCROLL_SPEED` / `GAMEPAD_LONGEST_STEP` | 1000 px/s / 1 doubling per second / 500 px/s / 900 px/s / 100 ms | the left stick's pan and scroll, the right stick's zoom and pointer, and the longest wake either is paid for — a wheel spun at ten notches a second, held rather than flicked |
 | `PALETTE_KEY` | `Ctrl+Shift+C` | the palette at the pen's one chord, for opening it and for putting it away; the status line says so while it is up |
 | `PALETTE_RING_RADIUS` / `PALETTE_TOOL_RADIUS` | 104 / 54 logical px | how far the colours and the three tools sit from the palette's centre: the tools are in the well inside and the colours are on the ring outside, and both rings are far enough out that no point on the palette is within reach of two controls |
 | `PALETTE_DISC` / `PALETTE_DISC_BOX` | 30 / 38 logical px | a colour disc, and the box it draws in — the box carries the ring that marks the keyboard's place, so a placement is measured in the box rather than in the disc |

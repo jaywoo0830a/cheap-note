@@ -1413,6 +1413,16 @@ impl NoteApp {
                     app.release_system_buttons();
 
                     if !covered {
+                        // The shoulders turn the page while the sheet is in front — the same two
+                        // commands the page pill's arrows and the arrow keys use.
+                        if sticks.left == Some(true) {
+                            app.previous_page(cx);
+                        }
+
+                        if sticks.right == Some(true) {
+                            app.next_page(cx);
+                        }
+
                         app.pan_sheet(sticks.pan, cx);
                     }
 

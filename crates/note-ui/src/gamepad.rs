@@ -32,8 +32,9 @@ const GAMEPAD_ZOOM_RATE: f32 = 1.0;
 /// How fast a fully deflected right stick moves the system pointer, in logical pixels per second.
 ///
 /// Only used while another application is in front: then the right stick is the pointer, and the
-/// same position that zooms the note is a velocity here.
-const GAMEPAD_POINTER_SPEED: f32 = 1_800.0;
+/// same position that zooms the note is a velocity here. Slower than the in-app pan: a cursor is
+/// aimed at a button, not swept across a page.
+const GAMEPAD_POINTER_SPEED: f32 = 900.0;
 
 /// How far the system pointer's stick has to leave its centre before it moves.
 ///
@@ -401,8 +402,8 @@ mod tests {
         );
         assert_eq!(
             stick_pointer(1.0, 1.0, Duration::from_millis(100)),
-            (180.0, -180.0),
-            "a tenth of a second at eighteen hundred pixels a second, up the screen"
+            (90.0, -90.0),
+            "a tenth of a second at nine hundred pixels a second, up the screen"
         );
         assert_eq!(
             stick_pointer(0.1, -0.1, Duration::from_millis(100)),

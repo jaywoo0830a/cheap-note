@@ -33,7 +33,14 @@ const GAMEPAD_ZOOM_RATE: f32 = 1.0;
 ///
 /// Only used while another application is in front: then the right stick is the pointer, and the
 /// same position that zooms the note is a velocity here.
-const GAMEPAD_POINTER_SPEED: f32 = 1_200.0;
+const GAMEPAD_POINTER_SPEED: f32 = 1_800.0;
+
+/// How far the system pointer's stick has to leave its centre before it moves.
+///
+/// `gilrs` already applies a 0.1 dead zone; this one is larger because a pointer is a much finer
+/// instrument than a page: a worn stick's 0.15 is a drift a person sees, so it is zero here and the
+/// rest of the travel is rescaled to make full deflection still full speed.
+const GAMEPAD_POINTER_DEADZONE: f32 = 0.2;
 
 /// How fast a fully deflected left stick scrolls, in logical pixels per second.
 ///
@@ -116,18 +123,41 @@ pub struct Gamepads {
     right_down: bool,
     /// Whether Start and Select were both down at the last read, so the chord is one pulse.
     chord_down: bool,
+    /// Whether the last read saw any input, so the trace can say when a gesture begins and ends.
+    was_held: bool,
+    /// When the trace last printed the sticks, so a held stick is one line every quarter second.
+    last_input_log: Instant,
 }
 
 impl Gamepads {
     /// Opens the platform's gamepad support, if there is any.
     pub fn new() -> Self {
+        let gilrs = Gilrs::new().ok();
+
+        if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
+            if let Some(gilrs) = gilrs.as_ref() {
+                for (id, pad) in gilrs.gamepads() {
+                    eprintln!("gamepad {id}: {} connected", pad.name());
+                }
+            }
+        }
+
         Gamepads {
-            gilrs: Gilrs::new().ok(),
+            gilrs,
             last: Instant::now(),
             left_down: false,
             right_down: false,
             chord_down: false,
+            was_held: false,
+            last_input_log: Instant::now(),
         }
+    }
+
+    /// Whether a pad is connected, for a status line or a trace.
+    pub fn is_connected(&self) -> bool {
+        self.gilrs
+            .as_ref()
+            .is_some_and(|gilrs| gilrs.gamepads().next().is_some())
     }
 
     /// What the sticks and shoulders ask for since the last call.
@@ -148,7 +178,21 @@ impl Gamepads {
             return Sticks::default();
         };
 
-        while gilrs.next_event().is_some() {}
+        let trace = std::env::var_os("CHEAP_NOTE_TRACE").is_some();
+
+        while let Some(event) = gilrs.next_event() {
+            if trace {
+                match event.event {
+                    gilrs::EventType::Connected => {
+                        eprintln!("gamepad {}: connected", event.id);
+                    }
+                    gilrs::EventType::Disconnected => {
+                        eprintln!("gamepad {}: disconnected", event.id);
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         // The first pad being held is the one that counts: two hands on two pads is not a gesture
         // this app has, and adding them together would double the speed. `Input::default` is a pad
@@ -165,6 +209,41 @@ impl Gamepads {
             })
             .find(|input| input.is_held())
             .unwrap_or_default();
+
+        let held = input.is_held();
+        if trace && held != self.was_held {
+            eprintln!(
+                "gamepad: {} left=({:.2}, {:.2}) right=({:.2}, {:.2}) L={} R={} start={} select={}",
+                if held { "input" } else { "still" },
+                input.left.0,
+                input.left.1,
+                input.right.0,
+                input.right.1,
+                input.left_button,
+                input.right_button,
+                input.start,
+                input.select
+            );
+        }
+        self.was_held = held;
+
+        if trace && held {
+            let logged = Instant::now();
+            if logged.saturating_duration_since(self.last_input_log) >= Duration::from_millis(250) {
+                eprintln!(
+                    "gamepad: left=({:.2}, {:.2}) right=({:.2}, {:.2}) L={} R={} start={} select={}",
+                    input.left.0,
+                    input.left.1,
+                    input.right.0,
+                    input.right.1,
+                    input.left_button,
+                    input.right_button,
+                    input.start,
+                    input.select
+                );
+                self.last_input_log = logged;
+            }
+        }
 
         Sticks {
             pan: stick_pan(input.left.0, input.left.1, elapsed),
@@ -217,10 +296,20 @@ fn stick_zoom(y: f32, elapsed: Duration) -> f32 {
 /// The distance the system pointer moves for a right stick at `(x, y)` held for `elapsed`.
 ///
 /// Screen coordinates grow downward, so the vertical sign is the one that flips: a stick pushed away
-/// from the reader moves the pointer up, and right is right.
+/// from the reader moves the pointer up, and right is right. A pointer dead zone larger than the
+/// pad's is applied first, because a cursor shows a drift the sheet would hide.
 fn stick_pointer(x: f32, y: f32, elapsed: Duration) -> (f32, f32) {
     let distance = GAMEPAD_POINTER_SPEED * elapsed.min(GAMEPAD_LONGEST_STEP).as_secs_f32();
-    (x * distance, -y * distance)
+    (pointer_axis(x) * distance, -pointer_axis(y) * distance)
+}
+
+/// One axis of the pointer's stick with [`GAMEPAD_POINTER_DEADZONE`] applied and the rest rescaled.
+fn pointer_axis(value: f32) -> f32 {
+    if value.abs() <= GAMEPAD_POINTER_DEADZONE {
+        return 0.0;
+    }
+
+    value.signum() * (value.abs() - GAMEPAD_POINTER_DEADZONE) / (1.0 - GAMEPAD_POINTER_DEADZONE)
 }
 
 /// The scroll a left stick at `(x, y)` asks for over `elapsed`: a wheel turned away scrolls up, and
@@ -302,7 +391,8 @@ mod tests {
         );
     }
 
-    /// The system pointer follows the right stick: right is right, away from the reader is up.
+    /// The system pointer follows the right stick: right is right, away from the reader is up, and a
+    /// stick near its centre is still.
     #[test]
     fn the_pointer_follows_the_right_stick() {
         assert_eq!(
@@ -311,8 +401,13 @@ mod tests {
         );
         assert_eq!(
             stick_pointer(1.0, 1.0, Duration::from_millis(100)),
-            (120.0, -120.0),
-            "a tenth of a second at twelve hundred pixels a second, up the screen"
+            (180.0, -180.0),
+            "a tenth of a second at eighteen hundred pixels a second, up the screen"
+        );
+        assert_eq!(
+            stick_pointer(0.1, -0.1, Duration::from_millis(100)),
+            (0.0, 0.0),
+            "inside the pointer's own dead zone"
         );
     }
 

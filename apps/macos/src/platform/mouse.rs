@@ -29,6 +29,8 @@
 //! * a click is a down or an up at the current location, which is what makes a held shoulder a
 //!   button held rather than a burst of clicks.
 
+use std::time::{Duration, Instant};
+
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
@@ -83,6 +85,8 @@ struct SystemMouseService {
     buttons: (bool, bool),
     /// Whether the Accessibility prompt has already been asked for in this process.
     requested: bool,
+    /// When the trace last printed a pointer movement, so a held stick is one line a quarter second.
+    last_log: Instant,
     /// The App Nap exemption, held for as long as the service exists.
     ///
     /// A background app is exactly what App Nap slows down, and a mouse that answers on App Nap's
@@ -102,11 +106,18 @@ impl SystemMouseService {
             ),
         );
 
+        if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
+            // SAFETY: a process-wide TCC read with no arguments.
+            let trusted = unsafe { AXIsProcessTrusted() != 0 };
+            eprintln!("system mouse: installed, Accessibility={trusted}");
+        }
+
         Box::new(SystemMouseService {
             source: CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok(),
             scroll: (0.0, 0.0),
             buttons: (false, false),
             requested: false,
+            last_log: Instant::now(),
             activity,
         })
     }
@@ -143,12 +154,25 @@ impl SystemMouse for SystemMouseService {
         }
 
         self.requested = true;
+
+        if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
+            eprintln!("system mouse: asking for Accessibility");
+        }
+
         request_accessibility();
     }
 
     fn move_by(&mut self, distance: (f32, f32)) {
         if distance == (0.0, 0.0) {
             return;
+        }
+
+        if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
+            let now = Instant::now();
+            if now.saturating_duration_since(self.last_log) >= Duration::from_millis(250) {
+                eprintln!("system mouse: move ({:.1}, {:.1})", distance.0, distance.1);
+                self.last_log = now;
+            }
         }
 
         let Some(at) = self.cursor() else {

@@ -568,10 +568,11 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
 * **The gamepad is above the seam too.** Its sticks are `gilrs`, a cross-platform library in the
   same sense GPUI Kit is — one API over XInput/WGI on Windows and IOKit on macOS — so `note-ui` reads
   it directly instead of asking a platform crate for it. A machine with no gamepad is not an error:
-  the sticks simply read as still. While this app is in front the sticks pan and zoom the note; while
-  another app is, they are its pointer and scroll, with the shoulders as clicks. The Mac posts those
-  events with Core Graphics (behind the Accessibility permission); Windows answers the stub — no
-  system mouse, and always in front — so its in-app behaviour is unchanged.
+  the sticks simply read as still. While a note is open and this app is in front the sticks pan and
+  zoom it; on the home list, or while another app is in front, they are its pointer and scroll, with
+  the shoulders as clicks. The Mac posts those events with Core Graphics (behind the Accessibility
+  permission); Windows answers the stub — no system mouse, and always in front — so its in-app
+  behaviour is unchanged.
 * **Pdfium is not in the repository.** It is downloaded into `vendor/` (`vendor/README.md`; the current
   build is 158.0.8125.0), and a build copies the platform's library (`pdfium.dll`; the loader also
   knows `libpdfium.dylib` and `libpdfium.so`) from `vendor/lib` next to the executable it produces, so

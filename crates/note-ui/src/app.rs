@@ -779,6 +779,11 @@ pub struct NoteApp {
     /// On by default, and Start+Select is the one way to give the controller back to a game: a
     /// system-wide mapper that cannot be turned off is a controller nobody else can use.
     system_mouse_enabled: bool,
+    /// The focus the last wake saw, so a trace can say when the app changes places rather than every
+    /// millisecond that it has not.
+    focus_was: Option<bool>,
+    /// Whether the last wake saw a gamepad, so the status line can say when one is connected.
+    pad_was: bool,
     /// Where each page was being read, for as long as the note in hand is open.
     ///
     /// The *page's* place rather than the reader's: turning to a page added at the end of a note opens that page at
@@ -998,6 +1003,8 @@ impl NoteApp {
             focus,
             system_buttons: (false, false),
             system_mouse_enabled: true,
+            focus_was: None,
+            pad_was: false,
             pans: HashMap::new(),
             sheet: Sheet::default(),
             bar_bottom: Rc::new(Cell::new(None)),
@@ -1325,16 +1332,57 @@ impl NoteApp {
                 // It has two jobs — the sheet's while this app is in front, the desktop's while it
                 // is not — and the platform's focus answer is what decides which one this wake is.
                 let sticks = app.gamepad.read();
+                let active = app.focus.is_active();
+
+                // A pad the app can see is the first thing to know when the sticks do nothing: the
+                // status line says `pad` while one is connected, and the connection itself is what
+                // asks for the line to be rebuilt.
+                let pad = app.gamepad.is_connected();
+                if pad != app.pad_was {
+                    app.pad_was = pad;
+                    app.touch_status();
+                }
+
+                if app.focus_was != Some(active) {
+                    if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
+                        eprintln!(
+                            "focus: {}",
+                            if active { "cheap-note" } else { "another app" }
+                        );
+                    }
+
+                    app.focus_was = Some(active);
+                    // The status line says which job the sticks have (`pad: desktop`/`canvas`),
+                    // and the answer changed with the focus.
+                    app.touch_status();
+                }
+
                 let covered = app.home_is_open()
                     || app.marks.is_open()
                     || app.outline.is_open()
                     || app.asking()
                     || app.naming.is_some();
 
+                // The desktop's job: another app is in front, or cheap-note is on its own home list —
+                // there is no page to pan there, and a cursor is what the sticks should be. A note in
+                // front keeps them on the sheet.
+                let desktop = !active || app.home_is_open();
+
                 // The one chord: give the controller back to whatever app is in front, or take it
                 // back for the desktop. A system-wide mapper with no way out is a borrowed controller.
                 if sticks.toggle {
                     app.system_mouse_enabled = !app.system_mouse_enabled;
+
+                    if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
+                        eprintln!(
+                            "controller mouse: {}",
+                            if app.system_mouse_enabled {
+                                "on"
+                            } else {
+                                "off"
+                            }
+                        );
+                    }
 
                     if !app.system_mouse_enabled {
                         app.release_system_buttons();
@@ -1350,8 +1398,18 @@ impl NoteApp {
                     ));
                 }
 
-                if app.focus.is_active() {
-                    // The app has the controller: let go of anything the desktop was holding.
+                if desktop {
+                    // The home list is the place a person first tries the controller, so it is the
+                    // place the Accessibility prompt has to be able to appear: the app is in front,
+                    // and the sticks are the desktop's rather than a page's.
+                    if app.system_mouse_enabled {
+                        app.zoom_with_stick(1.0, cx);
+                        app.drive_system_mouse(&sticks);
+                    } else {
+                        app.zoom_with_stick(1.0, cx);
+                    }
+                } else {
+                    // The app has a note in front: let go of anything the desktop was holding.
                     app.release_system_buttons();
 
                     if !covered {
@@ -1362,15 +1420,6 @@ impl NoteApp {
                     // *settles*, so a gesture held when one opened becomes the note's setting
                     // rather than being lost with the view it moved.
                     app.zoom_with_stick(if covered { 1.0 } else { sticks.zoom }, cx);
-                } else if app.system_mouse_enabled {
-                    // Another app is in front: the sticks are its pointer and scroll, and the
-                    // shoulders are its clicks. A zoom left mid-gesture when focus left still
-                    // becomes the note's, once.
-                    app.zoom_with_stick(1.0, cx);
-                    app.drive_system_mouse(&sticks);
-                } else {
-                    // The desktop mouse mode is off: the controller belongs to the app in front.
-                    app.zoom_with_stick(1.0, cx);
                 }
 
                 // The page the view is waiting for, paid for here rather than inside a frame: it is
@@ -4086,6 +4135,21 @@ impl NoteApp {
         // 99% look identical from the outside, and the placeholders are what the eye actually saw.
         if self.pdf.is_loaded() {
             parts.push(self.pdf.stats().summary());
+        }
+
+        // The controller, when there is one, and which job its sticks have right now: `desktop`
+        // while another app is in front or the home list is up, `canvas` while a note is in front,
+        // and `off` after Start+Select. A person whose cursor did not move can read why here.
+        if self.gamepad.is_connected() {
+            let mode = if !self.system_mouse_enabled {
+                "off"
+            } else if !self.focus.is_active() || self.home_is_open() {
+                "desktop"
+            } else {
+                "canvas"
+            };
+
+            parts.push(format!("pad: {mode}"));
         }
 
         // Where the reading goes and what it costs to put it there. The zoom is the one piece of

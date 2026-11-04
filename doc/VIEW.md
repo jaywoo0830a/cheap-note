@@ -90,11 +90,12 @@ and pans and zooms the sheet the way a wheel does. The left stick pans; the righ
 front, the sticks are still read — that is what keeps their cached state current — and what they ask
 for is not spent, because there is no page under them to move.
 
-The sticks have a second job when another application is in front: the left one scrolls, the right one
-moves the system pointer (at `GAMEPAD_POINTER_SPEED` and `GAMEPAD_SCROLL_SPEED`), and the shoulders
-are the pointer's two buttons. The platform's focus answer decides which job a wake is (`AppFocus`);
-Start+Select turns the desktop job off and on, because a controller
-that can never be given back to a game is a controller nobody else can use.
+The sticks have a second job when another application is in front, or while cheap-note is on its own
+home list: the left one scrolls, the right one moves the system pointer (at `GAMEPAD_POINTER_SPEED`
+and `GAMEPAD_SCROLL_SPEED`), and the shoulders are the pointer's two buttons. The platform's focus
+answer decides which job a wake is (`AppFocus`); Start+Select turns the desktop job off and on,
+because a controller that can never be given back to a game is a controller nobody else can use. A
+note in front keeps the sticks on the sheet.
 
 ## 3. The top bar
 
@@ -187,6 +188,11 @@ stopwatch and starting it and stopping it are the same gesture a moment apart. W
 only *that* it is running; what it measures — the wait between frames and the pen's own wait — is read
 once, afterwards. An error is the one thing allowed to force the line to be rebuilt at once, since the
 line is not on a clock and would otherwise hold the message back.
+
+A connected gamepad adds one segment — `pad: desktop`, `pad: canvas` or `pad: off` — which says which
+job its sticks have right now. It is the first thing to read when a controller seems to do nothing:
+`desktop` is another app or the home list, `canvas` is a note in front, and `off` is the Start+Select
+toggle.
 
 ### Turning the bar off
 
@@ -632,11 +638,12 @@ away from the reader is closer and toward them further away, anchored on the win
 stick's X axis is not read for the zoom. The view is moved on every wake while the stick is held; the
 note's zoom setting is written once, when it is let go, because a write per millisecond is not a setting.
 
-The same sticks are the system's when cheap-note is not the app in front: the right one moves the
+The same sticks are the system's when there is no note in front: the right one moves the
 pointer, the left one scrolls up/down/left/right, and LB/RB are the left and right mouse buttons —
-held, not flicked, so a shoulder can drag. Start+Select toggles that desktop job. The system events
-are the platform's (Core Graphics on macOS, behind its Accessibility permission); the view only says
-how far and which way.
+held, not flicked, so a shoulder can drag. That is the case while another app is in front and while
+cheap-note is on its home list; Start+Select toggles the desktop job. The system events are the
+platform's (Core Graphics on macOS, behind its Accessibility permission); the view only says how far
+and which way.
 
 The numbers behind that are all *derived* rather than picked:
 
@@ -648,7 +655,8 @@ The numbers behind that are all *derived* rather than picked:
 | a trackpad's notch | 96 px | `WHEEL_LINES_PER_NOTCH` × `WHEEL_LINE_HEIGHT` — the distance that asks for what a notch asks for. Without it the pixel path zooms three times faster per gesture than the line path, and it *was* three times too fast the first time this was written |
 | `GAMEPAD_PAN_SPEED` | 1000 logical px/s | a wheel spun at ten notches a second (10 × 96 px), because a stick is held rather than flicked and has to cross a sheet in about the time a hand expects |
 | `GAMEPAD_ZOOM_RATE` | 1 doubling/s | full deflection doubles the sheet in a second — half deflection is the square root of that, because the zoom is an exponent rather than a sum |
-| `GAMEPAD_POINTER_SPEED` | 1200 logical px/s | how fast a fully deflected right stick moves the system pointer while another app is in front |
+| `GAMEPAD_POINTER_SPEED` | 1800 logical px/s | how fast a fully deflected right stick moves the system pointer while another app is in front |
+| `GAMEPAD_POINTER_DEADZONE` | 0.2 | how far that stick must leave its centre before the pointer moves: twice `gilrs`'s own dead zone, because a cursor shows a drift a page would hide |
 | `GAMEPAD_SCROLL_SPEED` | 900 logical px/s | how fast a fully deflected left stick scrolls that app; a little slower than the in-app pan because the content is not a sheet at a known size |
 | `GAMEPAD_LONGEST_STEP` | 100 ms | the longest wake the sticks are paid for: a laptop that slept must not wake to a sheet a minute's worth of pan or zoom away |
 
@@ -744,7 +752,7 @@ counts the rebuilds a zoom's change of detail forced (see `ink_layer/render.rs`)
 | `WHEEL_ZOOM_STEP` | 1.25 | one notch of a wheel, and one press of the toolbar's zoom buttons — the same question, answered at the same rate |
 | `WHEEL_LINES_PER_NOTCH` | 3 | what the platform turns one notch into; 32 logical px per line; 96 px is a trackpad's notch |
 | `WHEEL_LINE_HEIGHT` | 32 logical px | what one line of a scroll is worth when panning |
-| `GAMEPAD_PAN_SPEED` / `GAMEPAD_ZOOM_RATE` / `GAMEPAD_POINTER_SPEED` / `GAMEPAD_SCROLL_SPEED` / `GAMEPAD_LONGEST_STEP` | 1000 px/s / 1 doubling per second / 1200 px/s / 900 px/s / 100 ms | the left stick's pan and scroll, the right stick's zoom and pointer, and the longest wake either is paid for — a wheel spun at ten notches a second, held rather than flicked |
+| `GAMEPAD_PAN_SPEED` / `GAMEPAD_ZOOM_RATE` / `GAMEPAD_POINTER_SPEED` / `GAMEPAD_SCROLL_SPEED` / `GAMEPAD_LONGEST_STEP` | 1000 px/s / 1 doubling per second / 1800 px/s / 900 px/s / 100 ms | the left stick's pan and scroll, the right stick's zoom and pointer, and the longest wake either is paid for — a wheel spun at ten notches a second, held rather than flicked |
 | `PALETTE_KEY` | `Ctrl+Shift+C` | the palette at the pen's one chord, for opening it and for putting it away; the status line says so while it is up |
 | `PALETTE_RING_RADIUS` / `PALETTE_TOOL_RADIUS` | 104 / 54 logical px | how far the colours and the three tools sit from the palette's centre: the tools are in the well inside and the colours are on the ring outside, and both rings are far enough out that no point on the palette is within reach of two controls |
 | `PALETTE_DISC` / `PALETTE_DISC_BOX` | 30 / 38 logical px | a colour disc, and the box it draws in — the box carries the ring that marks the keyboard's place, so a placement is measured in the box rather than in the disc |

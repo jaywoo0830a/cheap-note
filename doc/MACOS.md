@@ -313,9 +313,10 @@ The gamepad is the one input with two jobs, so the seam grew two small traits ra
 
 The split matters because the *policy* is portable and only the *events* are not: the view decides
 that the left stick scrolls at `GAMEPAD_SCROLL_SPEED` and the shoulders are the pointer's buttons,
-and the platform decides how a scroll or a click is expressed on its system. While cheap-note is in
-front the same sticks pan and zoom the note; a platform that cannot tell the difference is always
-"in front", which is the behaviour it had before.
+and the platform decides how a scroll or a click is expressed on its system. While a note is open
+and cheap-note is in front the same sticks pan and zoom it; on the home list, or with another app in
+front, they are the desktop's. A platform that cannot tell the difference is always "in front", which
+is the behaviour it had before.
 
 Posting events is **Accessibility**, not a link-time capability: macOS gates `CGEventPost` behind
 System Settings → Privacy & Security → Accessibility. The app asks the first time a controller is

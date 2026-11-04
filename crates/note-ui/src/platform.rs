@@ -1,4 +1,4 @@
-//! The seam: the four things the view needs from whatever machine it is running on.
+//! The seam: what the view needs from whatever machine it is running on.
 //!
 //! ## What is on each side
 //!
@@ -12,6 +12,8 @@
 //! | [`GhostFeed`] | draw the nib's mark at the pen's angle, now | a layered window above everything |
 //! | [`SystemPointer`] | get the system pointer out of the way, or back | `SetCursor` in a subclass |
 //! | [`InkSurface`] | paint the desk, the paper and the ink | a Direct2D surface under GPUI's |
+//! | [`SystemMouse`] | drive the machine's pointer while another app is in front | none — the Windows stub |
+//! | [`AppFocus`] | whether this app is the one in front | always, until Windows is asked |
 //!
 //! A platform is one implementation of each, assembled by [`Platform`] and handed to
 //! [`crate::run`]. That is the whole of what a second platform has to write: no element tree, no
@@ -122,6 +124,53 @@ pub trait SystemPointer {
     fn follow(&mut self, pen_has_its_own_cursor: bool);
 }
 
+/// Which of the system pointer's buttons a gamepad button stands in for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    /// The primary button.
+    Left,
+    /// The secondary button.
+    Right,
+}
+
+/// The machine's own pointer, for a gamepad to drive while this app is behind another.
+///
+/// The view owns the *policy* — what a stick's position means, when a shoulder is a click, and when
+/// the app has to let go — and a platform owns the mechanism. A platform with no way to post events
+/// answers `None` in [`Platform::mouse`], and the gamepad keeps its in-app job alone.
+pub trait SystemMouse {
+    /// Whether this service can post events at all.
+    ///
+    /// macOS needs Accessibility permission for synthetic events, and a service without it is a
+    /// stick that moves nothing; the view asks before it spends a gesture, so it can say why.
+    fn is_ready(&self) -> bool;
+    /// Asks the system for whatever permission posting needs, showing its prompt if it can.
+    ///
+    /// Called on the first gesture the view tries to spend, not at startup: a person who never uses
+    /// a gamepad should never see a permission dialog for one.
+    fn request(&mut self);
+    /// Moves the pointer by a distance in logical pixels: right and down are positive.
+    fn move_by(&mut self, distance: (f32, f32));
+    /// Scrolls the content under the pointer by a distance in logical pixels: right and **up** are
+    /// positive — the direction a wheel turned away from the reader scrolls.
+    fn scroll(&mut self, distance: (f32, f32));
+    /// Holds or releases one of the pointer's buttons.
+    fn button(&mut self, button: MouseButton, pressed: bool);
+    /// Releases every button this service is holding: what a focus change calls, so the desktop is
+    /// never left mid-drag by a controller the app has stopped listening to.
+    fn release_all(&mut self);
+}
+
+/// Whether this application is the one in front.
+///
+/// Read by the gamepad's pump: in front, the sticks pan and zoom the note; behind another app they
+/// are the system's pointer instead. A platform that cannot tell answers `true`, which keeps the
+/// in-app behaviour exactly as it was.
+pub trait AppFocus {
+    /// True while this application is the active one.
+    fn is_active(&self) -> bool;
+}
+
 /// The surface the desk, the paper and the ink are painted on: the view says what, this says how.
 pub trait InkSurface {
     /// Paints one frame of the canvas. The error is a sentence rather than a type: it is shown in the
@@ -171,6 +220,18 @@ pub struct Platform {
     /// The pen. Always there, because a pen that cannot be read is a pen that draws with the mouse —
     /// a service that says so in its status rather than an absence to handle everywhere.
     pub pen: Box<dyn PenSource>,
+    /// The machine's own pointer, when the platform can post events to it.
+    ///
+    /// `None` is a platform that leaves a gamepad to the app alone: Windows until it grows one, and
+    /// a macOS build whose Accessibility permission has not been granted still answers `Some` so it
+    /// can say *why* the sticks move nothing.
+    pub mouse: Option<Box<dyn SystemMouse>>,
+    /// Whether this application is the one in front, as the platform sees it.
+    ///
+    /// The gamepad is the one input with two jobs: it pans and zooms the note while this app is in
+    /// front, and drives the system's pointer while another app is. This is the answer that decides
+    /// which, and a platform that cannot tell says `true` — the in-app job, which is the old one.
+    pub focus: Box<dyn AppFocus>,
 }
 
 /// The platform's two halves: what has to happen before a window exists, and what has to happen once

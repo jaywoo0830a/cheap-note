@@ -53,7 +53,11 @@ impl InkCanvas {
         let surface = Surface::install(&view, scale)?;
 
         // Below GPUI's view: the interface is painted over the ink, never the other way round.
-        parent.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Below, Some(gpui_view));
+        parent.addSubview_positioned_relativeTo(
+            &view,
+            NSWindowOrderingMode::Below,
+            Some(gpui_view),
+        );
 
         let mut canvas = InkCanvas {
             view,
@@ -68,7 +72,10 @@ impl InkCanvas {
     /// Matches the surface to the view.
     fn follow(&mut self, scale: f64) {
         let frame = self.view.frame();
-        let (width, height) = (device(frame.size.width, scale), device(frame.size.height, scale));
+        let (width, height) = (
+            device(frame.size.width, scale),
+            device(frame.size.height, scale),
+        );
 
         self.surface.resize(width, height, scale);
     }

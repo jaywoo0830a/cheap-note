@@ -40,13 +40,11 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSView, NSWindow,
     NSWindowStyleMask,
 };
-use objc2_core_foundation::{
-    CGPoint as WindowPoint, CGRect as WindowRect, CGSize as WindowSize,
-};
+use objc2_core_foundation::{CGPoint as WindowPoint, CGRect as WindowRect, CGSize as WindowSize};
 use objc2_foundation::NSString;
 use objc2_quartz_core::CALayer;
 
-use pen_macos::{Phase, Pen, Reading};
+use pen_macos::{Pen, Phase, Reading};
 
 /// `kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little`.
 const BGRA: u32 = 2 | (2 << 12);
@@ -67,7 +65,9 @@ struct Pad {
 impl Pad {
     fn install(view: &NSView) -> Option<Pad> {
         let bounds = view.bounds();
-        let scale = view.window().map_or(1.0, |window| window.backingScaleFactor());
+        let scale = view
+            .window()
+            .map_or(1.0, |window| window.backingScaleFactor());
         let width = ((bounds.size.width * scale).round() as usize).max(1);
         let height = ((bounds.size.height * scale).round() as usize).max(1);
 
@@ -206,7 +206,9 @@ fn main() {
     )
     .expect("a monitor");
 
-    println!("pen-macos: write in the window. The line follows the nib, and thickens with pressure.");
+    println!(
+        "pen-macos: write in the window. The line follows the nib, and thickens with pressure."
+    );
 
     app.run();
 

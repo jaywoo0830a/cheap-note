@@ -86,9 +86,15 @@ The gamepad's sticks ride that same clock. A stick is a *position* rather than a
 so there is no queue to wait on: the housekeeping pump reads them, turns the distance and the zoom
 since its last wake into logical pixels at `GAMEPAD_PAN_SPEED` and a factor at `GAMEPAD_ZOOM_RATE`,
 and pans and zooms the sheet the way a wheel does. The left stick pans; the right stick's Y axis zooms
-(its X axis is not read at all). While the home screen, a list, a question or a name is in front, the
-sticks are still read — that is what keeps their cached state current — and what they ask for is not
-spent, because there is no page under them to move.
+(its X axis is not read *for the zoom*). While the home screen, a list, a question or a name is in
+front, the sticks are still read — that is what keeps their cached state current — and what they ask
+for is not spent, because there is no page under them to move.
+
+The sticks have a second job when another application is in front: the left one scrolls, the right one
+moves the system pointer (at `GAMEPAD_POINTER_SPEED` and `GAMEPAD_SCROLL_SPEED`), and the shoulders
+are the pointer's two buttons. The platform's focus answer decides which job a wake is (`AppFocus`);
+Start+Select turns the desktop job off and on, because a controller
+that can never be given back to a game is a controller nobody else can use.
 
 ## 3. The top bar
 
@@ -623,8 +629,14 @@ the sheet, which is what a two-finger drag is asking for. A pinch zooms about th
 fingers. A gamepad's left stick pans too: pushing it right looks further right and pushing it up looks
 earlier in the page, so the sheet moves the way the *view* was pushed. The right stick's Y axis zooms:
 away from the reader is closer and toward them further away, anchored on the window's centre, and that
-stick's X axis is not read at all. The view is moved on every wake while the stick is held; the note's
-zoom setting is written once, when it is let go, because a write per millisecond is not a setting.
+stick's X axis is not read for the zoom. The view is moved on every wake while the stick is held; the
+note's zoom setting is written once, when it is let go, because a write per millisecond is not a setting.
+
+The same sticks are the system's when cheap-note is not the app in front: the right one moves the
+pointer, the left one scrolls up/down/left/right, and LB/RB are the left and right mouse buttons —
+held, not flicked, so a shoulder can drag. Start+Select toggles that desktop job. The system events
+are the platform's (Core Graphics on macOS, behind its Accessibility permission); the view only says
+how far and which way.
 
 The numbers behind that are all *derived* rather than picked:
 
@@ -636,6 +648,8 @@ The numbers behind that are all *derived* rather than picked:
 | a trackpad's notch | 96 px | `WHEEL_LINES_PER_NOTCH` × `WHEEL_LINE_HEIGHT` — the distance that asks for what a notch asks for. Without it the pixel path zooms three times faster per gesture than the line path, and it *was* three times too fast the first time this was written |
 | `GAMEPAD_PAN_SPEED` | 1000 logical px/s | a wheel spun at ten notches a second (10 × 96 px), because a stick is held rather than flicked and has to cross a sheet in about the time a hand expects |
 | `GAMEPAD_ZOOM_RATE` | 1 doubling/s | full deflection doubles the sheet in a second — half deflection is the square root of that, because the zoom is an exponent rather than a sum |
+| `GAMEPAD_POINTER_SPEED` | 1200 logical px/s | how fast a fully deflected right stick moves the system pointer while another app is in front |
+| `GAMEPAD_SCROLL_SPEED` | 900 logical px/s | how fast a fully deflected left stick scrolls that app; a little slower than the in-app pan because the content is not a sheet at a known size |
 | `GAMEPAD_LONGEST_STEP` | 100 ms | the longest wake the sticks are paid for: a laptop that slept must not wake to a sheet a minute's worth of pan or zoom away |
 
 Two notches are the step applied **twice**, not twice the step, so a fast roll zooms smoothly instead of in
@@ -730,7 +744,7 @@ counts the rebuilds a zoom's change of detail forced (see `ink_layer/render.rs`)
 | `WHEEL_ZOOM_STEP` | 1.25 | one notch of a wheel, and one press of the toolbar's zoom buttons — the same question, answered at the same rate |
 | `WHEEL_LINES_PER_NOTCH` | 3 | what the platform turns one notch into; 32 logical px per line; 96 px is a trackpad's notch |
 | `WHEEL_LINE_HEIGHT` | 32 logical px | what one line of a scroll is worth when panning |
-| `GAMEPAD_PAN_SPEED` / `GAMEPAD_ZOOM_RATE` / `GAMEPAD_LONGEST_STEP` | 1000 logical px/s / 1 doubling per second / 100 ms | how fast a fully deflected left stick pans, how fast a fully deflected right stick's Y axis doubles the zoom, and the longest wake either is paid for — a wheel spun at ten notches a second, held rather than flicked |
+| `GAMEPAD_PAN_SPEED` / `GAMEPAD_ZOOM_RATE` / `GAMEPAD_POINTER_SPEED` / `GAMEPAD_SCROLL_SPEED` / `GAMEPAD_LONGEST_STEP` | 1000 px/s / 1 doubling per second / 1200 px/s / 900 px/s / 100 ms | the left stick's pan and scroll, the right stick's zoom and pointer, and the longest wake either is paid for — a wheel spun at ten notches a second, held rather than flicked |
 | `PALETTE_KEY` | `Ctrl+Shift+C` | the palette at the pen's one chord, for opening it and for putting it away; the status line says so while it is up |
 | `PALETTE_RING_RADIUS` / `PALETTE_TOOL_RADIUS` | 104 / 54 logical px | how far the colours and the three tools sit from the palette's centre: the tools are in the well inside and the colours are on the ring outside, and both rings are far enough out that no point on the palette is within reach of two controls |
 | `PALETTE_DISC` / `PALETTE_DISC_BOX` | 30 / 38 logical px | a colour disc, and the box it draws in — the box carries the ring that marks the keyboard's place, so a placement is measured in the box rather than in the disc |
@@ -765,7 +779,9 @@ wheel turned away from the user moves the sheet *down* — the same rule a docum
 to both axes. The left stick is the same distance asked for by a position rather than by a stream: it pans
 the *view*, so right is later in the page and the sheet moves left, and up is earlier in the page and the
 sheet moves down. The right stick's Y axis is the same kind of rate for the zoom, anchored on the window's
-centre; its X axis is not read at all. Zooming is *anchored* to a point, and the pan is stored rather than recomputed from a centre
+centre; its X axis is not read for the zoom. While another application is in front, the same sticks are
+that application's pointer and scroll, and the shoulders are its buttons — the platform posts those
+events, and the view only decides how far. Zooming is *anchored* to a point, and the pan is stored rather than recomputed from a centre
 each frame for exactly that reason (`view.rs`).
 
 

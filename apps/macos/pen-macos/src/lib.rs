@@ -238,7 +238,14 @@ impl Pen {
 
                     // SAFETY: the view is alive and this is the main thread.
                     let reading = unsafe {
-                        reading_of(event, view as *const NSView, capabilities.get(), last_phase.get(), stamp, now)
+                        reading_of(
+                            event,
+                            view as *const NSView,
+                            capabilities.get(),
+                            last_phase.get(),
+                            stamp,
+                            now,
+                        )
                     };
 
                     if let Some(reading) = reading {
@@ -344,7 +351,8 @@ unsafe fn reading_of(
     // A pen arrives as a mouse event carrying the tablet subtype, or as a tablet event of its own — and
     // a driver is free to send both.
     let tablet = kind == NSEventType::TabletPoint || subtype == Some(NSEventSubtype::TabletPoint);
-    let proximity = kind == NSEventType::TabletProximity || subtype == Some(NSEventSubtype::TabletProximity);
+    let proximity =
+        kind == NSEventType::TabletProximity || subtype == Some(NSEventSubtype::TabletProximity);
     let tip_down = tablet && event.buttonMask().contains(NSEventButtonMask::PenTip);
 
     // `isEnteringProximity` is a proximity event's own property, and asking any other kind raises
@@ -356,7 +364,8 @@ unsafe fn reading_of(
     let phase = phase_of(kind, subtype, entering, tip_down, last_phase)?;
 
     // One fact on macOS: which end of the pen is down.
-    let eraser = (tablet || proximity) && event.pointingDeviceType() == NSPointingDeviceType::Eraser;
+    let eraser =
+        (tablet || proximity) && event.pointingDeviceType() == NSPointingDeviceType::Eraser;
 
     // SAFETY: the caller's contract.
     let (x, y) = unsafe { pixel_of(event, view) };

@@ -85,8 +85,7 @@ impl Ghost {
     /// Read on the reading rather than observed from a notification: the answer is needed then anyway, and
     /// a pen left behind in another app's window is a mark on a page that is not ours.
     fn app_is_active() -> bool {
-        MainThreadMarker::new()
-            .is_some_and(|mtm| NSApplication::sharedApplication(mtm).isActive())
+        MainThreadMarker::new().is_some_and(|mtm| NSApplication::sharedApplication(mtm).isActive())
     }
 }
 

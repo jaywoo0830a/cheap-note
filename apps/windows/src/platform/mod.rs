@@ -1,4 +1,4 @@
-//! The four services the view asks for, on Windows, and the assembly of them.
+//! The services the view asks for, on Windows, and the assembly of them.
 //!
 //! [`INSTALLER`] is the whole of what this crate hands the view: two functions — one that runs before
 //! the window exists, one that runs when it does — and what comes back is a [`Platform`]: a pen to
@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use gpui_kit::Window;
 use note_ui::input::{BatchTap, Reading};
-use note_ui::platform::{GhostFeed, Installer, Platform};
+use note_ui::platform::{AppFocus, GhostFeed, Installer, Platform};
 
 use crate::platform::cursor_overlay::CursorFeed;
 use crate::platform::ink_layer::InkLayer;
@@ -40,7 +40,7 @@ pub static INSTALLER: Installer = Installer {
     install,
 };
 
-/// Installs the four services on a window that has just been made.
+/// Installs the services on a window that has just been made.
 fn install(window: &mut Window) -> Platform {
     // The ghost cursor's window, installed before the capture: the pen thread is handed the tap that
     // feeds it, and that tap has to exist when the thread starts. Failing to install one is not an
@@ -69,6 +69,24 @@ fn install(window: &mut Window) -> Platform {
         // The design's numbers are this platform's own: a Windows logical pixel is a 96-DPI one.
         unit_scale: 1.0,
         pen: Box::new(pen),
+        // The Windows stub: no system pointer for a gamepad yet, and an app that is always the one
+        // in front — which is exactly the in-app pan and zoom this build already had.
+        mouse: None,
+        focus: Box::new(AlwaysActive),
+    }
+}
+
+/// The Windows stub's answer to "is this app in front": yes.
+///
+/// The gamepad's second job — driving the desktop while another application is in front — is a
+/// macOS feature for now (see `apps/macos/src/platform/mouse.rs`). Until Windows grows a
+/// `SendInput` service, the sticks keep their in-app work and the seam keeps its promise: a platform
+/// that cannot tell answers `true`.
+struct AlwaysActive;
+
+impl AppFocus for AlwaysActive {
+    fn is_active(&self) -> bool {
+        true
     }
 }
 

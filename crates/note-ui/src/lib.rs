@@ -22,7 +22,7 @@
 //! | Module      | Responsibility                                                     |
 //! | ----------- | ------------------------------------------------------------------ |
 //! | [`input`]   | one pen reading in the app's own terms, and the queue it arrives through |
-//! | [`platform`]| the seam: the four things a platform lends the view                |
+//! | [`platform`]| the seam: what a platform lends the view                          |
 //! | `keys`      | the chords, and how this platform writes them (`Ctrl+Z`, `⌘Z`)     |
 //! | [`ink`]     | readings to strokes: edges, resampling, width, erasing             |
 //! | [`canvas`]  | the sheet's size, colour and ruling                                |
@@ -53,8 +53,9 @@
 //!
 //! Below this crate is a platform, and it depends on this crate rather than the other way round. What
 //! a platform lends is in [`platform`] — a pen to read, a ghost cursor to follow the nib, a pointer to
-//! hide, and a surface to paint the desk and the ink on — and `apps/windows` is one implementation of
-//! those four. A macOS build would be another, and would leave everything above the seam alone; the
+//! hide, a surface to paint the desk and the ink on, a system mouse to drive while another app is in
+//! front, and a focus answer to say which job a gamepad has — and `apps/windows` is one implementation
+//! of those six. A macOS build would be another, and would leave everything above the seam alone; the
 //! work that build needs is written down in `doc/MACOS.md`.
 //!
 //! ## The documents
@@ -108,7 +109,7 @@ use gpui_kit::*;
 use crate::app::{Redo, Undo};
 use crate::platform::Installer;
 
-/// Starts the application: one window, and the platform's four services inside it.
+/// Starts the application: one window, and the platform's services inside it.
 ///
 /// The whole of what a platform's `main` has to do, and the reason it can be six lines: everything a
 /// window needs that is not about this machine — the toolkit's own initialization, the app's look, the

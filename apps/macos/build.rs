@@ -77,108 +77,107 @@ fn main() {
         }
     }
 
-/// The directory this package keeps its downloaded libraries in.
-///
-/// The repository's `vendor/`, which is *above* this crate: the app lives in `apps/macos`, and the library
-/// is downloaded once for the repository rather than per crate. So this walks up from the crate's own
-/// directory until it finds one, and falls back to the first candidate — which is what a build with no
-/// vendored library reports, and the sentence is the same either way.
-fn vendor_directory() -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    /// The directory this package keeps its downloaded libraries in.
+    ///
+    /// The repository's `vendor/`, which is *above* this crate: the app lives in `apps/macos`, and the library
+    /// is downloaded once for the repository rather than per crate. So this walks up from the crate's own
+    /// directory until it finds one, and falls back to the first candidate — which is what a build with no
+    /// vendored library reports, and the sentence is the same either way.
+    fn vendor_directory() -> PathBuf {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
 
-    for ancestor in manifest.ancestors() {
-        let candidate = ancestor.join("vendor");
+        for ancestor in manifest.ancestors() {
+            let candidate = ancestor.join("vendor");
 
-        if candidate.is_dir() {
-            return candidate;
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+
+        manifest.join("vendor")
+    }
+
+    /// The version of the Pdfium build in `vendor/`, from its `VERSION` file.
+    ///
+    /// The file is four `KEY=value` lines written by `pdfium-binaries`. A clone without a vendored library has
+    /// no such file, and `unknown` is the honest answer rather than a guess.
+    fn pdfium_version(vendor: &Path) -> String {
+        let text = std::fs::read_to_string(vendor.join("VERSION")).unwrap_or_default();
+        let mut parts = ["", "", "", ""];
+
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+
+            let slot = match key.trim() {
+                "MAJOR" => 0,
+                "MINOR" => 1,
+                "BUILD" => 2,
+                "PATCH" => 3,
+                _ => continue,
+            };
+
+            parts[slot] = value.trim();
+        }
+
+        if parts.iter().any(|part| part.is_empty()) {
+            String::from("unknown")
+        } else {
+            parts.join(".")
         }
     }
 
-    manifest.join("vendor")
-}
-
-/// The version of the Pdfium build in `vendor/`, from its `VERSION` file.
-///
-/// The file is four `KEY=value` lines written by `pdfium-binaries`. A clone without a vendored library has
-/// no such file, and `unknown` is the honest answer rather than a guess.
-fn pdfium_version(vendor: &Path) -> String {
-    let text = std::fs::read_to_string(vendor.join("VERSION")).unwrap_or_default();
-    let mut parts = ["", "", "", ""];
-
-    for line in text.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
+    /// The shared libraries in a directory, in a name order: `libpdfium.dylib`, and anything built beside it.
+    fn libraries_in(directory: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return Vec::new();
         };
 
-        let slot = match key.trim() {
-            "MAJOR" => 0,
-            "MINOR" => 1,
-            "BUILD" => 2,
-            "PATCH" => 3,
-            _ => continue,
-        };
+        let mut libraries: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("dylib"))
+            })
+            .collect();
 
-        parts[slot] = value.trim();
+        libraries.sort();
+        libraries
     }
 
-    if parts.iter().any(|part| part.is_empty()) {
-        String::from("unknown")
-    } else {
-        parts.join(".")
+    /// The directory a build's executable lands in.
+    ///
+    /// Cargo gives a build script the *output* directory — `<target>/<profile>/build/<package>-<hash>/out` —
+    /// and has no variable for the directory the executable itself goes in, which is three steps above it.
+    /// Walking up is what that layout is for: it also answers correctly for a build with `--target`, where the
+    /// same three steps land in `<target>/<triple>/<profile>`.
+    fn beside_the_executable() -> Option<PathBuf> {
+        let out = PathBuf::from(std::env::var_os("OUT_DIR")?);
+
+        out.ancestors().nth(3).map(Path::to_path_buf)
     }
-}
 
-/// The shared libraries in a directory, in a name order: `libpdfium.dylib`, and anything built beside it.
-fn libraries_in(directory: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return Vec::new();
-    };
+    /// Copies a file unless the copy already has what it says.
+    ///
+    /// This runs on every build, and copying seven megabytes of library for nothing on every build is a cost
+    /// with no point to it. Size and time are the shortcut for "the copy is that library": a different library
+    /// that happens to match in both is not a case a build has to survive.
+    fn copy_if_newer(from: &Path, to: &Path) -> std::io::Result<()> {
+        let source = std::fs::metadata(from)?;
 
-    let mut libraries: Vec<PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("dylib"))
-        })
-        .collect();
-
-    libraries.sort();
-    libraries
-}
-
-/// The directory a build's executable lands in.
-///
-/// Cargo gives a build script the *output* directory — `<target>/<profile>/build/<package>-<hash>/out` —
-/// and has no variable for the directory the executable itself goes in, which is three steps above it.
-/// Walking up is what that layout is for: it also answers correctly for a build with `--target`, where the
-/// same three steps land in `<target>/<triple>/<profile>`.
-fn beside_the_executable() -> Option<PathBuf> {
-    let out = PathBuf::from(std::env::var_os("OUT_DIR")?);
-
-    out.ancestors().nth(3).map(Path::to_path_buf)
-}
-
-/// Copies a file unless the copy already has what it says.
-///
-/// This runs on every build, and copying seven megabytes of library for nothing on every build is a cost
-/// with no point to it. Size and time are the shortcut for "the copy is that library": a different library
-/// that happens to match in both is not a case a build has to survive.
-fn copy_if_newer(from: &Path, to: &Path) -> std::io::Result<()> {
-    let source = std::fs::metadata(from)?;
-
-    if let Ok(existing) = std::fs::metadata(to) {
-        if existing.len() == source.len() {
-            if let (Ok(copied_at), Ok(written_at)) = (existing.modified(), source.modified()) {
-                if copied_at >= written_at {
-                    return Ok(());
+        if let Ok(existing) = std::fs::metadata(to) {
+            if existing.len() == source.len() {
+                if let (Ok(copied_at), Ok(written_at)) = (existing.modified(), source.modified()) {
+                    if copied_at >= written_at {
+                        return Ok(());
+                    }
                 }
             }
         }
+
+        std::fs::copy(from, to).map(|_| ())
     }
-
-    std::fs::copy(from, to).map(|_| ())
-}
-
 }

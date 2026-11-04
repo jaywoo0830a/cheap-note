@@ -824,6 +824,7 @@ name = "cheap-note-macos"
 version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
+ "core-foundation 0.10.1",
  "core-graphics 0.24.0",
  "foreign-types-shared",
  "gpui-kit",

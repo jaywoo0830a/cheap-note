@@ -3,6 +3,7 @@
 pub mod canvas;
 pub mod ghost;
 pub mod metal;
+pub mod mouse;
 pub mod pen;
 pub mod pointer;
 
@@ -78,10 +79,9 @@ fn install(window: &mut Window) -> Platform {
     // The canvas, which is the platform's own renderer here rather than the frame's. The app cannot run
     // without one: the frame leaves the desk to it (see `NoteApp::render`).
     // with the stroke under the pen.
-    let ink = Some(
-        Box::new(InkCanvas::install(window, Arc::clone(&ghost)).expect("a canvas for the window"))
-            as Box<_>,
-    );
+    let ink = Some(Box::new(
+        InkCanvas::install(window, Arc::clone(&ghost)).expect("a canvas for the window"),
+    ) as Box<_>);
 
     Platform {
         ink,
@@ -91,5 +91,9 @@ fn install(window: &mut Window) -> Platform {
         // lengths multiplied by three quarters are the same size in the hand as they are on Windows.
         unit_scale: 0.75,
         pen: Box::new(pen),
+        // The gamepad's second job: while another app is in front, these sticks are its pointer.
+        // Accessibility is asked for by the first gesture, not here (see `mouse.rs`).
+        mouse: mouse::install(),
+        focus: Box::new(mouse::AppActive),
     }
 }

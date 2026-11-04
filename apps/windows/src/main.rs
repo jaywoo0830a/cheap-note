@@ -4,7 +4,7 @@
 //!
 //! The *platform* half of the application, and nothing else. Everything a note-taking program does —
 //! the bar, the home screen, the sheet, the gestures, the page cache, the ink model, the frame loop —
-//! is `crates/note-ui`, written once and portable. What is here is the four things that crate cannot
+//! is `crates/note-ui`, written once and portable. What is here is the things that crate cannot
 //! write for another machine:
 //!
 //! | Module | What it lends the view |

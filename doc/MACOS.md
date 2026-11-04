@@ -15,8 +15,9 @@ The repository is three crates, and the two boundaries face opposite ways:
 | `crates/note-ui` | everything the application *does*: the bar, the home screen, the sheet, the gestures, the PDF page cache, the ink model, the frame loop, the chords | **yes**, and it declares **no platform crate at all** |
 | `apps/windows` | the platform: Direct2D canvas, `pen-windows` capture, the ghost cursor's layered window, the pointer hook, `main` | no, and it does not need to be |
 
-The port is therefore **one new crate** (`apps/macos`) that implements four traits the view declares —
-`PenSource`, `GhostFeed`, `SystemPointer`, `InkSurface` (`crates/note-ui/src/platform.rs`) — and
+The port is therefore **one new crate** (`apps/macos`) that implements the traits the view declares —
+`PenSource`, `GhostFeed`, `SystemPointer`, `InkSurface`, and (for the gamepad's second job)
+`SystemMouse` and `AppFocus` (`crates/note-ui/src/platform.rs`) — and
 nothing above the seam. That is not an aspiration: §3 is the list of what has already been made true
 to get here.
 
@@ -25,7 +26,7 @@ to get here.
 | Piece | Where | State | Verified by |
 |---|---|---|---|
 | the note's format | `crates/note-format` | **done** | 154 tests (78 unit + 76 black-box) |
-| the view, and the seam | `crates/note-ui` | **done**, platform-free | 214 tests; dependency graph (§3) |
+| the view, and the seam | `crates/note-ui` | **done**, platform-free | 228 tests; dependency graph (§3) |
 | the chords (`⌘`/`Ctrl`) | `crates/note-ui/src/keys.rs` | **done** | 5 tests; the Windows text is pinned, the mac text by `cfg(macos)` |
 | Pdfium loading | `crates/note-ui/src/pdfium/api.rs` | **done** on every platform | 21 pdf tests on Windows, loading the real DLL through `libloading` |
 | the Windows platform | `apps/windows` | unchanged | 29 tests |
@@ -40,16 +41,16 @@ cd cheap-note
 rustup toolchain install 1.90     # Cargo.toml's rust-version
 
 cargo test -p note-format         # 154 tests: the note itself
-cargo test -p note-ui             # 214 tests: the view — and none of them needs a window
+cargo test -p note-ui             # 228 tests: the view — and none of them needs a window
 ```
 
 **Do not run `cargo build` or `cargo test --workspace` with no `-p` yet.** The workspace's third member
 is `apps/windows`, which cannot build on a Mac. Until `apps/macos` exists, name the crates. That is a
 workspace-shape snag rather than a port bug, and it is listed with the others in §8.
 
-If everything is as it should be, **368 tests pass on a Mac with no platform crate written at all** —
-154 + 214. That number *is* the seam's claim: the note and the view are the same code on every
-machine, and only the four services are not.
+If everything is as it should be, **382 tests pass on a Mac with no platform crate written at all** —
+154 + 228. That number *is* the seam's claim: the note and the view are the same code on every
+machine, and only the platform services are not.
 
 One caution about that green run: the pdf tests that need a real Pdfium skip themselves when none is on
 the machine (`crates/note-ui/src/pdfium/api.rs`'s `available()`), so 368 green is *not* proof that a page
@@ -84,6 +85,8 @@ These are the things the Windows side could settle, and did:
   aarch64-apple-darwin` still prints `windows-sys`/`windows-link`, but those are reached only through a
   **proc-macro** graph (gpui-kit's `rust-embed`/`rust-i18n` and their `dirs`/`ignore`), which builds for
   the *host*; on a Mac they are not in the graph at all. Nothing the view depends on names a Windows API.
+  The one device library it does depend on, `gilrs`, is cross-platform in the same way: its Windows
+  backend is compiled only on Windows and its IOKit one only on macOS.
 * **The toolkit has a mac backend.** `gpui-kit 0.7.3` → `gpui-pre-platform`, which selects
   `gpui-pre-macos` + `gpui-pre-apple` for macOS (both published, 0.3.x). Resolving the dependency graph
   for `--target aarch64-apple-darwin` from Windows picks them, so this is checked rather than hoped for.
@@ -298,6 +301,30 @@ macOS answers `0.75` — a point is four thirds of a Windows logical pixel — a
 reads it, so the palette is the same size in the hand as it is on Windows rather than a third larger.
 Windows answers `1.0`, and nothing it draws changes.
 
+### The gamepad's second job
+
+The gamepad is the one input with two jobs, so the seam grew two small traits rather than one big one:
+
+* `AppFocus::is_active` says whether cheap-note is the app in front. The Mac answers with
+  `NSApplication::isActive`; the Windows stub answers `true`, which keeps its in-app behaviour.
+* `SystemMouse` is the machine's pointer while another app is in front: `move_by`, `scroll`,
+  `button` and `release_all`. The Mac answers with Core Graphics events from `platform/mouse.rs`;
+  Windows answers `None`.
+
+The split matters because the *policy* is portable and only the *events* are not: the view decides
+that the left stick scrolls at `GAMEPAD_SCROLL_SPEED` and the shoulders are the pointer's buttons,
+and the platform decides how a scroll or a click is expressed on its system. While cheap-note is in
+front the same sticks pan and zoom the note; a platform that cannot tell the difference is always
+"in front", which is the behaviour it had before.
+
+Posting events is **Accessibility**, not a link-time capability: macOS gates `CGEventPost` behind
+System Settings → Privacy & Security → Accessibility. The app asks the first time a controller is
+actually used while another app is in front (`AXIsProcessTrustedWithOptions`), and a build without
+the grant says so in the status line instead of looking broken. The grant is tied to the signed code,
+so the ad-hoc bundle `bundle.sh` makes may be asked again after a rebuild; a Developer ID signature
+is what keeps one grant across releases. Start+Select toggles the desktop job, so the controller can
+be given back to a game.
+
 ## 6. What must not change
 
 * **The format.** A note written on the Mac must open on Windows, and the reverse — that is the whole
@@ -312,7 +339,7 @@ Windows answers `1.0`, and nothing it draws changes.
 ## 7. Acceptance checklist for the Mac
 
 - [ ] `cargo test -p note-format` — 154
-- [ ] `cargo test -p note-ui` — 214 (no window needed)
+- [ ] `cargo test -p note-ui` — 228 (no window needed)
 - [ ] the app opens on the home list, and Escape returns to it
 - [ ] a new note lands under `~/Library/Application Support/cheap-note/notes`, holding `note.db` — and
       `source.pdf` / `attachments/` once those exist — rather than in the repository's folder
@@ -344,7 +371,7 @@ Windows answers `1.0`, and nothing it draws changes.
 
 | To change… | Look at |
 |---|---|
-| the four traits, and `Platform`/`Installer` | `crates/note-ui/src/platform.rs` |
+| the traits, and `Platform`/`Installer` | `crates/note-ui/src/platform.rs` |
 | one pen reading, and the queue it arrives through | `crates/note-ui/src/input.rs` |
 | the chords, and how they are written | `crates/note-ui/src/keys.rs` |
 | what a canvas may call back into | `crates/note-ui/src/paint.rs` |

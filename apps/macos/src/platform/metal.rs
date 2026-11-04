@@ -28,11 +28,11 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use note_ui::ink_layer::canvas::Rect;
 use note_ui::cursor::{
     BODY_ALPHA, BODY_HALO_ALPHA, BODY_HALO_GROW, NIB_ALPHA, NIB_BLOOM_ALPHA, NIB_BLOOM_SPREAD,
     NIB_RADIUS_MAX, NIB_RADIUS_MIN,
 };
+use note_ui::ink_layer::canvas::Rect;
 use note_ui::ink_layer::{ink_colour, Canvas};
 use note_ui::paint::drawn_of_paper;
 
@@ -42,11 +42,11 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice, MTLLibrary,
-    MTLResourceOptions, MTLLoadAction,
-    MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
-    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLSamplerDescriptor,
-    MTLSamplerMinMagFilter, MTLSamplerState, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture,
-    MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
+    MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
+    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
+    MTLResourceOptions, MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerState, MTLSize,
+    MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureType,
+    MTLTextureUsage,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
@@ -122,7 +122,6 @@ struct PageVertex {
     u: f32,
     v: f32,
 }
-
 
 /// The window's GPU canvas.
 pub(super) struct Surface {
@@ -213,10 +212,11 @@ impl Surface {
         self.width = width.max(1);
         self.height = height.max(1);
         self.layer.setContentsScale(scale);
-        self.layer.setDrawableSize(objc2_core_foundation::CGSize::new(
-            self.width as f64,
-            self.height as f64,
-        ));
+        self.layer
+            .setDrawableSize(objc2_core_foundation::CGSize::new(
+                self.width as f64,
+                self.height as f64,
+            ));
 
         // The ink's triangles are in pixels, so a resize makes them all stale.
         self.ink_key = None;
@@ -292,7 +292,13 @@ impl Surface {
                 continue;
             }
 
-            fill(&mut self.ink, stroke, &mapping, (0.0, 0.0), ink_colour(stroke.color));
+            fill(
+                &mut self.ink,
+                stroke,
+                &mapping,
+                (0.0, 0.0),
+                ink_colour(stroke.color),
+            );
         }
 
         // The ink in hand, where a drag has taken it, and once more in the selection's colour.
@@ -302,7 +308,13 @@ impl Surface {
                     continue;
                 }
 
-                fill(&mut self.ink, stroke, &mapping, ink.offset, ink_colour(stroke.color));
+                fill(
+                    &mut self.ink,
+                    stroke,
+                    &mapping,
+                    ink.offset,
+                    ink_colour(stroke.color),
+                );
 
                 if let Some(colour) = ink.selection {
                     fill(&mut self.ink, stroke, &mapping, ink.offset, colour);
@@ -355,19 +367,31 @@ impl Surface {
 
         if let Some(stroke) = &canvas.ink.open {
             let mapping = Mapping::of(canvas);
-            ribbon(&mut vertices, stroke, &mapping, (0.0, 0.0), ink_colour(stroke.color));
+            ribbon(
+                &mut vertices,
+                stroke,
+                &mapping,
+                (0.0, 0.0),
+                ink_colour(stroke.color),
+            );
         }
 
         vertices
     }
 
     /// The page's texture, uploaded when the document hands over a new rasterisation of it.
-    fn page_texture(&mut self, canvas: &Canvas) -> Option<Retained<ProtocolObject<dyn MTLTexture>>> {
+    fn page_texture(
+        &mut self,
+        canvas: &Canvas,
+    ) -> Option<Retained<ProtocolObject<dyn MTLTexture>>> {
         let page = canvas.page.as_ref()?;
         let key = Arc::as_ptr(&page.image) as usize;
 
         if self.page_texture.as_ref().map(|(cached, _)| *cached) == Some(key) {
-            return self.page_texture.as_ref().map(|(_, texture)| texture.clone());
+            return self
+                .page_texture
+                .as_ref()
+                .map(|(_, texture)| texture.clone());
         }
 
         let bytes = page.image.as_bytes(0)?;
@@ -398,7 +422,11 @@ impl Surface {
             texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
                 MTLRegion {
                     origin: MTLOrigin { x: 0, y: 0, z: 0 },
-                    size: MTLSize { width, height, depth: 1 },
+                    size: MTLSize {
+                        width,
+                        height,
+                        depth: 1,
+                    },
                 },
                 0,
                 bytes,
@@ -408,7 +436,9 @@ impl Surface {
 
         self.page_texture = Some((key, texture));
 
-        self.page_texture.as_ref().map(|(_, texture)| texture.clone())
+        self.page_texture
+            .as_ref()
+            .map(|(_, texture)| texture.clone())
     }
 }
 
@@ -622,8 +652,20 @@ fn cursor_vertices(vertices: &mut Vec<Vertex>, mark: &Mark, scale: f32) {
             mark.halo,
             BODY_SHADOW_ALPHA * fade,
         );
-        polygon(vertices, &body.outline(BODY_HALO_GROW), scale, mark.halo, BODY_HALO_ALPHA * fade);
-        polygon(vertices, &body.outline(0.0), scale, mark.colour, BODY_ALPHA * fade);
+        polygon(
+            vertices,
+            &body.outline(BODY_HALO_GROW),
+            scale,
+            mark.halo,
+            BODY_HALO_ALPHA * fade,
+        );
+        polygon(
+            vertices,
+            &body.outline(0.0),
+            scale,
+            mark.colour,
+            BODY_ALPHA * fade,
+        );
     }
 
     let radius = if mark.nib_radius.is_finite() {
@@ -643,7 +685,13 @@ fn cursor_vertices(vertices: &mut Vec<Vertex>, mark: &Mark, scale: f32) {
 }
 
 /// One of the body's passes: its outline, filled with the nonzero rule like any other polygon.
-fn polygon(vertices: &mut Vec<Vertex>, outline: &[[f32; 2]; 7], scale: f32, colour: u32, alpha: f32) {
+fn polygon(
+    vertices: &mut Vec<Vertex>,
+    outline: &[[f32; 2]; 7],
+    scale: f32,
+    colour: u32,
+    alpha: f32,
+) {
     if alpha <= 0.0 {
         return;
     }
@@ -763,7 +811,6 @@ fn disc(vertices: &mut Vec<Vertex>, centre: (f32, f32), radius: f32, colour: gpu
         vertices.push(vertex(to));
     }
 }
-
 
 /// Samples per pixel: the ink is a polygon, and a polygon's edge is a staircase without them.
 ///
@@ -905,7 +952,11 @@ impl Transform {
 
     /// The sheet, where the view has put it and as large as it is drawn.
     fn of(canvas: &Canvas) -> Self {
-        let scale = if canvas.scale > 0.0 { canvas.scale } else { 1.0 };
+        let scale = if canvas.scale > 0.0 {
+            canvas.scale
+        } else {
+            1.0
+        };
         let ink = &canvas.ink;
 
         Transform {
@@ -946,11 +997,14 @@ fn page_quad(canvas: &Canvas, scale: f32) -> Vec<PageVertex> {
     ]
 }
 
-
 impl Surface {
     /// Draws one description of the canvas, and the pen's mark over it. `false` when there was no drawable.
     pub(super) fn draw(&mut self, canvas: &Canvas, mark: Option<&Mark>) -> bool {
-        let scale = if canvas.scale > 0.0 { canvas.scale } else { 1.0 };
+        let scale = if canvas.scale > 0.0 {
+            canvas.scale
+        } else {
+            1.0
+        };
 
         // The pen's mark: above the ink, below the interface. Built before the trace, so that "no cursor
         // drawn" and "no cursor to draw" can be told apart.
@@ -962,7 +1016,11 @@ impl Surface {
         if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
             report::drawn(
                 self.ink.len(),
-                canvas.ink.open.as_deref().map_or(0, |stroke| stroke.outline.len()),
+                canvas
+                    .ink
+                    .open
+                    .as_deref()
+                    .map_or(0, |stroke| stroke.outline.len()),
                 pointer.len(),
             );
         }
@@ -1031,7 +1089,14 @@ impl Surface {
 
         // Behind: the desk, the shadow, the sheet, the ruling.
         if let Some(buffer) = self.buffer(&behind) {
-            self.solid(&encoder, &buffer, behind.len(), width, height, Transform::WINDOW);
+            self.solid(
+                &encoder,
+                &buffer,
+                behind.len(),
+                width,
+                height,
+                Transform::WINDOW,
+            );
         }
 
         // The document's page.
@@ -1064,7 +1129,14 @@ impl Surface {
         }
 
         if let Some(buffer) = self.buffer(&front) {
-            self.solid(&encoder, &buffer, front.len(), width, height, Transform::WINDOW);
+            self.solid(
+                &encoder,
+                &buffer,
+                front.len(),
+                width,
+                height,
+                Transform::WINDOW,
+            );
         }
 
         if let Some(buffer) = self.buffer(&open) {
@@ -1074,7 +1146,14 @@ impl Surface {
         // The pen, over everything the canvas drew: a cursor is the one thing on the sheet that has to be
         // visible above the ink it is about to write.
         if let Some(buffer) = self.buffer(&pointer) {
-            self.solid(&encoder, &buffer, pointer.len(), width, height, Transform::WINDOW);
+            self.solid(
+                &encoder,
+                &buffer,
+                pointer.len(),
+                width,
+                height,
+                Transform::WINDOW,
+            );
         }
 
         encoder.endEncoding();
@@ -1089,7 +1168,6 @@ impl Surface {
         true
     }
 }
-
 
 impl Surface {
     /// Uploads one run of vertices, and hands back the buffer to bind.
@@ -1173,7 +1251,6 @@ impl Surface {
     }
 }
 
-
 /// What the canvas drew, once a second, when `CHEAP_NOTE_TRACE` is set.
 ///
 /// Two numbers that matter: how often the canvas reached a drawable — a frame that cannot get one is a
@@ -1223,7 +1300,6 @@ mod report {
         );
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1345,13 +1421,17 @@ mod tests {
 
         // "Everything is visible" cannot be compared with itself — the difference of two infinities is
         // `NaN` — and a rectangle that cannot be compared must not ask for a redraw on every frame.
-        let everything = [f32::NEG_INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::INFINITY];
+        let everything = [
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            f32::INFINITY,
+        ];
         assert_eq!(moved(everything, everything), 0.0);
 
         assert_eq!(grow([0.0, 0.0, 10.0, 10.0], 5.0), [-5.0, -5.0, 15.0, 15.0]);
     }
 }
-
 
 #[cfg(test)]
 mod fill_tests {
@@ -1380,7 +1460,11 @@ mod fill_tests {
 
         tessellate(&mut vertices, &square, colour());
 
-        assert!((area(&vertices) - 100.0).abs() < 0.01, "area {}", area(&vertices));
+        assert!(
+            (area(&vertices) - 100.0).abs() < 0.01,
+            "area {}",
+            area(&vertices)
+        );
     }
 
     /// A square traced twice is still one square. This is the highlighter's case — a stroke that passes over
@@ -1394,7 +1478,11 @@ mod fill_tests {
         let mut vertices = Vec::new();
         tessellate(&mut vertices, &twice, colour());
 
-        assert!((area(&vertices) - 100.0).abs() < 0.01, "area {}", area(&vertices));
+        assert!(
+            (area(&vertices) - 100.0).abs() < 0.01,
+            "area {}",
+            area(&vertices)
+        );
     }
 
     /// Every triangle stays inside the shape it came from: a fill that spills is ink where nobody wrote.
@@ -1415,4 +1503,3 @@ mod fill_tests {
         }
     }
 }
-

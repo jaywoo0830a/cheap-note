@@ -413,7 +413,7 @@ swallows the note's keys entirely (it did, from opening a note until a rename).
 | `cursor` | the ghost's shape: where the pen is, and how it leans |
 | `cursor_overlay` | the ghost's own window, drawn from the pen thread |
 | `system_cursor` | hiding the system pointer while the ghost replaces it |
-| `gamepad` | the sticks: the left as a pan, the right stick's Y as a zoom |
+| `gamepad` | the sticks: pan and scroll on the left, zoom and pointer on the right, clicks on the shoulders |
 | **What is written on** | |
 | `canvas` | the sheet: its size (physical), its colour, its ruling |
 | `view` | zoom, the two fits, and where the sheet sits in the window |
@@ -560,14 +560,18 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
   page cache, the ink model, the frame loop — with no platform's own API in it; and `apps/windows` is
   the platform: the canvas, the pen capture, the ghost cursor's window, the pointer hook, Pdfium's
   entry points, and `main`. The view depends on the format and the platform depends on the view, which
-  is what a build for another platform needs: `note-ui`'s `platform.rs` is four traits — a pen, a
-  ghost, a pointer, a surface — and a macOS build is `apps/windows` rewritten behind them. The view's
+  is what a build for another platform needs: `note-ui`'s `platform.rs` is the seam — a pen, a ghost,
+  a pointer, a surface, and, for the Mac's system-wide gamepad, a mouse and a focus answer — and a
+  macOS build is `apps/windows` rewritten behind them. The view's
   `store`, `note`, `pages`, `settings` and `history` modules are re-exports of the format's, so no
   path inside the view changed.
 * **The gamepad is above the seam too.** Its sticks are `gilrs`, a cross-platform library in the
   same sense GPUI Kit is — one API over XInput/WGI on Windows and IOKit on macOS — so `note-ui` reads
   it directly instead of asking a platform crate for it. A machine with no gamepad is not an error:
-  the sticks simply read as still.
+  the sticks simply read as still. While this app is in front the sticks pan and zoom the note; while
+  another app is, they are its pointer and scroll, with the shoulders as clicks. The Mac posts those
+  events with Core Graphics (behind the Accessibility permission); Windows answers the stub — no
+  system mouse, and always in front — so its in-app behaviour is unchanged.
 * **Pdfium is not in the repository.** It is downloaded into `vendor/` (`vendor/README.md`; the current
   build is 158.0.8125.0), and a build copies the platform's library (`pdfium.dll`; the loader also
   knows `libpdfium.dylib` and `libpdfium.so`) from `vendor/lib` next to the executable it produces, so
@@ -579,7 +583,7 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
 
 ```text
 cargo run -p cheap-note --release   # the app: it opens on the home list, and Escape returns to it
-cargo test --workspace     # 403 tests, including ones that install a real canvas on a window
+cargo test --workspace     # 407 tests, including ones that install a real canvas on a window
 ```
 
 `cargo run` with a path argument opens that file's note and skips the list — which is what a file

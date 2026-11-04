@@ -35,7 +35,7 @@ use crate::canvas::{
     HIGHLIGHTER_COLORS, INK_COLORS, PAPER_COLORS,
 };
 use crate::cursor::{nib_radius_for_width, PenCursor};
-use crate::gamepad::Gamepads;
+use crate::gamepad::{Gamepads, Sticks};
 use crate::home::Home;
 use crate::ink::{
     paper_of_drawn, paper_of_page_point, with_alpha, InkTransform, Notes, Stroke, TextChar,
@@ -50,7 +50,10 @@ use crate::note::{self, Note, NoteWriter, Report};
 use crate::outline::{Outline, OutlinePages};
 use crate::pages::{swaps_axes, Pages, Quarters};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
-use crate::platform::{GhostFeed, InkSurface, PenSource, Platform, Screen, SystemPointer};
+use crate::platform::{
+    AppFocus, GhostFeed, InkSurface, MouseButton, PenSource, Platform, Screen, SystemMouse,
+    SystemPointer,
+};
 use crate::recent::{self, Recent};
 use crate::settings::{PenWeight, Settings};
 use crate::timing::{measure, Measurement, Timings};
@@ -763,6 +766,19 @@ pub struct NoteApp {
     scroll_asked: bool,
     /// The gamepads the app can see: their left stick is a pan, read by the housekeeping pump.
     gamepad: Gamepads,
+    /// The system's pointer, when the platform can post events to it: the gamepad's job while this
+    /// app is behind another.
+    system_mouse: Option<Box<dyn SystemMouse>>,
+    /// Whether this app is in front, as the platform sees it: the answer that decides whether the
+    /// sticks are the sheet's or the desktop's.
+    focus: Box<dyn AppFocus>,
+    /// Which of the pointer's buttons the gamepad is holding, so a focus change can let them go.
+    system_buttons: (bool, bool),
+    /// Whether the gamepad drives the desktop while another app is in front.
+    ///
+    /// On by default, and Start+Select is the one way to give the controller back to a game: a
+    /// system-wide mapper that cannot be turned off is a controller nobody else can use.
+    system_mouse_enabled: bool,
     /// Where each page was being read, for as long as the note in hand is open.
     ///
     /// The *page's* place rather than the reader's: turning to a page added at the end of a note opens that page at
@@ -871,7 +887,7 @@ impl NoteApp {
         let settings = Settings::default();
         let mut message = String::new();
 
-        // The four services, taken apart again. The pen's thread and the ghost's window are already
+        // The services, taken apart again. The pen's thread and the ghost's window are already
         // running by the time this returns, because installing them is the platform's job (see
         // `apps/windows/src/platform`); what is kept here is the handle on each.
         let Platform {
@@ -880,6 +896,8 @@ impl NoteApp {
             pointer: system_cursor,
             unit_scale,
             pen,
+            mouse: system_mouse,
+            focus,
         } = platform;
 
         // What the pen says about itself, or the reason it could not be read — a pen that cannot be
@@ -976,6 +994,10 @@ impl NoteApp {
             scroll_waiting: (0.0, 0.0),
             scroll_asked: false,
             gamepad: Gamepads::new(),
+            system_mouse,
+            focus,
+            system_buttons: (false, false),
+            system_mouse_enabled: true,
             pans: HashMap::new(),
             sheet: Sheet::default(),
             bar_bottom: Rc::new(Cell::new(None)),
@@ -1299,24 +1321,57 @@ impl NoteApp {
                 let now = Instant::now();
 
                 // The gamepad's sticks, on the same clock as the rest of the housekeeping: a stick
-                // is a position rather than a stream of readings, so there is no queue to park on —
-                // the distance and the zoom since this loop last woke are what the sheet moves by. A
-                // screen, a question or a name in front is a page nobody is reading, so the sticks
-                // are still read (to keep their state current) and what they ask for is not spent.
+                // is a position rather than a stream of readings, so there is no queue to park on.
+                // It has two jobs — the sheet's while this app is in front, the desktop's while it
+                // is not — and the platform's focus answer is what decides which one this wake is.
                 let sticks = app.gamepad.read();
                 let covered = app.home_is_open()
                     || app.marks.is_open()
                     || app.outline.is_open()
                     || app.asking()
                     || app.naming.is_some();
-                if !covered {
-                    app.pan_sheet(sticks.pan, cx);
+
+                // The one chord: give the controller back to whatever app is in front, or take it
+                // back for the desktop. A system-wide mapper with no way out is a borrowed controller.
+                if sticks.toggle {
+                    app.system_mouse_enabled = !app.system_mouse_enabled;
+
+                    if !app.system_mouse_enabled {
+                        app.release_system_buttons();
+                    }
+
+                    app.report(format!(
+                        "controller mouse: {}",
+                        if app.system_mouse_enabled {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    ));
                 }
 
-                // Spent only while the sheet is in front; behind a screen the zoom still *settles*,
-                // so a gesture held when one opened becomes the note's setting rather than being lost
-                // with the view it moved.
-                app.zoom_with_stick(if covered { 1.0 } else { sticks.zoom }, cx);
+                if app.focus.is_active() {
+                    // The app has the controller: let go of anything the desktop was holding.
+                    app.release_system_buttons();
+
+                    if !covered {
+                        app.pan_sheet(sticks.pan, cx);
+                    }
+
+                    // Spent only while the sheet is in front; behind a screen the zoom still
+                    // *settles*, so a gesture held when one opened becomes the note's setting
+                    // rather than being lost with the view it moved.
+                    app.zoom_with_stick(if covered { 1.0 } else { sticks.zoom }, cx);
+                } else if app.system_mouse_enabled {
+                    // Another app is in front: the sticks are its pointer and scroll, and the
+                    // shoulders are its clicks. A zoom left mid-gesture when focus left still
+                    // becomes the note's, once.
+                    app.zoom_with_stick(1.0, cx);
+                    app.drive_system_mouse(&sticks);
+                } else {
+                    // The desktop mouse mode is off: the controller belongs to the app in front.
+                    app.zoom_with_stick(1.0, cx);
+                }
 
                 // The page the view is waiting for, paid for here rather than inside a frame: it is
                 // skipped while the pen is laying ink, so the ink pump keeps taking readings.
@@ -1836,6 +1891,92 @@ impl NoteApp {
             .zoom_around(factor, centre, sheet.paper, sheet.window, PAGE_MARGIN)
         {
             cx.notify();
+        }
+    }
+
+    /// Lets go of any pointer button the gamepad is holding for the desktop.
+    ///
+    /// Called when this app comes back to the front: a controller that clicked somewhere else and
+    /// was still held must not leave the desktop mid-drag while the sticks go back to the sheet.
+    fn release_system_buttons(&mut self) {
+        if self.system_buttons == (false, false) {
+            return;
+        }
+
+        if let Some(mouse) = self.system_mouse.as_mut() {
+            mouse.release_all();
+        }
+
+        self.system_buttons = (false, false);
+    }
+
+    /// Drives the machine's pointer with the sticks and shoulders, while another app is in front.
+    ///
+    /// The view owns the policy and the platform owns the events (see [`SystemMouse`]). A service
+    /// that cannot post is not an error to handle everywhere: it is a sentence in the status line,
+    /// which is where a person coming back to the app will read why the controller did nothing.
+    fn drive_system_mouse(&mut self, sticks: &Sticks) {
+        let ready = self
+            .system_mouse
+            .as_ref()
+            .is_some_and(|mouse| mouse.is_ready());
+
+        if !ready {
+            // Only a gesture is worth a permission prompt: a controller at rest is not a reason to
+            // ask, and a person who never uses one should never see the dialog.
+            let tried = sticks.pointer != (0.0, 0.0)
+                || sticks.scroll != (0.0, 0.0)
+                || sticks.left == Some(true)
+                || sticks.right == Some(true);
+
+            if tried {
+                if let Some(mouse) = self.system_mouse.as_mut() {
+                    mouse.request();
+                } else {
+                    return;
+                }
+
+                self.report(String::from(
+                    "controller mouse: grant cheap-note Accessibility in System Settings",
+                ));
+            }
+
+            return;
+        }
+
+        let Some(mouse) = self.system_mouse.as_mut() else {
+            return;
+        };
+
+        if sticks.pointer != (0.0, 0.0) {
+            mouse.move_by(sticks.pointer);
+        }
+
+        if sticks.scroll != (0.0, 0.0) {
+            mouse.scroll(sticks.scroll);
+        }
+
+        if let Some(pressed) = sticks.left {
+            if pressed {
+                mouse.button(MouseButton::Left, true);
+                self.system_buttons.0 = true;
+            } else if self.system_buttons.0 {
+                // A release for a button this service is not holding is not a click: it is what a
+                // shoulder does when the app changed places mid-press, and the desktop never saw the
+                // down. Letting a stray up through would be a click nobody asked for.
+                mouse.button(MouseButton::Left, false);
+                self.system_buttons.0 = false;
+            }
+        }
+
+        if let Some(pressed) = sticks.right {
+            if pressed {
+                mouse.button(MouseButton::Right, true);
+                self.system_buttons.1 = true;
+            } else if self.system_buttons.1 {
+                mouse.button(MouseButton::Right, false);
+                self.system_buttons.1 = false;
+            }
         }
     }
 
@@ -4480,9 +4621,15 @@ impl NoteApp {
                 placed(
                     at,
                     geometry.tool_disc(),
-                    palette_tool_chip(id, icon, label, *tool == mode, geometry, cx, move |app, cx| {
-                        app.palette_take(PalettePart::Tool(place), cx)
-                    }),
+                    palette_tool_chip(
+                        id,
+                        icon,
+                        label,
+                        *tool == mode,
+                        geometry,
+                        cx,
+                        move |app, cx| app.palette_take(PalettePart::Tool(place), cx),
+                    ),
                 )
                 .into_any_element(),
             );
@@ -5352,11 +5499,9 @@ impl Render for NoteApp {
             .text_color(foreground)
             // A trackpad's pinch, and a wheel with the command modifier held, both arrive here: the canvas is the
             // whole window's only interactive element, so it is what the gestures hit.
-            .on_scroll_wheel(
-                cx.listener(|app, event: &ScrollWheelEvent, window, cx| {
-                    app.on_wheel(event, window, cx)
-                }),
-            )
+            .on_scroll_wheel(cx.listener(|app, event: &ScrollWheelEvent, window, cx| {
+                app.on_wheel(event, window, cx)
+            }))
             .on_pinch(cx.listener(|app, event: &PinchEvent, _, cx| app.on_pinch(event, cx)))
             // The note's keyboard: Esc for the home screen, the two arrows for the page, and the three
             // commands a person reaches without letting go of the pen. A listener and not a binding,
@@ -6436,9 +6581,7 @@ fn bar_line(shown: bool, measured: Option<f32>) -> f32 {
         return 0.0;
     }
 
-    measured
-        .filter(|edge| *edge > 0.0)
-        .unwrap_or(BAR_HEIGHT)
+    measured.filter(|edge| *edge > 0.0).unwrap_or(BAR_HEIGHT)
 }
 
 /// Describes a frame's canvas: the desk, the page's shadow, and the sheet — in the order painted.

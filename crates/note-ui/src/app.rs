@@ -1298,20 +1298,25 @@ impl NoteApp {
             let alive = this.update(cx, |app, cx| {
                 let now = Instant::now();
 
-                // The gamepad's left stick, on the same clock as the rest of the housekeeping: a
-                // stick is a position rather than a stream of readings, so there is no queue to park
-                // on — the distance since this loop last woke is what the sheet moves by. A screen, a
-                // question or a name in front is a page nobody is reading, so the stick is still read
-                // (to keep its state current) and its distance is not spent.
-                let stick = app.gamepad.pan();
+                // The gamepad's sticks, on the same clock as the rest of the housekeeping: a stick
+                // is a position rather than a stream of readings, so there is no queue to park on —
+                // the distance and the zoom since this loop last woke are what the sheet moves by. A
+                // screen, a question or a name in front is a page nobody is reading, so the sticks
+                // are still read (to keep their state current) and what they ask for is not spent.
+                let sticks = app.gamepad.read();
                 let covered = app.home_is_open()
                     || app.marks.is_open()
                     || app.outline.is_open()
                     || app.asking()
                     || app.naming.is_some();
                 if !covered {
-                    app.pan_sheet(stick, cx);
+                    app.pan_sheet(sticks.pan, cx);
                 }
+
+                // Spent only while the sheet is in front; behind a screen the zoom still *settles*,
+                // so a gesture held when one opened becomes the note's setting rather than being lost
+                // with the view it moved.
+                app.zoom_with_stick(if covered { 1.0 } else { sticks.zoom }, cx);
 
                 // The page the view is waiting for, paid for here rather than inside a frame: it is
                 // skipped while the pen is laying ink, so the ink pump keeps taking readings.
@@ -1796,6 +1801,40 @@ impl NoteApp {
         }
 
         if self.view.pan() != was {
+            cx.notify();
+        }
+    }
+
+    /// Zooms with the gamepad's right stick, about the window's centre.
+    ///
+    /// The view is moved on every wake — a stick should zoom as smoothly as it pans — while the note's
+    /// setting is written once, when the stick is let go: a write per millisecond is not a setting. The
+    /// zoom field still follows every frame because it reads the view ([`Self::sync_choosers`]).
+    fn zoom_with_stick(&mut self, factor: f32, cx: &mut Context<Self>) {
+        if factor == 1.0 {
+            // The stick is still: a zoom it left behind becomes the note's, once.
+            if self.settings.zoom != self.view.zoom() {
+                self.finish_zoom(cx);
+            }
+            return;
+        }
+
+        // A stick is a gesture the lock holds off, like the wheel and the pinch: a controller knocked
+        // while writing must not take the line away from the nib.
+        if !self.settings.gestures_zoom() {
+            return;
+        }
+
+        let sheet = self.sheet;
+        if sheet.window.0 <= 0.0 || sheet.window.1 <= 0.0 {
+            return;
+        }
+
+        let centre = (sheet.window.0 / 2.0, sheet.window.1 / 2.0);
+        if self
+            .view
+            .zoom_around(factor, centre, sheet.paper, sheet.window, PAGE_MARGIN)
+        {
             cx.notify();
         }
     }

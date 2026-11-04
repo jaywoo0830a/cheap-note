@@ -82,6 +82,13 @@ taken from the display, because nothing in the loop reads the monitor any more. 
 skipped while the pen is laying ink, so waking this often costs a timer and a comparison when there is
 nothing to do, and a rasterisation can never delay a stroke.
 
+The gamepad's left stick rides that same clock. A stick is a *position* rather than a stream of
+readings, so there is no queue to wait on: the housekeeping pump reads it, turns the distance since
+its last wake into logical pixels at `GAMEPAD_PAN_SPEED`, and pans the sheet the way a wheel does.
+While the home screen, a list, a question or a name is in front, the stick is still read — that is what
+keeps its cached state current — and the distance is not spent, because there is no page under it to
+move.
+
 ## 3. The top bar
 
 **Two rows and one surface.** The first row is what the reader is *doing* — the document, the tool in
@@ -611,7 +618,8 @@ the unfinished bitmap.
 A wheel with `Ctrl` held zooms about the pointer — what every viewer does, and what a trackpad's pinch is
 delivered as when the platform sends it as a wheel rather than as a gesture. Without `Ctrl`, a scroll pans
 the sheet, which is what a two-finger drag is asking for. A pinch zooms about the point between the
-fingers.
+fingers. A gamepad's left stick pans too: pushing it right looks further right and pushing it up looks
+earlier in the page, so the sheet moves the way the *view* was pushed.
 
 The numbers behind that are all *derived* rather than picked:
 
@@ -621,6 +629,8 @@ The numbers behind that are all *derived* rather than picked:
 | `WHEEL_LINES_PER_NOTCH` | 3 | GPUI scales a wheel notch by the system's "lines to scroll per notch" setting, which is three on a machine at its defaults, so a notch of a *real* wheel reaches the app as three lines. Assuming it here is what makes one notch zoom like one press of the button. A machine set differently zooms proportionally faster or slower per notch — a small, self-consistent difference, and measuring it would mean reading a system setting this app has no API for |
 | `WHEEL_LINE_HEIGHT` | 32 logical px | the platform does not say what a line is: Windows' notion is a fraction of a "page" whose size comes from the mouse settings, and 32 px lands within a few pixels of it at the defaults |
 | a trackpad's notch | 96 px | `WHEEL_LINES_PER_NOTCH` × `WHEEL_LINE_HEIGHT` — the distance that asks for what a notch asks for. Without it the pixel path zooms three times faster per gesture than the line path, and it *was* three times too fast the first time this was written |
+| `GAMEPAD_PAN_SPEED` | 1000 logical px/s | a wheel spun at ten notches a second (10 × 96 px), because a stick is held rather than flicked and has to cross a sheet in about the time a hand expects |
+| `GAMEPAD_LONGEST_STEP` | 100 ms | the longest wake the stick is paid for: a laptop that slept must not wake to a sheet a minute's worth of pan away |
 
 Two notches are the step applied **twice**, not twice the step, so a fast roll zooms smoothly instead of in
 jumps, and the result is clamped, because one enormous delta from a driver should not take the sheet from
@@ -714,6 +724,7 @@ counts the rebuilds a zoom's change of detail forced (see `ink_layer/render.rs`)
 | `WHEEL_ZOOM_STEP` | 1.25 | one notch of a wheel, and one press of the toolbar's zoom buttons — the same question, answered at the same rate |
 | `WHEEL_LINES_PER_NOTCH` | 3 | what the platform turns one notch into; 32 logical px per line; 96 px is a trackpad's notch |
 | `WHEEL_LINE_HEIGHT` | 32 logical px | what one line of a scroll is worth when panning |
+| `GAMEPAD_PAN_SPEED` / `GAMEPAD_LONGEST_STEP` | 1000 logical px/s / 100 ms | how fast a fully deflected left stick pans, and the longest wake it is paid for — a wheel spun at ten notches a second, held rather than flicked |
 | `PALETTE_KEY` | `Ctrl+Shift+C` | the palette at the pen's one chord, for opening it and for putting it away; the status line says so while it is up |
 | `PALETTE_RING_RADIUS` / `PALETTE_TOOL_RADIUS` | 104 / 54 logical px | how far the colours and the three tools sit from the palette's centre: the tools are in the well inside and the colours are on the ring outside, and both rings are far enough out that no point on the palette is within reach of two controls |
 | `PALETTE_DISC` / `PALETTE_DISC_BOX` | 30 / 38 logical px | a colour disc, and the box it draws in — the box carries the ring that marks the keyboard's place, so a placement is measured in the box rather than in the disc |
@@ -745,7 +756,9 @@ no reason, because the next person will keep a rule whose justification has gone
 
 Panning is a distance in logical pixels, in the direction of the scroll: up is earlier in the page, so a
 wheel turned away from the user moves the sheet *down* — the same rule a document viewer follows, applied
-to both axes. Zooming is *anchored* to a point, and the pan is stored rather than recomputed from a centre
+to both axes. The left stick is the same distance asked for by a position rather than by a stream: it pans
+the *view*, so right is later in the page and the sheet moves left, and up is earlier in the page and the
+sheet moves down. Zooming is *anchored* to a point, and the pan is stored rather than recomputed from a centre
 each frame for exactly that reason (`view.rs`).
 
 

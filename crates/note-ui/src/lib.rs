@@ -26,6 +26,7 @@
 //! | `keys`      | the chords, and how this platform writes them (`Ctrl+Z`, `⌘Z`)     |
 //! | [`ink`]     | readings to strokes: edges, resampling, width, erasing             |
 //! | [`canvas`]  | the sheet's size, colour and ruling                                |
+//! | [`gamepad`] | the left stick, as a pan of the sheet                               |
 //! | [`ink_layer`] | the canvas *description*: what the surface is asked to paint     |
 //! | [`view`]    | zoom, fit, and where the sheet sits in the window                  |
 //! | [`cursor`]  | the pen's ghost cursor: where it is and how it leans               |
@@ -82,6 +83,7 @@ pub mod platform;
 mod app;
 mod bookmarks;
 mod canvas;
+mod gamepad;
 mod history;
 mod home;
 mod ink;

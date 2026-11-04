@@ -35,6 +35,7 @@ use crate::canvas::{
     HIGHLIGHTER_COLORS, INK_COLORS, PAPER_COLORS,
 };
 use crate::cursor::{nib_radius_for_width, PenCursor};
+use crate::gamepad::Gamepads;
 use crate::home::Home;
 use crate::ink::{
     paper_of_drawn, paper_of_page_point, with_alpha, InkTransform, Notes, Stroke, TextChar,
@@ -760,6 +761,8 @@ pub struct NoteApp {
     scroll_waiting: (f32, f32),
     /// Whether a frame has been asked for to spend [`Self::scroll_waiting`].
     scroll_asked: bool,
+    /// The gamepads the app can see: their left stick is a pan, read by the housekeeping pump.
+    gamepad: Gamepads,
     /// Where each page was being read, for as long as the note in hand is open.
     ///
     /// The *page's* place rather than the reader's: turning to a page added at the end of a note opens that page at
@@ -972,6 +975,7 @@ impl NoteApp {
             view,
             scroll_waiting: (0.0, 0.0),
             scroll_asked: false,
+            gamepad: Gamepads::new(),
             pans: HashMap::new(),
             sheet: Sheet::default(),
             bar_bottom: Rc::new(Cell::new(None)),
@@ -1293,6 +1297,21 @@ impl NoteApp {
 
             let alive = this.update(cx, |app, cx| {
                 let now = Instant::now();
+
+                // The gamepad's left stick, on the same clock as the rest of the housekeeping: a
+                // stick is a position rather than a stream of readings, so there is no queue to park
+                // on — the distance since this loop last woke is what the sheet moves by. A screen, a
+                // question or a name in front is a page nobody is reading, so the stick is still read
+                // (to keep its state current) and its distance is not spent.
+                let stick = app.gamepad.pan();
+                let covered = app.home_is_open()
+                    || app.marks.is_open()
+                    || app.outline.is_open()
+                    || app.asking()
+                    || app.naming.is_some();
+                if !covered {
+                    app.pan_sheet(stick, cx);
+                }
 
                 // The page the view is waiting for, paid for here rather than inside a frame: it is
                 // skipped while the pen is laying ink, so the ink pump keeps taking readings.
@@ -1753,16 +1772,30 @@ impl NoteApp {
             eprintln!("pan: ({:.1}, {:.1})", distance.0, distance.1);
         }
 
-        // Held where the layout can show it, so that a wheel turned past the end of the sheet leaves no debt
-        // for the next turn to pay off (see [`Viewport::hold_pan`]). A sheet no frame has drawn yet has no
-        // bounds to be held inside — the pan is left alone rather than clamped into a window of nothing.
-        let sheet = self.sheet;
-        let moved = self.view.pan_by(distance);
-        let held = sheet.window.0 > 0.0
-            && sheet.window.1 > 0.0
-            && self.view.hold_pan(sheet.paper, sheet.window, PAGE_MARGIN);
+        // Held where the layout can show it, so that a wheel turned past the end of the sheet leaves
+        // no debt for the next turn to pay off (see [`Viewport::hold_pan`]).
+        self.pan_sheet(distance, cx);
+    }
 
-        if moved || held {
+    /// Pans the sheet by a distance in logical pixels, kept where the layout can show it, and asks for the
+    /// frame that shows it when the pan actually changed — a stick held against the end of the sheet is a
+    /// position that has nowhere to go, not a reason to redraw.
+    fn pan_sheet(&mut self, distance: (f32, f32), cx: &mut Context<Self>) {
+        if distance == (0.0, 0.0) {
+            return;
+        }
+
+        let sheet = self.sheet;
+        let was = self.view.pan();
+        self.view.pan_by(distance);
+
+        // A sheet no frame has drawn yet has no bounds to be held inside — the pan is left alone
+        // rather than clamped into a window of nothing (see [`Viewport::hold_pan`]).
+        if sheet.window.0 > 0.0 && sheet.window.1 > 0.0 {
+            self.view.hold_pan(sheet.paper, sheet.window, PAGE_MARGIN);
+        }
+
+        if self.view.pan() != was {
             cx.notify();
         }
     }

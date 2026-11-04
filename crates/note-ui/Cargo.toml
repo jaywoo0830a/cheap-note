@@ -22,6 +22,11 @@ note-format = { path = "../note-format" }
 # itself. On Windows, macOS and Linux the platform crates behind it choose the backend.
 gpui-kit = "=0.7.3"
 
+# The gamepad's left stick, as a pan of the sheet. Like GPUI Kit this is a cross-platform library —
+# one API over XInput/WGI on Windows and IOKit on macOS — so it belongs above the seam rather than
+# in a platform crate. A machine with no gamepad is not an error: the stick simply reads as still.
+gilrs = "=0.11.2"
+
 # Serialisable state of the app's own: the index of what has been opened (see `src/recent.rs`) and
 # the bundled palette (see `src/theme.rs`). A *note*'s JSON — its page list and its settings — is
 # serialised by `note-format`, which pins the same versions.

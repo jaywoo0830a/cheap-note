@@ -41,6 +41,7 @@
 //! | [`home`]    | the screen that offers what was opened, and what it does            |
 //! | [`app`]     | the view: the bar and the pills, canvas painting, the two pumps     |
 //! | [`timing`]  | what every hot path costs, measured rather than guessed            |
+//! | `status_log`| the status line's log file, one line a second while a note is in front |
 //! | [`settings`]| what a note remembers, one row at a time (the format's)             |
 //! | [`theme`]   | the palette, the bundled font, and the icons' asset source         |
 //! | [`error`]   | the error type every fallible boundary returns                     |
@@ -96,6 +97,7 @@ mod pdf;
 mod pdfium;
 mod recent;
 mod settings;
+mod status_log;
 mod store;
 mod theme;
 mod timing;

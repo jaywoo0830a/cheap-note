@@ -13,8 +13,8 @@ If you read only one paragraph, read this one:
 > no offset arithmetic to become a stroke. The pen's own wake draws the ink and presents it
 > immediately — the interface's frame is too expensive to wait for — and everything that is *not* the
 > ink (a page rasterised, the counters, the writer's reports) happens on a one-millisecond housekeeping
-> wake of its own. The status line is not on a clock, the bar can be turned off, and the pen is refused
-> by a line or a state, never by a rectangle.
+> wake of its own. The status line's counters rebuild once a second and are written to a log file, the
+> bar can be turned off, and the pen is refused by a line or a state, never by a rectangle.
 
 ## 1. The screen: an overlay, and what it costs
 
@@ -167,6 +167,14 @@ The counters sit in a translucent pill **on the desk**, out of the bar, because 
 than a control — and because the line changes four times a second: text in the bar would re-lay-out the
 bar, while text in a pill of its own re-lays-out the pill.
 
+It is rebuilt when the reader changes something, and once a second besides
+(`STATUS_REFRESH_INTERVAL`): the counters move on their own, and a person watching a stroke should see
+them move. The pill's copy button puts the whole line on the clipboard, and the same line is appended
+to `status.log` beside the notes — `~/Library/Application Support/cheap-note/status.log` on macOS,
+`%LOCALAPPDATA%\cheap-note\status.log` on Windows — with a UTC timestamp and a session header. A file
+past 8 MB is rotated to `status.log.1` on the next launch; a log that cannot be opened says `log: off`
+in the line it was meant to record.
+
 It wraps, and is allowed 60% of the window's width (`STATUS_PILL_WIDTH`), because of what the line
 carries: the document and the page, the ink's counts, the page cache's ratio, the zoom and the frame's
 own timings. Set on one nowrap line of 460 pixels — what this pill used to do — the timings were the
@@ -179,15 +187,16 @@ page pill's height plus a margin — because a readout drawn over the control a 
 worse than one a row higher, and it grows *upward* from the corner it is anchored to rather than down
 off the window.
 
-**It is not on a clock.** It is rebuilt by the change that made it stale — a key, a tool, a page, a
-session started or stopped — and never on a tick of its own: a line that moves on its own is a line
-nobody can read, and re-shaping and re-laying-out text on every frame is exactly what made the top of
-the window look like it was flickering while writing. What needs a clock to be readable is a
-**session**, which a person starts and stops by hand: `Ctrl+M` for both, because a session is a
-stopwatch and starting it and stopping it are the same gesture a moment apart. While it runs it says
-only *that* it is running; what it measures — the wait between frames and the pen's own wait — is read
-once, afterwards. An error is the one thing allowed to force the line to be rebuilt at once, since the
-line is not on a clock and would otherwise hold the message back.
+**It is on a one-second clock for the counters, and on the change for the rest.** The line is rebuilt
+by the change that made it stale — a key, a tool, a page, a session started or stopped — and once a
+second while a note is in front, because the counters move on their own. A line that moves on every
+frame is a line nobody can read, and re-shaping and re-laying-out text on every frame is exactly what
+made the top of the window look like it was flickering while writing. What needs a clock to be
+readable is a **session**, which a person starts and stops by hand: `Ctrl+M` for both, because a
+session is a stopwatch and starting it and stopping it are the same gesture a moment apart. While it
+runs it says only *that* it is running; what it measures — the wait between frames and the pen's own
+wait — is read once, afterwards. An error is the one thing allowed to force the line to be rebuilt at
+once, rather than waiting for the next second.
 
 A connected gamepad adds one segment — `pad: desktop`, `pad: canvas` or `pad: off` — which says which
 job its sticks have right now. It is the first thing to read when a controller seems to do nothing:
@@ -408,8 +417,9 @@ A paper size is a *physical* size, so choosing one sets the drawing scale too: a
 expects half a sheet of A4, not the same sheet under another name.
 
 **The ruling discards itself.** It is keyed on the sheet's rectangle, its style and its paper colour, so
-it rebuilds on the next frame without being told. What is left to rebuild is the status line, and it is
-rebuilt by the change the user just made — they are looking for it — rather than on a tick.
+it rebuilds on the next frame without being told. What is left to rebuild is the status line: it is
+rebuilt by the change the user just made — they are looking for it — and once a second for the counters
+that move on their own (`STATUS_REFRESH_INTERVAL`).
 
 Changing the pen's weight leaves what is already on the page untouched: a stroke keeps the width it was
 drawn at, exactly as it keeps its colour, because the width is stamped into every point as the nib moves
@@ -751,6 +761,7 @@ counts the rebuilds a zoom's change of detail forced (see `ink_layer/render.rs`)
 | `BAR_HEIGHT` | 148 logical px | the estimate `bar_edge` falls back to only on the frame before the bar has been measured; the *measured* edge is the one line ink, the ghost cursor and the system pointer all use |
 | `STATUS_PILL_WIDTH` | 0.6 | the fraction of the window the status pill may use; it wraps, and the fraction is what decides into how many lines |
 | `STATUS_LIFT` | 40 logical px | how far above the desk's bottom row the status pill floats (the page pill's height plus `BAR_MARGIN`) |
+| `STATUS_REFRESH_INTERVAL` | 1 s | how often the status line's counters are rebuilt while a note is in front: a readout's pace, not a frame's |
 | `MEASURE_KEY` | `Ctrl+M` | the session's one key, for starting and for stopping: named once, and the line that reports on a session says it out loud |
 | `HOUSEKEEPING_INTERVAL` | 1 ms | the housekeeping pump's own clock: a fixed floor, not a rate taken from the display, and the shortest wait that still parks the task rather than spinning it |
 | `PDF_QUIET_INTERVAL` | 120 ms | how long the pen must be still before a page render is paid for: an eighth of a second, so a person pausing to think sees the sharp page land and the pause between two letters of a word does not count |

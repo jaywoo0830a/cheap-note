@@ -7,8 +7,10 @@
 //!
 //! Three things follow from that, and they are the reason for the module:
 //!
-//! * **Nothing is copied per reading.** The finished ink is built once and kept in a vertex buffer; a
-//!   reading rebuilds only the stroke under the pen, which is a few hundred vertices.
+//! * **Nothing is copied per reading.** The finished ink is built once and kept in a vertex buffer,
+//!   uploaded again only when the ink changes; a reading appends only the new segments of the stroke
+//!   under the pen. Both buffers are reused across frames, in a ring of three so the CPU never
+//!   overwrites one the GPU is still reading.
 //! * **Scrolling is a uniform, not a rebuild.** The ink is baked in the paper's own units — the units
 //!   `note_ui`'s canvas keeps its geometry in — and where the paper is drawn, how large, and which way up
 //!   is one transform the shader applies. A trackpad sends a hundred readings a second; rebuilding a page
@@ -143,6 +145,26 @@ pub(super) struct Surface {
     /// The one thing that moves while the ink stays valid: a build leaves out every stroke that was off
     /// screen, so scrolling towards one has to bring it back (see [`CULL_SLACK`]).
     ink_visible: [f32; 4],
+    /// The open stroke's triangles, appended as the pen adds points.
+    open: Vec<Vertex>,
+    /// The identity of the stroke `open` was built from.
+    open_id: u64,
+    /// How many of the open stroke's points `open` already covers.
+    open_points: usize,
+    /// The colour `open` was built with.
+    open_colour: u32,
+    /// The paper and turn `open` was built for: a page turn changes the mapping, not the points.
+    open_paper: (f32, f32),
+    open_rotation: u8,
+    /// The finished ink's buffers, one per frame in flight: the CPU writes the next while the GPU
+    /// may still be reading the last.
+    ink_buffers: [Option<Retained<ProtocolObject<dyn MTLBuffer>>>; 3],
+    /// Which of the finished ink's buffers hold the current ink.
+    ink_slots_valid: [bool; 3],
+    /// The open stroke's buffers, one per frame in flight.
+    open_buffers: [Option<Retained<ProtocolObject<dyn MTLBuffer>>>; 3],
+    /// Which of the three the next frame writes.
+    buffer_slot: usize,
     /// The document's page on the GPU, and the identity of the rasterisation it holds.
     page_texture: Option<(usize, Retained<ProtocolObject<dyn MTLTexture>>)>,
     /// The multisampled target the passes draw into, resolved into the drawable. Made with the size.
@@ -177,7 +199,14 @@ impl Surface {
         // Three in flight: enough for the compositor to hold one while the next is drawn, and no more — a
         // drawable is a window-sized surface.
         layer.setMaximumDrawableCount(3);
-        layer.setDisplaySyncEnabled(true);
+        // A drawable that is not ready is a frame to skip, not a thread to park: the pen's pump
+        // draws on the main thread, and waiting here would hold the next reading behind the
+        // compositor. The next wake tries again (see `NoteApp::present_canvas`).
+        layer.setAllowsNextDrawableTimeout(false);
+        // The display's clock is the compositor's; a frame that waits for it is a frame the pen
+        // waited for. `CHEAP_NOTE_NO_VSYNC=1` is the experiment: present immediately and see
+        // whether the tear is worth the latency.
+        layer.setDisplaySyncEnabled(std::env::var_os("CHEAP_NOTE_NO_VSYNC").is_none());
 
         view.setWantsLayer(true);
         view.setLayer(Some(&layer));
@@ -196,6 +225,16 @@ impl Surface {
             ink: Vec::new(),
             ink_key: None,
             ink_visible: [0.0; 4],
+            open: Vec::new(),
+            open_id: 0,
+            open_points: 0,
+            open_colour: 0,
+            open_paper: (0.0, 0.0),
+            open_rotation: 0,
+            ink_buffers: [None, None, None],
+            ink_slots_valid: [false; 3],
+            open_buffers: [None, None, None],
+            buffer_slot: 0,
             page_texture: None,
             msaa: None,
             width: 1,
@@ -327,6 +366,11 @@ impl Surface {
             let colour = ink.selection.unwrap_or_else(|| ink_colour(stroke.color));
             fill(&mut self.ink, stroke, &mapping, (0.0, 0.0), colour);
         }
+
+        // The ink changed: every slot is stale until its frame uploads it. The slot from three
+        // frames ago is the one the compositor has finished with, so a slot is written only when
+        // its turn comes.
+        self.ink_slots_valid = [false; 3];
     }
 
     /// The multisampled target, made once per size.
@@ -361,22 +405,111 @@ impl Surface {
         self.msaa.clone()
     }
 
-    /// The stroke under the pen, as triangles: the only geometry that is rebuilt per reading.
-    fn open_stroke(&self, canvas: &Canvas) -> Vec<Vertex> {
-        let mut vertices = Vec::new();
+    /// The stroke under the pen, appended as the pen adds points.
+    ///
+    /// The open stroke is the one piece of ink that moves; rebuilding its whole ribbon every frame
+    /// is O(points) for a line that grew by one. The id says when a new stroke begins, and the
+    /// point count says how much of this one is already in `self.open`.
+    fn open_stroke(&mut self, canvas: &Canvas) {
+        let Some(stroke) = &canvas.ink.open else {
+            self.open.clear();
+            self.open_id = 0;
+            self.open_points = 0;
+            return;
+        };
 
-        if let Some(stroke) = &canvas.ink.open {
-            let mapping = Mapping::of(canvas);
-            ribbon(
-                &mut vertices,
-                stroke,
+        let points = &stroke.points;
+        let colour = ink_colour(stroke.color);
+        let mapping = Mapping::of(canvas);
+
+        // A new stroke, a different colour, a page turn, or a stroke that lost points: start over.
+        if self.open_id != canvas.ink.open_id
+            || self.open_colour != stroke.color
+            || self.open_paper != canvas.ink.paper
+            || self.open_rotation != canvas.ink.rotation
+            || points.len() < self.open_points
+        {
+            self.open.clear();
+            self.open_id = canvas.ink.open_id;
+            self.open_colour = stroke.color;
+            self.open_paper = canvas.ink.paper;
+            self.open_rotation = canvas.ink.rotation;
+            self.open_points = 0;
+        }
+
+        if points.is_empty() {
+            self.open_points = 0;
+            return;
+        }
+
+        // The first point's round end, once. The finished ink's `ribbon` draws it last; here it is
+        // first, because the segments after it are appended and cannot be inserted before it.
+        if self.open_points == 0 {
+            disc(
+                &mut self.open,
+                mapping.point([points[0].x, points[0].y], (0.0, 0.0)),
+                points[0].width * 0.5,
+                colour,
+            );
+            self.open_points = 1;
+        }
+
+        // The segments the pen has added since the last frame. `open_points - 1` is the point the
+        // last segment ended at, so the first new segment starts there.
+        for pair in points[self.open_points.saturating_sub(1)..].windows(2) {
+            segment(
+                &mut self.open,
+                &pair[0],
+                &pair[1],
                 &mapping,
                 (0.0, 0.0),
-                ink_colour(stroke.color),
+                colour,
             );
         }
 
-        vertices
+        self.open_points = points.len();
+    }
+
+    /// Uploads the finished ink into the current frame's buffer.
+    fn upload_ink(&mut self, slot: usize) {
+        let buffer = self.ink_buffers[slot].take();
+        self.ink_buffers[slot] = Self::upload(&self.device, &self.ink, buffer);
+    }
+
+    /// Uploads the open stroke into the current frame's buffer.
+    fn upload_open(&mut self, slot: usize) {
+        let buffer = self.open_buffers[slot].take();
+        self.open_buffers[slot] = Self::upload(&self.device, &self.open, buffer);
+    }
+
+    /// Copies `vertices` into `buffer`, growing it when it is too small.
+    fn upload<T>(
+        device: &ProtocolObject<dyn MTLDevice>,
+        vertices: &[T],
+        buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    ) -> Option<Retained<ProtocolObject<dyn MTLBuffer>>> {
+        if vertices.is_empty() {
+            return None;
+        }
+
+        let bytes = std::mem::size_of_val(vertices);
+        let buffer = match buffer.filter(|buffer| buffer.length() >= bytes) {
+            Some(buffer) => buffer,
+            None => {
+                device.newBufferWithLength_options(bytes, MTLResourceOptions::StorageModeShared)?
+            }
+        };
+
+        // SAFETY: a buffer of at least this many bytes, written once before anything reads it.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                vertices.as_ptr().cast::<u8>(),
+                buffer.contents().as_ptr().cast::<u8>(),
+                bytes,
+            );
+        }
+
+        Some(buffer)
     }
 
     /// The page's texture, uploaded when the document hands over a new rasterisation of it.
@@ -723,13 +856,57 @@ fn shaded(colour: u32, alpha: f32) -> gpui_kit::Hsla {
     gpui_kit::rgba(((colour & 0x00FF_FFFF) << 8) | alpha).into()
 }
 
+/// One segment of a ribbon: the quad between two points, and the disc at the joint.
+///
+/// The model's `outline` is the ribbon's edge, and a fan of triangles over it is only correct when
+/// that polygon is star-shaped — handwriting is not: a loop or a sharp turn makes a triangle of the
+/// fan reach outside the stroke, which is ink where nobody wrote. The points and their widths are
+/// what the ribbon was made from, so the ribbon is built from those instead. Overlap is invisible
+/// for opaque ink, which is every stroke but the highlighter's.
+fn segment(
+    vertices: &mut Vec<Vertex>,
+    a: &note_format::ink::InkPoint,
+    b: &note_format::ink::InkPoint,
+    mapping: &Mapping,
+    shift: (f32, f32),
+    colour: gpui_kit::Hsla,
+) {
+    let (pa, pb) = (
+        mapping.point([a.x, a.y], shift),
+        mapping.point([b.x, b.y], shift),
+    );
+
+    let (dx, dy) = (pb.0 - pa.0, pb.1 - pa.1);
+    let length = (dx * dx + dy * dy).sqrt();
+
+    if length < f32::EPSILON {
+        return;
+    }
+
+    // The ink's widths are in the paper's own units, as its triangles are: the transform that places
+    // the paper is what turns a half width into pixels.
+    let (ha, hb) = (a.width * 0.5, b.width * 0.5);
+    let (nx, ny) = (-dy / length, dx / length);
+    let vertex = |p: (f32, f32)| Vertex::new(p.0, p.1, colour);
+
+    let corners = [
+        vertex((pa.0 + nx * ha, pa.1 + ny * ha)),
+        vertex((pa.0 - nx * ha, pa.1 - ny * ha)),
+        vertex((pb.0 - nx * hb, pb.1 - ny * hb)),
+        vertex((pb.0 + nx * hb, pb.1 + ny * hb)),
+    ];
+
+    vertices.extend_from_slice(&[
+        corners[0], corners[1], corners[2], corners[0], corners[2], corners[3],
+    ]);
+
+    // The wedge a turn leaves open on the outside of the bend.
+    disc(vertices, pb, hb, colour);
+}
+
 /// A stroke as a ribbon: a quad per segment, and a disc at every joint.
 ///
-/// The model's `outline` is the ribbon's edge, and a fan of triangles over it is only correct when that
-/// polygon is star-shaped — handwriting is not: a loop or a sharp turn makes a triangle of the fan reach
-/// outside the stroke, which is ink where nobody wrote. The points and their widths are what the ribbon was
-/// made from, so the ribbon is rebuilt from those instead. Overlap is invisible for opaque ink, which is
-/// every stroke but the highlighter's.
+/// The finished ink is built once and kept; the open stroke is appended to by [`Surface::open_stroke`].
 fn ribbon(
     vertices: &mut Vec<Vertex>,
     stroke: &note_format::ink::Stroke,
@@ -743,8 +920,6 @@ fn ribbon(
     };
 
     let at = |point: &note_format::ink::InkPoint| mapping.point([point.x, point.y], shift);
-    // The ink's widths are in the paper's own units, as its triangles are: the transform that places the
-    // paper is what turns a half width into pixels.
     let half = |width: f32| width * 0.5;
 
     if points.len() == 1 {
@@ -753,33 +928,7 @@ fn ribbon(
     }
 
     for pair in points.windows(2) {
-        let (a, b) = (&pair[0], &pair[1]);
-        let (pa, pb) = (at(a), at(b));
-
-        let (dx, dy) = (pb.0 - pa.0, pb.1 - pa.1);
-        let length = (dx * dx + dy * dy).sqrt();
-
-        if length < f32::EPSILON {
-            continue;
-        }
-
-        let (ha, hb) = (half(a.width), half(b.width));
-        let (nx, ny) = (-dy / length, dx / length);
-        let vertex = |p: (f32, f32)| Vertex::new(p.0, p.1, colour);
-
-        let corners = [
-            vertex((pa.0 + nx * ha, pa.1 + ny * ha)),
-            vertex((pa.0 - nx * ha, pa.1 - ny * ha)),
-            vertex((pb.0 - nx * hb, pb.1 - ny * hb)),
-            vertex((pb.0 + nx * hb, pb.1 + ny * hb)),
-        ];
-
-        vertices.extend_from_slice(&[
-            corners[0], corners[1], corners[2], corners[0], corners[2], corners[3],
-        ]);
-
-        // The wedge a turn leaves open on the outside of the bend.
-        disc(vertices, pb, hb, colour);
+        segment(vertices, &pair[0], &pair[1], mapping, shift, colour);
     }
 
     // The ends: a nib is round, and so is a highlighter's.
@@ -1006,6 +1155,20 @@ impl Surface {
             1.0
         };
 
+        // A drawable that is not ready is a frame to skip, not work to do: the pen's pump is on
+        // the main thread, and building a frame nobody can see would hold the next reading.
+        let Some(drawable) = self.layer.nextDrawable() else {
+            return false;
+        };
+
+        let Some(msaa) = self.multisample() else {
+            return false;
+        };
+
+        // The buffer slot this frame writes. It advances only when a frame is actually committed, so
+        // the slot from three frames ago is the one the compositor has finished with.
+        let slot = self.buffer_slot;
+
         // The pen's mark: above the ink, below the interface. Built before the trace, so that "no cursor
         // drawn" and "no cursor to draw" can be told apart.
         let mut pointer = Vec::new();
@@ -1053,7 +1216,12 @@ impl Surface {
         }
 
         self.refresh_ink(canvas, scale);
-        let open = self.open_stroke(canvas);
+        if !self.ink_slots_valid[slot] {
+            self.upload_ink(slot);
+            self.ink_slots_valid[slot] = true;
+        }
+        self.open_stroke(canvas);
+        self.upload_open(slot);
 
         // Where the paper's own units land in the window: the one thing a scroll, a zoom or a change of
         // screen changes, and the reason none of them rebuilds a triangle.
@@ -1061,14 +1229,6 @@ impl Surface {
         let page = self
             .page_texture(canvas)
             .map(|texture| (page_quad(canvas, scale), texture));
-
-        let Some(drawable) = self.layer.nextDrawable() else {
-            return false;
-        };
-
-        let Some(msaa) = self.multisample() else {
-            return false;
-        };
 
         let pass = MTLRenderPassDescriptor::new();
 
@@ -1124,8 +1284,8 @@ impl Surface {
 
         // The finished ink, then the highlight, then the stroke under the pen: the order the page was
         // painted in when Core Graphics drew it.
-        if let Some(buffer) = self.buffer(&self.ink) {
-            self.solid(&encoder, &buffer, self.ink.len(), width, height, sheet);
+        if let Some(buffer) = &self.ink_buffers[slot] {
+            self.solid(&encoder, buffer, self.ink.len(), width, height, sheet);
         }
 
         if let Some(buffer) = self.buffer(&front) {
@@ -1139,8 +1299,8 @@ impl Surface {
             );
         }
 
-        if let Some(buffer) = self.buffer(&open) {
-            self.solid(&encoder, &buffer, open.len(), width, height, sheet);
+        if let Some(buffer) = &self.open_buffers[slot] {
+            self.solid(&encoder, buffer, self.open.len(), width, height, sheet);
         }
 
         // The pen, over everything the canvas drew: a cursor is the one thing on the sheet that has to be
@@ -1165,16 +1325,19 @@ impl Surface {
 
         buffer.commit();
 
+        self.buffer_slot = (self.buffer_slot + 1) % self.ink_buffers.len();
+
         true
     }
 }
 
 impl Surface {
-    /// Uploads one run of vertices, and hands back the buffer to bind.
+    /// Uploads one of the small runs — the desk, the page's quad, the highlight, the pen's mark —
+    /// and hands back the buffer to bind.
     ///
-    /// One allocation per run per frame — at most four, a few kilobytes each. A pool would save the
-    /// allocation and cost a lifetime to track; the measurement this module exists for is the reading's,
-    /// and this is not where it goes.
+    /// One allocation per run per frame, a few kilobytes each. The two large runs — the finished ink
+    /// and the open stroke — are kept in `ink_buffers`/`open_buffers` instead, because they are the
+    /// ones whose size makes an allocation per frame worth avoiding.
     fn buffer<T>(&self, vertices: &[T]) -> Option<Retained<ProtocolObject<dyn MTLBuffer>>> {
         if vertices.is_empty() {
             return None;

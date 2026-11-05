@@ -266,6 +266,10 @@ pixels). `apps/macos/src/platform/metal.rs` does this in `Mapping` (paper → dr
 thing that can move while the ink stays valid is the *culling* rectangle, which is grown by `CULL_SLACK`
 before the cull and re-culled once the sheet has scrolled that far.
 
+The open stroke is the one piece of ink that moves: its ribbon is appended to as points arrive, and its
+vertex buffer is reused in a ring of three so the CPU never overwrites one the GPU is still reading. The
+finished ink is uploaded again only when the ink changes, not on every frame.
+
 The same rule applies above the seam: `note-ui` collects a frame's worth of scroll readings and spends them
 once (`NoteApp::spend_scroll`), and holds the pan inside the layout's bounds (`Viewport::hold_pan`) so a
 wheel turned past the end of a sheet leaves no invisible offset for the next turn to pay off.

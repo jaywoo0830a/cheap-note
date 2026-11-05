@@ -110,6 +110,9 @@ pub struct Ink {
     /// The stroke under the pen, closed at the zoom in hand. Rebuilt by the app for every frame it
     /// is drawn in, because it is the one piece of ink that is still moving.
     pub open: Option<Arc<Stroke>>,
+    /// The identity of [`Ink::open`]: it changes when a new stroke begins, and not as the stroke
+    /// grows. A layer uses it to append to the open stroke's geometry instead of rebuilding it.
+    pub open_id: u64,
     /// Counts the rebuilds of the outlines themselves: a zoom that crosses into another detail rung
     /// changes every stroke's outline without changing any of their identities, and this is what
     /// says so.
@@ -169,6 +172,7 @@ impl Default for Ink {
             zoom: 0.0,
             strokes: Arc::new(Vec::new()),
             open: None,
+            open_id: 0,
             revision: 0,
             visible: Ink::ALL_VISIBLE,
             rotation: 0,

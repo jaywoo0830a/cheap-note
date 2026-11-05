@@ -86,11 +86,12 @@ impl InkSurface for InkCanvas {
     ///
     /// Called twice in a frame's life: once per pen batch, by the pump, and once per UI frame, by the
     /// view. Both are cheap: the ink's triangles are cached by the surface, and a frame that changed
-    /// nothing redraws what is already there.
-    fn draw(&mut self, canvas: &Canvas) -> Result<(), String> {
+    /// nothing redraws what is already there. `false` is a drawable that was not ready; the app tries
+    /// again on its next wake rather than waiting for the compositor here.
+    fn draw(&mut self, canvas: &Canvas) -> Result<bool, String> {
         // Nothing has described a canvas yet: a reading that arrived before the first frame.
         if canvas.sheet.is_none() {
-            return Ok(());
+            return Ok(false);
         }
 
         let scale = if canvas.scale > 0.0 {
@@ -101,9 +102,7 @@ impl InkSurface for InkCanvas {
 
         self.follow(scale);
         // The pen's mark is part of the frame, now: above the ink, below the interface.
-        self.surface.draw(canvas, self.ghost.mark().as_ref());
-
-        Ok(())
+        Ok(self.surface.draw(canvas, self.ghost.mark().as_ref()))
     }
 }
 

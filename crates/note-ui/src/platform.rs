@@ -173,9 +173,13 @@ pub trait AppFocus {
 
 /// The surface the desk, the paper and the ink are painted on: the view says what, this says how.
 pub trait InkSurface {
-    /// Paints one frame of the canvas. The error is a sentence rather than a type: it is shown in the
-    /// status line, once, and the app keeps running without a canvas rather than failing to start.
-    fn draw(&mut self, canvas: &Canvas) -> Result<(), String>;
+    /// Paints one frame of the canvas.
+    ///
+    /// `Ok(true)` means a frame was handed to the compositor. `Ok(false)` means the surface had no
+    /// drawable ready — a frame to skip rather than a thread to park, so the next wake tries again
+    /// (see [`crate::app`]). The error is a sentence rather than a type: it is shown in the status
+    /// line, once, and the app keeps running without a canvas rather than failing to start.
+    fn draw(&mut self, canvas: &Canvas) -> Result<bool, String>;
 }
 
 /// Where the pen's readings come from.

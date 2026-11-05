@@ -56,6 +56,7 @@ use crate::platform::{
 };
 use crate::recent::{self, Recent};
 use crate::settings::{PenWeight, Settings};
+use crate::status_log::StatusLog;
 use crate::timing::{measure, Measurement, Timings};
 use crate::view::{Fit, Viewport};
 
@@ -280,6 +281,13 @@ const SELECTION_TINT: f32 = 0.45;
 
 /// How often the housekeeping pump wakes.
 const HOUSEKEEPING_INTERVAL: Duration = Duration::from_millis(1);
+
+/// How often the counters on the status line are rebuilt while a note is in front.
+///
+/// The rest of the line changes when the reader changes something; the meters move on their own,
+/// and a person watching a stroke should see them move. One second is a readout's pace, not a
+/// frame's: rebuilding the line on every wake would make the interface compete with the pen.
+const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long the pen has to be quiet before a page is rendered for it.
 const PDF_QUIET_INTERVAL: Duration = Duration::from_millis(120);
@@ -738,6 +746,16 @@ pub struct NoteApp {
     ink_revision: u64,
     /// When the canvas layer last presented: the rate the ink reaches the screen at, which is not the frame rate.
     last_present: Option<Instant>,
+    /// Whether the canvas has changed since the last frame the layer presented.
+    ///
+    /// A drawable that is not ready is a frame to skip, not a thread to park: the pen's pump leaves
+    /// this set and the display pump tries again (see [`Self::present_canvas`]).
+    canvas_dirty: bool,
+    /// When the status line was last rebuilt on the clock, so its counters move while the reader
+    /// is only watching (see [`STATUS_REFRESH_INTERVAL`]).
+    status_refreshed_at: Instant,
+    /// The status line's log file: one line a second while a note is in front.
+    status_log: StatusLog,
     /// The canvas as the last frame described it: the desk, the page's shadow, and the sheet.
     canvas: Canvas,
     /// The colour the ink a lasso has hold of is shown in: the wash over the ink, and the loop's own mark.
@@ -990,6 +1008,9 @@ impl NoteApp {
             ink_layer,
             ink_revision: 0,
             last_present: None,
+            canvas_dirty: false,
+            status_refreshed_at: Instant::now(),
+            status_log: StatusLog::open(),
             canvas: Canvas::default(),
             selection_colour: cx.theme().accent.opacity(SELECTION_TINT),
             page_index: 0,
@@ -1204,9 +1225,16 @@ impl NoteApp {
                 // was laid.
                 app.draw_canvas();
 
-                // The counters have moved too, but the line waits for a change the user made: re-shaping
-                // text is work a frame drawn to show ink does not have to carry.
-                if laid_ink {
+                // The canvas was drawn above, on this wake. A frame is what the *interface* needs,
+                // not what the ink needs: notifying on every reading made the frame redraw the same
+                // canvas a second time, which is the one thing a stroke cannot afford. The line's
+                // stroke count can wait for the stroke to end.
+                if batch.readings.iter().any(|reading| {
+                    matches!(
+                        reading.phase,
+                        crate::input::Phase::Up | crate::input::Phase::Cancel
+                    )
+                }) {
                     cx.notify();
                 }
             });
@@ -1264,6 +1292,7 @@ impl NoteApp {
             zoom: sheet.zoom,
             strokes: Arc::clone(self.ink.finished()),
             open,
+            open_id: self.ink.open_id(),
             revision: self.ink_revision,
             visible: sheet.visible(),
             // Which way up the page is, and the paper's own shape: the layer turns the ink with the
@@ -1281,36 +1310,58 @@ impl NoteApp {
         };
     }
 
-    /// Hands the canvas to its layer, and reports a failure without losing the layer.
+    /// Describes the ink for the canvas, then hands the canvas to its layer.
     fn draw_canvas(&mut self) {
         // Nothing has described a canvas yet: this is a reading that arrived before the first frame,
         // and a layer handed an empty description would paint an empty desk over the window.
         if self.canvas.sheet.is_none() {
+            self.canvas_dirty = false;
             return;
         }
 
         self.describe_ink();
+        self.present_canvas();
+    }
+
+    /// Hands the canvas to its layer, and reports a failure without losing the layer.
+    ///
+    /// A layer that has no drawable ready is not a failure: the canvas stays dirty and the next
+    /// wake tries again. That is what keeps the pen's pump from waiting for the compositor — the
+    /// one wait a reading cannot afford (see [`crate::platform::InkSurface`]).
+    fn present_canvas(&mut self) {
+        if self.canvas.sheet.is_none() {
+            self.canvas_dirty = false;
+            return;
+        }
 
         // Timed by hand rather than with a guard, which would hold a borrow of the counters across the
         // layer's own borrow of the app. This is what the status line's `canvas` clause counts.
         let started = Instant::now();
         let drawn = match self.ink_layer.as_mut() {
             Some(ink) => ink.draw(&self.canvas),
-            None => Ok(()),
+            None => Ok(true),
         };
-        self.timings.canvas.record(started.elapsed());
 
         match drawn {
-            Ok(()) => {
+            Ok(true) => {
+                self.timings.canvas.record(started.elapsed());
                 // Handed over: the compositor shows the newest canvas it is given, so the gap between two
                 // of these is the rate the ink reaches the screen at, whichever wake drew it.
                 if let Some(previous) = self.last_present.replace(started) {
                     self.timings.present_gap.record(started - previous);
                 }
+                self.canvas_dirty = false;
+            }
+            Ok(false) => {
+                // No drawable was ready. Nothing was presented, so nothing is recorded as one; the
+                // display pump will try again, and the last reading is not left unpresented.
+                self.canvas_dirty = true;
             }
             Err(error) => {
+                self.timings.canvas.record(started.elapsed());
                 // Kept rather than dropped: no frame paints the canvas, so a dropped layer is a canvas
                 // that is gone, while a kept one holds its last frame and can say what is wrong.
+                self.canvas_dirty = false;
                 let message = format!("canvas: {error}");
                 if self.message != message {
                     self.message = message;
@@ -1355,6 +1406,23 @@ impl NoteApp {
                     // The status line says which job the sticks have (`pad: desktop`/`canvas`),
                     // and the answer changed with the focus.
                     app.touch_status();
+                }
+
+                // The counters are the one part of the line that moves on its own. Rebuild it
+                // once a second while a note is in front, so a person watching a stroke sees the
+                // numbers move; the rest of the line still waits for a change the reader made.
+                if active
+                    && !app.home_is_open()
+                    && now.saturating_duration_since(app.status_refreshed_at)
+                        >= STATUS_REFRESH_INTERVAL
+                {
+                    app.status_refreshed_at = now;
+                    let before = app.status.clone();
+                    app.touch_status();
+                    app.status_log.write(&app.status);
+                    if app.status != before {
+                        cx.notify();
+                    }
                 }
 
                 let covered = app.home_is_open()
@@ -1435,6 +1503,13 @@ impl NoteApp {
                 // The page the view is waiting for, paid for here rather than inside a frame: it is
                 // skipped while the pen is laying ink, so the ink pump keeps taking readings.
                 let page_rendered = app.serve_pdf(now);
+
+                // A canvas that could not get a drawable is still the newest canvas: try again on
+                // this wake rather than leaving the last reading unpresented. `nextDrawable` does
+                // not block (see `metal.rs`), so a retry is a cheap check.
+                if app.canvas_dirty {
+                    app.present_canvas();
+                }
 
                 // The note's own housekeeping, on the same clock: ink still in memory is handed
                 // over when the pen has stopped (see `persist`), and whatever the writer has to say
@@ -4239,6 +4314,12 @@ impl NoteApp {
             }
         }
 
+        // A log that could not be opened is worth saying once, in the line it was meant to record:
+        // the app still works, and this is the only place the failure would otherwise be seen.
+        if !self.status_log.is_on() {
+            parts.push(String::from("log: off"));
+        }
+
         if !self.message.is_empty() {
             parts.push(self.message.clone());
         }
@@ -4249,6 +4330,17 @@ impl NoteApp {
     /// Rebuilds the status line, for a change the user made and expects to see at once.
     fn touch_status(&mut self) {
         self.status = self.compose_status();
+    }
+
+    /// Puts the status line on the clipboard, so a measurement can leave the app.
+    fn copy_status(&mut self, cx: &mut Context<Self>) {
+        if self.status.is_empty() {
+            return;
+        }
+
+        cx.write_to_clipboard(ClipboardItem::new_string(self.status.clone()));
+        self.report(String::from("status copied"));
+        cx.notify();
     }
 
     /// Starts or stops the measurement session, and puts what it found on the status line.
@@ -5264,7 +5356,19 @@ impl NoteApp {
             .text_size(px(11.0))
             .text_color(theme.muted_foreground)
             .max_w(relative(STATUS_PILL_WIDTH))
-            .child(self.status.clone())
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap(px(6.0))
+            .child(div().flex_1().min_w(px(0.0)).child(self.status.clone()))
+            .child(icon_button(
+                "status-copy",
+                IconName::Copy,
+                "Copy status",
+                !self.status.is_empty(),
+                cx,
+                |app, cx| app.copy_status(cx),
+            ))
     }
 
     /// The way back when the bar is hidden.

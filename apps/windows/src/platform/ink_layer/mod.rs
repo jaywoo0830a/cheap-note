@@ -165,7 +165,10 @@ impl InkLayer {
 /// it in the status line, once — a canvas that fails is a canvas that stops being drawn, not an app
 /// that stops working (see [`InkLayer::install`] for the failure that *is* fatal).
 impl note_ui::platform::InkSurface for InkLayer {
-    fn draw(&mut self, canvas: &Canvas) -> Result<(), String> {
-        InkLayer::draw(self, canvas)
+    fn draw(&mut self, canvas: &Canvas) -> Result<bool, String> {
+        InkLayer::draw(self, canvas)?;
+        // A swap chain's back buffer is always there: the present is immediate, and the
+        // compositor decides which frame it shows (see `device.rs`).
+        Ok(true)
     }
 }

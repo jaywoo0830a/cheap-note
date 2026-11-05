@@ -612,6 +612,12 @@ pub struct InkDocument {
     highlighting: Option<(usize, usize)>,
     /// The stroke currently being drawn, if a pen nib is down.
     open: Option<Stroke>,
+    /// Counts the strokes this page has opened, so a layer can tell a longer stroke from a new one.
+    ///
+    /// The open stroke's points grow while the pen is down; a layer that appends to the geometry it
+    /// already built needs to know when the stroke it is looking at is a *different* one. The id
+    /// changes when a new stroke begins and at no other time.
+    open_id: u64,
     /// The pointer that owns the turn: the pen or eraser that is currently down.
     active_pointer: Option<u32>,
     /// Which tool [`Self::active_pointer`] is using.
@@ -668,6 +674,7 @@ impl Default for InkDocument {
             text: TextLayout::default(),
             highlighting: None,
             open: None,
+            open_id: 0,
             active_pointer: None,
             active_tool: Tool::Pen,
             mode: Tool::Pen,
@@ -699,6 +706,12 @@ impl InkDocument {
     /// The stroke being drawn right now, if any.
     pub fn open(&self) -> Option<&Stroke> {
         self.open.as_ref()
+    }
+
+    /// The identity of the stroke being drawn: it changes when a new stroke begins, and not as the
+    /// stroke grows. A layer uses it to append to the open stroke's geometry instead of rebuilding it.
+    pub fn open_id(&self) -> u64 {
+        self.open_id
     }
 
     /// Selects the tool an ordinary nib uses.
@@ -1052,6 +1065,7 @@ impl InkDocument {
                                 let width = settings.width_for_pressure(sample.applied_pressure());
                                 // The pen in hand is stamped into the stroke: it is chosen at the
                                 // moment the nib goes down, and it stays with that line for good.
+                                self.open_id = self.open_id.wrapping_add(1);
                                 self.open = Some(Stroke::new(
                                     InkPoint::new(x, y, width),
                                     settings.ink_color,
@@ -1068,6 +1082,7 @@ impl InkDocument {
                             Tool::Highlighter => match self.text.nearest((x, y), TEXT_REACH) {
                                 Some(index) => self.highlighting = Some((index, index)),
                                 None => {
+                                    self.open_id = self.open_id.wrapping_add(1);
                                     self.open = Some(Stroke::new(
                                         InkPoint::new(x, y, HIGHLIGHTER_WIDTH),
                                         with_alpha(settings.highlighter_color, HIGHLIGHTER_ALPHA),
@@ -3115,6 +3130,29 @@ mod tests {
             "the stroke the pen was drawing was finished on the page"
         );
         assert!(ink.open().is_none());
+    }
+
+    /// The open stroke's id changes when a new stroke begins, and not as the stroke grows: a layer
+    /// appends to the geometry it already built only while the id is the same.
+    #[test]
+    fn the_open_id_changes_only_when_a_new_stroke_begins() {
+        let mut ink = InkDocument::blank();
+        let s = settings();
+
+        assert_eq!(ink.open_id(), 0, "no stroke has begun");
+
+        ink.consume(&[reading(7, Phase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+        let first = ink.open_id();
+        assert_ne!(first, 0, "the first stroke has an id");
+
+        ink.consume(&[reading(7, Phase::Move, 20.0, 10.0, Some(0.5))], &id(), &s);
+        assert_eq!(ink.open_id(), first, "growing the stroke keeps its id");
+
+        ink.consume(&[reading(7, Phase::Up, 20.0, 10.0, None)], &id(), &s);
+        assert_eq!(ink.open_id(), first, "lifting does not change the id");
+
+        ink.consume(&[reading(7, Phase::Down, 30.0, 10.0, Some(0.5))], &id(), &s);
+        assert_ne!(ink.open_id(), first, "a new stroke has a new id");
     }
 
     /// With nothing finished on the page there is nothing to take back, even while the pen is down.

@@ -25,7 +25,8 @@
 //! * a move is a `MouseMoved` at the current location plus the stick's distance — or a
 //!   `LeftMouseDragged`/`RightMouseDragged` while a shoulder is held, so the shoulder can drag;
 //! * a scroll is a pixel-unit wheel event, with a fractional accumulator because a stick at a
-//!   quarter deflection moves less than a pixel per wake;
+//!   quarter deflection moves less than a pixel per wake; the horizontal axis is negated because
+//!   Core Graphics counts a positive horizontal wheel as a scroll to the left;
 //! * a click is a down or an up at the current location, which is what makes a held shoulder a
 //!   button held rather than a burst of clicks.
 
@@ -214,14 +215,10 @@ impl SystemMouse for SystemMouseService {
 
         // The first wheel is vertical and the second horizontal; both are pixel units so the
         // distance the stick asked for is the distance the window scrolls.
-        if let Ok(event) = CGEvent::new_scroll_event(
-            source,
-            ScrollEventUnit::PIXEL,
-            2,
-            vertical as i32,
-            horizontal as i32,
-            0,
-        ) {
+        let (vertical, horizontal) = wheel_axes(horizontal, vertical);
+        if let Ok(event) =
+            CGEvent::new_scroll_event(source, ScrollEventUnit::PIXEL, 2, vertical, horizontal, 0)
+        {
             event.post(CGEventTapLocation::HID);
         }
     }
@@ -255,6 +252,15 @@ impl SystemMouse for SystemMouseService {
             self.button(MouseButton::Right, false);
         }
     }
+}
+
+/// The two wheel axes Core Graphics wants for a scroll the view asked for.
+///
+/// The vertical axis agrees with the view: positive is up. The horizontal one does not — Core
+/// Graphics counts a positive horizontal wheel as a scroll to the left, while the view counts
+/// right as positive — so it is negated here, at the one place the two conventions meet.
+fn wheel_axes(horizontal: f32, vertical: f32) -> (i32, i32) {
+    (vertical as i32, -(horizontal as i32))
 }
 
 impl Drop for SystemMouseService {
@@ -292,4 +298,19 @@ fn request_accessibility() {
 /// Installs the macOS system pointer service.
 pub fn install() -> Option<Box<dyn SystemMouse>> {
     Some(SystemMouseService::install())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wheel_axes;
+
+    /// The view counts right as positive; Core Graphics counts a positive horizontal wheel as a
+    /// scroll to the left. The vertical axes already agree.
+    #[test]
+    fn a_scroll_to_the_right_is_a_negative_horizontal_wheel() {
+        assert_eq!(wheel_axes(90.0, 0.0), (0, -90));
+        assert_eq!(wheel_axes(-90.0, 0.0), (0, 90));
+        assert_eq!(wheel_axes(0.0, 90.0), (90, 0));
+        assert_eq!(wheel_axes(0.0, -90.0), (-90, 0));
+    }
 }

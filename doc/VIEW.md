@@ -660,6 +660,7 @@ The numbers behind that are all *derived* rather than picked:
 | `GAMEPAD_PAN_SPEED` | 1000 logical px/s | a wheel spun at ten notches a second (10 × 96 px), because a stick is held rather than flicked and has to cross a sheet in about the time a hand expects |
 | `GAMEPAD_ZOOM_RATE` | 1 doubling/s | full deflection doubles the sheet in a second — half deflection is the square root of that, because the zoom is an exponent rather than a sum |
 | `GAMEPAD_POINTER_SPEED` | 500 logical px/s | how fast a fully deflected right stick moves the system pointer while another app is in front: half the in-app pan, because a cursor is aimed rather than swept |
+| `GAMEPAD_POINTER_CURVE` | 1.5 | how sharply the pointer's speed rises with deflection: 1 is linear, and larger values make a gentle push slower without changing the full-deflection speed |
 | `GAMEPAD_POINTER_DEADZONE` | 0.2 | how far that stick must leave its centre before the pointer moves: twice `gilrs`'s own dead zone, because a cursor shows a drift a page would hide |
 | `GAMEPAD_SCROLL_SPEED` | 900 logical px/s | how fast a fully deflected left stick scrolls that app; a little slower than the in-app pan because the content is not a sheet at a known size |
 | `GAMEPAD_LONGEST_STEP` | 100 ms | the longest wake the sticks are paid for: a laptop that slept must not wake to a sheet a minute's worth of pan or zoom away |

@@ -43,6 +43,13 @@ const GAMEPAD_POINTER_SPEED: f32 = 500.0;
 /// rest of the travel is rescaled to make full deflection still full speed.
 const GAMEPAD_POINTER_DEADZONE: f32 = 0.2;
 
+/// How sharply the pointer's speed rises with deflection.
+///
+/// `1.0` is linear; larger values make a gentle push slower without changing the speed at full
+/// deflection. The pointer is the one control aimed at a button rather than swept, so the curve is
+/// what gives a light touch its precision and a firm push its reach.
+const GAMEPAD_POINTER_CURVE: f32 = 1.5;
+
 /// How fast a fully deflected left stick scrolls, in logical pixels per second.
 ///
 /// The left stick's in-app twin is a pan at [`GAMEPAD_PAN_SPEED`]; a scroll is a little slower
@@ -304,13 +311,15 @@ fn stick_pointer(x: f32, y: f32, elapsed: Duration) -> (f32, f32) {
     (pointer_axis(x) * distance, -pointer_axis(y) * distance)
 }
 
-/// One axis of the pointer's stick with [`GAMEPAD_POINTER_DEADZONE`] applied and the rest rescaled.
+/// One axis of the pointer's stick with [`GAMEPAD_POINTER_DEADZONE`] applied, the rest rescaled,
+/// and [`GAMEPAD_POINTER_CURVE`] shaping how fast the speed rises with the push.
 fn pointer_axis(value: f32) -> f32 {
     if value.abs() <= GAMEPAD_POINTER_DEADZONE {
         return 0.0;
     }
 
-    value.signum() * (value.abs() - GAMEPAD_POINTER_DEADZONE) / (1.0 - GAMEPAD_POINTER_DEADZONE)
+    let axis = (value.abs() - GAMEPAD_POINTER_DEADZONE) / (1.0 - GAMEPAD_POINTER_DEADZONE);
+    value.signum() * axis.powf(GAMEPAD_POINTER_CURVE)
 }
 
 /// The scroll a left stick at `(x, y)` asks for over `elapsed`: a wheel turned away scrolls up, and
@@ -409,6 +418,28 @@ mod tests {
             stick_pointer(0.1, -0.1, Duration::from_millis(100)),
             (0.0, 0.0),
             "inside the pointer's own dead zone"
+        );
+    }
+
+    /// The pointer accelerates with the push: a light touch is slower than a firm one, and full
+    /// deflection is still the speed the constant names.
+    #[test]
+    fn a_harder_push_moves_the_pointer_faster() {
+        let gentle = stick_pointer(0.6, 0.0, Duration::from_millis(100)).0;
+        let firm = stick_pointer(0.8, 0.0, Duration::from_millis(100)).0;
+        let full = stick_pointer(1.0, 0.0, Duration::from_millis(100)).0;
+
+        assert!(
+            gentle < firm && firm < full,
+            "the curve rises with deflection: {gentle} < {firm} < {full}"
+        );
+        assert!(
+            (gentle - 17.677_67).abs() < 0.001,
+            "half of the usable travel is half raised to the curve, not half the speed: {gentle}"
+        );
+        assert_eq!(
+            full, 50.0,
+            "full deflection is still five hundred pixels a second"
         );
     }
 

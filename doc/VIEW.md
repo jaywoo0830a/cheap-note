@@ -663,6 +663,8 @@ The numbers behind that are all *derived* rather than picked:
 | `GAMEPAD_POINTER_CURVE` | 1.5 | how sharply the pointer's speed rises with deflection: 1 is linear, and larger values make a gentle push slower without changing the full-deflection speed |
 | `GAMEPAD_POINTER_DEADZONE` | 0.2 | how far that stick must leave its centre before the pointer moves: twice `gilrs`'s own dead zone, because a cursor shows a drift a page would hide |
 | `GAMEPAD_SCROLL_SPEED` | 900 logical px/s | how fast a fully deflected left stick scrolls that app; a little slower than the in-app pan because the content is not a sheet at a known size |
+| `GAMEPAD_SCROLL_CURVE` | 1.5 | how sharply the scroll's speed rises with deflection: 1 is linear, and larger values make a gentle push slower without changing the full-deflection speed |
+| `GAMEPAD_SCROLL_DEADZONE` | 0.1 | how far that stick must leave its centre before the scroll moves: the same edge `gilrs` already applies, named because the curve is applied after it |
 | `GAMEPAD_LONGEST_STEP` | 100 ms | the longest wake the sticks are paid for: a laptop that slept must not wake to a sheet a minute's worth of pan or zoom away |
 
 Two notches are the step applied **twice**, not twice the step, so a fast roll zooms smoothly instead of in
@@ -758,6 +760,7 @@ counts the rebuilds a zoom's change of detail forced (see `ink_layer/render.rs`)
 | `WHEEL_LINES_PER_NOTCH` | 3 | what the platform turns one notch into; 32 logical px per line; 96 px is a trackpad's notch |
 | `WHEEL_LINE_HEIGHT` | 32 logical px | what one line of a scroll is worth when panning |
 | `GAMEPAD_PAN_SPEED` / `GAMEPAD_ZOOM_RATE` / `GAMEPAD_POINTER_SPEED` / `GAMEPAD_SCROLL_SPEED` / `GAMEPAD_LONGEST_STEP` | 1000 px/s / 1 doubling per second / 500 px/s / 900 px/s / 100 ms | the left stick's pan and scroll, the right stick's zoom and pointer, and the longest wake either is paid for — a wheel spun at ten notches a second, held rather than flicked |
+| `GAMEPAD_POINTER_CURVE` / `GAMEPAD_SCROLL_CURVE` | 1.5 / 1.5 | how sharply the pointer and the scroll accelerate with deflection: 1 is linear, and larger values make a gentle push slower without changing the full-deflection speed |
 | `PALETTE_KEY` | `Ctrl+Shift+C` | the palette at the pen's one chord, for opening it and for putting it away; the status line says so while it is up |
 | `PALETTE_RING_RADIUS` / `PALETTE_TOOL_RADIUS` | 104 / 54 logical px | how far the colours and the three tools sit from the palette's centre: the tools are in the well inside and the colours are on the ring outside, and both rings are far enough out that no point on the palette is within reach of two controls |
 | `PALETTE_DISC` / `PALETTE_DISC_BOX` | 30 / 38 logical px | a colour disc, and the box it draws in — the box carries the ring that marks the keyboard's place, so a placement is measured in the box rather than in the disc |

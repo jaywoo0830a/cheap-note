@@ -56,6 +56,19 @@ const GAMEPAD_POINTER_CURVE: f32 = 1.5;
 /// because it moves the content of whatever window is under the pointer, not a sheet at a known size.
 const GAMEPAD_SCROLL_SPEED: f32 = 900.0;
 
+/// How far the scroll's stick has to leave its centre before it moves.
+///
+/// `gilrs` already applies a 0.1 dead zone; this is the same edge, named here because the curve is
+/// applied after it and the rest of the travel is rescaled to make full deflection still full speed.
+const GAMEPAD_SCROLL_DEADZONE: f32 = 0.1;
+
+/// How sharply the scroll's speed rises with deflection.
+///
+/// `1.0` is linear; larger values make a gentle push slower without changing the speed at full
+/// deflection. The scroll is a system control like the pointer, so it gets the same shape: a light
+/// touch creeps, and a firm push crosses the page.
+const GAMEPAD_SCROLL_CURVE: f32 = 1.5;
+
 /// The longest wake the sticks are paid for.
 ///
 /// A laptop that slept for a minute would otherwise jump the sheet by a minute's worth of pan and
@@ -311,22 +324,33 @@ fn stick_pointer(x: f32, y: f32, elapsed: Duration) -> (f32, f32) {
     (pointer_axis(x) * distance, -pointer_axis(y) * distance)
 }
 
-/// One axis of the pointer's stick with [`GAMEPAD_POINTER_DEADZONE`] applied, the rest rescaled,
-/// and [`GAMEPAD_POINTER_CURVE`] shaping how fast the speed rises with the push.
-fn pointer_axis(value: f32) -> f32 {
-    if value.abs() <= GAMEPAD_POINTER_DEADZONE {
+/// One axis of a stick with a dead zone applied, the rest rescaled, and a curve shaping how fast
+/// the speed rises with the push.
+fn curved_axis(value: f32, deadzone: f32, curve: f32) -> f32 {
+    if value.abs() <= deadzone {
         return 0.0;
     }
 
-    let axis = (value.abs() - GAMEPAD_POINTER_DEADZONE) / (1.0 - GAMEPAD_POINTER_DEADZONE);
-    value.signum() * axis.powf(GAMEPAD_POINTER_CURVE)
+    let axis = ((value.abs() - deadzone) / (1.0 - deadzone)).clamp(0.0, 1.0);
+    value.signum() * axis.powf(curve)
+}
+
+/// One axis of the pointer's stick, curved by [`GAMEPAD_POINTER_CURVE`].
+fn pointer_axis(value: f32) -> f32 {
+    curved_axis(value, GAMEPAD_POINTER_DEADZONE, GAMEPAD_POINTER_CURVE)
+}
+
+/// One axis of the scroll's stick, curved by [`GAMEPAD_SCROLL_CURVE`].
+fn scroll_axis(value: f32) -> f32 {
+    curved_axis(value, GAMEPAD_SCROLL_DEADZONE, GAMEPAD_SCROLL_CURVE)
 }
 
 /// The scroll a left stick at `(x, y)` asks for over `elapsed`: a wheel turned away scrolls up, and
-/// the stick follows the same rule as the pan.
+/// the push is curved like the pointer's, so a light touch is precise and full deflection is the
+/// speed above.
 fn stick_scroll(x: f32, y: f32, elapsed: Duration) -> (f32, f32) {
     let distance = GAMEPAD_SCROLL_SPEED * elapsed.min(GAMEPAD_LONGEST_STEP).as_secs_f32();
-    (x * distance, y * distance)
+    (scroll_axis(x) * distance, scroll_axis(y) * distance)
 }
 
 #[cfg(test)]
@@ -453,6 +477,33 @@ mod tests {
         assert_eq!(
             stick_scroll(-1.0, -1.0, Duration::from_millis(100)),
             (-90.0, -90.0)
+        );
+    }
+
+    /// The scroll accelerates with the push too: a light touch creeps, a firm one crosses the page,
+    /// and full deflection is still the speed the constant names.
+    #[test]
+    fn a_harder_push_scrolls_faster() {
+        let gentle = stick_scroll(0.3, 0.0, Duration::from_millis(100)).0;
+        let firm = stick_scroll(0.8, 0.0, Duration::from_millis(100)).0;
+        let full = stick_scroll(1.0, 0.0, Duration::from_millis(100)).0;
+
+        assert!(
+            gentle < firm && firm < full,
+            "the curve rises with deflection: {gentle} < {firm} < {full}"
+        );
+        assert!(
+            (gentle - 9.428_1).abs() < 0.001,
+            "a light push creeps: {gentle}"
+        );
+        assert_eq!(
+            full, 90.0,
+            "full deflection is still nine hundred pixels a second"
+        );
+        assert_eq!(
+            stick_scroll(0.1, 0.1, Duration::from_millis(100)),
+            (0.0, 0.0),
+            "inside the scroll's dead zone"
         );
     }
 

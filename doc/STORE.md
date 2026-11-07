@@ -423,7 +423,7 @@ chunk encoding, and its version travels in the database (§9).
 
 | Mechanism | What it protects against |
 |---|---|
-| `PRAGMA user_version` (this build writes `5`) | a note written by *any* other build — newer or older: refused, with a message that says which way round the difference is |
+| `PRAGMA user_version` (this build writes `6`) | a note written by *any* other build — newer or older: refused, with a message that says which way round the difference is |
 | the zip's entry list | a file that is not a note at all: named as such rather than half-read |
 | the CRC32 of every blob | a damaged disk or a truncated file: reported as damaged |
 | the uncompressed length of every blob | a blob that decompresses to the wrong size |
@@ -580,7 +580,7 @@ with it.
 
 **`bookmarks` is the one table that is not ink.** A mark names a *page* by its position, so it is renamed
 with `pages.ord` when a page is inserted and deleted with the page it is on. It arrives in an older note
-the way any table does — `CREATE TABLE IF NOT EXISTS` runs on every open — so the version stays `5` (§9).
+the way any table does — `CREATE TABLE IF NOT EXISTS` runs on every open — so the version stays `6` (§9).
 
 ### The pragmas, in the order they are applied
 
@@ -609,7 +609,7 @@ default for the rest of its life. This one was found by a test, which is the rea
 | `chunk::CHUNK_MAX_STROKES` | 512 | strokes per chunk, whichever comes first |
 | (palette) | 255 | distinct colours per chunk, enforced by ending the chunk |
 | `chunk::ZSTD_LEVEL` | 3 | the compression level the design settles on |
-| `store::SCHEMA_VERSION` | 5 | what `PRAGMA user_version` says (§9) |
+| `store::SCHEMA_VERSION` | 6 | what `PRAGMA user_version` says (§9) |
 | `app::BATCH_INTERVAL` | 500 ms | how long ink may wait in memory |
 | `app::BATCH_STROKES` | 200 | how much ink may wait in memory |
 | `app::CHECKPOINT_QUIET_INTERVAL` | 5 s | how long the pen must be still before a checkpoint |

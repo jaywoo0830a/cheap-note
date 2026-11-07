@@ -404,22 +404,25 @@ swallows the note's keys entirely (it did, from opening a note until a rename).
 
 ## 9. The modules, by job
 
-| Module | Job |
+The modules live in two portable crates (`note-format`, `note-ui`) and one platform crate per machine
+(`apps/windows`, `apps/macos`). This table is the portable ones — what the application *is* — followed by
+the seam the platforms implement.
+
+| Module (`crates/note-ui`) | Job |
 |---|---|
 | **The hand** | |
-| `pen` | the capture, its worker thread, the batch tap, and the hand-off inbox |
+| `input` | one pen reading and the queue it arrives through: `Reading`, `PenInbox`, phase, tilt |
 | `ink` | readings in, strokes out: edges, pointer identity, resampling, width, the lasso's selection |
 | `history` | what an edit *is* (apply and revert), a page's history, and the bytes the note's log holds |
 | `cursor` | the ghost's shape: where the pen is, and how it leans |
-| `cursor_overlay` | the ghost's own window, drawn from the pen thread |
-| `system_cursor` | hiding the system pointer while the ghost replaces it |
 | `gamepad` | the sticks: pan and scroll on the left, zoom and pointer on the right, clicks on the shoulders |
 | **What is written on** | |
 | `canvas` | the sheet: its size (physical), its colour, its ruling |
 | `view` | zoom, the two fits, and where the sheet sits in the window |
 | `pages` | what a note's pages are, and what each one shows |
 | **The drawing** | |
-| `ink_layer` | the canvas's own renderer: the device, the visual behind GPUI's, Direct2D, and the description it is handed |
+| `ink_layer` | the canvas's own renderer *interface*: the description the app hands over (`Canvas`), in logical pixels |
+| `paint` | what a canvas may call back into — the seam the layer and a frame's own painting share |
 | `app` | every screen, the two pumps, and the canvas description — see [VIEW.md](VIEW.md) |
 | **The document** | |
 | `pdf` | the Pdfium document, page rendering, and the page cache |
@@ -427,18 +430,28 @@ swallows the note's keys entirely (it did, from opening a note until a rename).
 | `outline` | the document's own table of contents, and the screen that lists it |
 | `bookmarks` | the pages the note has marked, and the screen that lists them |
 | **The note, on disk** | |
-| `note` | a note as a folder, the writer thread, and the zip it is carried in |
-| `store` | the note's SQLite file: schema, batch write, read path, the history's log |
-| `chunk` | a page of ink as one blob: SoA, varints, zstd, CRC32 |
-| `recent` | what has been opened, and the index of it the app keeps |
-| `settings` | every choice a person can make, one `meta` row each — and all of them belong to a note |
+| `note`, `store`, `chunk`, `recent`, `settings`, `history` | re-exports of `crates/note-format`'s modules — the note as a folder and its writer thread, its SQLite file, a page of ink as one blob, the index of what was opened, every choice a person can make |
 | **The screens** | |
 | `home` | the screen the app opens on: the notes that were opened, and what a row can do |
 | **Cross-cutting** | |
+| `keys` | the chords, written once per platform (`⌘` vs `Ctrl`) |
+| `status_log` | the status line: what the meters read, and the messages the writers report |
 | `timing` | what every hot path costs, measured rather than guessed |
 | `theme` | the palette, the bundled font, and the icons' asset source |
 | `error` | the error type every fallible boundary returns |
-| `main` | the window, the theme, the key bindings, and the command line |
+| `platform` | the seam: `PenSource`, `GhostFeed`, `SystemPointer`, `InkSurface`, `SystemMouse`, `AppFocus`, `Platform`, `Installer` |
+
+The **platform** modules are the other half — each implements those traits and is imported by nothing
+above the seam:
+
+| Module (`apps/windows`) | Module (`apps/macos`) | Job |
+|---|---|---|
+| `pen` | `platform::pen` | the pen capture and its thread/inbox |
+| `cursor_overlay` | `platform::ghost` + `platform::metal` | where the ghost is, and drawing it above the ink |
+| `system_cursor` | `platform::pointer` | putting the system pointer away while the ghost is up |
+| `ink_layer` (Direct2D) | `platform::canvas` + `platform::metal` (Metal) | the desk, the sheet, the page and the ink |
+| — | `platform::mouse` | the gamepad driving the desktop while another app is in front |
+| `main` | `main` | the window, the theme, the key bindings, and the command line |
 
 ## 10. What is measured
 
@@ -550,21 +563,24 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
 
 * **Windows**, x64, and **a GPU with Direct3D 11** — see the end of §2; there is no software path.
   The requirement is vendor-neutral: Direct3D 11, Direct2D 1.1 and DirectComposition are Windows APIs, and
-  an AMD, Intel or NVIDIA driver provides them alike. What cannot run this app is a machine with no hardware
-  Direct3D 11 device at all — a remote session, a virtual machine without a graphics processor, or a driver
-  older than WDDM 1.2 — and `InkLayer::install` reports that reason, once, at startup.
+  an AMD, Intel or NVIDIA driver provides them alike. What cannot run the Windows app is a machine with no
+  hardware Direct3D 11 device at all — a remote session, a virtual machine without a graphics processor, or
+  a driver older than WDDM 1.2 — and `InkLayer::install` reports that reason, once, at startup.
+* **macOS**, and **a GPU with Metal** — every Mac that runs the supported macOS has one, so this is
+  effectively "a Mac". The canvas is `CAMetalLayer` + Metal (`apps/macos/src/platform/metal.rs`); there is
+  no software path here either. See [MACOS.md](MACOS.md).
 * **Rust 1.90+** (see `Cargo.toml`), and the pinned dependency versions in it.
-* **Three crates, and the seams face opposite ways.** The repository is a workspace:
-  `crates/note-format` is what a note *is* on disk (no window, no pen, no GPU, no PDF renderer);
-  `crates/note-ui` is everything the application *does* — the bar, the home screen, the sheet, the
-  page cache, the ink model, the frame loop — with no platform's own API in it; and `apps/windows` is
-  the platform: the canvas, the pen capture, the ghost cursor's window, the pointer hook, Pdfium's
-  entry points, and `main`. The view depends on the format and the platform depends on the view, which
-  is what a build for another platform needs: `note-ui`'s `platform.rs` is the seam — a pen, a ghost,
-  a pointer, a surface, and, for the Mac's system-wide gamepad, a mouse and a focus answer — and a
-  macOS build is `apps/windows` rewritten behind them. The view's
-  `store`, `note`, `pages`, `settings` and `history` modules are re-exports of the format's, so no
-  path inside the view changed.
+* **Four workspace members, and the seams face opposite ways.** `crates/note-format` is what a note *is*
+  on disk (no window, no pen, no GPU, no PDF renderer); `crates/note-ui` is everything the application
+  *does* — the bar, the home screen, the sheet, the page cache, the ink model, the frame loop — with no
+  platform's own API in it; and `apps/windows` and `apps/macos` are the platforms: the canvas, the pen
+  capture, the ghost cursor, the pointer, Pdfium's entry points, and `main`. The view depends on the
+  format and each platform depends on the view, which is what a second platform needed: `note-ui`'s
+  `platform.rs` is the seam — a pen, a ghost, a pointer, a surface, and, for the Mac's system-wide gamepad,
+  a mouse and a focus answer — and `apps/macos` is `apps/windows` rewritten behind them (Metal instead of
+  Direct2D, `NSEvent` instead of `pen-windows`, the ghost drawn in the canvas pass instead of in a window
+  of its own). The view's `store`, `note`, `pages`, `settings` and `history` modules are re-exports of the
+  format's, so no path inside the view changed.
 * **The gamepad is above the seam too.** Its sticks are `gilrs`, a cross-platform library in the
   same sense GPUI Kit is — one API over XInput/WGI on Windows and IOKit on macOS — so `note-ui` reads
   it directly instead of asking a platform crate for it. A machine with no gamepad is not an error:
@@ -583,12 +599,15 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
   at all.
 
 ```text
-cargo run -p cheap-note --release   # the app: it opens on the home list, and Escape returns to it
-cargo test --workspace     # 407 tests, including ones that install a real canvas on a window
+cargo run  -p cheap-note --release          # Windows: opens on the home list; Escape returns to it
+cargo run  -p cheap-note-macos --release     # macOS:   the same binary, `cheap-note`
+cargo test --workspace                       # every crate, on either platform
 ```
 
-`cargo run` with a path argument opens that file's note and skips the list — which is what a file
-association, a shortcut, or a drag onto the executable becomes.
+`cargo test --workspace` works on both platforms: the app for the *other* one compiles to a stub (its
+platform modules are `#[cfg(windows)]` / only in `apps/macos`), so naming the crates by hand is no longer
+necessary. `cargo run` with a path argument opens that file's note and skips the list — which is what a
+file association, a shortcut, or a drag onto the executable becomes.
 
 The documents are meant to be read together:
 

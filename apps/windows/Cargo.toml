@@ -29,7 +29,11 @@ gpui-kit = "=0.7.3"
 # the status line showed `delay 4294967287 ms`, and that one reading pinned the worst-seen figure at
 # the top of its range for the rest of the session. 0.3.0 answers a wrapped subtraction as no delay
 # at all.
-pen-windows = { git = "https://github.com/jaywoo0830a/pen-windows", tag = "0.3.0", features = ["window-handle"] }
+#
+# It is Windows-only, so it lives under the same `cfg(windows)` gate as the `windows` crate below:
+# that is what lets `apps/windows` be a workspace member that `cargo build --workspace` accepts on a
+# Mac (where this crate compiles to nothing — see `src/main.rs`), while remaining the same crate on
+# the machine it is written for.
 
 # Ergonomic error propagation: the device and the canvas are built out of fallible calls.
 anyhow = "=1.0.104"
@@ -37,6 +41,10 @@ anyhow = "=1.0.104"
 # Windows-only: the pen capture's window hook, the ghost cursor's layered window, the pointer
 # hook, and the Direct3D 11 / Direct2D 1.1 / DirectComposition canvas.
 [target.'cfg(windows)'.dependencies]
+# Low-latency pen input (§ above): WM_POINTER readings on a thread of its own. Gated here so the
+# crate is present on Windows and absent everywhere else, which is what makes `--workspace` build on
+# a Mac.
+pen-windows = { git = "https://github.com/jaywoo0830a/pen-windows", tag = "0.3.0", features = ["window-handle"] }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     # WM_SETCURSOR, SetCursor, HTCLIENT, IDC_ARROW, LoadCursorW: hiding the system pointer over

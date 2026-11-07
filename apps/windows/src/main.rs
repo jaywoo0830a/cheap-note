@@ -50,8 +50,23 @@
     windows_subsystem = "windows"
 )]
 
+#[cfg(windows)]
 mod platform;
 
+#[cfg(windows)]
 fn main() {
     note_ui::run(platform::INSTALLER);
+}
+
+/// Off Windows this crate is a workspace member with nothing to build — the app for *this* machine is
+/// `apps/macos`. It compiles to this stub so that `cargo build`/`cargo test --workspace` succeeds on a
+/// Mac, where building the real `apps/windows` (its `pen-windows` capture and its Direct2D canvas) is
+/// neither possible nor wanted. On Windows the cfg above makes this module disappear and the real
+/// `main` take its place, so the machine it is written for is unchanged.
+#[cfg(not(windows))]
+fn main() {
+    eprintln!(
+        "cheap-note: this is the Windows build; on macOS run `cargo run -p cheap-note-macos`."
+    );
+    std::process::exit(1);
 }

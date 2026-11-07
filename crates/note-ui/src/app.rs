@@ -1188,6 +1188,11 @@ impl NoteApp {
                     // The palette is the pen's control, but the bar's line still decides where the ghost
                     // is the cursor: a pen moved over the bar shows the arrow there, palette or not.
                     app.follow_pen_with_pointer();
+                    // The pen's mark is drawn by the canvas (not a window of the platform's own — see
+                    // `apps/macos`), so a reading that moves the pen has to repaint it or the cursor
+                    // freezes where the palette opened. That is why this branch draws the canvas too,
+                    // exactly as the ink path below does.
+                    app.draw_canvas();
                     return;
                 }
 

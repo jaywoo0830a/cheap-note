@@ -38,6 +38,7 @@
 use std::borrow::Cow;
 use std::rc::Rc;
 
+use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::theme::{Theme, ThemeConfig, ThemeMode};
 use gpui_kit::*;
 
@@ -153,6 +154,15 @@ pub fn install(cx: &mut App) {
     Theme::change(ThemeMode::Light, None, cx);
     Theme::global_mut(cx).light_theme = Rc::new(palette());
     Theme::change(ThemeMode::Light, None, cx);
+
+    // The scrollbar is always shown, not auto-hidden. macOS (and any system set to overlay
+    // scrollbars) makes the default fade a scrollbar out a couple of seconds after the last scroll —
+    // which on a trackpad means a list you can scroll has no visible sign that it scrolls until you
+    // touch it. The home screen's list of notes is exactly such a list, so the app asks for the
+    // persistent style instead. The base scrollbar still hides itself when the content fits (see its
+    // own render: it draws nothing when the scroll area is not larger than the viewport), so a short
+    // list or an empty one shows no bar at all — only a list that can scroll shows one.
+    Theme::set_scrollbar_mode(ScrollbarMode::Always, cx);
 
     if !installed {
         // Said out loud rather than swallowed: the palette names this family unconditionally, so a

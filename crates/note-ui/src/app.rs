@@ -1185,14 +1185,11 @@ impl NoteApp {
                 // no ink is laid while it is there (see [`NoteApp::palette_from_pen`]).
                 if app.palette_is_open() {
                     app.palette_from_pen(&batch.readings, cx);
-                    // The palette is the pen's control, but the bar's line still decides where the ghost
-                    // is the cursor: a pen moved over the bar shows the arrow there, palette or not.
+                    // The ghost is suppressed while the palette is up and the *system* pointer is the
+                    // cursor over the ring (see [`NoteApp::ghost_suppressed`] and the way a question is
+                    // handled below), so a reading here only has to keep the pointer's own answer in
+                    // step — it lays no ink and draws no ghost, so the canvas needs no repaint.
                     app.follow_pen_with_pointer();
-                    // The pen's mark is drawn by the canvas (not a window of the platform's own — see
-                    // `apps/macos`), so a reading that moves the pen has to repaint it or the cursor
-                    // freezes where the palette opened. That is why this branch draws the canvas too,
-                    // exactly as the ink path below does.
-                    app.draw_canvas();
                     return;
                 }
 
@@ -2203,14 +2200,16 @@ impl NoteApp {
         self.last_cursor()
     }
 
-    /// Whether something on screen means the ghost is not drawn: the home list, or a question waiting
-    /// for an answer.
+    /// Whether something on screen means the ghost is not drawn: the home list, a question waiting for
+    /// an answer, or the palette at the pen.
     ///
     /// One answer for the ghost *and* the pointer ([`Self::pen_has_its_own_cursor`]): with the ghost
     /// suppressed the pointer has to be the system's, or the app would be showing no cursor at all on a
-    /// screen that has buttons to press.
+    /// screen that has buttons to press. The palette is one of those screens: its controls are aimed at
+    /// with the system pointer, so the ghost goes while it is up and the system cursor is what the hand
+    /// sees over the ring.
     fn ghost_suppressed(&self) -> bool {
-        self.home_is_open() || self.asking()
+        self.home_is_open() || self.asking() || self.palette_is_open()
     }
 
     /// Whether the pen has a cursor of its own where it is, so the system pointer should be out of the way.
@@ -2465,9 +2464,13 @@ impl NoteApp {
             chosen: palette_in_hand(palette_colours(self.ink.mode()), self.ink_colour_in_hand()),
         });
 
-        // The ghost cursor is deliberately *not* told to go: it is where the hand is aiming, and the
-        // palette is what the hand is reaching for. What the pen is told is that it lays no ink under it,
-        // which is the rule a confirmation box follows for the same reason (see [`Self::consume_ink`]).
+        // The ring with the ghost gone and the system pointer in its place: with the palette up a
+        // reading is a choice, not a stroke, and the hand aims the ring with the pointer rather than
+        // writing on the page — so the pen's own cursor goes and the system's is what the hand sees
+        // (see [`Self::ghost_suppressed`]). Published here, once, the same way a question does it
+        // ([`Self::ask`]): the suppression is a state of the screen, not of a reading.
+        self.follow_pen_with_pointer();
+        self.publish_screen();
         self.touch_status();
         cx.notify();
     }
@@ -2475,6 +2478,9 @@ impl NoteApp {
     /// Takes the palette away.
     fn close_palette(&mut self, cx: &mut Context<Self>) {
         if self.palette.take().is_some() {
+            // And the ghost comes back with it, exactly as an answer brings it back (see [`Self::answer`]).
+            self.follow_pen_with_pointer();
+            self.publish_screen();
             self.touch_status();
             cx.notify();
         }

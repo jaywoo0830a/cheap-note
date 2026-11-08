@@ -226,3 +226,81 @@ fn a_stroke_still_under_the_nib_draws_its_last_segment_straight() {
     finished.close();
     assert!(finished.same_ink(&live));
 }
+
+/// A pen held down and turned on the spot leaves a dot, and not a ring with a hole in it.
+///
+/// This is the gesture a reader makes when they scrub a spot with a highlighter: the nib stays within
+/// a fraction of a pixel of one place while the readings pile up and the pen turns. The outline is
+/// built by offsetting each point along the normal through its neighbours, and a point whose
+/// neighbours are indistinguishable from it has no direction to take a normal from — so offsetting a
+/// whole turning path walks one edge *outside* the band and the other *inside* it. Joined into one
+/// polygon that is an annulus, and an annulus is filled by the nonzero rule as a ring with a hole in
+/// the middle.
+///
+/// The assertion is about the shape rather than the pixels: what the outline encloses is a disc the
+/// size of the nib, so its area is that disc's and not a ring's.
+#[test]
+fn a_pen_turned_on_the_spot_leaves_a_dot() {
+    let width = 18.0_f32;
+    let mut stroke = Stroke::new(InkPoint::new(0.0, 0.0, width), 0x59FF_EB3B);
+
+    // One reading every ten degrees, a fifth of a pixel from the centre: a hand turning a pen.
+    for step in 1..=36 {
+        let angle = step as f32 / 36.0 * std::f32::consts::TAU;
+        stroke
+            .points
+            .push(InkPoint::new(angle.cos() * 0.2, angle.sin() * 0.2, width));
+    }
+
+    stroke.close();
+
+    let area = polygon_area(&stroke.outline);
+    let radius = width * 0.5;
+    let disc = std::f32::consts::PI * radius * radius;
+
+    assert!(
+        area > disc * 0.85,
+        "a turned nib encloses {area:.0}px2, not the {disc:.0}px2 of its own disc"
+    );
+}
+
+/// A stroke that covers ground is still a ribbon: the dot rule must not swallow a short line.
+#[test]
+fn a_line_longer_than_its_nib_is_still_a_band() {
+    let width = 18.0_f32;
+    let mut stroke = Stroke::new(InkPoint::new(0.0, 0.0, width), 0x59FF_EB3B);
+
+    let mut x = 0.0;
+    while x < 40.0 {
+        x += 0.75;
+        stroke.points.push(InkPoint::new(x, 0.0, width));
+    }
+
+    stroke.close();
+
+    // A band 40 long and 18 wide, not the disc a dot would be.
+    let area = polygon_area(&stroke.outline);
+    let band = 40.0 * width;
+
+    assert!(
+        (area / band - 1.0).abs() < 0.15,
+        "a 40px band encloses {area:.0}px2, not the {band:.0}px2 it sweeps"
+    );
+}
+
+/// The area a closed polygon encloses, by the shoelace rule.
+fn polygon_area(points: &[[f32; 2]]) -> f32 {
+    if points.len() < 3 {
+        return 0.0;
+    }
+
+    let mut twice = 0.0;
+    for index in 0..points.len() {
+        let here = points[index];
+        let next = points[(index + 1) % points.len()];
+
+        twice += here[0] * next[1] - next[0] * here[1];
+    }
+
+    twice.abs() * 0.5
+}

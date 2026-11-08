@@ -589,21 +589,39 @@ pub fn ribbon_outline(points: &[InkPoint], detail: f32, tip: Tip) -> Vec<[f32; 2
 
     if points.len() == 1 {
         // A dot: a small polygon standing in for a filled circle.
-        const SEGMENTS: usize = 12;
-        let point = points[0];
-        let radius = (point.width * 0.5).max(MIN_HALF_WIDTH);
-        return (0..SEGMENTS)
-            .map(|step| {
-                let angle = step as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
-                [
-                    point.x + radius * angle.cos(),
-                    point.y + radius * angle.sin(),
-                ]
-            })
-            .collect();
+        return disc_outline(points[0], MIN_HALF_WIDTH);
     }
 
     let line = densified(points, detail, tip);
+
+    // A stroke that goes nowhere is a dot, however many readings it took to say so.
+    //
+    // This is the gesture a reader makes when they *scrub* a spot with a highlighter — or hand-write a
+    // full stop with the pen: the nib stays within a pixel or two of one place while the readings pile
+    // up and the pen turns. Offsetting each of those points along the normal through its neighbours
+    // does not describe a ribbon at all: the normals swing right round with the pen, so the "left" edge
+    // walks a circle *outside* the band and the "right" edge walks one *inside* it. Joined into one
+    // polygon that is an annulus, and an annulus filled by the nonzero rule is a ring with a hole in the
+    // middle — the shape a turned pen used to leave behind.
+    //
+    // A nib that has not left the place it was put has no direction to be extruded along, so it is drawn
+    // as what it is: the disc of its own width, at the place it is held. What decides that is how far the
+    // points reach from where the nib went down — the *extent* of the path, which a pen turned on the
+    // spot never grows however many times it goes round.
+    let widest = line
+        .iter()
+        .fold(0.0f32, |widest, point| widest.max(point.width));
+    let reach = extent(&line);
+
+    if reach <= (widest * 0.5).max(MIN_HALF_WIDTH) {
+        let total = line.iter().fold((0.0, 0.0), |total, point| {
+            (total.0 + point.x, total.1 + point.y)
+        });
+        let count = line.len() as f32;
+        let centre = InkPoint::new(total.0 / count, total.1 / count, widest);
+        return disc_outline(centre, MIN_HALF_WIDTH);
+    }
+
     let last = line.len() - 1;
     let mut left = Vec::with_capacity(line.len());
     let mut right = Vec::with_capacity(line.len());
@@ -628,6 +646,46 @@ pub fn ribbon_outline(points: &[InkPoint], detail: f32, tip: Tip) -> Vec<[f32; 2
 
     left.extend(right.into_iter().rev());
     left
+}
+
+/// A filled circle standing in for a nib's round end, as a polygon.
+///
+/// Twelve sides, because one step of this is 30° and the chord error is a fraction of a percent of the
+/// radius: an ink dot is read at the size of a nib and never magnified enough for another side to show.
+fn disc_outline(point: InkPoint, min_half_width: f32) -> Vec<[f32; 2]> {
+    const SEGMENTS: usize = 12;
+
+    let radius = (point.width * 0.5).max(min_half_width);
+
+    (0..SEGMENTS)
+        .map(|step| {
+            let angle = step as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+            [
+                point.x + radius * angle.cos(),
+                point.y + radius * angle.sin(),
+            ]
+        })
+        .collect()
+}
+
+/// How far a line's points reach from where it began.
+///
+/// The measure of whether the nib *left* the place it was put: a pen turned on the spot keeps every
+/// reading within a fraction of a pixel of the first one, so its reach stays near zero however many
+/// times it goes round — which is exactly the case the ribbon cannot describe (see [`outline_of`]).
+fn extent(line: &[InkPoint]) -> f32 {
+    let Some(first) = line.first() else {
+        return 0.0;
+    };
+
+    line.iter()
+        .map(|point| {
+            let dx = point.x - first.x;
+            let dy = point.y - first.y;
+
+            (dx * dx + dy * dy).sqrt()
+        })
+        .fold(0.0f32, f32::max)
 }
 
 /// The unit normal of the line as it passes through a point: the direction *across* it, from the

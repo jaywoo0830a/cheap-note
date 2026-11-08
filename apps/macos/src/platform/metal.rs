@@ -1517,7 +1517,7 @@ mod fill_tests {
     ///
     /// A stroke is now drawn as its outline, tessellated once with the nonzero rule ([`tessellate`]) —
     /// the polygon the model already caches, which cannot overlap itself. This test is the property that
-    /// follows: the triangles cover the capsule the band *is*, and no more. The old ribbon measured 6.6
+    /// follows: the triangles cover the shape the band *is*, and no more. The old ribbon measured 6.6
     /// at this length; a band drawn once measures 1.
     #[test]
     fn a_highlighter_band_is_painted_exactly_once() {
@@ -1533,14 +1533,17 @@ mod fill_tests {
         let width = 18.0_f32;
         let spacing = note_format::settings::Settings::default().resample_spacing;
 
-        // A short mark: a few pixels of travel, which is what "too short" means in practice.
+        // A stroke long enough to be a line and not a dot: more than one nib across, so the shape it
+        // leaves is the band it swept rather than the disc its own width would make.
+        let travel = 30.0_f32;
+
         let mut stroke = note_format::ink::Stroke::new(
             note_format::ink::InkPoint::new(0.0, 0.0, width),
             0xFFEB_3B00,
         );
 
         let mut x = 0.0;
-        while x < 6.0 {
+        while x < travel {
             x += spacing;
             stroke
                 .points
@@ -1556,20 +1559,19 @@ mod fill_tests {
         // What the band covers. A highlighter's outline is the *rectangle* the nib sweeps —
         // `ribbon_outline` offsets to either side of the line and joins the two edges, with no round
         // cap — so the area is the travel times the width, and nothing else.
-        let travel = stroke.points.last().expect("a stroke").x;
-        let covered = travel * width;
+        let covered = stroke.points.last().expect("a stroke").x * width;
 
         let painted = area(&vertices);
         let overlap = painted / covered;
 
         // A tessellated polygon covers its own area once. Half again would already be one layer too
-        // many for a 35% band; the old ribbon measured 6.6 at this length and 19 over a long stroke.
+        // many for a 35% band; the old ribbon measured 17 at this length.
         assert!(
             (overlap - 1.0).abs() < 0.15,
             "the band is painted {overlap:.2}× over: at 35% ink that is {:.0}% opaque, not 35%",
             (1.0 - (1.0 - 0.35_f32).powf(overlap)) * 100.0
         );
-        assert!(!vertices.is_empty(), "a short band drew nothing at all");
+        assert!(!vertices.is_empty(), "a band drew nothing at all");
     }
 
     /// The same property for a stroke that doubles back over itself: the overlap is *inside* one
@@ -1590,10 +1592,11 @@ mod fill_tests {
             0xFFEB_3B00,
         );
 
-        // Out along the line, then back over it: the shape a reader makes when they go over a
-        // highlight a second time in one stroke.
+        // Out along the line, a long way past its own width, then back over it: the shape a reader
+        // makes when they go over a highlight a second time in one stroke.
+        let travel = 40.0_f32;
         let mut x = 0.0;
-        while x < 8.0 {
+        while x < travel {
             x += spacing;
             stroke
                 .points
@@ -1610,14 +1613,65 @@ mod fill_tests {
         stroke.close_at(1.0);
         fill(&mut vertices, &stroke, &mapping, (0.0, 0.0), colour());
 
-        // The band is 8 px of travel wide, however many times the stroke covered it: the nonzero rule
-        // fills the region once, and a polygon that crosses itself is ink rather than a hole.
-        let covered = 8.0 * width;
+        // The band is `travel` long however many times the stroke covered it: the nonzero rule fills the
+        // region once, and a polygon that crosses itself is ink rather than a second layer.
+        let covered = travel * width;
         let overlap = area(&vertices) / covered;
 
         assert!(
             (overlap - 1.0).abs() < 0.15,
             "a doubled-back band is painted {overlap:.2}× over"
+        );
+    }
+
+    /// A pen held down and turned on the spot fills a disc, and does not become a polygon with a hole.
+    ///
+    /// This is the gesture a reader makes when they "scrub" a spot with a highlighter: the nib stays
+    /// within a pixel or two while the pen turns, so the points pile up in almost the same place and
+    /// their *directions* swing right round. [`ribbon_outline`] offsets each point along the normal
+    /// through its neighbours, so a point whose neighbours are indistinguishable from it has no
+    /// direction to take a normal from — and a polygon built by joining those offsets winds round
+    /// itself, which the nonzero rule fills as a shape with a hole in it.
+    #[test]
+    fn a_pen_turned_on_the_spot_fills_a_disc() {
+        let mapping = Mapping {
+            base: (0.0, 0.0),
+            step_x: (1.0, 0.0),
+            step_y: (0.0, 1.0),
+        };
+
+        let width = 18.0_f32;
+
+        // A nib pressed down and swept right round: 36 readings, one per 10 degrees, a fifth of a
+        // pixel from the centre — the wobble of a hand turning a pen rather than pivoting on a pin.
+        let mut stroke = note_format::ink::Stroke::new(
+            note_format::ink::InkPoint::new(0.0, 0.0, width),
+            0xFFEB_3B00,
+        );
+
+        for step in 1..=36 {
+            let angle = step as f32 / 36.0 * std::f32::consts::TAU;
+            stroke.points.push(note_format::ink::InkPoint::new(
+                angle.cos() * 0.2,
+                angle.sin() * 0.2,
+                width,
+            ));
+        }
+
+        stroke.close_at(1.0);
+
+        let mut vertices = Vec::new();
+        fill(&mut vertices, &stroke, &mapping, (0.0, 0.0), colour());
+
+        // What it must cover: about a disc the size of the nib, since the wobble is far smaller than
+        // the band is wide.
+        let radius = width * 0.5;
+        let disc = std::f32::consts::PI * radius * radius;
+        let painted = area(&vertices);
+
+        assert!(
+            painted > disc * 0.5,
+            "a turned nib painted {painted:.0}px² of a {disc:.0}px² disc: the shape has a hole in it"
         );
     }
 

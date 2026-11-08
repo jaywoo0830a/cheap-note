@@ -571,6 +571,15 @@ that a *short* mark looked broken where a long one merely looked dark. Both rend
 is what makes a highlight over one word the same colour as a highlight across a paragraph
 ([ARCHITECTURE.md](ARCHITECTURE.md), invariant 17).
 
+**A nib turned where it stands lays a dot, not a ring.** The outline is built by offsetting each point along the
+normal through its neighbours, and a point whose neighbours are indistinguishable from it has no direction to take
+a normal from. A pen held down and turned — scrubbing a spot, or the full stop at the end of a sentence — keeps its
+readings within a fraction of a pixel of one place while their *directions* go right round, so one edge of the
+"ribbon" walks outside the band and the other walks inside it: an annulus, which the nonzero rule fills as a ring
+with a hole in the middle. A stroke whose points never reach past half its own nib therefore has no direction to be
+extruded along, and is drawn for what it is — the disc of the nib, at the place it is held
+(`ink::ribbon_outline`, and `a_pen_turned_on_the_spot_leaves_a_dot` in `crates/note-format/tests/ink.rs`).
+
 ### A mark
 
 A **mark** is one page of the note and nothing else — no name, no colour, no text — so it is a page

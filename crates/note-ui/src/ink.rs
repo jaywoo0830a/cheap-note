@@ -119,7 +119,7 @@ pub use note_format::ink::{
 /// rebuilt from [`detail_zoom`] — but a test that asks *what the outline is* has to be able to
 /// build one, and it is the same arithmetic the app is drawing.
 #[allow(unused_imports)]
-pub use note_format::ink::{densified, ribbon_outline, steadied, steps_for, FACET};
+pub use note_format::ink::{densified, outline_of, ribbon_outline, steadied, steps_for, FACET};
 
 /// Where the pen is, in the sheet's own coordinates.
 ///

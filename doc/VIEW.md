@@ -571,23 +571,26 @@ that a *short* mark looked broken where a long one merely looked dark. Both rend
 is what makes a highlight over one word the same colour as a highlight across a paragraph
 ([ARCHITECTURE.md](ARCHITECTURE.md), invariant 17).
 
-**A nib turned where it stands lays a dot, not a ring.** The outline is built by offsetting each point along the
-normal through its neighbours, and a point whose neighbours are indistinguishable from it has no direction to take
-a normal from. A pen held down and turned — scrubbing a spot, or the full stop at the end of a sentence — keeps its
-readings within a fraction of a pixel of one place while their *directions* go right round, so one edge of the
-"ribbon" walks outside the band and the other walks inside it: an annulus, which the nonzero rule fills as a ring
-with a hole in the middle. A stroke whose points never reach past half its own nib therefore has no direction to be
-extruded along, and is drawn for what it is — the disc of the nib, at the place it is held
-(`ink::ribbon_outline`, and `a_pen_turned_on_the_spot_leaves_a_dot` in `crates/note-format/tests/ink.rs`).
-
-**And its two ends are round.** The end of a band is a half circle round the nib, not a slice across it. That is
-not decoration either: an edge is set by the points on either side of a point, and the first and last points have
-one neighbour each — so they are exactly the places a turn distorts most. A pen put down and rolled before it
-travels leaves the first few readings nearly coincident while their directions swing, and a square end cut there is
-cut across a direction the nib never faced: a stroke whose beginning (or end) is half missing. Rounding the ends is
-what makes the whole outline independent of how the stroke happens to begin
-(`a_curve_drawn_while_turning_is_filled_end_to_end` and `the_ends_of_a_turning_stroke_are_inked`, in
+**The ink is the union of the nib's discs.** One sentence, and the whole of the model: a stroke is the set of
+places the nib covered, so a place is ink exactly when it is within the nib's radius of any reading. Everything
+that used to be a special case follows from it without being mentioned. A pen held down and turned lays a dot,
+not a ring, because every disc is at the same place. A stroke that doubles back is still one region, because a
+union has no order. An end is round, because the disc at the end is round. A corner is filled, because the disc at
+the corner reaches past it (`ink::Model`, and `a_pen_turned_on_the_spot_fills_a_disc` in
 `apps/macos/src/platform/metal.rs`).
+
+**And its boundary is drawn from the discs, not from a normal.** The outline the renderer fills is the edge of
+that union: between two readings it is the common *outer* tangent, and round each reading it is the arc no other
+disc covers — a half circle at an end, the outside of the turn at a corner, and nearly a whole circle where the
+pen turned round and came back. That is one rule for every shape a hand makes
+(`ink::ribbon_outline`, and the `fill_tests` scenarios in `apps/macos/src/platform/metal.rs`).
+
+**What this replaced, and why it kept breaking.** The outline used to be two *offset edges*, each point pushed
+along the normal through its neighbours. That construction has a normal to keep in step with its neighbours at
+every reading, and a turn is exactly what flips it. Each of the four bugs fixed before this model was a symptom
+of it: an annulus for a turned pen, a slit through a stroke that met itself, a half-missing end where a stroke
+rolled in, and one unpainted reading at every sharp corner — the last of which survived every attempt to patch the
+normal. A union of discs has no edges to keep in step, so none of those cases exists to be got wrong.
 
 ### A mark
 

@@ -236,7 +236,7 @@ fn drawn(stroke: &Stroke, zoom: f32) -> Vec<[f32; 2]> {
 /// the geometry this change is measured against — built by the same code that draws the new one,
 /// rather than by a copy of the code it replaced.
 fn drawn_flat(stroke: &Stroke) -> Vec<[f32; 2]> {
-    ribbon_outline(&stroke.points, 0.0, Tip::Curved)
+    outline_of(&stroke.points, 0.0, Tip::Curved)
 }
 
 /// The arc [`curve`] walks, written by a hand whose digitizer is a little noisy: every reading is
@@ -401,18 +401,24 @@ fn the_detail_costs_nothing_at_one_to_one() {
 
     stroke.close_at(1.0);
 
-    assert_eq!(
-        stroke.outline.len(),
-        points * 2 + 2 * CAP_VERTICES,
-        "a vertex a side, a cap at each end, and no pieces added: a point is still one straight edge"
+    // One straight edge per reading on each side, plus the two round ends. The ends are half circles of
+    // sixteen points, and the readings themselves are not added to at 1:1 — a curve that is already a point
+    // every three quarters of a pixel has nothing left to cut.
+    let edges = points * 2;
+    let ends = stroke.outline.len() - edges;
+
+    assert!(
+        ends > 0 && ends <= 2 * END_VERTICES,
+        "the two ends added {ends} vertices, and a round end is at most {END_VERTICES}"
     );
 }
 
-/// The vertices one round cap adds to an outline: a half circle in six steps, each end included.
+/// The most vertices one round end adds to an outline.
 ///
-/// Kept here rather than exported, because it is a fact about the shape the model draws and the tests
-/// are where that shape is asserted.
-const CAP_VERTICES: usize = 5;
+/// Kept here rather than exported, because it is a fact about the shape the model draws and the tests are where
+/// that shape is asserted. A half circle drawn in sixteen steps is at most that many points; a corner's arc is
+/// a fraction of one, so this bounds every arc the outline can carry.
+const END_VERTICES: usize = 16;
 
 /// A zoom buys detail and not shape: the same line, cut finer. Every piece gets shorter and no
 /// vertex moves to anywhere it was not already.
@@ -484,9 +490,12 @@ fn a_live_stroke_is_straight_at_its_tip() {
 }
 
 /// A point with no direction of its own — a pen doubling back over its own ink — keeps the stroke
-/// its width. The direction it is offset across is the one the ink was drawn in; a direction
-/// picked out of the air lays the two edges of the ribbon *along* the line and pinches the stroke
-/// away exactly where the user doubled back.
+/// its width.
+///
+/// The claim is about the ink, not about where in the outline a vertex happens to sit: the nib went round the
+/// turn, so every place a half width either side of that reading must be ink, and every place much further out
+/// must not be. Asking the model that is both what the old index arithmetic was trying to say and a stronger
+/// statement than it could make, because it does not depend on how the boundary was cut up.
 #[test]
 fn a_point_that_doubles_back_keeps_the_stroke_its_width() {
     let stroke = doubled_back();
@@ -496,25 +505,23 @@ fn a_point_that_doubles_back_keeps_the_stroke_its_width() {
     let point = points[turn];
     let half = point.width * 0.5;
 
-    let mut copy = stroke.clone();
-    copy.close_at(1.0);
-    let count = copy.points.len();
+    let model = note_format::ink::Model::of(&stroke.points, 1.0, Tip::Curved);
 
-    // The two ends of the ribbon at the turn are a half width either side of it — *across* the
-    // line, which runs vertically here. The left edge comes first in the outline and the right edge
-    // after the far end's cap, which is what the outline carries between them (see
-    // `ink::ribbon_outline`).
-    for index in [turn, CAP_VERTICES + 2 * count - 1 - turn] {
-        let [x, y] = copy.outline[index];
+    // Across the line, which runs vertically here: a half width either side of the reading is ink, and
+    // a quarter of a width further out than that is not.
+    for across in [-half, half, -half * 0.5, half * 0.5] {
         assert!(
-            (y - point.y).abs() < 1e-4,
-            "the edge at the turn left the line: {y} against {}",
-            point.y
+            model.is_ink(point.x + across, point.y),
+            "the ribbon is not a half width wide at the turn: {across} across {}",
+            point.x
         );
+    }
+
+    for across in [-half * 1.5, half * 1.5] {
         assert!(
-            ((x - point.x).abs() - half).abs() < 1e-4,
-            "the ribbon is not a half width wide there: {} against {half}",
-            (x - point.x).abs()
+            !model.is_ink(point.x + across, point.y),
+            "the ribbon is wider than the nib at the turn: {across} across {}",
+            point.x
         );
     }
 }

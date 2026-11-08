@@ -186,7 +186,7 @@ impl Stroke {
             bounds[3] = bounds[3].max(point.y);
         }
         self.bounds = bounds;
-        self.outline = ribbon_outline(&self.points, detail, tip);
+        self.outline = ribbon_outline(&Model::of(&self.points, detail, tip));
     }
 
     /// Rebuilds the derived geometry of a stroke for `detail`: its bounds and its outline.
@@ -567,217 +567,561 @@ pub fn densified(points: &[InkPoint], detail: f32, tip: Tip) -> Vec<InkPoint> {
     line
 }
 
-/// Builds the filled ribbon outline of a line with a per-point width.
+/// Whether a place on the page is ink, according to the model: **the union of the discs the nib left**.
 ///
-/// The outline walks the line on both sides — the left offset side forward, the right offset
-/// side backward — and closes the polygon. Filling that polygon is what gives a stroke a
-/// width that varies with the pen's force; a constant-width stroke would need only a polyline.
+/// This is the model written as the predicate it is, rather than as the boundary [`ribbon_outline`] derives
+/// from it. The two are the same claim from two sides — the outline is where a point stops being ink, and this
+/// is whether it is — so a test that asks this can check the model's *meaning* without triangulating anything,
+/// and a test that compares the two checks that the outline is the boundary of exactly this region.
 ///
-/// The line walked is the *drawn* one rather than the stored one: [`densified`] has already put a
-/// curve through the points that were kept and cut it into pieces short enough for `detail` — the
-/// zoom — to be drawn from. The direction through a point is the difference of the points on either
-/// side of it, which is what keeps a sharp corner from pinching the ribbon, and on an interpolated
-/// line those points are a fraction of a pixel away: the two edges follow the curve the pen drew
-/// instead of the corners of the sampling of it.
-pub fn ribbon_outline(points: &[InkPoint], detail: f32, tip: Tip) -> Vec<[f32; 2]> {
-    /// The thinnest a stroke is drawn, so a hairline reading still leaves a mark.
-    const MIN_HALF_WIDTH: f32 = 0.35;
+/// A place is ink when it is within the nib's radius of any reading, or under the tangent between two
+/// readings that are further apart than that. The tangent is the straight side of the band: between two discs
+/// the outside is bounded by the common outer tangent, and the strip between the tangent, the two radii and the
+/// line of centres is inside the union.
+///
+/// `detail` is the zoom the page is drawn at, and the points are resampled at it, so the answer is the answer
+/// for the stroke as it would be drawn.
+/// One disc of the model: where the nib was, and how far it reached.
+#[derive(Clone, Copy, Debug)]
+pub struct Disc {
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+}
 
-    if points.is_empty() {
+impl Disc {
+    /// Whether a place is inside this disc.
+    pub fn covers(&self, x: f32, y: f32) -> bool {
+        let (dx, dy) = (x - self.x, y - self.y);
+
+        dx * dx + dy * dy <= self.radius * self.radius
+    }
+}
+
+/// Two discs and the tangent between them: the straight side of a band.
+#[derive(Clone, Copy, Debug)]
+pub struct Span {
+    pub from: Disc,
+    pub to: Disc,
+}
+
+impl Span {
+    /// Whether a place is under the tangent between these two discs — the straight run of the band.
+    ///
+    /// The outside of the union of two discs is their two arcs and the common tangents, so between the two
+    /// centres and closer to their line than the nib is wide is ink.
+    pub fn covers(&self, x: f32, y: f32) -> bool {
+        let (dx, dy) = (self.to.x - self.from.x, self.to.y - self.from.y);
+        let length = (dx * dx + dy * dy).sqrt();
+
+        if length <= 1e-6 {
+            return false;
+        }
+
+        let along = (dx / length, dy / length);
+        let across = (-along.1, along.0);
+        let (px, py) = (x - self.from.x, y - self.from.y);
+
+        let forward = px * along.0 + py * along.1;
+        let sideways = (px * across.0 + py * across.1).abs();
+
+        forward >= 0.0 && forward <= length && sideways <= self.from.radius.max(self.to.radius)
+    }
+}
+
+/// A stroke's ink, worked out once: **the union of the discs the nib left behind.**
+///
+/// This is the model, computed rather than described. The points are resampled and steadied exactly once, when
+/// the model is built, and every question after that — is this place ink, what is the boundary, where are its
+/// bounds — is answered from the discs. That split is what makes the model usable in a test: the expensive part
+/// is the *making* of a stroke's model, not the asking about it, and a scenario suite that asks a thousand
+/// questions asks them all against one model.
+///
+/// The claim it encodes has no cases. A stroke is the discs its nib left, so:
+///
+/// * a nib turned where it stands is a disc, because every disc is at the same place;
+/// * a stroke that doubles back is still one region, because a union has no order;
+/// * an end is round, because the disc at the end is round;
+/// * a corner is filled, because the disc at the corner reaches past it.
+///
+/// None of those are special cases in the code below, and none of them can be got wrong in it. They were four
+/// separate bugs in the outline this replaced, in which the band was described by two offset *edges* — each
+/// with a normal that had to be kept in step with its neighbours, and each of which could be flipped by a turn.
+#[derive(Clone, Debug, Default)]
+pub struct Model {
+    /// The discs the nib left, in order. Order is kept only for drawing the boundary.
+    pub discs: Vec<Disc>,
+    /// The spans between consecutive discs: the straight runs of the band.
+    pub spans: Vec<Span>,
+}
+
+impl Model {
+    /// The model of a stroke's points, resampled at the zoom the page is drawn at.
+    ///
+    /// This is the only expensive call: it steadies, resamples and curves the points. Everything else on
+    /// `Model` is arithmetic over what this returns.
+    pub fn of(points: &[InkPoint], detail: f32, tip: Tip) -> Self {
+        /// The thinnest a stroke is drawn, so a hairline reading still leaves a mark.
+        const MIN_HALF_WIDTH: f32 = 0.35;
+
+        if points.is_empty() {
+            return Model::default();
+        }
+
+        let line = densified(points, detail, tip);
+        let discs: Vec<Disc> = line
+            .iter()
+            .map(|point| Disc {
+                x: point.x,
+                y: point.y,
+                radius: (point.width * 0.5).max(MIN_HALF_WIDTH),
+            })
+            .collect();
+
+        let spans = discs
+            .windows(2)
+            .map(|pair| Span {
+                from: pair[0],
+                to: pair[1],
+            })
+            .collect();
+
+        Model { discs, spans }
+    }
+
+    /// Whether a place on the page is ink.
+    ///
+    /// The whole model in one predicate: inside any disc, or under the tangent between two of them. A place the
+    /// nib covered is ink; there is nothing else to be.
+    pub fn is_ink(&self, x: f32, y: f32) -> bool {
+        self.discs.iter().any(|disc| disc.covers(x, y))
+            || self.spans.iter().any(|span| span.covers(x, y))
+    }
+
+    /// The box the ink occupies: the discs' own bounds, made a little wider than the points.
+    pub fn bounds(&self) -> [f32; 4] {
+        if self.discs.is_empty() {
+            return [0.0, 0.0, 0.0, 0.0];
+        }
+
+        let mut low = (f32::MAX, f32::MAX);
+        let mut high = (f32::MIN, f32::MIN);
+
+        for disc in &self.discs {
+            low = (
+                low.0.min(disc.x - disc.radius),
+                low.1.min(disc.y - disc.radius),
+            );
+            high = (
+                high.0.max(disc.x + disc.radius),
+                high.1.max(disc.y + disc.radius),
+            );
+        }
+
+        [low.0, low.1, high.0, high.1]
+    }
+
+    /// How many of a set of places the model calls ink, out of how many were asked.
+    ///
+    /// A whole scenario in one number, which is what a test wants to assert on: `(1.0, 1.0)` is a stroke whose
+    /// readings are all inked.
+    pub fn inked_share(&self, places: impl IntoIterator<Item = (f32, f32)>) -> (usize, usize) {
+        let mut inked = 0;
+        let mut total = 0;
+
+        for (x, y) in places {
+            total += 1;
+
+            if self.is_ink(x, y) {
+                inked += 1;
+            }
+        }
+
+        (inked, total)
+    }
+}
+
+/// The boundary of a stroke's ink, from the model that was already worked out.
+///
+/// The model is one sentence — a stroke is the union of the discs its nib left, one disc per reading — and
+/// the drawing is that sentence turned into points a fill can use. There is no direction to splay a nib
+/// along (a nib is round), no normal to flip at a corner (a union has no orientation), no cap to add at an
+/// end and no ring to close: a turned pen, a stroke that doubles back, and one that ends where it began are
+/// all unions of discs that come out right without being mentioned.
+///
+/// ## The shape of the boundary
+///
+/// The outline is the edge of the union of the discs, so it is derived from [`Model`] rather than from the
+/// points: the resampling happens once, in [`Model::of`], and this walks the discs that came out of it. Between
+/// two discs the edge is the common outer tangent, and round each disc it is the arc no other disc covers —
+/// which is a half circle at an end and the outside of the turn at a corner.
+///
+/// ## The shape of the boundary
+///
+/// Between two readings the nib draws two discs of radius `r` each, and the outside of their union is one of two
+/// figures:
+///
+/// * **overlapping** (`d < 2r`, the usual case) — two arcs and the two *outer* common tangents, which meet
+///   inside the pair. This is what makes a turn solid: the arcs are the outside of each disc, so the wedge on
+///   the outside of a corner is covered by the disc at the corner and is never left as page.
+/// * **apart** (`d >= 2r`) — two arcs and the two tangents, which are parallel: a straight band with round ends.
+///
+/// Walking the discs in order and taking the outer tangent on each side gives one closed loop for the whole
+/// stroke, whatever the readings do.
+///
+/// ## What is not here any more
+///
+/// The cases this replaces were four: a disc for a pen that did not move, an annulus guard for one that turned,
+/// a close test for a stroke that met itself, and a half circle at each end. Each was a bug found and fixed one
+/// at a time, and the fourth was still leaving a reading unpainted at every corner. They were all symptoms of
+/// describing the band by its *edges* — two offset curves with a normal to keep in step — instead of by the
+/// discs that made it. The discs have no edges to keep in step.
+pub fn ribbon_outline(model: &Model) -> Vec<[f32; 2]> {
+    /// How many points a round end and a turned reading are drawn with.
+    const ARC_STEPS: usize = 16;
+
+    let line = &model.discs;
+
+    if line.is_empty() {
         return Vec::new();
     }
 
-    if points.len() == 1 {
-        // A dot: a small polygon standing in for a filled circle.
-        return disc_outline(points[0], MIN_HALF_WIDTH);
-    }
-
-    let line = densified(points, detail, tip);
-
-    // A stroke that goes nowhere is a dot, however many readings it took to say so.
-    //
-    // This is the gesture a reader makes when they *scrub* a spot with a highlighter — or hand-write a
-    // full stop with the pen: the nib stays within a pixel or two of one place while the readings pile
-    // up and the pen turns. Offsetting each of those points along the normal through its neighbours
-    // does not describe a ribbon at all: the normals swing right round with the pen, so the "left" edge
-    // walks a circle *outside* the band and the "right" edge walks one *inside* it. Joined into one
-    // polygon that is an annulus, and an annulus filled by the nonzero rule is a ring with a hole in the
-    // middle — the shape a turned pen used to leave behind.
-    //
-    // A nib that has not left the place it was put has no direction to be extruded along, so it is drawn
-    // as what it is: the disc of its own width, at the place it is held. What decides that is how far the
-    // points reach from where the nib went down — the *extent* of the path, which a pen turned on the
-    // spot never grows however many times it goes round.
-    let widest = line
-        .iter()
-        .fold(0.0f32, |widest, point| widest.max(point.width));
-    let reach = extent(&line);
-
-    if reach <= (widest * 0.5).max(MIN_HALF_WIDTH) {
-        let total = line.iter().fold((0.0, 0.0), |total, point| {
-            (total.0 + point.x, total.1 + point.y)
-        });
-        let count = line.len() as f32;
-        let centre = InkPoint::new(total.0 / count, total.1 / count, widest);
-        return disc_outline(centre, MIN_HALF_WIDTH);
+    if line.len() == 1 {
+        return arc_points(line[0], 0.0, std::f32::consts::TAU, ARC_STEPS);
     }
 
     let last = line.len() - 1;
-    let mut left = Vec::with_capacity(line.len());
-    let mut right = Vec::with_capacity(line.len());
+
+    // A nib that never left the place it was put is a disc, and nothing else: every reading is at the same
+    // point, so every tangent is undefined and the union of the discs is the one disc. This is the shape a
+    // reader makes scrubbing a spot, and it is the model's own answer rather than a case invented for it.
+    //
+    // The disc is the *enclosing* one: centred where the readings are, and wide enough to reach the furthest
+    // reading plus its own nib. A hand that wobbles as it scrubs pushed the ink that far out, so a disc drawn at
+    // the nib's plain width would be smaller than the model says the mark is.
+    let mut low = (f32::MAX, f32::MAX);
+    let mut high = (f32::MIN, f32::MIN);
+
+    for disc in line {
+        low = (low.0.min(disc.x), low.1.min(disc.y));
+        high = (high.0.max(disc.x), high.1.max(disc.y));
+    }
+
+    let widest = line
+        .iter()
+        .fold(0.0f32, |widest, disc| widest.max(disc.radius * 2.0));
+
+    if (high.0 - low.0).max(high.1 - low.1) <= widest * 0.5 {
+        let total = line.iter().fold((0.0, 0.0), |total, disc| {
+            (total.0 + disc.x, total.1 + disc.y)
+        });
+        let count = line.len() as f32;
+        let centre = (total.0 / count, total.1 / count);
+
+        // How far the furthest reading is from that centre, on top of its own reach.
+        let reach = line.iter().fold(0.0f32, |reach, disc| {
+            let (dx, dy) = (disc.x - centre.0, disc.y - centre.1);
+
+            reach.max((dx * dx + dy * dy).sqrt() + disc.radius)
+        });
+
+        return arc_points(
+            Disc {
+                x: centre.0,
+                y: centre.1,
+                radius: reach,
+            },
+            0.0,
+            std::f32::consts::TAU,
+            ARC_STEPS,
+        );
+    }
+
+    // The two edges, walked forwards: each disc contributes the point its tangents to the discs either side
+    // meet at, which is the outside of the disc there.
+    let mut left: Vec<[f32; 2]> = Vec::with_capacity(line.len());
+    let mut right: Vec<[f32; 2]> = Vec::with_capacity(line.len());
 
     for index in 0..line.len() {
         let point = line[index];
         let previous = line[index.saturating_sub(1)];
         let next = line[(index + 1).min(last)];
 
-        let (across_x, across_y) = normal_through(previous, point, next);
-        let half_width = (point.width * 0.5).max(MIN_HALF_WIDTH);
-
-        left.push([
-            point.x + across_x * half_width,
-            point.y + across_y * half_width,
-        ]);
-        right.push([
-            point.x - across_x * half_width,
-            point.y - across_y * half_width,
-        ]);
+        left.push(edge_point(previous, point, next, Side::Left));
+        right.push(edge_point(previous, point, next, Side::Right));
     }
 
-    // The polygon runs: the left edge forward, a half circle round the far end, the right edge back, and
-    // a half circle round the near end — which is what closes it.
-    //
-    // The caps are not decoration. The band's edge at a point is set by the points on either side of it,
-    // so the first and last points — which have one neighbour each — are the ones a turn distorts most: a
-    // pen put down and rolled before it travels leaves the first few readings nearly coincident while
-    // their directions swing, and a square end cut there is cut across a direction the nib never actually
-    // faced. What a reader sees is a stroke whose beginning, and its end, is half missing.
-    let last_index = line.len() - 1;
+    // The loop: the left edge forwards, round the far disc, the right edge back, and round the near one.
+    let mut outline: Vec<[f32; 2]> = Vec::with_capacity(line.len() * 2 + ARC_STEPS * 2);
 
-    let mut outline = left;
-    cap(
-        &mut outline,
-        line[last_index],
-        normal_through(line[last_index - 1], line[last_index], line[last_index]),
-        1.0,
-        MIN_HALF_WIDTH,
-    );
+    // The left edge, with the disc's own arc wherever the band turns hard enough that the two straight
+    // pieces at a reading meet outside the disc. That arc is not a special case either: it is the part of that
+    // reading's disc that no other disc covers, which on a sharp corner is the outside of the turn — and where
+    // the pen turned round and came back, it is the whole tip.
+    outline.push(left[0]);
 
-    outline.extend(right.into_iter().rev());
-    cap(
-        &mut outline,
+    for index in 1..line.len() {
+        let point = line[index];
+
+        outline.extend(arc_between(point, left[index - 1], left[index], ARC_STEPS));
+        outline.push(left[index]);
+    }
+
+    outline.extend(end_arc(
+        line[last],
+        left[last],
+        right[last],
+        [
+            line[last.saturating_sub(1)].x,
+            line[last.saturating_sub(1)].y,
+        ],
+        ARC_STEPS,
+    ));
+
+    for index in (0..line.len()).rev() {
+        let point = line[index];
+
+        outline.push(right[index]);
+
+        if index > 0 {
+            outline.extend(arc_between(
+                point,
+                right[index],
+                right[index - 1],
+                ARC_STEPS,
+            ));
+        }
+    }
+
+    outline.extend(end_arc(
         line[0],
-        normal_through(line[0], line[0], line[1]),
-        -1.0,
-        MIN_HALF_WIDTH,
-    );
+        right[0],
+        left[0],
+        [line[(1).min(last)].x, line[(1).min(last)].y],
+        ARC_STEPS,
+    ));
 
     outline
 }
 
-/// Walks a half circle round one end of a band, from its `right` edge to its `left`.
+/// Which of the two outer tangents of a pair of discs a point is taken on.
+#[derive(Clone, Copy, PartialEq)]
+enum Side {
+    Left,
+    Right,
+}
+
+/// Where the band's edge is at a reading: on the tangents to the discs either side of it.
 ///
-/// `normal` is the direction *across* the band at that end, and `side` says which way the band runs from
-/// it: `1.0` for the end the pen finished at, `-1.0` for the end it started at. The arc is drawn on the
-/// side the stroke does not continue towards — the outside of the line — which is where a round nib end
-/// leaves its ink.
-fn cap(
-    outline: &mut Vec<[f32; 2]>,
-    end: InkPoint,
-    normal: (f32, f32),
-    side: f32,
-    min_half_width: f32,
-) {
-    /// A half circle in this many steps. Six is 15° apiece, which is finer than [`disc_outline`]'s 30°
-    /// because an end is looked at head-on rather than as one part of a moving line.
-    const STEPS: usize = 6;
+/// The two tangents are averaged rather than one being chosen, because at a corner that average *is* the
+/// corner: extending both straight pieces of edge until they meet. A disc with a neighbour on one side only
+/// takes that tangent, which is a reading at either end of the line.
+fn edge_point(previous: Disc, point: Disc, next: Disc, side: Side) -> [f32; 2] {
+    match (
+        outer_tangent(previous, point, side),
+        outer_tangent(point, next, side),
+    ) {
+        (Some(from), Some(to)) => {
+            // The two tangents meet at the corner, and their average is the meeting point. Where they cancel —
+            // the pen turned round and came back along its own line, so its next reading is the one before it —
+            // the average is the reading itself, and the band would pinch to nothing there. That pinch is not a
+            // point: it is the whole disc at the turn, and the disc is drawn by the arc this reading gets. So the
+            // tangent to the reading it *came from* is the edge through it, and the arc round the turn is the
+            // outside.
+            let average = [(from[0] + to[0]) * 0.5, (from[1] + to[1]) * 0.5];
+            let (ax, ay) = (average[0] - point.x, average[1] - point.y);
+            let (fx, fy) = (from[0] - point.x, from[1] - point.y);
 
-    let radius = (end.width * 0.5).max(min_half_width);
+            if (ax * ax + ay * ay).sqrt() < (fx * fx + fy * fy).sqrt() * 0.25 {
+                from
+            } else {
+                average
+            }
+        }
+        (Some(point), None) | (None, Some(point)) => point,
+        // Neither neighbour has a direction: the pen went down and lifted again in one place.
+        (None, None) => {
+            let angle = match side {
+                Side::Left => -std::f32::consts::FRAC_PI_2,
+                Side::Right => std::f32::consts::FRAC_PI_2,
+            };
 
-    // From the `normal` side round to the `-normal` side, turning towards the way the band continues.
-    let (across_x, across_y) = normal;
-    let along_x = across_y * side;
-    let along_y = -across_x * side;
-
-    for step in 1..STEPS {
-        let angle = std::f32::consts::PI * step as f32 / STEPS as f32;
-        let (cos, sin) = (angle.cos(), angle.sin());
-
-        outline.push([
-            end.x + (across_x * cos + along_x * sin) * radius,
-            end.y + (across_y * cos + along_y * sin) * radius,
-        ]);
+            [
+                point.x + point.radius * angle.cos(),
+                point.y + point.radius * angle.sin(),
+            ]
+        }
     }
 }
 
-/// A filled circle standing in for a nib's round end, as a polygon.
+/// Where the outer tangent from `from` touches `to`, on `side`.
 ///
-/// Twelve sides, because one step of this is 30° and the chord error is a fraction of a percent of the
-/// radius: an ink dot is read at the size of a nib and never magnified enough for another side to show.
-fn disc_outline(point: InkPoint, min_half_width: f32) -> Vec<[f32; 2]> {
-    const SEGMENTS: usize = 12;
-
-    let radius = (point.width * 0.5).max(min_half_width);
-
-    (0..SEGMENTS)
-        .map(|step| {
-            let angle = step as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
-            [
-                point.x + radius * angle.cos(),
-                point.y + radius * angle.sin(),
-            ]
-        })
-        .collect()
-}
-
-/// How far a line's points reach from where it began.
+/// For two circles the outer tangents are the ones crossing neither circle. Their touch points differ by one
+/// vector on both circles, and that vector has the direction it has because the tangent meets both radii at
+/// a right angle: along the centres by `r_to - r_from`, and across them by `sqrt(d^2 - (r_to - r_from)^2)`.
+/// With equal radii — which is what one nib draws — the along part is nothing and the across part is the
+/// whole distance, so the touch point is simply a radius off the line of centres. Unequal ones tilt it, which
+/// is what a stroke that thins as it travels needs.
 ///
-/// The measure of whether the nib *left* the place it was put: a pen turned on the spot keeps every
-/// reading within a fraction of a pixel of the first one, so its reach stays near zero however many
-/// times it goes round — which is exactly the case the ribbon cannot describe (see [`outline_of`]).
-fn extent(line: &[InkPoint]) -> f32 {
-    let Some(first) = line.first() else {
-        return 0.0;
-    };
-
-    line.iter()
-        .map(|point| {
-            let dx = point.x - first.x;
-            let dy = point.y - first.y;
-
-            (dx * dx + dy * dy).sqrt()
-        })
-        .fold(0.0f32, f32::max)
-}
-
-/// The unit normal of the line as it passes through a point: the direction *across* it, from the
-/// points on either side.
-///
-/// A point with no direction of its own — a pen that came back to the place it was, or a reading
-/// doubled by a lift — is the case worth spelling out, because the cheap answer is wrong in a way
-/// that shows. Offsetting across an axis picked out of the air lays the two edges of the ribbon
-/// *along* the line instead of across it, pinching the stroke to nothing exactly where the user
-/// doubled back over their own ink. The direction the ink was drawn in is the honest one, so such a
-/// point is offset across the segment it arrived on, and a point whose whole neighbourhood is one
-/// place gets a horizontal line across it, which is as good as any.
-fn normal_through(previous: InkPoint, point: InkPoint, next: InkPoint) -> (f32, f32) {
-    /// The shortest direction that is a direction at all, in logical pixels.
+/// `None` where the two discs are the same disc, because there is no tangent out of a place to nowhere.
+fn outer_tangent(from: Disc, to: Disc, side: Side) -> Option<[f32; 2]> {
+    /// Nearer than this and the two discs are one disc.
     const FLOOR: f32 = 1e-6;
 
-    // The unit normal of a direction: the direction across the line.
-    let across = |dx: f32, dy: f32| -> Option<(f32, f32)> {
-        let length = (dx * dx + dy * dy).sqrt();
-        if length <= FLOOR {
-            None
-        } else {
-            Some((-dy / length, dx / length))
-        }
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let distance = (dx * dx + dy * dy).sqrt();
+
+    if distance <= FLOOR {
+        return None;
+    }
+
+    let along = (dx / distance, dy / distance);
+    let across = match side {
+        Side::Left => (-along.1, along.0),
+        Side::Right => (along.1, -along.0),
     };
 
-    across(next.x - previous.x, next.y - previous.y)
-        .or_else(|| across(point.x - previous.x, point.y - previous.y))
-        .or_else(|| across(next.x - point.x, next.y - point.y))
-        .unwrap_or((0.0, 1.0))
+    let difference = to.radius - from.radius;
+    let reach = (distance * distance - difference * difference)
+        .max(0.0)
+        .sqrt();
+
+    // The direction the touch points are offset from the centres, which the radius then scales.
+    let direction = (
+        along.0 * difference + across.0 * reach,
+        along.1 * difference + across.1 * reach,
+    );
+
+    Some([
+        from.x + direction.0 * from.radius / distance,
+        from.y + direction.1 * from.radius / distance,
+    ])
+}
+
+/// `steps` points along a disc's edge, starting at `start` and turning through `sweep` radians.
+fn arc_points(centre: Disc, start: f32, sweep: f32, steps: usize) -> Vec<[f32; 2]> {
+    let mut points = Vec::with_capacity(steps);
+
+    for step in 0..steps {
+        let angle = start + sweep * step as f32 / steps as f32;
+
+        points.push([
+            centre.x + centre.radius * angle.cos(),
+            centre.y + centre.radius * angle.sin(),
+        ]);
+    }
+
+    points
+}
+
+/// The boundary of a stroke's ink, from its points. A convenience over [`Model::of`] and [`ribbon_outline`].
+pub fn outline_of(points: &[InkPoint], detail: f32, tip: Tip) -> Vec<[f32; 2]> {
+    ribbon_outline(&Model::of(points, detail, tip))
+}
+
+///
+/// The edge of a band is straight between two readings, so at each reading it has to get from the tangent it
+/// came in on to the tangent it goes out on. Where those two meet *inside* the disc there is nothing to draw —
+/// the corner is covered. Where they meet outside it, the edge has to follow the disc's own rim round the
+/// outside, which is this arc. On a corner sharper than the nib is wide it is a long arc; at a tip, where the
+/// pen turned round and came back, it is nearly a whole circle.
+///
+/// `outwards` is the reading the edge came from; the sweep kept is the one going away from it.
+fn arc_between(end: Disc, from: [f32; 2], to: [f32; 2], steps: usize) -> Vec<[f32; 2]> {
+    // Both points are on the disc's rim by construction, so their angles round it are the angles of the arc.
+    // Measuring them from the centre is only safe if they really are on the rim: a point that floated inside
+    // would swing through a wild angle and draw an arc that is not there. Where one is not on the rim the edge
+    // runs straight between them and there is no arc to draw.
+    let on_rim = |point: [f32; 2]| {
+        let (dx, dy) = (point[0] - end.x, point[1] - end.y);
+        let reach = (dx * dx + dy * dy).sqrt();
+
+        (reach - end.radius).abs() <= end.radius * 0.5 + 1e-3
+    };
+
+    if !on_rim(from) || !on_rim(to) {
+        return Vec::new();
+    }
+
+    let start = (from[1] - end.y).atan2(from[0] - end.x);
+    let finish = (to[1] - end.y).atan2(to[0] - end.x);
+
+    let mut sweep = finish - start;
+
+    while sweep > std::f32::consts::PI {
+        sweep -= std::f32::consts::TAU;
+    }
+    while sweep < -std::f32::consts::PI {
+        sweep += std::f32::consts::TAU;
+    }
+
+    // A turn of nearly nothing is a straight run, and an arc there would double the edge over the straight
+    // piece it is already drawn as — which is the difference between a band painted once and painted twice
+    // over. The arc is only boundary where the corner is sharper than the straight pieces can cover.
+    if sweep.abs() < TURN {
+        return Vec::new();
+    }
+
+    arc_points(end, start, sweep, steps)
+}
+
+/// How sharp a turn has to be before its disc contributes an arc: about 20°, which is a corner a reader can
+/// see. Below it the two straight pieces already meet inside the disc, so the edge is those pieces and an arc
+/// added over them would be the same stretch of band drawn twice.
+const TURN: f32 = 0.35;
+
+///
+/// This is the round cap, and it is not added to the model — it is what the end disc already is. It runs from
+/// one edge point to the other, and of the two ways round the disc it takes the one that passes through the
+/// point furthest from the reading behind: that is the tip of the nib, and the half beyond it is the half no
+/// part of the stroke lies in. Going the other way would sweep across the band's own width, and the tip of the
+/// stroke would be the part left unpainted.
+fn end_arc(
+    end: Disc,
+    from: [f32; 2],
+    to: [f32; 2],
+    behind: [f32; 2],
+    steps: usize,
+) -> Vec<[f32; 2]> {
+    let start = (from[1] - end.y).atan2(from[0] - end.x);
+    let finish = (to[1] - end.y).atan2(to[0] - end.x);
+
+    // Where the way out of the disc points, as an angle: directly away from the reading behind.
+    let out = (end.y - behind[1]).atan2(end.x - behind[0]);
+
+    // The sweep that goes through the tip: the one whose midpoint is the way out. Of the two candidates, the
+    // one nearer `out` is it.
+    let mut sweep = finish - start;
+
+    while sweep > std::f32::consts::TAU {
+        sweep -= std::f32::consts::TAU;
+    }
+    while sweep < -std::f32::consts::TAU {
+        sweep += std::f32::consts::TAU;
+    }
+
+    let normalise = |angle: f32| {
+        let mut angle = angle;
+
+        while angle > std::f32::consts::PI {
+            angle -= std::f32::consts::TAU;
+        }
+        while angle < -std::f32::consts::PI {
+            angle += std::f32::consts::TAU;
+        }
+
+        angle
+    };
+
+    let forward = normalise(start + sweep * 0.5 - out).abs();
+    let backward =
+        normalise(start + (sweep - std::f32::consts::TAU * sweep.signum()) * 0.5 - out).abs();
+
+    if backward < forward {
+        sweep -= std::f32::consts::TAU * sweep.signum();
+    }
+
+    arc_points(end, start, sweep, steps)
 }
 
 /// How many straight pieces one segment of a stroke is drawn as.

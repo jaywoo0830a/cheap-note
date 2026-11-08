@@ -7,7 +7,7 @@
 //! up never moves the ink — it only cuts its curves more finely.
 
 use note_format::ink::{
-    alpha_of, densified, detail_of, detail_zoom, ribbon_outline, steadied, steps_for, with_alpha,
+    alpha_of, densified, detail_of, detail_zoom, outline_of, steadied, steps_for, with_alpha,
     InkPoint, Stroke, Tip,
 };
 
@@ -191,7 +191,7 @@ fn a_finer_detail_cuts_the_line_into_more_pieces() {
 
     assert!(steadied(&points).len() >= 3, "the ends are kept");
     assert!(densified(&points, detail_zoom(16.0), Tip::Curved).len() > points.len());
-    assert!(!ribbon_outline(&points, detail_zoom(16.0), Tip::Curved).is_empty());
+    assert!(!outline_of(&points, detail_zoom(16.0), Tip::Curved).is_empty());
 }
 
 /// A stroke the pen has not lifted from draws its newest segment straight.
@@ -278,9 +278,10 @@ fn a_line_longer_than_its_nib_is_still_a_band() {
 
     stroke.close();
 
-    // A band 40 long and 18 wide, not the disc a dot would be.
+    // A band 40 long and 18 wide, not the disc a dot would be. Its two ends are round, because the nib is,
+    // so the shape is the rectangle plus one whole disc — and the disc is most of a millimetre of the mark.
     let area = polygon_area(&stroke.outline);
-    let band = 40.0 * width;
+    let band = 40.0 * width + std::f32::consts::PI * (width * 0.5).powi(2);
 
     assert!(
         (area / band - 1.0).abs() < 0.15,

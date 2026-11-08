@@ -1505,6 +1505,25 @@ mod fill_tests {
         gpui_kit::rgba(0x00FF_00FF).into()
     }
 
+    use note_format::ink::Tip;
+
+    /// Whether a point is inside a triangle: the three edge cross-products share a sign.
+    fn inside_triangle(point: (f32, f32), triangle: &[Vertex]) -> bool {
+        let cross =
+            |a: &Vertex, b: &Vertex| (b.x - a.x) * (point.1 - a.y) - (b.y - a.y) * (point.0 - a.x);
+
+        let (d1, d2, d3) = (
+            cross(&triangle[0], &triangle[1]),
+            cross(&triangle[1], &triangle[2]),
+            cross(&triangle[2], &triangle[0]),
+        );
+
+        let negative = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+        let positive = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+
+        !(negative && positive)
+    }
+
     /// A stroke is painted **once**, however many pieces its outline was cut into.
     ///
     /// This is the bug that made a highlighter read as a smear. Ink is translucent
@@ -1614,9 +1633,12 @@ mod fill_tests {
         stroke.close_at(1.0);
         fill(&mut vertices, &stroke, &mapping, (0.0, 0.0), colour());
 
-        // The band is `travel` long however many times the stroke covered it: the nonzero rule fills the
-        // region once, and a polygon that crosses itself is ink rather than a second layer.
-        let covered = travel * width;
+        // The band is `travel` long however many times the stroke covered it: the region is filled once, and a
+        // polygon that crosses itself is ink rather than a second layer. The two ends add a half circle each,
+        // because the nib is round — so the shape is the rectangle plus one whole disc, and *not* the rectangle
+        // alone. Leaving the ends out is what made this test call a correct stroke "1.35× over".
+        let radius = width * 0.5;
+        let covered = travel * width + std::f32::consts::PI * radius * radius;
         let overlap = area(&vertices) / covered;
 
         assert!(
@@ -1769,23 +1791,6 @@ mod fill_tests {
         covered as f32 / (STEPS * STEPS) as f32
     }
 
-    /// Whether a point is inside a triangle, by the sign of the three edge cross-products.
-    fn inside_triangle(point: (f32, f32), triangle: &[Vertex]) -> bool {
-        let cross =
-            |a: &Vertex, b: &Vertex| (b.x - a.x) * (point.1 - a.y) - (b.y - a.y) * (point.0 - a.x);
-
-        let (d1, d2, d3) = (
-            cross(&triangle[0], &triangle[1]),
-            cross(&triangle[1], &triangle[2]),
-            cross(&triangle[2], &triangle[0]),
-        );
-
-        let negative = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
-        let positive = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
-
-        !(negative && positive)
-    }
-
     /// The ends of a curve are where a turn distorts the outline most, and they must still be inked.
     ///
     /// The first and last points of a stroke have one neighbour each, so their edges are the ones a turn
@@ -1884,6 +1889,402 @@ mod fill_tests {
 
         stroke.close_at(1.0);
         stroke
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Turning ink: every way a hand can turn while the nib is down, and whether the mark is solid.
+    //
+    // Each scenario below is a *shape*, not a length: what is asserted is that the ink is there across
+    // the whole of it. Two questions are asked of each, and they are the same question from two sides —
+    // `assert_inked` asks whether the model calls the nib's own path ink, and `assert_outline_is_the_model`
+    // asks whether the outline the renderer is given is the boundary of exactly that region.
+    //
+    // Neither question triangulates or rasterises anything to answer, which is what lets a shape be asked
+    // about at every width, wobble and turn: the model is built once and then queried. That is the whole
+    // reason the model is a value (`ink::Model`) rather than a function of the points.
+    // ---------------------------------------------------------------------------------------------
+
+    /// The most cells a failure's picture is drawn across, so a large stroke still prints a picture that fits
+    /// on a screen.
+    const PICTURE_CELLS: usize = 160;
+
+    /// The nib width the app ships with (`ink::HIGHLIGHTER_WIDTH`), spelled out because that constant is
+    /// private to `note-ui` and these tests are about the geometry rather than the tool.
+    const WIDTH: f32 = 18.0;
+
+    /// The app's own resampling: the distance it keeps between two points (`resample_spacing`).
+    fn spacing() -> f32 {
+        note_format::settings::Settings::default().resample_spacing
+    }
+
+    /// The identity mapping: these tests are about the outline, not about where the page sits.
+    fn flat() -> Mapping {
+        Mapping {
+            base: (0.0, 0.0),
+            step_x: (1.0, 0.0),
+            step_y: (0.0, 1.0),
+        }
+    }
+
+    /// The ink a stroke's outline is filled with.
+    fn ink(stroke: &note_format::ink::Stroke) -> Vec<Vertex> {
+        let mut vertices = Vec::new();
+        fill(&mut vertices, stroke, &flat(), (0.0, 0.0), colour());
+        vertices
+    }
+
+    /// A stroke through a list of points, at the given width, closed as a finished stroke would be.
+    fn stroke_of(points: &[(f32, f32)], width: f32) -> note_format::ink::Stroke {
+        use note_format::ink::{InkPoint, Stroke};
+
+        let mut stroke = Stroke::new(InkPoint::new(points[0].0, points[0].1, width), 0xFFEB_3B00);
+
+        for (x, y) in &points[1..] {
+            stroke.points.push(InkPoint::new(*x, *y, width));
+        }
+
+        stroke.close_at(1.0);
+        stroke
+    }
+
+    /// A whole disc of readings a fraction of a pixel from one place: a nib turned where it stands.
+    ///
+    /// `wobble` is how far the readings stray, `readings` how many there are, and `turns` how many times
+    /// round the pen goes — the three things a turning hand varies.
+    fn turned_in_place(wobble: f32, readings: usize, turns: f32) -> Vec<(f32, f32)> {
+        (0..readings)
+            .map(|step| {
+                let angle = step as f32 / readings as f32 * turns * std::f32::consts::TAU;
+
+                (angle.cos() * wobble, angle.sin() * wobble)
+            })
+            .collect()
+    }
+
+    /// A curve walked at the app's spacing: a radius, and how far round it goes.
+    fn arc(radius: f32, turns: f32) -> Vec<(f32, f32)> {
+        let step = spacing() / radius;
+        let mut points = Vec::new();
+        let mut angle = 0.0f32;
+
+        while angle < turns * std::f32::consts::TAU {
+            points.push((radius * angle.sin(), radius - radius * angle.cos()));
+            angle += step;
+        }
+
+        points
+    }
+
+    /// A stroke that goes out along a line and comes back over it.
+    fn there_and_back(length: f32) -> Vec<(f32, f32)> {
+        let step = spacing();
+        let mut points = Vec::new();
+        let mut x = 0.0f32;
+
+        while x < length {
+            points.push((x, 0.0));
+            x += step;
+        }
+
+        while x > 0.0 {
+            points.push((x, 0.0));
+            x -= step;
+        }
+
+        points
+    }
+
+    /// A zigzag: a run, a hard turn, and a run back at an angle to it.
+    fn zigzag(runs: usize, length: f32, angle_degrees: f32) -> Vec<(f32, f32)> {
+        let step = spacing();
+        let angle = angle_degrees.to_radians();
+        let mut points = Vec::new();
+        let mut at = (0.0f32, 0.0f32);
+
+        for run in 0..runs {
+            let heading = if run % 2 == 0 { angle } else { -angle };
+            let mut walked = 0.0f32;
+
+            while walked < length {
+                points.push(at);
+                at = (at.0 + heading.cos() * step, at.1 + heading.sin() * step);
+                walked += step;
+            }
+        }
+
+        points
+    }
+
+    /// A spiral: the pen travels, and its direction turns, the whole way round.
+    fn spiral(turns: f32, start: f32, growth: f32) -> Vec<(f32, f32)> {
+        /// The most readings a spiral may be drawn with. A spiral that grows as fast as it turns never comes
+        /// round, so without a bound on the readings it walks outwards for ever — and a test nobody can finish
+        /// is not a test.
+        const MOST: usize = 4000;
+
+        let mut points = Vec::new();
+        let mut angle = 0.0f32;
+        let mut radius = start;
+
+        while angle < turns * std::f32::consts::TAU && points.len() < MOST {
+            points.push((radius * angle.cos(), radius * angle.sin()));
+            angle += spacing() / radius.max(0.5);
+            radius += growth;
+        }
+
+        points
+    }
+
+    /// Fills a stroke and fails if any of the places the nib actually was is unpainted.
+    ///
+    /// The nib's own centre is the one point of a stroke that *must* be ink: whatever the outline did,
+    /// it cannot have left the place the pen was standing unpainted. This walks every reading rather
+    /// than a sample of them, so a hole anywhere in a stroke is a failure at the reading inside it.
+    fn assert_inked(what: &str, stroke: &note_format::ink::Stroke) {
+        // The model, asked directly: every place the nib was standing is a place the model says is ink. That is
+        // the whole of this test — no triangulation, no raster, no picture — because the claim being made is
+        // about what the stroke *is*, not about how the renderer happens to have cut it up. The model is built
+        // once here and asked many times, which is what makes the scenario suites affordable.
+        let model = note_format::ink::Model::of(&stroke.points, 1.0, Tip::Curved);
+        let mut missing = Vec::new();
+
+        for (index, point) in stroke.points.iter().enumerate() {
+            if !model.is_ink(point.x, point.y) {
+                missing.push((index, point.x, point.y));
+            }
+        }
+
+        if let Some((index, x, y)) = missing.first() {
+            panic!(
+                "{what}: {} of {} readings are not ink, first #{index} at ({x:.2}, {y:.2})",
+                missing.len(),
+                stroke.points.len(),
+            );
+        }
+    }
+
+    /// Fails unless the outline and the model agree about the region a stroke covers.
+    ///
+    /// The outline is a boundary and the model is a predicate, so they are the same claim from two sides. This
+    /// walks a grid over the stroke's own box and asks both: a place the model calls ink must be inside some
+    /// triangle of the outline, and a place it calls page must be inside none. That is the check a raster would
+    /// make, done without rasterising anything.
+    fn assert_outline_is_the_model(what: &str, stroke: &note_format::ink::Stroke) {
+        let model = note_format::ink::Model::of(&stroke.points, 1.0, Tip::Curved);
+        let vertices = ink(stroke);
+        let bounds = model.bounds();
+
+        // A grid the size of a picture, so the check is the same shape however large the stroke is.
+        let columns = PICTURE_CELLS;
+        let rows = PICTURE_CELLS;
+        let across = (bounds[2] - bounds[0]) / columns as f32;
+        let down = (bounds[3] - bounds[1]) / rows as f32;
+
+        let mut wrong = Vec::new();
+
+        for row in 0..rows {
+            for column in 0..columns {
+                let at = (
+                    bounds[0] + column as f32 * across,
+                    bounds[1] + row as f32 * down,
+                );
+                let said = model.is_ink(at.0, at.1);
+                let drawn = vertices
+                    .chunks_exact(3)
+                    .any(|triangle| inside_triangle(at, triangle));
+
+                if said != drawn {
+                    wrong.push((at, said, drawn));
+                }
+            }
+        }
+
+        // A boundary that disagrees in places is expected: the outline is a polygonal approximation of a curved
+        // rim, so a place right on it can fall either side. What is being checked is a hole or a spill, not the
+        // size of the last triangle.
+        let share = wrong.len() as f32 / (rows * columns) as f32;
+
+        assert!(
+            share < 0.05,
+            "{what}: the outline and the model disagree about {:.1}% of places (first at {:?})",
+            share * 100.0,
+            wrong.first(),
+        );
+    }
+
+    /// The outline and the model are the same region, seen from two sides.
+    ///
+    /// The outline is the boundary of the union of the discs, and the model is whether a place is in that union.
+    /// If they are the same claim then a place is inside the outline exactly when the model says it is ink — and
+    /// that is what this checks, over strokes whose shapes are the ones that used to break: a turn in place, a
+    /// curve, a doubled-back line, a zigzag and a spiral. A hole in the outline and a spill outside it both fail
+    /// here, which is the pair of bugs the whole disc-union rewrite exists to be free of.
+    #[test]
+    fn the_outline_is_the_boundary_of_the_model() {
+        let cases: [(&str, Vec<(f32, f32)>); 5] = [
+            ("turned in place", turned_in_place(0.2, 40, 1.0)),
+            ("arc r=40", arc(40.0, 1.0)),
+            ("there and back", there_and_back(40.0)),
+            ("zigzag", zigzag(3, 20.0, 90.0)),
+            ("spiral", spiral(1.0, 6.0, 0.2)),
+        ];
+
+        for (what, points) in cases {
+            let stroke = stroke_of(&points, WIDTH);
+
+            assert_inked(what, &stroke);
+            assert_outline_is_the_model(what, &stroke);
+        }
+    }
+
+    /// A nib turned where it stands is a dot: solid, whatever the wobble and however many times round.
+    #[test]
+    fn a_nib_turned_in_one_place_is_solid() {
+        for wobble in [0.0f32, 0.05, 0.2, 0.6, 1.5] {
+            for readings in [8usize, 36, 100, 400] {
+                for turns in [1.0f32, 1.5, 3.0] {
+                    let stroke = stroke_of(&turned_in_place(wobble, readings, turns), WIDTH);
+
+                    assert_inked(
+                        &format!("turned in place w={wobble} n={readings} t={turns}"),
+                        &stroke,
+                    );
+                }
+            }
+        }
+    }
+
+    /// A curve walked while turning is solid along its whole length, at every radius that matters.
+    ///
+    /// The tight end is the interesting one: a radius smaller than the nib means the inside edge of the
+    /// band is *behind* the centre of the stroke, so the offset points fold back over each other.
+    #[test]
+    fn a_curve_walked_while_turning_is_solid() {
+        for radius in [80.0f32, 40.0, 20.0, 12.0, 8.0, 5.0, 3.0, 2.0] {
+            for turns in [0.25f32, 0.5, 1.0, 2.0] {
+                let stroke = stroke_of(&arc(radius, turns), WIDTH);
+
+                assert_inked(&format!("arc r={radius} turns={turns}"), &stroke);
+            }
+        }
+    }
+
+    /// A spiral, travelling and turning the whole way round, is solid.
+    #[test]
+    fn a_spiral_is_solid() {
+        for turns in [0.5f32, 1.0, 2.0, 4.0] {
+            for start in [2.0f32, 6.0, 20.0] {
+                // `growth` stays small on purpose: a spiral that grows as fast as it turns never comes round,
+                // so a large one walks outwards for ever instead of spiralling. A twentieth of the nib is
+                // already a ring tighter than a hand draws.
+                for growth in [0.05f32, 0.2, 0.5] {
+                    let stroke = stroke_of(&spiral(turns, start, growth), WIDTH);
+
+                    assert_inked(&format!("spiral t={turns} s={start} g={growth}"), &stroke);
+                }
+            }
+        }
+    }
+
+    /// A stroke that goes out and comes back over itself is solid.
+    #[test]
+    fn a_stroke_that_doubles_back_is_solid() {
+        for length in [4.0f32, 8.0, 20.0, 60.0] {
+            let stroke = stroke_of(&there_and_back(length), WIDTH);
+
+            assert_inked(&format!("there and back {length}"), &stroke);
+        }
+    }
+
+    /// A zigzag: the case where consecutive runs face opposite ways.
+    #[test]
+    fn a_zigzag_is_solid() {
+        for runs in [2usize, 3, 6] {
+            for length in [6.0f32, 20.0] {
+                for angle in [30.0f32, 90.0, 150.0] {
+                    let stroke = stroke_of(&zigzag(runs, length, angle), WIDTH);
+
+                    assert_inked(&format!("zigzag n={runs} l={length} a={angle}"), &stroke);
+                }
+            }
+        }
+    }
+
+    /// A stroke put down, rolled, then walked — the shape a highlighter is actually used in.
+    #[test]
+    fn a_rolling_start_then_a_curve_is_solid() {
+        for roll in [2usize, 4, 8, 16, 40] {
+            for radius in [4.0f32, 8.0, 12.0, 30.0] {
+                let mut points = turned_in_place(0.05, roll, 1.0);
+                let (ox, oy) = *points.last().expect("a rolled start has readings");
+
+                for (x, y) in arc(radius, 0.5) {
+                    points.push((ox + x, oy + y));
+                }
+
+                let stroke = stroke_of(&points, WIDTH);
+
+                assert_inked(&format!("roll={roll} then r={radius}"), &stroke);
+            }
+        }
+    }
+
+    /// A stroke that is lifted while still turning: the other end of the same problem.
+    #[test]
+    fn a_curve_ending_in_a_roll_is_solid() {
+        for roll in [2usize, 4, 8, 16, 40] {
+            for radius in [4.0f32, 8.0, 12.0, 30.0] {
+                let mut points = arc(radius, 0.5);
+                let (ex, ey) = *points.last().expect("an arc has readings");
+
+                for (x, y) in turned_in_place(0.05, roll, 1.0) {
+                    points.push((ex + x, ey + y));
+                }
+
+                let stroke = stroke_of(&points, WIDTH);
+
+                assert_inked(&format!("r={radius} ending in roll={roll}"), &stroke);
+            }
+        }
+    }
+
+    /// Every width: a hairline and a broad marker both stay solid while turning.
+    #[test]
+    fn turning_ink_is_solid_at_every_width() {
+        for width in [1.0f32, 2.0, 6.0, 18.0, 40.0] {
+            for (name, points) in [
+                ("in place", turned_in_place(0.2, 60, 1.0)),
+                ("arc", arc(12.0, 0.5)),
+                ("spiral", spiral(1.0, 6.0, 0.35)),
+                ("back", there_and_back(20.0)),
+            ] {
+                let stroke = stroke_of(&points, width);
+
+                assert_inked(&format!("width {width} {name}"), &stroke);
+            }
+        }
+    }
+
+    /// The stroke under the pen, not yet finished, is solid too: a frame draws it every time.
+    #[test]
+    fn a_turning_stroke_is_solid_while_it_is_being_drawn() {
+        for points in [
+            turned_in_place(0.2, 40, 1.0),
+            arc(10.0, 0.5),
+            spiral(0.5, 4.0, 0.5),
+        ] {
+            for upto in [2usize, 5, 20, 100] {
+                if upto > points.len() {
+                    continue;
+                }
+
+                // The live stroke: `close_live` rather than `close_at`, which is what a frame draws.
+                let mut stroke = stroke_of(&points[..upto], WIDTH);
+                stroke.close_live(1.0);
+
+                assert_inked(&format!("live, first {upto} readings"), &stroke);
+            }
+        }
     }
 
     /// A square comes out as a square: covered once, and its area is its own.

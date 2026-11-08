@@ -538,6 +538,17 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
     per segment plus a disc at every joint came out 91-100% opaque, and unevenly enough that a *short* mark read
     as a blot. Direct2D has always filled a stroke as one primitive; Metal did not, and now does
     (`apps/macos/src/platform/metal.rs`, `fill`, and its test `a_highlighter_band_is_painted_exactly_once`).
+
+    **And the outline is the boundary of the discs the nib left.** The model is one sentence — a place is ink exactly
+    when it is within the nib's radius of some reading — computed once as `ink::Model`, and `ribbon_outline` walks
+    the discs that came out of it: the common outer tangent between two of them, and the arc no other disc covers
+    round each. Between a union and a pair of offset edges that is the difference between a shape that has no cases
+    and one that has nothing but. Two offset edges need a normal at every reading, kept in step with its neighbours;
+    a turn flips it, and the four bugs that model produced — a ring instead of a dot, a slit through a stroke that met
+    itself, half a missing end, and one unpainted reading at every sharp corner — were each a flip in a different
+    place. A union of discs has no edges to keep in step, so the turning cases do not exist to get wrong
+    (`crates/note-format/src/ink.rs`, `Model` and `ribbon_outline`, and the `fill_tests` scenarios in
+    `apps/macos/src/platform/metal.rs`).
 18. **A page's selection mask is one flag per stroke, and reading a page rebuilds it.** The mask is a *view* of the
     ink — which strokes a lasso has in hand — and it is the one part of a page nothing stores. A page read out of a
     note therefore has to build one (`InkDocument::from_strokes`), and an edit repairs it if it ever arrives out of

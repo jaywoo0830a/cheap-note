@@ -1251,20 +1251,23 @@ impl InkDocument {
 
     /// Takes the strokes the loop encloses, and lets go of the ones it does not.
     ///
-    /// The loop's own bounds answer most strokes in four comparisons — the same cheap first test the eraser
-    /// makes — and only the survivors are read point by point against the loop.
+    /// The loop's own bounds answer most strokes in four comparisons — the same cheap first test the eraser makes
+    /// (`Stroke::visible_in`, which is a bounds-overlap test) — and the survivors are read point by point against
+    /// a [`Loop`], which is the loop prepared once for all of them rather than walked afresh for every reading.
     fn select_inside(&mut self, region: &Stroke) {
-        let selected: Vec<bool> = self
-            .finished
-            .iter()
-            .map(|stroke| {
-                stroke.visible_in(region.bounds)
+        let loop_bounds = region.bounds;
+        let lasso = Loop::of(&region.points);
+        let mut selected = Vec::with_capacity(self.finished.len());
+
+        for stroke in self.finished.iter() {
+            selected.push(
+                stroke.visible_in(loop_bounds)
                     && stroke
                         .points
                         .iter()
-                        .any(|point| inside_loop((point.x, point.y), &region.points))
-            })
-            .collect();
+                        .any(|point| lasso.contains((point.x, point.y))),
+            );
+        }
 
         self.selected = Arc::new(selected);
     }
@@ -1354,38 +1357,91 @@ fn add_point(
     stats.kept_points += 1;
 }
 
-/// Whether a point is inside a closed loop of points, by the even-odd rule.
+/// A reader's lasso loop, prepared for being asked about many points: the edges sorted by where they start.
 ///
-/// The rule a hand's loop is read by, and the standard way to read one: a ray cast from the point crosses
-/// the boundary an odd number of times when the point is inside. The loop is closed by the last edge back
-/// to the first point, because the reader's loop *is* closed even though the reading that ended it did not
-/// land where the sweep began.
-fn inside_loop(point: (f32, f32), loop_points: &[InkPoint]) -> bool {
-    if loop_points.len() < 3 {
-        // A line, or a dot: there is no region to be inside of.
-        return false;
+/// The loop is walked once, when it is made, and every question after that skips straight to the edges that can
+/// cross the point's own row. A raw walk visits every edge of the loop for every reading of every stroke on the
+/// page — a lasso drawn round a word, over a page of a few hundred strokes, asks the same three hundred edges
+/// several hundred thousand times. Sorting them by their lower end turns each of those asks into a binary search
+/// and the handful of edges that actually reach that row.
+///
+/// The rule is the same even-odd ray cast [`inside_loop`] uses; only the walking is cheaper.
+pub(crate) struct Loop {
+    /// The edges, lowest end first: `(low_y, high_y, x_at_low, x_at_high)`.
+    edges: Vec<(f32, f32, f32, f32)>,
+    /// The lowest `low_y` of any edge, so a point below every edge is answered without searching.
+    lowest: f32,
+}
+
+impl Loop {
+    /// Prepares a closed loop of readings. Fewer than three readings enclose nothing.
+    pub(crate) fn of(points: &[InkPoint]) -> Self {
+        if points.len() < 3 {
+            return Loop {
+                edges: Vec::new(),
+                lowest: 0.0,
+            };
+        }
+
+        let mut edges = Vec::with_capacity(points.len());
+        let mut previous = points[points.len() - 1];
+
+        for current in points {
+            let (low, high) = if previous.y <= current.y {
+                (previous, *current)
+            } else {
+                (*current, previous)
+            };
+
+            edges.push((low.y, high.y, low.x, high.x));
+            previous = *current;
+        }
+
+        edges.sort_by(|left, right| left.0.total_cmp(&right.0));
+
+        let lowest = edges.first().map_or(0.0, |edge| edge.0);
+
+        Loop { edges, lowest }
     }
 
-    let mut inside = false;
-    let mut previous = loop_points[loop_points.len() - 1];
+    /// How many edges of the loop a question at `y` has to look at: the ones whose lowest end is at or above it.
+    ///
+    /// This is the loop's whole saving, exposed so a test can assert the *mechanism* rather than time it. A
+    /// question near the bottom of a loop looks at few edges and one near the top at nearly all of them, so the
+    /// saving is real but not uniform — which is worth knowing when reading a profile of a lasso sweep.
+    pub(crate) fn reachable(&self, y: f32) -> usize {
+        self.edges.partition_point(|edge| edge.0 <= y)
+    }
 
-    for current in loop_points {
-        // The y comparison is half-open — `>` on one side of it and not the other — so a point level with
-        // a vertex is counted once rather than twice, or not at all.
-        if (current.y > point.1) != (previous.y > point.1) {
-            let crossing = current.x
-                + (point.1 - current.y) / (previous.y - current.y) * (previous.x - current.x);
+    /// Whether a point is inside the loop, by the even-odd rule.
+    pub(crate) fn contains(&self, point: (f32, f32)) -> bool {
+        if self.edges.is_empty() || point.1 < self.lowest {
+            return false;
+        }
 
-            if point.0 < crossing {
-                inside = !inside;
+        // Every edge that starts above the point cannot reach its row, and the edges are sorted by where they
+        // start — so the search only has to look at the ones before that.
+        let reachable = self.reachable(point.1);
+
+        let mut inside = false;
+
+        for edge in &self.edges[..reachable] {
+            let (low_y, high_y, low_x, high_x) = *edge;
+
+            // The y comparison is half-open, so a point level with a vertex is counted once rather than twice.
+            if high_y > point.1 {
+                let crossing = low_x + (point.1 - low_y) / (high_y - low_y) * (high_x - low_x);
+
+                if point.0 < crossing {
+                    inside = !inside;
+                }
             }
         }
 
-        previous = *current;
+        inside
     }
-
-    inside
 }
+
 /// Every page's ink, and which page is being written on.
 ///
 /// ## Why the ink is per page

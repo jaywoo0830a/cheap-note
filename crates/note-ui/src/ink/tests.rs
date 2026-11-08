@@ -2482,6 +2482,10 @@ fn a_page_turn_ends_a_gesture_in_flight() {
 }
 
 /// The loop's rule: a point inside is inside, a point outside is not, and the loop closes itself.
+///
+/// Asked of [`Loop`], which is what the lasso actually uses: the prepared form sorts the edges so a question
+/// only visits the ones that can reach its row, and a test that exercised the plain walk instead would pass
+/// while the real one was wrong.
 #[test]
 fn a_point_is_inside_a_loop_by_the_even_odd_rule() {
     // A square of four points: the closing edge runs from the last point back to the first.
@@ -2489,12 +2493,13 @@ fn a_point_is_inside_a_loop_by_the_even_odd_rule() {
         .iter()
         .map(|(x, y)| InkPoint::new(*x, *y, 1.0))
         .collect();
+    let square = Loop::of(&square);
 
-    assert!(inside_loop((50.0, 50.0), &square));
-    assert!(!inside_loop((150.0, 50.0), &square), "beside it");
-    assert!(!inside_loop((-10.0, 50.0), &square), "on the other side");
-    assert!(!inside_loop((50.0, 150.0), &square), "above it");
-    assert!(!inside_loop((50.0, -10.0), &square), "below it");
+    assert!(square.contains((50.0, 50.0)));
+    assert!(!square.contains((150.0, 50.0)), "beside it");
+    assert!(!square.contains((-10.0, 50.0)), "on the other side");
+    assert!(!square.contains((50.0, 150.0)), "above it");
+    assert!(!square.contains((50.0, -10.0)), "below it");
 
     // A loop with a bite taken out of it: a point in the bite is outside, by the same rule.
     let bitten: Vec<InkPoint> = [
@@ -2510,18 +2515,19 @@ fn a_point_is_inside_a_loop_by_the_even_odd_rule() {
     .iter()
     .map(|(x, y)| InkPoint::new(*x, *y, 1.0))
     .collect();
+    let bitten = Loop::of(&bitten);
 
-    assert!(inside_loop((20.0, 20.0), &bitten));
-    assert!(inside_loop((80.0, 20.0), &bitten));
-    assert!(
-        !inside_loop((50.0, 80.0), &bitten),
-        "the bite is not enclosed"
-    );
+    assert!(bitten.contains((20.0, 20.0)));
+    assert!(bitten.contains((80.0, 20.0)));
+    assert!(!bitten.contains((50.0, 80.0)), "the bite is not enclosed");
 
-    assert!(
-        !inside_loop((50.0, 50.0), &square[..2]),
-        "a line is not a region"
-    );
+    // A line is not a region: two readings enclose nothing, so nothing is inside them.
+    let line: Vec<InkPoint> = [(0.0, 0.0), (100.0, 0.0)]
+        .iter()
+        .map(|(x, y)| InkPoint::new(*x, *y, 1.0))
+        .collect();
+
+    assert!(!Loop::of(&line).contains((50.0, 50.0)));
 }
 
 /// The eraser can be undone, which is the whole reason an edit is a value.
@@ -2787,4 +2793,89 @@ fn the_history_is_bounded() {
     }
 
     assert_eq!(taken, HISTORY_EDITS, "and every one of them can be undone");
+}
+
+/// The prepared loop answers the same question as a plain walk, and answers it from a sorted list.
+///
+/// This is the test the lasso's speed rests on. `Loop` sorts its edges by where they start so a question only
+/// visits the ones that can reach the point's row; if that sorting or the search that uses it were wrong, the
+/// lasso would quietly pick the wrong strokes -- which is a wrong answer, not a slow one. So the two forms are
+/// run against each other over a loop and a spread of points, and they have to agree everywhere.
+#[test]
+fn the_prepared_loop_answers_what_a_plain_walk_answers() {
+    // A lumpy loop, so the edges are neither axis-aligned nor sorted as they were drawn.
+    let loop_points: Vec<InkPoint> = (0..120)
+        .map(|step| {
+            let angle = step as f32 * std::f32::consts::TAU / 120.0;
+            let reach = 100.0 + 30.0 * (angle * 3.0).sin();
+
+            InkPoint::new(
+                200.0 + reach * angle.cos(),
+                200.0 + reach * angle.sin(),
+                1.0,
+            )
+        })
+        .collect();
+
+    let prepared = Loop::of(&loop_points);
+
+    // The plain walk, written out: the same even-odd rule, every edge visited.
+    let plain = |point: (f32, f32)| {
+        let mut inside = false;
+        let mut previous = loop_points[loop_points.len() - 1];
+
+        for current in &loop_points {
+            if (current.y > point.1) != (previous.y > point.1) {
+                let crossing = current.x
+                    + (point.1 - current.y) / (previous.y - current.y) * (previous.x - current.x);
+
+                if point.0 < crossing {
+                    inside = !inside;
+                }
+            }
+
+            previous = *current;
+        }
+
+        inside
+    };
+
+    let mut agreed = 0;
+    let mut within = 0;
+
+    for row in 0..=160 {
+        for column in 0..=160 {
+            let at = (60.0 + column as f32 * 2.0, 60.0 + row as f32 * 2.0);
+
+            assert_eq!(
+                prepared.contains(at),
+                plain(at),
+                "the two forms disagree at {at:?}"
+            );
+
+            agreed += 1;
+
+            if prepared.contains(at) {
+                within += 1;
+            }
+        }
+    }
+
+    // Both answers are worth having only if the spread actually lands on both sides of the boundary.
+    assert!(
+        within > agreed / 10 && within < agreed * 9 / 10,
+        "the sample is all one side of the loop: {within} of {agreed} inside"
+    );
+
+    // And the prepared form skips what cannot reach the point: the list it walks is shorter than the loop,
+    // which is the mechanism the speed comes from. Asserted as that mechanism rather than as a timing, because
+    // a test that fails on a busy machine is not a test.
+    let centre = (200.0, 200.0);
+    let reachable = prepared.reachable(centre.1);
+
+    assert!(
+        reachable < loop_points.len(),
+        "a question at the centre walked {reachable} of {} edges",
+        loop_points.len()
+    );
 }

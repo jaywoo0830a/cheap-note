@@ -2603,4 +2603,68 @@ mod fill_tests {
             polygon.len()
         );
     }
+
+    /// Where the per-frame cost of a growing stroke goes.
+    ///
+    /// A stroke under the pen is reshaped every frame, so drawing one costs the shapes at every length it
+    /// passes through. Measured here rather than assumed, because the two halves are not the same size: of
+    /// the cost of drawing a stroke of six hundred readings, the resampling is about a tenth and building
+    /// the outline from it is the rest. Run with `--nocapture`.
+    #[test]
+    fn where_the_shaping_time_goes() {
+        use note_format::ink::{self, InkPoint, Stroke};
+
+        let readings = 600;
+        let line: Vec<InkPoint> = (1..=readings)
+            .map(|step| {
+                let along = step as f32 / readings as f32;
+                InkPoint::new(
+                    100.0 + along * 400.0,
+                    100.0 + along * 400.0 + (along * 40.0).sin() * 20.0,
+                    6.0,
+                )
+            })
+            .collect();
+
+        let mut resample = std::time::Duration::ZERO;
+        let mut outline = std::time::Duration::ZERO;
+
+        for step in 2..=readings {
+            let part = &line[..step];
+
+            let started = std::time::Instant::now();
+            let dense = ink::densified(part, 1.0, ink::Tip::Straight);
+            resample += started.elapsed();
+
+            let started = std::time::Instant::now();
+            let model = ink::Model::of(part, 1.0, ink::Tip::Straight);
+            std::hint::black_box(ink::ribbon_outline(&model));
+            std::hint::black_box(&dense);
+            outline += started.elapsed();
+        }
+
+        let mut whole = std::time::Duration::ZERO;
+
+        for step in 2..=readings {
+            let mut stroke = Stroke::new(line[0], 0x00FF_00FF);
+            stroke.points = line[..step].to_vec();
+
+            let started = std::time::Instant::now();
+            stroke.rebuild(1.0);
+            whole += started.elapsed();
+        }
+
+        eprintln!(
+            "a stroke of {readings} readings drawn: resampling {resample:?}, model and outline \
+             {outline:?}, whole stroke {whole:?}"
+        );
+
+        // The outline is the larger half by a wide margin, which is where a change to the cost of drawing
+        // a stroke has to be made. This asserts the shape of that rather than a time, so it does not fail
+        // on a busy machine.
+        assert!(
+            outline > resample,
+            "the resampling cost more than the outline: {resample:?} against {outline:?}"
+        );
+    }
 }

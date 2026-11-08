@@ -531,6 +531,13 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
     band can be erased, dragged, undone and stored without one line of the file format changing. A band is written
     exactly where the nib went, over a document's text as much as over a blank sheet — the model never reads a
     page's text, so what is written down is only ever ink ([VIEW.md](VIEW.md), §7, *The highlighter*).
+
+    **A stroke is drawn once, as its outline.** Every renderer fills `Stroke::outline` — one closed polygon,
+    tessellated by the nonzero rule — and never a chain of pieces. That is what keeps a translucent stroke the
+    colour it was set to: pieces laid side by side overlap, and alpha composes, so a 35% band drawn as a quad
+    per segment plus a disc at every joint came out 91-100% opaque, and unevenly enough that a *short* mark read
+    as a blot. Direct2D has always filled a stroke as one primitive; Metal did not, and now does
+    (`apps/macos/src/platform/metal.rs`, `fill`, and its test `a_highlighter_band_is_painted_exactly_once`).
 18. **A page's selection mask is one flag per stroke, and reading a page rebuilds it.** The mask is a *view* of the
     ink — which strokes a lasso has in hand — and it is the one part of a page nothing stores. A page read out of a
     note therefore has to build one (`InkDocument::from_strokes`), and an edit repairs it if it ever arrives out of

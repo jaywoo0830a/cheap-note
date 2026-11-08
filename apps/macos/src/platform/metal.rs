@@ -405,11 +405,18 @@ impl Surface {
         self.msaa.clone()
     }
 
-    /// The stroke under the pen, appended as the pen adds points.
+    /// The stroke under the pen, rebuilt whenever it grew.
     ///
-    /// The open stroke is the one piece of ink that moves; rebuilding its whole ribbon every frame
-    /// is O(points) for a line that grew by one. The id says when a new stroke begins, and the
-    /// point count says how much of this one is already in `self.open`.
+    /// The open stroke is the one piece of ink that moves, and like the finished ink it is drawn as its
+    /// *outline* (see [`fill`]). The outline is already in the stroke: the view closes it for the sheet it
+    /// is drawing every frame (`Stroke::close_live`, from `describe_ink`), because the edge at a point is
+    /// set by the points on either side of it and so the last point's edge changes when the next one
+    /// arrives. Appending could only ever draw overlapping pieces, and those pieces compose — a
+    /// translucent band laid down that way darkens into an opaque one as the pen moves.
+    ///
+    /// What is rebuilt here is the tessellation of one stroke, once per frame the pen is down. It is
+    /// bounded by the stroke being drawn and by nothing else, and a *still* page never pays for it: the
+    /// point count is what the early return below is for.
     fn open_stroke(&mut self, canvas: &Canvas) {
         let Some(stroke) = &canvas.ink.open else {
             self.open.clear();
@@ -442,31 +449,13 @@ impl Surface {
             return;
         }
 
-        // The first point's round end, once. The finished ink's `ribbon` draws it last; here it is
-        // first, because the segments after it are appended and cannot be inserted before it.
-        if self.open_points == 0 {
-            disc(
-                &mut self.open,
-                mapping.point([points[0].x, points[0].y], (0.0, 0.0)),
-                points[0].width * 0.5,
-                colour,
-            );
-            self.open_points = 1;
+        // Nothing to do while the pen has not moved: the triangles already uploaded are still right.
+        if self.open_points == points.len() && !self.open.is_empty() {
+            return;
         }
 
-        // The segments the pen has added since the last frame. `open_points - 1` is the point the
-        // last segment ended at, so the first new segment starts there.
-        for pair in points[self.open_points.saturating_sub(1)..].windows(2) {
-            segment(
-                &mut self.open,
-                &pair[0],
-                &pair[1],
-                &mapping,
-                (0.0, 0.0),
-                colour,
-            );
-        }
-
+        self.open.clear();
+        fill(&mut self.open, stroke, &mapping, (0.0, 0.0), colour);
         self.open_points = points.len();
     }
 
@@ -854,85 +843,6 @@ fn shaded(colour: u32, alpha: f32) -> gpui_kit::Hsla {
     let alpha = (alpha.clamp(0.0, 1.0) * 255.0).round() as u32;
 
     gpui_kit::rgba(((colour & 0x00FF_FFFF) << 8) | alpha).into()
-}
-
-/// One segment of a ribbon: the quad between two points, and the disc at the joint.
-///
-/// The model's `outline` is the ribbon's edge, and a fan of triangles over it is only correct when
-/// that polygon is star-shaped — handwriting is not: a loop or a sharp turn makes a triangle of the
-/// fan reach outside the stroke, which is ink where nobody wrote. The points and their widths are
-/// what the ribbon was made from, so the ribbon is built from those instead. Overlap is invisible
-/// for opaque ink, which is every stroke but the highlighter's.
-fn segment(
-    vertices: &mut Vec<Vertex>,
-    a: &note_format::ink::InkPoint,
-    b: &note_format::ink::InkPoint,
-    mapping: &Mapping,
-    shift: (f32, f32),
-    colour: gpui_kit::Hsla,
-) {
-    let (pa, pb) = (
-        mapping.point([a.x, a.y], shift),
-        mapping.point([b.x, b.y], shift),
-    );
-
-    let (dx, dy) = (pb.0 - pa.0, pb.1 - pa.1);
-    let length = (dx * dx + dy * dy).sqrt();
-
-    if length < f32::EPSILON {
-        return;
-    }
-
-    // The ink's widths are in the paper's own units, as its triangles are: the transform that places
-    // the paper is what turns a half width into pixels.
-    let (ha, hb) = (a.width * 0.5, b.width * 0.5);
-    let (nx, ny) = (-dy / length, dx / length);
-    let vertex = |p: (f32, f32)| Vertex::new(p.0, p.1, colour);
-
-    let corners = [
-        vertex((pa.0 + nx * ha, pa.1 + ny * ha)),
-        vertex((pa.0 - nx * ha, pa.1 - ny * ha)),
-        vertex((pb.0 - nx * hb, pb.1 - ny * hb)),
-        vertex((pb.0 + nx * hb, pb.1 + ny * hb)),
-    ];
-
-    vertices.extend_from_slice(&[
-        corners[0], corners[1], corners[2], corners[0], corners[2], corners[3],
-    ]);
-
-    // The wedge a turn leaves open on the outside of the bend.
-    disc(vertices, pb, hb, colour);
-}
-
-/// A stroke as a ribbon: a quad per segment, and a disc at every joint.
-///
-/// The finished ink is built once and kept; the open stroke is appended to by [`Surface::open_stroke`].
-fn ribbon(
-    vertices: &mut Vec<Vertex>,
-    stroke: &note_format::ink::Stroke,
-    mapping: &Mapping,
-    shift: (f32, f32),
-    colour: gpui_kit::Hsla,
-) {
-    let points = &stroke.points;
-    let Some(first) = points.first() else {
-        return;
-    };
-
-    let at = |point: &note_format::ink::InkPoint| mapping.point([point.x, point.y], shift);
-    let half = |width: f32| width * 0.5;
-
-    if points.len() == 1 {
-        disc(vertices, at(first), half(first.width), colour);
-        return;
-    }
-
-    for pair in points.windows(2) {
-        segment(vertices, &pair[0], &pair[1], mapping, shift, colour);
-    }
-
-    // The ends: a nib is round, and so is a highlighter's.
-    disc(vertices, at(first), half(first.width), colour);
 }
 
 /// A disc as a fan of triangles: a joint of the ribbon, or a stroke of a single point.
@@ -1593,6 +1503,122 @@ mod fill_tests {
 
     fn colour() -> gpui_kit::Hsla {
         gpui_kit::rgba(0x00FF_00FF).into()
+    }
+
+    /// A stroke is painted **once**, however many pieces its outline was cut into.
+    ///
+    /// This is the bug that made a highlighter read as a smear. Ink is translucent
+    /// (`HIGHLIGHTER_ALPHA`, 35%), and two triangles over the same pixel compose: 35% over 35% is 58%,
+    /// three is 72%. The ribbon this used to draw laid a quad per segment *and a disc at every joint*,
+    /// and at the sampling the app uses (`resample_spacing`, 0.75 logical px) that was a chain of discs
+    /// a few tenths of a pixel apart under a band 18 wide — six to nineteen layers of 35%, which came
+    /// out 91-100% opaque. The shorter the stroke, the more the overlap *varied*, which is why a short
+    /// mark looked broken where a long one merely looked dark.
+    ///
+    /// A stroke is now drawn as its outline, tessellated once with the nonzero rule ([`tessellate`]) —
+    /// the polygon the model already caches, which cannot overlap itself. This test is the property that
+    /// follows: the triangles cover the capsule the band *is*, and no more. The old ribbon measured 6.6
+    /// at this length; a band drawn once measures 1.
+    #[test]
+    fn a_highlighter_band_is_painted_exactly_once() {
+        let mapping = Mapping {
+            base: (0.0, 0.0),
+            step_x: (1.0, 0.0),
+            step_y: (0.0, 1.0),
+        };
+
+        // The width and the spacing the app ships with: the numbers a reader's hand meets. The width is
+        // `ink::HIGHLIGHTER_WIDTH` (18 logical px) — spelled out because that constant is private to
+        // `note-ui`.
+        let width = 18.0_f32;
+        let spacing = note_format::settings::Settings::default().resample_spacing;
+
+        // A short mark: a few pixels of travel, which is what "too short" means in practice.
+        let mut stroke = note_format::ink::Stroke::new(
+            note_format::ink::InkPoint::new(0.0, 0.0, width),
+            0xFFEB_3B00,
+        );
+
+        let mut x = 0.0;
+        while x < 6.0 {
+            x += spacing;
+            stroke
+                .points
+                .push(note_format::ink::InkPoint::new(x, 0.0, width));
+        }
+
+        let mut vertices = Vec::new();
+        // The outline is what a renderer draws, and the app builds it before the layer ever sees the
+        // stroke (`describe_ink`), so the test does the same: a stroke with no outline draws nothing.
+        stroke.close_at(1.0);
+        fill(&mut vertices, &stroke, &mapping, (0.0, 0.0), colour());
+
+        // What the band covers. A highlighter's outline is the *rectangle* the nib sweeps —
+        // `ribbon_outline` offsets to either side of the line and joins the two edges, with no round
+        // cap — so the area is the travel times the width, and nothing else.
+        let travel = stroke.points.last().expect("a stroke").x;
+        let covered = travel * width;
+
+        let painted = area(&vertices);
+        let overlap = painted / covered;
+
+        // A tessellated polygon covers its own area once. Half again would already be one layer too
+        // many for a 35% band; the old ribbon measured 6.6 at this length and 19 over a long stroke.
+        assert!(
+            (overlap - 1.0).abs() < 0.15,
+            "the band is painted {overlap:.2}× over: at 35% ink that is {:.0}% opaque, not 35%",
+            (1.0 - (1.0 - 0.35_f32).powf(overlap)) * 100.0
+        );
+        assert!(!vertices.is_empty(), "a short band drew nothing at all");
+    }
+
+    /// The same property for a stroke that doubles back over itself: the overlap is *inside* one
+    /// polygon, and the nonzero rule keeps it ink rather than counting it twice.
+    #[test]
+    fn a_band_that_crosses_itself_is_still_one_layer() {
+        let mapping = Mapping {
+            base: (0.0, 0.0),
+            step_x: (1.0, 0.0),
+            step_y: (0.0, 1.0),
+        };
+
+        let width = 18.0_f32;
+        let spacing = note_format::settings::Settings::default().resample_spacing;
+
+        let mut stroke = note_format::ink::Stroke::new(
+            note_format::ink::InkPoint::new(0.0, 0.0, width),
+            0xFFEB_3B00,
+        );
+
+        // Out along the line, then back over it: the shape a reader makes when they go over a
+        // highlight a second time in one stroke.
+        let mut x = 0.0;
+        while x < 8.0 {
+            x += spacing;
+            stroke
+                .points
+                .push(note_format::ink::InkPoint::new(x, 0.0, width));
+        }
+        while x > 0.0 {
+            x -= spacing;
+            stroke
+                .points
+                .push(note_format::ink::InkPoint::new(x.max(0.0), 0.0, width));
+        }
+
+        let mut vertices = Vec::new();
+        stroke.close_at(1.0);
+        fill(&mut vertices, &stroke, &mapping, (0.0, 0.0), colour());
+
+        // The band is 8 px of travel wide, however many times the stroke covered it: the nonzero rule
+        // fills the region once, and a polygon that crosses itself is ink rather than a hole.
+        let covered = 8.0 * width;
+        let overlap = area(&vertices) / covered;
+
+        assert!(
+            (overlap - 1.0).abs() < 0.15,
+            "a doubled-back band is painted {overlap:.2}× over"
+        );
     }
 
     /// A square comes out as a square: covered once, and its area is its own.

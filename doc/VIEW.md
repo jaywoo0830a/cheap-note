@@ -564,6 +564,13 @@ a blank sheet: what the hand draws is what is laid down, with no snapping to cha
 banding. A PDF's text is the document's, not the note's, and a marker that rearranged itself around it would be
 describing the file rather than making a mark on the page.
 
+**And it is laid once.** The band is one polygon — the stroke's own outline, filled by the nonzero rule — not a
+chain of overlapping pieces. That distinction is the difference between a 35% band and a solid one: alpha
+composes, so ink drawn as hundreds of overlapping segments and discs came out 91-100% opaque, and unevenly enough
+that a *short* mark looked broken where a long one merely looked dark. Both renderers now fill the outline, which
+is what makes a highlight over one word the same colour as a highlight across a paragraph
+([ARCHITECTURE.md](ARCHITECTURE.md), invariant 17).
+
 ### A mark
 
 A **mark** is one page of the note and nothing else — no name, no colour, no text — so it is a page

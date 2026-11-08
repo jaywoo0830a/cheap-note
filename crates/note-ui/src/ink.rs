@@ -46,18 +46,6 @@
 //! * **The eraser** removes the strokes the nib passes near, whatever they are.
 //! * **The lasso** takes the ink a loop encloses into the hand, to drag or delete.
 //!
-//! ## A highlighter over a document
-//!
-//! A page with a PDF under it has text, and over that text the marker does what a reader expects of one: the drag
-//! takes hold of *characters*, and the highlight is the bands a reader would draw by hand — one per line the span
-//! crosses (see [`TextLayout`]). Away from the text — a margin, a scan, a blank sheet — it lays a freehand band.
-//!
-//! The text is read by the app when a page is turned to and handed over as [`TextLayout`], in the paper's own
-//! coordinates: the boxes come from Pdfium in the page's points with the y growing up, and
-//! [`paper_of_page_point`] is the whole of putting them where the ink is. What a highlight *writes* is therefore
-//! ordinary strokes — the same ink as a pen's, in the highlighter's colour — so a marked sentence and a drawn band
-//! are the same kind of thing in a note.
-//!
 //! ## What undo is
 //!
 //! Every change to a page is an [`Edit`] — a value that knows how to put itself back — and undo is one edit at a
@@ -198,174 +186,6 @@ pub fn drawn_of_paper(
         3 => (y, width - x),
         _ => (x, y),
     }
-}
-
-/// Where a page's own point — a character box of the document, in PDF points from the page's bottom-left — lands
-/// on the paper the ink is written in.
-///
-/// Four numbers, and every one of them is a fact about how a page is drawn rather than a choice:
-///
-/// * `media` is the page's size **as the file has it**, in points, with no `/Rotate` in it. (Pdfium reports a
-///   page's size *with* it — see [`crate::pdfium`] — so the caller turns that back before coming here.)
-/// * `turn` is the document's own `/Rotate`, in quarter turns clockwise. A page drawn on its side is drawn that
-///   way: its text stays in the file's coordinates while the paper is in the drawn ones, and the four arms below
-///   are the four ways that corner is folded. `a_text_box_lands_where_the_page_draws_it` holds them.
-/// * `paper` is the paper's size in logical pixels: the same shape as `media`, scaled. One factor is therefore the
-///   whole of the scaling, and one subtraction the whole of the flip — because a PDF's y grows *up* from the
-///   bottom-left corner and the paper's grows *down* from the top-left.
-pub fn paper_of_page_point(
-    (x, y): (f32, f32),
-    (width, height): (f32, f32),
-    turn: u8,
-    (paper_width, _): (f32, f32),
-) -> (f32, f32) {
-    // How many logical pixels one point is worth. The drawn page is the width the paper asks for, whichever way
-    // round the turn left it (see [`crate::pdf::RenderedPage::display_size`]).
-    let drawn_width = if turn % 2 == 1 { height } else { width };
-    let scale = if drawn_width > 0.0 {
-        paper_width / drawn_width
-    } else {
-        1.0
-    };
-
-    let drawn = match turn % 4 {
-        // A quarter turn clockwise takes the page's *bottom-left* corner to the drawn top-left — which is the
-        // corner the fixture in `crate::pdf` marks — so the page's own x becomes the paper's y and its y the
-        // paper's x.
-        1 => (y, x),
-        2 => (width - x, y),
-        3 => (height - y, width - x),
-        _ => (x, height - y),
-    };
-
-    (drawn.0 * scale, drawn.1 * scale)
-}
-
-/// How close a nib has to be to a character of the document for a highlighter to take hold of the text.
-///
-/// In the paper's own pixels, measured from the character's box: a reader marking a line of writing puts the nib
-/// *on* it, and a nib within about a line's height of one is still marking that line. Further off than this the
-/// marker lays a freehand band instead — which is what a drag in the margin, and a page with no text at all, get.
-pub const TEXT_REACH: f32 = 16.0;
-
-/// One character of a page's text, in the paper's own coordinates: what a highlighter snaps to.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TextChar {
-    /// The character, as Unicode. Whitespace is kept — it is what tells one word from another, and it is left out
-    /// when a highlight is *drawn* rather than when it is measured (see [`TextLayout::highlight`]).
-    pub ch: char,
-    /// The box it is drawn in: left, top, right, bottom, in the paper's coordinates — y *down* from the top-left,
-    /// which is the flip [`paper_of_page_point`] makes.
-    pub rect: (f32, f32, f32, f32),
-}
-
-/// A page's text, as the ink sees it: the characters of the document under the page in front, in the paper's
-/// coordinates.
-///
-/// Kept beside the ink rather than looked up when it is wanted, because the two are read at the same moment and
-/// used at different ones: the text is read when a page is turned to, and a highlighter asks for it while the pen
-/// is *moving* — which is the one moment a PDF must not be asked to do anything (see [`crate::pdfium`]).
-#[derive(Clone, Debug, Default)]
-pub struct TextLayout {
-    /// The characters, in the document's own order: its text stream, not its geometry.
-    chars: Vec<TextChar>,
-}
-
-impl TextLayout {
-    /// The text a page has, in the order the document writes it.
-    pub fn new(chars: Vec<TextChar>) -> Self {
-        TextLayout { chars }
-    }
-
-    /// Whether there is any text to snap to. A scan, a drawing, and a blank sheet have none.
-    #[cfg(test)]
-    pub fn is_empty(&self) -> bool {
-        self.chars.is_empty()
-    }
-
-    /// How many characters the page's text has.
-    #[cfg(test)]
-    pub fn len(&self) -> usize {
-        self.chars.len()
-    }
-
-    /// The character at `index`, if the page has one.
-    #[cfg(test)]
-    pub fn get(&self, index: usize) -> Option<&TextChar> {
-        self.chars.get(index)
-    }
-
-    /// The character nearest a point, when it is close enough to be the one the reader meant.
-    ///
-    /// `reach` is how far away a character may be. A reader marking a line of writing puts the nib *on* it, and a
-    /// nib within a line's height of one is still marking that line rather than starting a freehand band; a nib
-    /// further off than that is a drag in the margin, and answers with nothing.
-    pub fn nearest(&self, (x, y): (f32, f32), reach: f32) -> Option<usize> {
-        let mut best: Option<(usize, f32)> = None;
-
-        for (index, entry) in self.chars.iter().enumerate() {
-            let (left, top, right, bottom) = entry.rect;
-
-            // The distance to the *box*, not to its centre: a character is a region, and a nib inside it is nothing
-            // away from it. Outside, it is the gap to the nearest edge.
-            let dx = (left - x).max(0.0).max(x - right);
-            let dy = (top - y).max(0.0).max(y - bottom);
-            let distance = (dx * dx + dy * dy).sqrt();
-
-            if distance > reach {
-                continue;
-            }
-
-            // A tie goes to the earlier character, which is the one a reader reading left to right meant.
-            if best.is_none_or(|(_, best)| distance < best) {
-                best = Some((index, distance));
-            }
-        }
-
-        best.map(|(index, _)| index)
-    }
-
-    /// The rectangles a highlight between two characters covers: one band per line the span runs across.
-    ///
-    /// This is a standard highlighter's answer and not a bounding box: a span of three lines is three bands that
-    /// follow the writing, rather than one rectangle swallowing the gaps between them. The span is the characters
-    /// *between* the two, in reading order whichever way round they were dragged, split where the text steps to
-    /// another line — which is where two neighbouring boxes stop overlapping vertically.
-    ///
-    /// Whitespace is left out, so a band ends at the last character of a word rather than running off into the
-    /// margin past it.
-    pub fn highlight(&self, from: usize, to: usize) -> Vec<(f32, f32, f32, f32)> {
-        let (first, last) = if from <= to { (from, to) } else { (to, from) };
-        let mut bands: Vec<(f32, f32, f32, f32)> = Vec::new();
-
-        for entry in self.chars.iter().take(last + 1).skip(first) {
-            if entry.ch.is_whitespace() {
-                continue;
-            }
-
-            let (left, top, right, bottom) = entry.rect;
-
-            match bands.last_mut() {
-                // The same line: the band grows to take this character in. "The same line" is boxes that overlap
-                // vertically at all — a character's box is its own height on its own baseline, so two boxes on one
-                // line always meet and two on different lines never do.
-                Some(band) if overlaps((band.1, band.3), (top, bottom)) => {
-                    band.0 = band.0.min(left);
-                    band.1 = band.1.min(top);
-                    band.2 = band.2.max(right);
-                    band.3 = band.3.max(bottom);
-                }
-                _ => bands.push((left, top, right, bottom)),
-            }
-        }
-
-        bands
-    }
-}
-
-/// Whether two vertical extents meet.
-fn overlaps((top, bottom): (f32, f32), (other_top, other_bottom): (f32, f32)) -> bool {
-    top < other_bottom && other_top < bottom
 }
 
 /// Where a point of the sheet's rectangle came from on the paper: the inverse of [`drawn_of_paper`].
@@ -600,16 +420,6 @@ pub struct InkDocument {
     /// Replaced a list of strokes that undo popped and redo pushed back: a list can only be *shortened*, which
     /// is why the eraser, a lasso's drag, and a cleared page could not be undone (see [`crate::history`]).
     history: History,
-    /// The document's text under this page, in the paper's coordinates: what a highlighter snaps to.
-    ///
-    /// Read when the page is turned to and kept until it is turned away from (see [`TextLayout`]): the gesture
-    /// needs it while the pen is moving, and that is no moment to ask a PDF for anything.
-    text: TextLayout,
-    /// The characters a highlighter has hold of, as (anchor, pointer): the drag in flight, in text indices.
-    ///
-    /// An index pair rather than a list of boxes, because the boxes can be worked out again from the two — which is
-    /// what the frame showing the drag does, and what makes a span that grows and shrinks follow the hand.
-    highlighting: Option<(usize, usize)>,
     /// The stroke currently being drawn, if a pen nib is down.
     open: Option<Stroke>,
     /// Counts the strokes this page has opened, so a layer can tell a longer stroke from a new one.
@@ -671,8 +481,6 @@ impl Default for InkDocument {
         InkDocument {
             finished: Arc::new(Vec::new()),
             history: History::new(),
-            text: TextLayout::default(),
-            highlighting: None,
             open: None,
             open_id: 0,
             active_pointer: None,
@@ -823,32 +631,6 @@ impl InkDocument {
     /// last week, which is the whole of what makes undo survive a restart.
     pub fn set_history(&mut self, history: History) {
         self.history = history;
-    }
-
-    /// Gives the page the document's text, in the paper's own coordinates.
-    ///
-    /// Called when a page is turned to, and again with an empty layout for a page that has no text: what a
-    /// highlighter snaps to *is* the text under the page in front, and a page that has none — a blank sheet, a
-    /// scan — leaves the marker freehand (see [`Tool::Highlighter`]).
-    pub fn set_text_layout(&mut self, text: TextLayout) {
-        self.text = text;
-        // A drag that was in flight was aimed at the text of the page that is gone.
-        self.highlighting = None;
-    }
-
-    /// The page's text, as the ink has it.
-    #[cfg(test)]
-    pub fn text_layout(&self) -> &TextLayout {
-        &self.text
-    }
-
-    /// The bands a highlighter has hold of right now: what a frame draws between the down and the lift.
-    ///
-    /// Nothing when no text is being dragged, which is also when the freehand band under the nib is what is being
-    /// drawn instead (see [`Self::open`]).
-    pub fn highlight_bands(&self) -> Option<Vec<(f32, f32, f32, f32)>> {
-        let (anchor, pointer) = self.highlighting?;
-        Some(self.text.highlight(anchor, pointer))
     }
 
     /// What to tell the note about this page's history, for a write that is about to go out.
@@ -1075,20 +857,14 @@ impl InkDocument {
                             // colour with an alpha in it. Both are stamped in at the same moment the pen's are, so the
                             // line carries what it was drawn with and nothing about the tool has to be remembered
                             // afterwards — the *stroke* is wide, not the tool (see [`alpha_of`] and [`add_point`]).
-                            //
-                            // Over the document's own text the marker takes hold of the *characters* instead, which is
-                            // what a reader highlighting a PDF expects: the drag marks whole characters, and the page's
-                            // text is what it snaps to (see [`TextLayout::nearest`]).
-                            Tool::Highlighter => match self.text.nearest((x, y), TEXT_REACH) {
-                                Some(index) => self.highlighting = Some((index, index)),
-                                None => {
-                                    self.open_id = self.open_id.wrapping_add(1);
-                                    self.open = Some(Stroke::new(
-                                        InkPoint::new(x, y, HIGHLIGHTER_WIDTH),
-                                        with_alpha(settings.highlighter_color, HIGHLIGHTER_ALPHA),
-                                    ));
-                                }
-                            },
+                            // It is freehand wherever it is drawn: a band follows the nib exactly as a line does.
+                            Tool::Highlighter => {
+                                self.open_id = self.open_id.wrapping_add(1);
+                                self.open = Some(Stroke::new(
+                                    InkPoint::new(x, y, HIGHLIGHTER_WIDTH),
+                                    with_alpha(settings.highlighter_color, HIGHLIGHTER_ALPHA),
+                                ));
+                            }
                             // The lasso takes hold of the ink already in hand when the reading is *on* it,
                             // and sweeps a new loop around whatever else it is pressed on.
                             Tool::Lasso => self.begin_lasso(x, y),
@@ -1105,18 +881,9 @@ impl InkDocument {
                         }
                         match self.active_tool {
                             Tool::Eraser => self.erase_at(x, y, settings),
-                            Tool::Pen => self.push_point(x, y, sample, settings, false),
-                            Tool::Highlighter => match self.highlighting {
-                                // The other end of the span follows the hand — and it is *always* the nearest
-                                // character, however far away the hand has got: a drag that runs off the bottom of
-                                // the text still marks to the last line rather than dropping what it had.
-                                Some((anchor, _)) => {
-                                    if let Some(index) = self.text.nearest((x, y), f32::INFINITY) {
-                                        self.highlighting = Some((anchor, index));
-                                    }
-                                }
-                                None => self.push_point(x, y, sample, settings, false),
-                            },
+                            Tool::Pen | Tool::Highlighter => {
+                                self.push_point(x, y, sample, settings, false)
+                            }
                             Tool::Lasso => self.sweep_lasso(x, y, sample, settings),
                         }
                         changed = true;
@@ -1130,19 +897,11 @@ impl InkDocument {
                         }
 
                         match self.active_tool {
-                            Tool::Pen => {
-                                // The lift is where the pen left the paper, so it is the stroke's
-                                // last point regardless of what the resampler would prefer.
+                            // The lift is where the pen left the paper, so it is the stroke's last point
+                            // regardless of what the resampler would prefer. A highlighter's band ends the
+                            // same way: it is one stroke written as the nib moved, not a span of characters.
+                            Tool::Pen | Tool::Highlighter => {
                                 self.push_point(x, y, sample, settings, true);
-                            }
-                            // A highlight is put down where the lift was, like a lasso's drag: the span the reader
-                            // can see is the span they get.
-                            Tool::Highlighter => {
-                                if self.highlighting.is_some() {
-                                    self.end_highlight(settings);
-                                } else {
-                                    self.push_point(x, y, sample, settings, true);
-                                }
                             }
                             // The loop ends where the pen lifted, and a drag is put down there.
                             Tool::Lasso => self.end_lasso(Some((x, y)), sample, settings),
@@ -1519,76 +1278,8 @@ impl InkDocument {
     /// starts with none of somebody else's half-done gesture on it.
     fn forget_gesture(&mut self) {
         self.lasso = None;
-        self.highlighting = None;
         self.active_pointer = None;
     }
-
-    /// Ends a text highlight: one edit, holding one band for each line the span crossed.
-    ///
-    /// The bands become strokes — a line along each band's middle, as wide as the band is tall — which is what makes
-    /// a text highlight the same *kind* of thing as everything else in a note: it is ink, so it can be undone,
-    /// erased, dragged and stored, and nothing outside this module has to know where it came from.
-    ///
-    /// An empty span — a lift that never moved over any text — writes nothing at all: a mark nobody made is not an
-    /// edit (see [`InkDocument::record`]).
-    fn end_highlight(&mut self, settings: &Settings) {
-        let Some((anchor, pointer)) = self.highlighting.take() else {
-            return;
-        };
-
-        let colour = with_alpha(settings.highlighter_color, HIGHLIGHTER_ALPHA);
-        let strokes: Vec<Arc<Stroke>> = self
-            .text
-            .highlight(anchor, pointer)
-            .iter()
-            .filter_map(|band| band_stroke(*band, colour))
-            .collect();
-
-        if strokes.is_empty() {
-            return;
-        }
-
-        // One edit for the whole highlight, so undo takes it off in one step however many lines it crossed.
-        let at = self.finished.len();
-        self.record(Edit::Written { at, strokes });
-    }
-}
-
-/// The stroke that paints one band of a text highlight: a line along the band's middle, as wide as it is tall.
-///
-/// A stroke is a ribbon of one width along a path, so a band is drawn by *walking its middle*: with the two ends
-/// pulled in by half the width, the ribbon's round caps land inside the band instead of bulging out past it, which
-/// is what makes a highlight look like a printed band rather than a rounded smear. The detail is 1:1 because a band
-/// is a straight two-point line — there is no curve in it to flatten.
-fn band_stroke(
-    (left, top, right, bottom): (f32, f32, f32, f32),
-    colour: u32,
-) -> Option<Arc<Stroke>> {
-    let height = bottom - top;
-    let width = right - left;
-
-    if height <= 0.0 || width <= 0.0 {
-        return None;
-    }
-
-    // Half the band's height, so that the ribbon's round caps — which reach half a width past each end of the path
-    // — land exactly on the band's own ends instead of bulging out past them. A band narrower than it is tall has
-    // its ends meet in the middle rather than cross.
-    let inset = (height / 2.0).min(width / 2.0);
-    let middle = (top + bottom) / 2.0;
-
-    let mut stroke = Stroke::new(InkPoint::new(left + inset, middle, height), colour);
-    stroke
-        .points
-        .push(InkPoint::new(right - inset, middle, height));
-    stroke.rebuild(1.0);
-
-    // The ribbon reaches half a width past its *path*, and a stroke's bounds are its path's (see [`Stroke::freeze`]):
-    // a band whose numbers were the path's would have its own ink outside them, and those numbers are what the
-    // eraser tests first and what a frame culls by. The band's rectangle is the honest answer, so it is set here.
-    stroke.bounds = [left, top, right, bottom];
-
-    Some(Arc::new(stroke))
 }
 
 /// Adds a point to a stroke being drawn, after smoothing and resampling.

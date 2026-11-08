@@ -2612,6 +2612,49 @@ fn the_pen_is_not_a_highlighter() {
     );
 }
 
+/// A highlighter is freehand even on a page that has a document's text under it.
+///
+/// The rule the marker is held to: it lays a band where the nib goes and asks nothing of the page. There is no
+/// snapping to characters, no span between two ends and no band per line — a press on a word draws a curve over
+/// that word, exactly as it would over a blank sheet.
+#[test]
+fn a_highlighter_over_a_documents_text_is_still_freehand() {
+    let mut s = settings();
+    s.highlighter_color = 0xFF_EB_3B;
+
+    let mut ink = InkDocument::default();
+    ink.set_mode(Tool::Highlighter);
+
+    // A press on the writing, held and dragged across it in a curve rather than along the line.
+    ink.consume(&[reading(7, Phase::Down, 105.0, 205.0, None)], &id(), &s);
+    ink.consume(&[reading(7, Phase::Move, 130.0, 235.0, None)], &id(), &s);
+    ink.consume(&[reading(7, Phase::Move, 160.0, 210.0, None)], &id(), &s);
+
+    assert!(
+        ink.finished().is_empty(),
+        "nothing is written until the lift, which is the same as any stroke"
+    );
+    assert!(ink.open().is_some(), "and it is the band being drawn");
+
+    ink.consume(&[reading(7, Phase::Up, 190.0, 245.0, None)], &id(), &s);
+
+    assert_eq!(
+        ink.stroke_count(),
+        1,
+        "one stroke for one drag, however many lines it crossed"
+    );
+
+    let band = &ink.finished()[0];
+    assert!(
+        (alpha_of(band.color) - HIGHLIGHTER_ALPHA).abs() < 0.01,
+        "and it is the marker's ink"
+    );
+    assert_eq!(
+        band.points[0].width, HIGHLIGHTER_WIDTH,
+        "with the one width a band has"
+    );
+}
+
 /// The eraser does not care what a stroke is: a highlight is ink, and it goes the same way as a line.
 #[test]
 fn the_eraser_takes_a_highlight_like_any_ink() {
@@ -2632,176 +2675,6 @@ fn the_eraser_takes_a_highlight_like_any_ink() {
     assert_eq!(ink.stroke_count(), 0, "the band went with the nib");
     assert!(ink.undo(), "and it comes back like anything else");
     assert_eq!(ink.stroke_count(), 1);
-}
-
-/// The document's text of a page, laid out by hand: three lines of four characters and a trailing space each.
-///
-/// Laid out rather than read out of a PDF, because what these tests are about is the *gesture*: which character
-/// a nib meant, and which bands a span covers. A real document would only hide that behind Pdfium, and the part
-/// of this that *does* need a document — where its text is, and how a turned page reports it — is pinned down in
-/// `crate::pdf` against a fixture that Pdfium itself reads.
-fn three_lines_of_text() -> TextLayout {
-    let mut chars = Vec::new();
-
-    for line in 0..3 {
-        for column in 0..=4 {
-            let left = 100.0 + column as f32 * 20.0;
-            let top = 200.0 + line as f32 * 40.0;
-
-            chars.push(TextChar {
-                // A space ends each line, which is what a band must stop *before*.
-                ch: if column == 4 { ' ' } else { 'a' },
-                rect: (left, top, left + 18.0, top + 16.0),
-            });
-        }
-    }
-
-    TextLayout::new(chars)
-}
-
-/// A nib on the writing takes hold of the character under it, and a nib in the margin takes hold of nothing.
-#[test]
-fn a_nib_snaps_to_the_character_under_it() {
-    let text = three_lines_of_text();
-
-    assert_eq!(text.len(), 15, "three lines of four characters and a space");
-    assert!(!text.is_empty());
-    assert_eq!(text.get(0).expect("the first character").ch, 'a');
-
-    assert_eq!(
-        text.nearest((110.0, 250.0), TEXT_REACH),
-        Some(5),
-        "the second character of the second line"
-    );
-    assert_eq!(
-        text.nearest((190.0, 250.0), TEXT_REACH),
-        Some(9),
-        "and the far end of that line is its last character"
-    );
-    assert_eq!(
-        text.nearest((400.0, 700.0), TEXT_REACH),
-        None,
-        "a nib on the blank paper below the text is not marking it"
-    );
-}
-
-/// A span is one band per line it crossed, and it reads the same way round whichever end was dragged first.
-#[test]
-fn a_span_covers_the_lines_it_crossed() {
-    let text = three_lines_of_text();
-
-    let bands = text.highlight(0, 5);
-    assert_eq!(bands.len(), 2, "two lines were crossed: {bands:?}");
-
-    assert_eq!(
-        bands[0],
-        (100.0, 200.0, 178.0, 216.0),
-        "the first line from its first character to its last, and not to the space after it"
-    );
-    assert_eq!(
-        bands[1],
-        (100.0, 240.0, 118.0, 256.0),
-        "and one character of the next"
-    );
-
-    assert_eq!(text.highlight(5, 0), bands, "dragged the other way round");
-}
-
-/// Marking a PDF's text: one edit, one band per line, and the ink it makes is an ordinary stroke.
-#[test]
-fn a_highlighter_marks_the_text_it_is_dragged_over() {
-    let mut s = settings();
-    s.highlighter_color = 0xFF_EB_3B;
-
-    let mut ink = InkDocument::default();
-    ink.set_mode(Tool::Highlighter);
-    ink.set_text_layout(three_lines_of_text());
-
-    // Down on the first character of the first line, dragged to the second character of the second.
-    ink.consume(&[reading(7, Phase::Down, 105.0, 205.0, None)], &id(), &s);
-    ink.consume(&[reading(7, Phase::Move, 130.0, 245.0, None)], &id(), &s);
-
-    let bands = ink.highlight_bands().expect("the drag is marking text");
-    assert_eq!(
-        bands.len(),
-        2,
-        "and it shows what it has hold of: {bands:?}"
-    );
-    assert_eq!(ink.stroke_count(), 0, "nothing is written until the lift");
-
-    ink.consume(&[reading(7, Phase::Up, 130.0, 245.0, None)], &id(), &s);
-
-    assert_eq!(
-        ink.text_layout().len(),
-        15,
-        "the page was given the document's text"
-    );
-    assert_eq!(ink.stroke_count(), 2, "one band per line");
-    assert!(
-        ink.highlight_bands().is_none(),
-        "and the drag is over, so nothing is in flight"
-    );
-
-    let stroke = &ink.finished()[0];
-    assert_eq!(
-        stroke.points[0].width, 16.0,
-        "a band is as tall as the line of text it marks"
-    );
-    assert!(
-        (alpha_of(stroke.color) - HIGHLIGHTER_ALPHA).abs() < 0.01,
-        "and it is the highlighter's ink, so the text shows through"
-    );
-    assert_eq!(
-        stroke.bounds,
-        [100.0, 200.0, 178.0, 216.0],
-        "with the geometry of the band itself"
-    );
-
-    assert!(
-        ink.undo(),
-        "a text highlight is one edit, and undo takes it off"
-    );
-    assert_eq!(ink.stroke_count(), 0);
-}
-
-/// A marker away from the text lays a freehand band, which is what a page with no text gets for every stroke.
-#[test]
-fn a_drag_away_from_the_text_is_freehand() {
-    let mut ink = InkDocument::default();
-    ink.set_mode(Tool::Highlighter);
-    ink.set_text_layout(three_lines_of_text());
-
-    ink.consume(
-        &[reading(7, Phase::Down, 400.0, 700.0, None)],
-        &id(),
-        &settings(),
-    );
-    ink.consume(
-        &[reading(7, Phase::Move, 500.0, 700.0, None)],
-        &id(),
-        &settings(),
-    );
-
-    assert!(
-        ink.highlight_bands().is_none(),
-        "the nib is nowhere near the writing"
-    );
-
-    ink.consume(
-        &[reading(7, Phase::Up, 500.0, 700.0, None)],
-        &id(),
-        &settings(),
-    );
-
-    assert_eq!(
-        ink.stroke_count(),
-        1,
-        "a freehand band, written as the nib moved"
-    );
-    assert!(
-        ink.finished()[0].points.len() > 2,
-        "with the path the hand took"
-    );
 }
 
 /// A page read out of the note takes ink like any other — which used to be fatal, and silently so.

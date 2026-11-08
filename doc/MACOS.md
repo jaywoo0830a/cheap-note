@@ -206,7 +206,7 @@ The body is `PenCursor::body_shape()` in three passes — shadow (`BODY_SHADOW_D
 `canvas.rs` is the window half (a `NSView` below GPUI's, its size, and the frame's description of what to
 draw); `metal.rs` is how the pixels are made. The description the view hands over is
 `note_ui::ink_layer::Canvas`: the fills (rect + `Hsla` + radius), the page (`Arc<RenderImage>`), and the
-ink (strokes, origin/zoom/paper/turns, selection, lasso, highlight bands). It becomes **GPU geometry** —
+ink (strokes, origin/zoom/paper/turns, selection, lasso). It becomes **GPU geometry** —
 a fill is two triangles, a page is a textured quad, a stroke is a triangle fan over the outline the ink
 model already computed. Four draw calls: desk and paper, the page's texture, the finished ink, the open
 stroke.

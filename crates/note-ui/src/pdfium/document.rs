@@ -25,9 +25,7 @@ use std::ffi::{c_int, c_ulong};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use super::api::{
-    api, FpdfAction, FpdfBookmark, FpdfDest, FpdfDocument, FpdfPage, FpdfTextPage, SizeF,
-};
+use super::api::{api, FpdfAction, FpdfBookmark, FpdfDest, FpdfDocument, FpdfPage, SizeF};
 use crate::error::{AppError, Result};
 
 /// Pdfium's `PDFACTION_GOTO`: an action that jumps to a destination in this document.
@@ -58,13 +56,6 @@ const OUTLINE_ENTRIES: usize = 4096;
 /// size of the file.
 const OUTLINE_TITLE_BYTES: c_ulong = 64 * 1024;
 
-/// The most characters one page may contribute to the highlighter.
-///
-/// Pdfium reports the number before the caller asks for the characters, and a crafted file can
-/// make that number large. A page with more than a million characters is not a page a person is
-/// going to highlight by hand; the cap keeps the reader's cost proportional to what it can use.
-const TEXT_CHARS: c_int = 1_000_000;
-
 /// One entry of a document's outline: the table of contents the document itself carries.
 ///
 /// A tree rather than a list, because that is what a table of contents is: chapters with sections under
@@ -83,27 +74,6 @@ pub struct OutlineEntry {
     pub page: Option<usize>,
     /// What is nested under it, in the document's order.
     pub children: Vec<OutlineEntry>,
-}
-
-/// One character of a page, and the box it is drawn in: what a highlighter snaps to.
-///
-/// The box is in the page's own points, with the origin at its **bottom-left** — Pdfium's convention for text, as
-/// it is for the page itself — so putting one on the paper means flipping the y (see `ink::paper_of_page_point`).
-/// `ch` is the character as Unicode and may be a space or a line break: Pdfium counts the characters it
-/// *generates* as well as the glyphs the file draws, which is what makes the stream a page's text rather than a
-/// list of marks.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TextChar {
-    /// The character, as Unicode. Zero when Pdfium cannot map one.
-    pub ch: char,
-    /// The box's left edge, in page points.
-    pub left: f32,
-    /// The box's right edge.
-    pub right: f32,
-    /// The box's bottom edge — nearer the page's bottom-left corner, in PDF's upward y.
-    pub bottom: f32,
-    /// The box's top edge.
-    pub top: f32,
 }
 
 /// An open PDF document, and the bytes it was opened from.
@@ -208,63 +178,6 @@ impl Document {
         };
 
         unsafe { (api.page_rotation)(page.handle()) }.clamp(0, 3) as u8
-    }
-
-    /// The characters of a page, with the box each is drawn in.
-    ///
-    /// A page with no text — a scan, a drawing, a blank sheet — answers with nothing rather than failing: that is
-    /// the common case for the pages a note is written on, and the highlighter's own answer to it (a freehand
-    /// band) is not an error.
-    ///
-    /// Costs one page load and one text-page load, both released before this returns: what comes back is copies of
-    /// numbers, so nothing here outlives the call and no handle is kept between frames.
-    pub fn text_chars(&self, index: usize) -> Result<Vec<TextChar>> {
-        let api = api()?;
-
-        let Some(page) = Page::load(self, index) else {
-            return Ok(Vec::new());
-        };
-
-        let text = unsafe { (api.text_load_page)(page.handle()) };
-        if text.is_null() {
-            return Ok(Vec::new());
-        }
-
-        // The guard releases the text page on every path out, including a panic in the loop.
-        let text = TextPage { handle: text };
-        let count = unsafe { (api.text_count_chars)(text.handle) }.clamp(0, TEXT_CHARS);
-        let mut chars = Vec::with_capacity(count as usize);
-
-        for at in 0..count {
-            let (mut left, mut right, mut bottom, mut top) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-
-            let ok = unsafe {
-                (api.text_char_box)(
-                    text.handle,
-                    at,
-                    &mut left,
-                    &mut right,
-                    &mut bottom,
-                    &mut top,
-                )
-            };
-
-            if ok == 0 {
-                continue;
-            }
-
-            let code = unsafe { (api.text_unicode)(text.handle, at) };
-
-            chars.push(TextChar {
-                ch: char::from_u32(code).unwrap_or('\u{0}'),
-                left: left as f32,
-                right: right as f32,
-                bottom: bottom as f32,
-                top: top as f32,
-            });
-        }
-
-        Ok(chars)
     }
 
     /// The document's outline — the table of contents it carries — as a tree.
@@ -373,22 +286,6 @@ impl Drop for Page {
     fn drop(&mut self) {
         if let Ok(api) = api() {
             unsafe { (api.close_page)(self.handle) }
-        }
-    }
-}
-
-/// A page's text object: the character stream loaded from a [`Page`].
-///
-/// It is a guard rather than a bare handle so every early return releases it; the [`Page`] it came
-/// from is dropped afterwards, which is the order Pdfium's API expects.
-struct TextPage {
-    handle: FpdfTextPage,
-}
-
-impl Drop for TextPage {
-    fn drop(&mut self) {
-        if let Ok(api) = api() {
-            unsafe { (api.text_close_page)(self.handle) }
         }
     }
 }

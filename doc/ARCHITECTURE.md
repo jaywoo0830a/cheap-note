@@ -528,12 +528,9 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
     ([STORE.md](STORE.md), §3, *The history*).
 17. **The marking tools are not new kinds of ink.** A highlighter is one `Stroke` with a wide width and a colour
     whose top byte is an alpha (`ink::with_alpha`, `ink::alpha_of`, and `ink::HIGHLIGHTER_WIDTH`), which is why a
-    band can be erased, dragged, undone and stored without one line of the file format changing. Where a page has a
-    document under it, the marker takes hold of *characters* instead: the app reads the page's text once, when it is
-    turned to, and maps every box onto the paper (`ink::paper_of_page_point` — one scale, one flip, and the
-    document's own `/Rotate`, which `pdf::a_pages_text_is_in_the_pages_own_points` is what pins down), and the model
-    turns a span into bands without ever asking Pdfium anything. What is written down is still ink
-    ([VIEW.md](VIEW.md), §7, *The highlighter*).
+    band can be erased, dragged, undone and stored without one line of the file format changing. A band is written
+    exactly where the nib went, over a document's text as much as over a blank sheet — the model never reads a
+    page's text, so what is written down is only ever ink ([VIEW.md](VIEW.md), §7, *The highlighter*).
 18. **A page's selection mask is one flag per stroke, and reading a page rebuilds it.** The mask is a *view* of the
     ink — which strokes a lasso has in hand — and it is the one part of a page nothing stores. A page read out of a
     note therefore has to build one (`InkDocument::from_strokes`), and an edit repairs it if it ever arrives out of

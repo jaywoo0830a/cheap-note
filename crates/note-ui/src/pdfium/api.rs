@@ -71,9 +71,6 @@ pub(super) type FpdfBookmark = *mut c_void;
 pub(super) type FpdfDest = *mut c_void;
 /// What an entry does instead of pointing somewhere in this document.
 pub(super) type FpdfAction = *mut c_void;
-/// A page's text: the character stream Pdfium builds for a page that has been asked for its text.
-pub(super) type FpdfTextPage = *mut c_void;
-
 /// Pdfium's `FS_SIZEF`: a width and a height, in points.
 ///
 /// The size lookup takes this *struct* rather than two `double*`s on the build this app ships.
@@ -198,12 +195,6 @@ pub(super) struct Api {
     pub(super) action_type: unsafe extern "C" fn(FpdfAction) -> c_ulong,
     pub(super) action_dest: unsafe extern "C" fn(FpdfDocument, FpdfAction) -> FpdfDest,
     pub(super) dest_page_index: unsafe extern "C" fn(FpdfDocument, FpdfDest) -> c_int,
-    pub(super) text_load_page: unsafe extern "C" fn(FpdfPage) -> FpdfTextPage,
-    pub(super) text_close_page: unsafe extern "C" fn(FpdfTextPage),
-    pub(super) text_count_chars: unsafe extern "C" fn(FpdfTextPage) -> c_int,
-    pub(super) text_unicode: unsafe extern "C" fn(FpdfTextPage, c_int) -> c_uint,
-    pub(super) text_char_box:
-        unsafe extern "C" fn(FpdfTextPage, c_int, *mut f64, *mut f64, *mut f64, *mut f64) -> c_int,
     /// The library those functions came from, held so that it is never unmapped.
     ///
     /// Every pointer in this struct points *into* this mapping, so dropping it would leave the app
@@ -290,14 +281,6 @@ fn load_api() -> Result<Api> {
             action_type: resolve(&library, "FPDFAction_GetType")?,
             action_dest: resolve(&library, "FPDFAction_GetDest")?,
             dest_page_index: resolve(&library, "FPDFDest_GetDestPageIndex")?,
-            // The text of a page: what a highlighter snaps to. Reading it is not rendering — the
-            // char boxes are in the page's own coordinates — so this needs no bitmap and no
-            // render, which is what lets a page's text be read the moment it is turned to.
-            text_load_page: resolve(&library, "FPDFText_LoadPage")?,
-            text_close_page: resolve(&library, "FPDFText_ClosePage")?,
-            text_count_chars: resolve(&library, "FPDFText_CountChars")?,
-            text_unicode: resolve(&library, "FPDFText_GetUnicode")?,
-            text_char_box: resolve(&library, "FPDFText_GetCharBox")?,
             _library: library,
         };
 

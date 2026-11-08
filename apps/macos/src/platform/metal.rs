@@ -1206,15 +1206,6 @@ impl Surface {
             quad(&mut behind, device(mark.rect, scale), mark.colour);
         }
 
-        // In front of the ink: the highlighter's preview, the one mark a gesture lays over ink that is
-        // already on the page. (A lasso's loop is ink, and is drawn with the ink.)
-        let mut front = Vec::new();
-        if let Some((colour, bands)) = &canvas.ink.highlight {
-            for band in bands {
-                quad(&mut front, device(*band, scale), *colour);
-            }
-        }
-
         self.refresh_ink(canvas, scale);
         if !self.ink_slots_valid[slot] {
             self.upload_ink(slot);
@@ -1282,21 +1273,10 @@ impl Surface {
             }
         }
 
-        // The finished ink, then the highlight, then the stroke under the pen: the order the page was
-        // painted in when Core Graphics drew it.
+        // The finished ink, then the stroke under the pen: the order the page was painted in when Core
+        // Graphics drew it.
         if let Some(buffer) = &self.ink_buffers[slot] {
             self.solid(&encoder, buffer, self.ink.len(), width, height, sheet);
-        }
-
-        if let Some(buffer) = self.buffer(&front) {
-            self.solid(
-                &encoder,
-                &buffer,
-                front.len(),
-                width,
-                height,
-                Transform::WINDOW,
-            );
         }
 
         if let Some(buffer) = &self.open_buffers[slot] {

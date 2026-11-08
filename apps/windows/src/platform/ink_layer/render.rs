@@ -350,23 +350,6 @@ impl Renderer {
                 self.context.FillGeometry(&outline, &self.brush, None);
             }
 
-            // The text a highlighter has hold of, drawn through the ink's own transform because that is where the
-            // text is: the bands are in the paper's units, exactly as the strokes they are about to become. Drawn
-            // before the lasso's loop, so that the mark being swept stays on top of everything.
-            if let Some((colour, bands)) = &canvas.ink.highlight {
-                self.context.SetTransform(&ink_transform(canvas));
-                self.brush.SetColor(&colour_of(*colour));
-
-                for band in bands {
-                    if band.is_empty() {
-                        continue;
-                    }
-
-                    self.context
-                        .FillRectangle(&rect_of(*band, 1.0), &self.brush);
-                }
-            }
-
             // And the loop a lasso is sweeping, over everything: it is the mark the reader is making *now*,
             // and the one thing on the sheet that has to be visible over the ink it is choosing between.
             if let Some(loop_stroke) = &canvas.ink.lasso {

@@ -37,11 +37,7 @@ use crate::canvas::{
 use crate::cursor::{nib_radius_for_width, PenCursor};
 use crate::gamepad::{Gamepads, Sticks};
 use crate::home::Home;
-use crate::ink::{
-    paper_of_drawn, paper_of_page_point, with_alpha, InkTransform, Notes, Stroke, TextChar,
-    TextLayout, Tool, HIGHLIGHTER_ALPHA, HIGHLIGHTER_WIDTH,
-};
-use crate::ink_layer::ink_colour;
+use crate::ink::{paper_of_drawn, InkTransform, Notes, Stroke, Tool, HIGHLIGHTER_WIDTH};
 use crate::ink_layer::{Canvas, Ink, Page, Rect};
 use crate::input::PenInbox;
 use crate::input::Reading;
@@ -1267,28 +1263,6 @@ impl NoteApp {
         });
         let shown = lasso.is_some() || self.ink.has_selection();
 
-        // The text a highlighter has hold of, in the colour it will be laid down in: a preview of bands, which is
-        // the whole of what a reader is choosing between while the span is still being dragged (see
-        // [`crate::ink_layer::Ink::highlight`]).
-        let highlight = self.ink.highlight_bands().map(|bands| {
-            let colour = ink_colour(with_alpha(
-                self.settings.highlighter_color,
-                HIGHLIGHTER_ALPHA,
-            ));
-
-            let rects = bands
-                .iter()
-                .map(|(left, top, right, bottom)| Rect {
-                    x: *left,
-                    y: *top,
-                    width: right - left,
-                    height: bottom - top,
-                })
-                .collect();
-
-            (colour, rects)
-        });
-
         self.canvas.ink = Ink {
             origin: sheet.origin,
             zoom: sheet.zoom,
@@ -1308,7 +1282,6 @@ impl NoteApp {
             offset: self.ink.drag_offset(),
             selection: shown.then_some(self.selection_colour),
             lasso,
-            highlight,
         };
     }
 
@@ -2307,10 +2280,6 @@ impl NoteApp {
     /// Persists and repaints after anything changed.
     fn finish_setting(&mut self, cx: &mut Context<Self>) {
         self.save_note_state();
-        // How wide the page is drawn is a *setting*, and it is also the scale a page's text is laid out at: a
-        // setting that changed it has to be followed by reading the text again, or a highlight would be built for
-        // the page as it was a moment ago (see [`Self::refresh_page_text`]).
-        self.refresh_page_text();
         self.touch_status();
         cx.notify();
     }
@@ -2643,93 +2612,6 @@ impl NoteApp {
         if let Err(error) = self.load_page_ink(page) {
             self.report(error.to_string());
         }
-
-        // The document's text under the page, so that a highlighter has something to snap to the moment the reader
-        // reaches for it (see [`Self::refresh_page_text`]).
-        self.refresh_page_text();
-    }
-
-    /// Hands the page in front the document's text, in the paper's own coordinates: what a highlighter snaps to.
-    ///
-    /// Read when a page is turned to rather than when a stroke is dragged, because the gesture needs it while the
-    /// pen is *moving*, and that is no moment to ask a PDF for anything (see [`TextLayout`]).
-    ///
-    /// The mapping is the whole of this: a document's character box is in the page's own points with the y growing
-    /// *up* from the bottom-left corner, and the ink is written in the paper's pixels with the y growing *down* from
-    /// the top-left — one scale, one flip, and the document's own `/Rotate` folded in between, which is what
-    /// [`paper_of_page_point`] is.
-    fn refresh_page_text(&mut self) {
-        let Some(document_page) = self.pages.document_page(self.page_index) else {
-            // A blank page has no document under it, so there is no text: the marker is freehand on it.
-            self.ink.set_text_layout(TextLayout::default());
-            return;
-        };
-
-        let Some((point_width, point_height)) = self.pdf.page_point_size(document_page) else {
-            self.ink.set_text_layout(TextLayout::default());
-            return;
-        };
-
-        if point_width <= 0.0 || point_height <= 0.0 {
-            self.ink.set_text_layout(TextLayout::default());
-            return;
-        }
-
-        // Pdfium reports a page's size with its own `/Rotate` already in it, while its *text* boxes are in the
-        // coordinates the file draws in — so the page's own size is the reported one turned back (`crate::pdf`'s
-        // fixture test is what says so).
-        let turn = self.pdf.page_document_rotation(document_page);
-        let media = if turn % 2 == 1 {
-            (point_height, point_width)
-        } else {
-            (point_width, point_height)
-        };
-
-        // The paper, in the page's own units: the drawn page is exactly as wide as the settings ask, so one factor
-        // carries the whole of the scaling — and the reader's *turn* is the view's, which is why the ink's own space
-        // is the page as the document draws it and not as the reader is holding it.
-        let turns = self.pages.rotation(self.page_index);
-        let drawn_points = if swaps_axes(turns) { media.1 } else { media.0 };
-        let scale = if drawn_points > 0.0 {
-            self.settings.page_display_width / drawn_points
-        } else {
-            1.0
-        };
-        let paper = (media.0 * scale, media.1 * scale);
-
-        let chars = match self.pdf.page_text_chars(document_page) {
-            Ok(chars) => chars,
-            Err(error) => {
-                self.report(error.to_string());
-                return;
-            }
-        };
-
-        // Two corners through the mapping rather than one: a turn swaps the axes, so which of the two comes out
-        // left and right is the mapping's business and not this loop's.
-        let layout = TextLayout::new(
-            chars
-                .into_iter()
-                .map(|entry| {
-                    let (left, top) =
-                        paper_of_page_point((entry.left, entry.top), media, turn, paper);
-                    let (right, bottom) =
-                        paper_of_page_point((entry.right, entry.bottom), media, turn, paper);
-
-                    TextChar {
-                        ch: entry.ch,
-                        rect: (
-                            left.min(right),
-                            top.min(bottom),
-                            left.max(right),
-                            top.max(bottom),
-                        ),
-                    }
-                })
-                .collect(),
-        );
-
-        self.ink.set_text_layout(layout);
     }
 
     /// Writes what a page still owes the note, and folds its ink into chunks: the page is closing.
@@ -2849,10 +2731,6 @@ impl NoteApp {
     fn turn_page(&mut self, turns: i32, cx: &mut Context<Self>) {
         self.pages.turn(self.page_index, turns);
 
-        // A turn changes the shape the page is drawn at, so where its text sits in the paper's coordinates
-        // changes with it: the layout is derived again rather than left pointing at the old paper.
-        self.refresh_page_text();
-
         // The sheet, the page's bitmap and the ink's transform all follow from the list on the next
         // frame, so nothing here has to describe them again — but the note has to keep the turn, and the
         // reader has to be told what it came to.
@@ -2868,7 +2746,6 @@ impl NoteApp {
     /// the reader put it — and turning the note back is the same command the other way.
     fn turn_every_page(&mut self, turns: i32, cx: &mut Context<Self>) {
         self.pages.turn_all(turns);
-        self.refresh_page_text();
         self.save_note_state();
         self.report(self.turn_message(turns, true));
         cx.notify();
@@ -3297,7 +3174,6 @@ impl NoteApp {
         self.writer = Some(writer);
         self.home.hide();
         self.load_page_ink(self.page_index)?;
-        self.refresh_page_text();
         self.remember_page();
         self.remember_opened(source);
 

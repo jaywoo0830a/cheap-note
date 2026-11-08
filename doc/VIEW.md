@@ -552,17 +552,10 @@ read *through* — a pen's black at the same alpha would be a grey smear over th
 pressure at all (a marker has one tip, and a translucent band that thinned under a light touch would show the
 writing through in stripes), and the eraser takes it like any other ink.
 
-**Over a document's own text, the marker snaps to the text.** A press within about a line's height of a character
-takes hold of *characters* rather than laying a band: the drag's span is the text between the two ends, in reading
-order whichever way it was dragged, and the highlight is one band per line the span crosses — trailing whitespace
-left out, so a band ends at the last letter of the word rather than running off into the margin. That is what a
-reader expects of a highlighter in a PDF, and it is also where the marker stops being freehand: a press away from
-any character — a margin, a scan, a blank sheet — lays a band as the hand moves, exactly as it would on paper.
-
-The text is read once, when a page is turned to (or when a setting changes how wide the page is drawn), and handed
-to the page in the paper's own coordinates. A page's text and the ink are then in the same space, which is why a
-highlight lands *on* the sentence it marks even on a page the reader has turned, and why a highlight is written in
-the same place whether the page is turned or not.
+**The band is freehand, always.** It follows the nib exactly as a line does, over a document's text as much as over
+a blank sheet: what the hand draws is what is laid down, with no snapping to characters and no line-by-line
+banding. A PDF's text is the document's, not the note's, and a marker that rearranged itself around it would be
+describing the file rather than making a mark on the page.
 
 ### A mark
 

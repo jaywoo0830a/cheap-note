@@ -30,7 +30,7 @@ use gpui_kit::RenderImage;
 
 use crate::error::{AppError, Result};
 use crate::pages::{swaps_axes, Quarters};
-use crate::pdfium::{Document, OutlineEntry, RenderJob, TextChar};
+use crate::pdfium::{Document, OutlineEntry, RenderJob};
 
 /// What one slice of a render did, re-exported because it is part of this module's own API.
 pub use crate::pdfium::Progress;
@@ -425,28 +425,6 @@ impl PdfDocumentView {
     /// any page, which is what the app needs to describe the sheet it is writing on.
     pub fn page_point_size(&self, index: usize) -> Option<(f32, f32)> {
         self.document.as_ref()?.page_point_size(index)
-    }
-
-    /// The text of one page of the document, as Pdfium reads it: character boxes in the page's own points.
-    ///
-    /// Read for a page when it is turned to, and never while a pen is moving: it loads the page and its text, which
-    /// is cheap but not free, and a frame must not wait on Pdfium (see [`crate::ink::TextLayout`]).
-    pub fn page_text_chars(&self, index: usize) -> Result<Vec<TextChar>> {
-        match self.document.as_ref() {
-            Some(document) => document.text_chars(index),
-            None => Ok(Vec::new()),
-        }
-    }
-
-    /// The page's own `/Rotate`, in quarter turns clockwise.
-    ///
-    /// The corollary of the fixture test in this module: a page's *size* comes back turned and its *text* does not,
-    /// so a caller putting one on the other needs this (see [`crate::ink::paper_of_page_point`]).
-    pub fn page_document_rotation(&self, index: usize) -> u8 {
-        match self.document.as_ref() {
-            Some(document) => document.page_rotation(index),
-            None => 0,
-        }
     }
 
     /// The best bitmap available *now* for a request, without rasterising anything.

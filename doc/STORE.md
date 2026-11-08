@@ -268,9 +268,9 @@ original on every save. There is a test for exactly that.
 (`0xAARRGGBB`), and **a colour whose top byte is nought is opaque** — which is the rule that keeps every line of
 ink ever written exactly as it was, because a pen's colour has always been written as `0xRRGGBB`. The alpha is how
 a highlighter exists at all: it is not a second kind of stroke, or a second list, but the same stroke with ink that
-lets the page through (see [VIEW.md](VIEW.md), §7, *The highlighter*). A highlight built over a document's text is
-therefore written down like anything else — one band per line, as strokes — and a note whose document was replaced
-keeps its highlights, because they were never a property of the text.
+lets the page through (see [VIEW.md](VIEW.md), §7, *The highlighter*). A band is written down like anything else,
+wherever the nib went, and a note whose document was replaced keeps its highlights — they were never a property of
+the text.
 
 **Colours are a palette.** A note is usually written in a handful of colours, so a chunk carries a
 table of them at its head and each stroke stores a one-byte index. A chunk ends early if a 256th colour

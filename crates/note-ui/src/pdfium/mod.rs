@@ -32,7 +32,7 @@
 //! | [`RenderJob`] | one page being rasterised in slices, owning its page and bitmap |
 //! | [`Format`] | the colour format the pixels are asked for in |
 //! | [`Progress`] | how far a slice got: unfinished, finished, or failed |
-//! | [`OutlineEntry`], [`TextChar`] | plain Rust copies of an outline and a page's text |
+//! | [`OutlineEntry`] | a plain Rust copy of a document's outline |
 //!
 //! There is no public handle, no lifetime to get wrong, and no function that takes a raw pointer.
 //! The private modules do the unsafe work:
@@ -63,7 +63,7 @@ mod api;
 mod document;
 mod render;
 
-pub use document::{Document, OutlineEntry, TextChar};
+pub use document::{Document, OutlineEntry};
 pub use render::{Format, Progress, RenderJob};
 
 #[cfg(test)]

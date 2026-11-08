@@ -1,19 +1,27 @@
 //! The chords this application owns: one spelling for a binding, one for the person pressing it.
 //!
-//! ## The command modifier belongs to the platform, and `gpui` already knows which it is
+//! ## The command modifier belongs to the platform
 //!
 //! Every chord here is on the modifier a platform uses for its own commands: `Ctrl` on Windows and
 //! Linux, `⌘` on macOS. Writing `"ctrl-z"` would therefore be a Windows-only binding, so the specs in
-//! [`chord`] say `"secondary-z"`, and the handlers ask [`is_primary`]. Both mean the same thing on
-//! both platforms because `gpui` resolves them, per target, in its own parser (`secondary` becomes
-//! `platform` on macOS and `control` elsewhere) and in `Modifiers::secondary`.
+//! [`chord`] say `"secondary-z"`, and the handlers ask [`is_primary`].
 //!
-//! That is also why this crate has no `cfg` anywhere: it must not know what it is running on, and it
-//! does not have to. *(A global-hook crate such as `rdev` was considered and rejected for this: its
-//! `listen` is a system-wide tap, not a window's keyboard — it would fire while another application
-//! is in front and while a note's name is being typed, and on macOS it needs the Accessibility
-//! permission and fails silently without it. It is the right tool for a *global* hotkey, and this is
-//! not one.)*
+//! Both mean the same thing on every platform, but *how* that is answered has one wrinkle worth knowing.
+//! [`is_primary`] asks `gpui` (`Modifiers::secondary(cx)`), which is the right way: it is told the platform
+//! by the app, so it has nothing to guess. [`label`] cannot ask, because the tooltip texts are `LazyLock`s
+//! built once with no app in reach — and since gpui-pre 0.3.10 `Keystroke::parse` refuses `secondary-…`
+//! outright, needing an `OperatingSystem` that `gpui-kit` does not re-export. So `label` takes `secondary`
+//! off the spec and answers it from the target it was *compiled* for (`cfg!`), which is the same answer
+//! `gpui` gives: `platform` on macOS, `control` everywhere else.
+//!
+//! That one `cfg!` in [`command_is_glyph`] is the whole of this crate's platform knowledge, and it decides
+//! something this crate genuinely owns: which glyphs a Mac writes and which words Windows does. Everything
+//! else — the bindings, the handlers — goes through `gpui` and stays blind to the machine.
+//!
+//! *(A global-hook crate such as `rdev` was considered and rejected for this: its `listen` is a
+//! system-wide tap, not a window's keyboard — it would fire while another application is in front and
+//! while a note's name is being typed, and on macOS it needs the Accessibility permission and fails
+//! silently without it. It is the right tool for a *global* hotkey, and this is not one.)*
 //!
 //! ## Labels are computed, never typed by hand
 //!
@@ -21,7 +29,7 @@
 //! platform's: `Ctrl+Shift+C` on Windows, `⇧⌘C` on macOS. Typing "Ctrl" into a string is a lie on a
 //! Mac about which key to press, and typing "⌘" into one is a lie on Windows about which key exists.
 //! So nothing here spells a chord out: it names the *spec*, and [`label`] writes it in the
-//! convention the parsed chord came from — which `gpui` has already resolved for this platform.
+//! convention that spec resolves to.
 
 use gpui_kit::{App, Keystroke, Modifiers};
 
@@ -98,7 +106,7 @@ pub fn is_primary(modifiers: Modifiers, cx: &App) -> bool {
 /// target (`platform` on macOS, `control` elsewhere), so a parsed `secondary-…` chord is the
 /// platform's own answer, and no `cfg` is needed to read it.
 fn command_is_glyph() -> bool {
-    Keystroke::parse("secondary-z").is_ok_and(|keystroke| keystroke.modifiers.platform)
+    cfg!(target_os = "macos")
 }
 
 /// The chord as the platform writes it: `Ctrl+Shift+C` on Windows, `⇧⌘C` on macOS.
@@ -112,20 +120,37 @@ fn command_is_glyph() -> bool {
 /// parsed chord keeps the source it came from, so it may only borrow text that outlives it. Nothing
 /// here loses anything by that — every spec in this program is a constant in [`chord`], and one built
 /// at run time never reaches a tooltip.
+///
+/// ## Why `secondary` is taken off before the parser sees it
+///
+/// Since gpui-pre 0.3.10 `Keystroke::parse` refuses `secondary-…`: resolving it means being *told* which
+/// platform this is, and only `parse_with_os` is told — with an `OperatingSystem` that `gpui-kit` does not
+/// re-export. A tooltip has no `App` to ask either, since the texts are `LazyLock`s built once.
+///
+/// So `secondary` is answered here, from the target this is compiled for, and the *rest* of the chord is
+/// left to `parse`. That is the same answer `gpui` gives (`platform` on macOS, `control` everywhere else,
+/// see the module docs), and it is the one question this module is allowed to answer by itself: which
+/// platform's command key the program is spelling. Handlers never come through here — they ask
+/// [`is_primary`], which asks the app — so the two cannot drift apart.
 pub fn label(spec: &'static str) -> String {
-    let Ok(keystroke) = Keystroke::parse(spec) else {
+    let macos = command_is_glyph();
+
+    // `secondary-` is a prefix of the spec rather than a real modifier name, so it comes off here and the
+    // remainder is a chord `parse` understands (`alt-shift-r`, `z`, …).
+    let (secondary, rest) = match spec.strip_prefix("secondary-") {
+        Some(rest) => (true, rest),
+        None => (false, spec),
+    };
+
+    let Ok(keystroke) = Keystroke::parse(rest) else {
         return spec.to_string();
     };
 
-    // A chord carrying the platform modifier is a macOS chord: `secondary` resolves to `platform` on
-    // macOS and to `control` elsewhere (see the module docs), so this is the platform's answer as
-    // well — and it is also what decides the *convention* below, because macOS writes glyphs with no
-    // separator and everything else writes words joined by `+`.
-    let macos = keystroke.modifiers.platform;
-    let mut words: Vec<&str> = Vec::with_capacity(4);
+    let mut words: Vec<&str> = Vec::with_capacity(5);
 
-    // Each platform's own order: `⌃⌥⇧⌘` on macOS, `Ctrl+Alt+Shift` on Windows and Linux.
-    if keystroke.modifiers.control {
+    // Each platform's own order: `⌃⌥⇧⌘` on macOS, `Ctrl+Alt+Shift` on Windows and Linux. `secondary` sits
+    // where its key sits — `⌘` last on a Mac, `Ctrl` first everywhere else.
+    if keystroke.modifiers.control || (secondary && !macos) {
         words.push(if macos { "⌃" } else { "Ctrl" });
     }
     if keystroke.modifiers.alt {
@@ -134,7 +159,7 @@ pub fn label(spec: &'static str) -> String {
     if keystroke.modifiers.shift {
         words.push(if macos { "⇧" } else { "Shift" });
     }
-    if keystroke.modifiers.platform {
+    if keystroke.modifiers.platform || (secondary && macos) {
         words.push("⌘");
     }
 

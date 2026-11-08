@@ -1,0 +1,18 @@
+# The compiler this project is built with, and the components a build needs.
+#
+# Pinned to a *version* rather than to the `stable` channel: a channel moves under the project, so
+# two people saying "it builds on stable" can mean two different compilers — and this workspace is
+# held to a standard where a warning is a defect (see doc/ARCHITECTURE.md), which a compiler upgrade
+# can break without a line of the project's own code changing. A `rustup` run in this directory
+# installs and selects exactly this one.
+#
+# This is the *build* toolchain, not the MSRV. `rust-version` in each `Cargo.toml` (1.90) is the
+# oldest compiler the code is promised to work with, and it is a real promise: the highest
+# `rust-version` in the dependency tree on macOS and Windows is 1.90. (The 1.92 in the tree belongs
+# to `oo7`, which arrives through `zbus` and is Linux-only.)
+[toolchain]
+channel = "1.99.1"
+# Only what a build here actually runs. `rustfmt` is named because formatting is checked on every
+# run (`cargo fmt --all --check`); nothing else is, so nothing else is requested — a component list
+# is an instruction to the next person's `rustup`, not a wish list.
+components = ["rustfmt"]

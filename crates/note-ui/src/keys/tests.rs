@@ -1,13 +1,25 @@
 use super::*;
 
-/// Every chord parses — the check a typo in [`chord`] fails instead of a shortcut that silently
-/// never fires.
+/// Every chord survives the label path — the check a typo in [`chord`] fails instead of a shortcut
+/// that silently never fires.
+///
+/// The test is written against [`label`] rather than against `Keystroke::parse` because `label` is what
+/// turns a spec into a chord since gpui-pre 0.3.10: it takes `secondary-` off first (the parser refuses
+/// that word without being told the platform), and the remainder is what `parse` reads. A chord `label`
+/// cannot read comes back as it was written, so a spec that parses is a spec whose label is a chord and
+/// not the raw binding.
 #[test]
 fn every_chord_parses() {
     for spec in chord::ALL {
+        let written = label(spec);
+
         assert!(
-            Keystroke::parse(spec).is_ok(),
-            "{spec} is not a keystroke: the binding would be dead"
+            written != spec,
+            "{spec} came back unread: the binding would be dead"
+        );
+        assert!(
+            !written.contains("secondary"),
+            "{written} still says `secondary`"
         );
     }
 }
@@ -29,31 +41,37 @@ fn a_label_names_the_key_and_not_the_spec() {
     }
 }
 
-/// The primary modifier is the one this platform uses for commands, and it is `gpui` that decides
-/// which — asking the parser is how this crate stays free of `cfg`s.
+/// The command modifier this crate spells is the one the platform uses, and the two halves of the
+/// program must agree on which that is.
 ///
-/// Asked through a parsed chord rather than through [`is_primary`], because since gpui-pre 0.3.10 that
-/// function needs the `App` to ask *which* platform this is, and a test has none. The question is the
-/// same one either way: `secondary` is resolved by `gpui`'s own parser, per target, and what it
-/// resolved to is what `is_primary` reads.
+/// [`label`] answers it from the compiled target (`cfg!`), because a tooltip is a `LazyLock` with no app
+/// to ask; [`is_primary`] answers it from the app, because a handler has one. This test is the seam
+/// between them: `secondary-…` in a spec names the same key in both — so a label and the key it names
+/// cannot disagree.
 #[test]
-fn the_primary_modifier_is_the_platforms_command_key() {
-    let parsed = Keystroke::parse(chord::UNDO).expect("a chord");
+fn the_label_and_the_platform_agree_on_the_command_key() {
+    // The glyph convention is the platform's own: glyphs with no separator on a Mac, words joined by `+`
+    // everywhere else. `label` picks it from the same answer that decides the modifier, so this checks
+    // the answer itself rather than one of its consequences.
+    let macos = command_is_glyph();
 
-    assert!(
-        parsed.modifiers.platform || parsed.modifiers.control,
-        "the undo chord carries no command modifier at all"
+    assert_eq!(
+        macos,
+        cfg!(target_os = "macos"),
+        "the command key's glyph convention follows the target"
     );
 
-    // And exactly one of the two: a chord that set both would be a chord no platform spells.
-    assert_ne!(
-        parsed.modifiers.platform, parsed.modifiers.control,
-        "the command modifier is one key, not two"
-    );
+    let undo = label(chord::UNDO);
 
-    // A chord with no modifier is nobody's command, which is the other half of what `is_primary` says.
-    let bare = Keystroke::parse("z").expect("a bare key");
-    assert!(!bare.modifiers.platform && !bare.modifiers.control);
+    if macos {
+        assert_eq!(undo, "⌘Z", "the undo chord is written with a glyph");
+    } else {
+        assert_eq!(undo, "Ctrl+Z", "the undo chord is written with a word");
+    }
+
+    // And a chord that carries no `secondary` at all is untouched by any of this: it parses as itself.
+    let bare = label("z");
+    assert_eq!(bare, "Z", "a bare key is just its key");
 }
 
 /// `what (chord)` is what a tooltip is, and the chord in it is never the raw spec.

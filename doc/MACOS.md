@@ -49,12 +49,17 @@ the view declares: `PenSource`, `GhostFeed`, `SystemPointer`, `InkSurface`, `Sys
 ```bash
 xcode-select --install            # libsqlite3-sys compiles SQLite with the C compiler
 git clone <this repository> cheap-note
-cd cheap-note
-rustup toolchain install 1.90     # Cargo.toml's rust-version
+cd cheap-note                     # rustup installs the pinned toolchain on the first cargo run
 
 cargo run -p cheap-note-macos     # the app: it opens on the home list, and Escape returns to it
 cargo test --workspace            # every crate: 154 + 234 + 10 + 5 (+ 29 on Windows)
 ```
+
+`rust-toolchain.toml` pins the compiler (1.99.1), so `cargo` in this directory uses it whether or not
+it is the default — nothing has to be installed by hand. That pin and `Cargo.toml`'s
+`rust-version = "1.90"` answer two different questions: the pin is the compiler the project is
+*built* with, and `rust-version` is the oldest one it is promised to work on. The promise is real
+today — 1.90 is the highest `rust-version` anywhere in the macOS and Windows dependency trees.
 
 `cargo test --workspace` now works on a Mac: `apps/windows` compiles to a stub off Windows (its platform
 modules are `#[cfg(windows)]`, and `pen-windows` is a `cfg(windows)` dependency), so it builds with no

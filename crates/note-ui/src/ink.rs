@@ -1030,28 +1030,26 @@ impl InkDocument {
         }
         self.last_erase = Some((x, y));
 
-        // Two passes, and the order is the whole point of them. The first is a bounds test per
-        // stroke — a handful of comparisons — and it answers the question the drag asks most of the
-        // time: *nothing* is under the nib. Only when something is does the second pass run at all,
-        // so the common case costs no copying.
-        if !self
-            .finished
-            .iter()
-            .any(|stroke| stroke.hits(x, y, settings.erase_radius))
-        {
-            return;
-        }
+        // One pass. The hit test is not free — a stroke that overlaps the nib is *walked*, reading by reading,
+        // until one of them is close enough — so asking it twice for every stroke the eraser touches is half the
+        // work of the drag done again. The old shape of this was two passes: `any` to find out whether there was
+        // anything to do, then `filter` to collect it. That bought nothing, because a stroke the `any` stopped at
+        // was retested by the `filter` from the beginning, and a stroke the `any` found early was walked twice.
+        //
+        // The bounds test that makes the `any` cheap is inside `hits` itself, so the common case — a drag over
+        // blank paper — still costs four comparisons a stroke and no allocation. The `Vec` is only ever built
+        // from strokes that were actually hit, which is the same set the second pass used to find.
+        //
+        // What the eraser took, with the indices it took them from: an edit has to be able to put them back where
+        // they were, so the strokes are *held* rather than dropped — which is the whole difference between an
+        // eraser that can be undone and one that cannot.
+        let mut removed: Vec<(usize, Arc<Stroke>)> = Vec::new();
 
-        // What the eraser took, with the indices it took them from: an edit has to be able to put them back
-        // where they were, so the strokes are *held* rather than dropped — which is the whole difference between
-        // an eraser that can be undone and one that cannot.
-        let removed: Vec<(usize, Arc<Stroke>)> = self
-            .finished
-            .iter()
-            .enumerate()
-            .filter(|(_, stroke)| stroke.hits(x, y, settings.erase_radius))
-            .map(|(index, stroke)| (index, Arc::clone(stroke)))
-            .collect();
+        for (index, stroke) in self.finished.iter().enumerate() {
+            if stroke.hits(x, y, settings.erase_radius) {
+                removed.push((index, Arc::clone(stroke)));
+            }
+        }
 
         if removed.is_empty() {
             return;

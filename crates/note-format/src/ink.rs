@@ -644,8 +644,70 @@ pub fn ribbon_outline(points: &[InkPoint], detail: f32, tip: Tip) -> Vec<[f32; 2
         ]);
     }
 
-    left.extend(right.into_iter().rev());
-    left
+    // The polygon runs: the left edge forward, a half circle round the far end, the right edge back, and
+    // a half circle round the near end — which is what closes it.
+    //
+    // The caps are not decoration. The band's edge at a point is set by the points on either side of it,
+    // so the first and last points — which have one neighbour each — are the ones a turn distorts most: a
+    // pen put down and rolled before it travels leaves the first few readings nearly coincident while
+    // their directions swing, and a square end cut there is cut across a direction the nib never actually
+    // faced. What a reader sees is a stroke whose beginning, and its end, is half missing.
+    let last_index = line.len() - 1;
+
+    let mut outline = left;
+    cap(
+        &mut outline,
+        line[last_index],
+        normal_through(line[last_index - 1], line[last_index], line[last_index]),
+        1.0,
+        MIN_HALF_WIDTH,
+    );
+
+    outline.extend(right.into_iter().rev());
+    cap(
+        &mut outline,
+        line[0],
+        normal_through(line[0], line[0], line[1]),
+        -1.0,
+        MIN_HALF_WIDTH,
+    );
+
+    outline
+}
+
+/// Walks a half circle round one end of a band, from its `right` edge to its `left`.
+///
+/// `normal` is the direction *across* the band at that end, and `side` says which way the band runs from
+/// it: `1.0` for the end the pen finished at, `-1.0` for the end it started at. The arc is drawn on the
+/// side the stroke does not continue towards — the outside of the line — which is where a round nib end
+/// leaves its ink.
+fn cap(
+    outline: &mut Vec<[f32; 2]>,
+    end: InkPoint,
+    normal: (f32, f32),
+    side: f32,
+    min_half_width: f32,
+) {
+    /// A half circle in this many steps. Six is 15° apiece, which is finer than [`disc_outline`]'s 30°
+    /// because an end is looked at head-on rather than as one part of a moving line.
+    const STEPS: usize = 6;
+
+    let radius = (end.width * 0.5).max(min_half_width);
+
+    // From the `normal` side round to the `-normal` side, turning towards the way the band continues.
+    let (across_x, across_y) = normal;
+    let along_x = across_y * side;
+    let along_y = -across_x * side;
+
+    for step in 1..STEPS {
+        let angle = std::f32::consts::PI * step as f32 / STEPS as f32;
+        let (cos, sin) = (angle.cos(), angle.sin());
+
+        outline.push([
+            end.x + (across_x * cos + along_x * sin) * radius,
+            end.y + (across_y * cos + along_y * sin) * radius,
+        ]);
+    }
 }
 
 /// A filled circle standing in for a nib's round end, as a polygon.

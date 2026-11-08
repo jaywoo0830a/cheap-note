@@ -1556,10 +1556,11 @@ mod fill_tests {
         stroke.close_at(1.0);
         fill(&mut vertices, &stroke, &mapping, (0.0, 0.0), colour());
 
-        // What the band covers. A highlighter's outline is the *rectangle* the nib sweeps —
-        // `ribbon_outline` offsets to either side of the line and joins the two edges, with no round
-        // cap — so the area is the travel times the width, and nothing else.
-        let covered = stroke.points.last().expect("a stroke").x * width;
+        // What the band covers: the rectangle the nib sweeps, plus a round cap at each end — the caps are
+        // what a nib's round end leaves, and they are half a disc each.
+        let travel = stroke.points.last().expect("a stroke").x;
+        let radius = width * 0.5;
+        let covered = travel * width + std::f32::consts::PI * radius * radius;
 
         let painted = area(&vertices);
         let overlap = painted / covered;
@@ -1673,6 +1674,216 @@ mod fill_tests {
             painted > disc * 0.5,
             "a turned nib painted {painted:.0}px² of a {disc:.0}px² disc: the shape has a hole in it"
         );
+    }
+
+    /// A curve drawn while the pen turns is filled along its whole length, ends included.
+    ///
+    /// The case a turned-but-stationary nib does not cover: the nib moves *and* its direction changes, so
+    /// the outline is a ribbon that twists. Where a twist is sharp enough, the left and right offsets
+    /// cross each other, and a polygon that crosses itself is filled by the nonzero rule as the region
+    /// its winding leaves over — which, where the crossing doubles back, is nothing at all. That is a hole
+    /// in the middle of a stroke, and the ends are where it shows first: the first and last points have
+    /// one neighbour each, so their edges are the ones a turn distorts most.
+    ///
+    /// The test fills a quarter circle and then asks, strip by strip down its length, whether any strip
+    /// came out unpainted.
+    #[test]
+    fn a_curve_drawn_while_turning_is_filled_end_to_end() {
+        let mapping = Mapping {
+            base: (0.0, 0.0),
+            step_x: (1.0, 0.0),
+            step_y: (0.0, 1.0),
+        };
+
+        let width = 18.0_f32;
+
+        // A quarter circle of radius 12, read at the spacing the app keeps points at.
+        let radius = 12.0f32;
+        let mut stroke = note_format::ink::Stroke::new(
+            note_format::ink::InkPoint::new(0.0, 0.0, width),
+            0xFFEB_3B00,
+        );
+        let mut angle = 0.0f32;
+        let step = 0.75 / radius;
+
+        while angle < std::f32::consts::FRAC_PI_2 {
+            angle += step;
+            stroke.points.push(note_format::ink::InkPoint::new(
+                radius * angle.sin(),
+                radius - radius * angle.cos(),
+                width,
+            ));
+        }
+
+        stroke.close_at(1.0);
+
+        let mut vertices = Vec::new();
+        fill(&mut vertices, &stroke, &mapping, (0.0, 0.0), colour());
+
+        // Walk the band's own length and check each slice of it was painted. A slice is a window of the
+        // stroke's points; the ink under it is whatever the triangles cover there.
+        let points = &stroke.points;
+        let across = width * 0.5;
+        let mut strip = 0;
+        let mut unpainted = Vec::new();
+
+        for pair in points.chunks(4) {
+            let middle = pair[pair.len() / 2];
+            let covered = area_within(&vertices, middle.x, middle.y, across * 0.5);
+            if covered < 0.25 {
+                unpainted.push((strip, middle.x, middle.y, covered));
+            }
+            strip += 1;
+        }
+
+        assert!(
+            unpainted.is_empty(),
+            "{} strips of {} came out unpainted, first at ({:.1},{:.1}) with {:.2}px2",
+            unpainted.len(),
+            strip,
+            unpainted.first().map(|entry| entry.1).unwrap_or(0.0),
+            unpainted.first().map(|entry| entry.2).unwrap_or(0.0),
+            unpainted.first().map(|entry| entry.3).unwrap_or(0.0),
+        );
+    }
+
+    /// How much of a small square around a point the triangles cover, by sampling.
+    fn area_within(vertices: &[Vertex], x: f32, y: f32, half: f32) -> f32 {
+        const STEPS: usize = 7;
+
+        let mut covered = 0;
+        for row in 0..STEPS {
+            for column in 0..STEPS {
+                let px = x - half + 2.0 * half * (column as f32 + 0.5) / STEPS as f32;
+                let py = y - half + 2.0 * half * (row as f32 + 0.5) / STEPS as f32;
+
+                if vertices
+                    .chunks_exact(3)
+                    .any(|t| inside_triangle((px, py), t))
+                {
+                    covered += 1;
+                }
+            }
+        }
+
+        covered as f32 / (STEPS * STEPS) as f32
+    }
+
+    /// Whether a point is inside a triangle, by the sign of the three edge cross-products.
+    fn inside_triangle(point: (f32, f32), triangle: &[Vertex]) -> bool {
+        let cross =
+            |a: &Vertex, b: &Vertex| (b.x - a.x) * (point.1 - a.y) - (b.y - a.y) * (point.0 - a.x);
+
+        let (d1, d2, d3) = (
+            cross(&triangle[0], &triangle[1]),
+            cross(&triangle[1], &triangle[2]),
+            cross(&triangle[2], &triangle[0]),
+        );
+
+        let negative = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+        let positive = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+
+        !(negative && positive)
+    }
+
+    /// The ends of a curve are where a turn distorts the outline most, and they must still be inked.
+    ///
+    /// The first and last points of a stroke have one neighbour each, so their edges are the ones a turn
+    /// bends furthest — and a pen that is *put down* and rolled before it travels makes the first few
+    /// readings nearly coincident while their directions swing. That is the same coincidence the dot rule
+    /// handles for a whole stroke, in miniature, at one end of an otherwise ordinary line.
+    ///
+    /// This walks a handful of rolling starts and ends and asks whether either end came out unpainted.
+    #[test]
+    fn the_ends_of_a_turning_stroke_are_inked() {
+        let mapping = Mapping {
+            base: (0.0, 0.0),
+            step_x: (1.0, 0.0),
+            step_y: (0.0, 1.0),
+        };
+
+        let width = 18.0_f32;
+        let mut failures = Vec::new();
+
+        for roll in [2usize, 4, 8, 16] {
+            for radius in [6.0f32, 12.0, 30.0] {
+                let stroke = rolling_curve(width, radius, roll);
+                let mut vertices = Vec::new();
+                fill(&mut vertices, &stroke, &mapping, (0.0, 0.0), colour());
+
+                let points = &stroke.points;
+                let half = width * 0.5;
+
+                for (which, point) in [("start", points[0]), ("end", points[points.len() - 1])] {
+                    // The nib's own centre must be inked: whatever the outline did at the end, it cannot
+                    // have left the place the pen actually was unpainted.
+                    let covered = area_within(&vertices, point.x, point.y, half * 0.35);
+
+                    if covered < 0.5 {
+                        failures.push(format!(
+                            "{which} of roll={roll} r={radius}: {:.0}% painted",
+                            covered * 100.0
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} ends came out unpainted:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+
+    /// A stroke that is put down, rolled in place, and then curves away.
+    fn rolling_curve(width: f32, radius: f32, roll: usize) -> note_format::ink::Stroke {
+        use note_format::ink::{InkPoint, Stroke};
+
+        let mut stroke = Stroke::new(InkPoint::new(0.0, 0.0, width), 0xFFEB_3B00);
+
+        // Put down and rolled: readings a fraction of a pixel apart, their directions going round.
+        for step in 1..=roll {
+            let angle = step as f32 * 0.6;
+            stroke
+                .points
+                .push(InkPoint::new(angle.cos() * 0.05, angle.sin() * 0.05, width));
+        }
+
+        // Then travelling, and still turning.
+        let (ox, oy) = (
+            stroke.points.last().unwrap().x,
+            stroke.points.last().unwrap().y,
+        );
+        let mut angle = 0.0f32;
+        let step = 0.75 / radius;
+
+        while angle < std::f32::consts::FRAC_PI_2 {
+            angle += step;
+            stroke.points.push(InkPoint::new(
+                ox + radius * angle.sin(),
+                oy + radius - radius * angle.cos(),
+                width,
+            ));
+        }
+
+        // And rolled again as it is lifted: the same coincidence at the other end.
+        let (ex, ey) = (
+            stroke.points.last().unwrap().x,
+            stroke.points.last().unwrap().y,
+        );
+        for step in 1..=roll {
+            let angle = step as f32 * 0.6;
+            stroke.points.push(InkPoint::new(
+                ex + angle.cos() * 0.05,
+                ey + angle.sin() * 0.05,
+                width,
+            ));
+        }
+
+        stroke.close_at(1.0);
+        stroke
     }
 
     /// A square comes out as a square: covered once, and its area is its own.

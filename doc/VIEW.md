@@ -580,6 +580,15 @@ with a hole in the middle. A stroke whose points never reach past half its own n
 extruded along, and is drawn for what it is — the disc of the nib, at the place it is held
 (`ink::ribbon_outline`, and `a_pen_turned_on_the_spot_leaves_a_dot` in `crates/note-format/tests/ink.rs`).
 
+**And its two ends are round.** The end of a band is a half circle round the nib, not a slice across it. That is
+not decoration either: an edge is set by the points on either side of a point, and the first and last points have
+one neighbour each — so they are exactly the places a turn distorts most. A pen put down and rolled before it
+travels leaves the first few readings nearly coincident while their directions swing, and a square end cut there is
+cut across a direction the nib never faced: a stroke whose beginning (or end) is half missing. Rounding the ends is
+what makes the whole outline independent of how the stroke happens to begin
+(`a_curve_drawn_while_turning_is_filled_end_to_end` and `the_ends_of_a_turning_stroke_are_inked`, in
+`apps/macos/src/platform/metal.rs`).
+
 ### A mark
 
 A **mark** is one page of the note and nothing else — no name, no colour, no text — so it is a page

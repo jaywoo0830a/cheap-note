@@ -270,6 +270,16 @@ fn wander(points: &[InkPoint], radius: f32, zoom: f32) -> f32 {
 }
 
 /// The longest edge of one side of an outline, in the outline's own (sheet) units.
+/// One edge of a finished outline — the left side, from the first point to the last — with the caps at
+/// its ends left out.
+///
+/// An outline is `left…`, the far end's cap, `right…`, the near end's cap (see `ink::ribbon_outline`),
+/// so the left edge is the first `points` vertices and nothing after them. Tests that measure how finely
+/// a *line* is cut ask about this, because a cap is a fixed arc that does not subdivide with the zoom.
+fn body_edge(outline: &[[f32; 2]], points: usize) -> &[[f32; 2]] {
+    &outline[..points.min(outline.len())]
+}
+
 fn longest_edge(side: &[[f32; 2]]) -> f32 {
     (0..side.len().saturating_sub(1))
         .map(|index| {
@@ -382,7 +392,8 @@ fn the_detail_moves_in_rungs() {
 
 /// At 1:1 nothing is interpolated: a stroke written at reading size is drawn from exactly the
 /// points it came from, which is what keeps writing at reading size as cheap as it ever was — and
-/// its geometry what the pen produced.
+/// its geometry what the pen produced. The two ends add a round cap each (see `ink::ribbon_outline`),
+/// which is a handful of vertices apiece and no pieces along the line itself.
 #[test]
 fn the_detail_costs_nothing_at_one_to_one() {
     let mut stroke = curve();
@@ -392,10 +403,16 @@ fn the_detail_costs_nothing_at_one_to_one() {
 
     assert_eq!(
         stroke.outline.len(),
-        points * 2,
-        "a vertex a side and no pieces added: a point is still one straight edge"
+        points * 2 + 2 * CAP_VERTICES,
+        "a vertex a side, a cap at each end, and no pieces added: a point is still one straight edge"
     );
 }
+
+/// The vertices one round cap adds to an outline: a half circle in six steps, each end included.
+///
+/// Kept here rather than exported, because it is a fact about the shape the model draws and the tests
+/// are where that shape is asserted.
+const CAP_VERTICES: usize = 5;
 
 /// A zoom buys detail and not shape: the same line, cut finer. Every piece gets shorter and no
 /// vertex moves to anywhere it was not already.
@@ -417,7 +434,10 @@ fn a_zoom_buys_detail_and_not_shape() {
         assert!(moved <= 0.25, "the line moved: {vertex:?} is {moved} away");
     }
 
-    let longest = longest_edge(&fine[..fine.len() / 2]);
+    // One edge of the band, with the caps at its ends left out of the measurement: what is being
+    // measured is how finely the *line* is cut, and a cap is a fixed arc that never subdivides.
+    let body = body_edge(&fine, stroke.points.len());
+    let longest = longest_edge(body);
     assert!(
         longest <= FACET * 1.25 / 16.0,
         "the longest piece of a 16x line is {longest} logical pixels"
@@ -481,8 +501,10 @@ fn a_point_that_doubles_back_keeps_the_stroke_its_width() {
     let count = copy.points.len();
 
     // The two ends of the ribbon at the turn are a half width either side of it — *across* the
-    // line, which runs vertically here.
-    for index in [turn, 2 * count - 1 - turn] {
+    // line, which runs vertically here. The left edge comes first in the outline and the right edge
+    // after the far end's cap, which is what the outline carries between them (see
+    // `ink::ribbon_outline`).
+    for index in [turn, CAP_VERTICES + 2 * count - 1 - turn] {
         let [x, y] = copy.outline[index];
         assert!(
             (y - point.y).abs() < 1e-4,
@@ -652,7 +674,7 @@ fn the_magnifier() {
             );
 
             for (label, outline) in [("as it was:", &as_it_was), ("as it is: ", &as_it_is)] {
-                let side = &outline[..outline.len() / 2];
+                let side = body_edge(&outline, stroke.points.len());
                 eprintln!(
                     "    {zoom:>4.0}x {label} {:>5} vertices · longest piece {:>5.1} px · \
                      sharpest turn {:>4.1}°",
@@ -675,14 +697,14 @@ fn the_magnifier() {
     // 16x a piece of ink is a pixel long on screen rather than twelve.
     let stroke = curve();
     let at_one = drawn(&stroke, 1.0);
-    let reading_piece = longest_edge(&at_one[..at_one.len() / 2]);
+    let reading_piece = longest_edge(body_edge(&at_one, curve().points.len()));
     assert!(
         reading_piece <= FACET,
         "1:1 needs no pieces cut: {reading_piece} logical pixels is a piece"
     );
 
     let at_sixteen = drawn(&stroke, 16.0);
-    let piece = longest_edge(&at_sixteen[..at_sixteen.len() / 2]);
+    let piece = longest_edge(body_edge(&at_sixteen, curve().points.len()));
     assert!(
         piece <= FACET * 1.25 / 16.0,
         "16x is drawn from pieces {piece} px long in the sheet, {} on screen",

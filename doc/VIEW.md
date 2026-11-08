@@ -293,7 +293,7 @@ Five facts about the ghost are decided here, and each of them is something a pen
 |---|---|
 | whether the pen has a cursor of its own at all | the **ink model**, not a batch, so the cursor survives the batches that lay nothing — most of them, while the pen is merely held over the window — and disappears only when the pen does |
 | where it is and how it leans | the pen's newest reading, in window coordinates, with no sign flip: lean right and the ghost extends right of the nib |
-| where it is *not* drawn | **only below the bar**: over the bar it would be drawn behind an opaque background, where it cannot be seen — and **never on the home screen**, which has no sheet to point at and is meant to be tapped |
+| where it is *not* drawn | **only below the bar**: over the bar it would be drawn behind an opaque background, where it cannot be seen — and **never on the home screen**, which has no sheet to point at and is meant to be tapped, **nor under a control that hangs over the page** (a chooser's list, the palette at the pen) |
 | the scale, the colours on this paper, and where the bar ends | published to the overlay (`publish_screen`) on the frames where they change, so a new pen colour or paper takes hold at once rather than at the next reading |
 | how **thick** the mark is | the same publication (`Screen::nib_radius`): half the width the tool in hand lays, which only the app knows — the pen's weight is a setting, and the marker's band is the tool's |
 
@@ -321,6 +321,13 @@ edge, which is no help at all when that edge and the paper are the same colour.
 The system pointer is driven **from the ghost** and not from the pen's range, because the two states
 have to be impossible to separate: a hidden pointer with nothing drawn in its place is a window with no
 cursor at all — and on a list, that is a list no pen can click.
+
+**A control that hangs over the page takes the ghost away.** The bar is one line (`bar_edge`): above it is
+interface, below it is page. A control that opens *below* itself breaks that line — a chooser's list, and the
+palette at the pen — because the place the reader is aiming at reads as page while the thing they are aiming
+at is a control. Both of them therefore suppress the ghost while they are up, and the system pointer is the
+cursor over them. The list is the sharper case of the two: it is a list of *options*, meant to be pressed one
+by one, and a list with no pointer on it cannot be pressed at all.
 
 ## 6. The keyboard
 

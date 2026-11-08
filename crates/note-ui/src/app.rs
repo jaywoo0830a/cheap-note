@@ -875,6 +875,17 @@ pub struct NoteApp {
     /// Its labels are *built* rather than spelled out, because each one is the pen's thickness in millimetres
     /// ([`PenWeight::describe`]) and that belongs to the note in hand: hence `String` rather than `&'static str`.
     pen_select: Entity<SelectState<Vec<String>>>,
+    /// Whether one of the bar's choosers has its list open.
+    ///
+    /// The list is a popup that hangs *below* the box, over the page — so the place the reader is aiming
+    /// at is page, by [`Self::bar_edge`]'s measure, while the thing they are aiming at is a control. That
+    /// is the palette's case over again (see [`Self::ghost_suppressed`]): the ghost goes and the system
+    /// pointer is the cursor, or a list of options is a list with no cursor on it.
+    ///
+    /// The chooser's own state cannot answer this — `SelectState` keeps its `open` flag private — so it is
+    /// tracked here from every way a list is opened or closed: the click on the box, a press anywhere else,
+    /// a confirmed choice, and Escape. See [`Self::chooser_toggled`] and [`Self::chooser`].
+    chooser_open: bool,
     /// The field the zoom is typed into, between the two steps.
     ///
     /// A field rather than a third pair of buttons, because the zoom a person wants is usually a *number* they already
@@ -1051,6 +1062,7 @@ impl NoteApp {
             sheet_select,
             rule_select,
             pen_select,
+            chooser_open: false,
             home: Home::open(window, cx),
         };
 
@@ -1069,6 +1081,10 @@ impl NoteApp {
         cx.subscribe(
             &app.sheet_select,
             |app, _, event: &SelectEvent<Vec<String>>, cx| {
+                // A confirmed choice closes the list, and that is the cursor's answer too: no press
+                // outside the box arrives to say so (see [`NoteApp::chooser_toggled`]).
+                app.chooser_toggled(false, cx);
+
                 if let SelectEvent::Confirm(Some(label)) = event {
                     if let Some(size) = CanvasSize::from_label(label) {
                         app.set_canvas_size(size, cx);
@@ -1081,6 +1097,8 @@ impl NoteApp {
         cx.subscribe(
             &app.rule_select,
             |app, _, event: &SelectEvent<Vec<String>>, cx| {
+                app.chooser_toggled(false, cx);
+
                 if let SelectEvent::Confirm(Some(label)) = event {
                     if let Some(style) = CanvasStyle::from_label(label) {
                         app.set_canvas_style(style, cx);
@@ -1093,6 +1111,8 @@ impl NoteApp {
         cx.subscribe(
             &app.pen_select,
             |app, _, event: &SelectEvent<Vec<String>>, cx| {
+                app.chooser_toggled(false, cx);
+
                 if let SelectEvent::Confirm(Some(label)) = event {
                     if let Some(weight) =
                         PenWeight::from_label(label, app.settings.no_pressure_width)
@@ -2174,15 +2194,17 @@ impl NoteApp {
     }
 
     /// Whether something on screen means the ghost is not drawn: the home list, a question waiting for
-    /// an answer, or the palette at the pen.
+    /// an answer, the palette at the pen, or a chooser's list hanging over the page.
     ///
     /// One answer for the ghost *and* the pointer ([`Self::pen_has_its_own_cursor`]): with the ghost
     /// suppressed the pointer has to be the system's, or the app would be showing no cursor at all on a
     /// screen that has buttons to press. The palette is one of those screens: its controls are aimed at
     /// with the system pointer, so the ghost goes while it is up and the system cursor is what the hand
-    /// sees over the ring.
+    /// sees over the ring. A chooser's list is the same case with a different shape — the popup is drawn
+    /// *below* its box, over the page, so the one place the reader has to aim at is a place the bar's own
+    /// line calls page (see [`Self::chooser_open`]).
     fn ghost_suppressed(&self) -> bool {
-        self.home_is_open() || self.asking() || self.palette_is_open()
+        self.home_is_open() || self.asking() || self.palette_is_open() || self.chooser_open
     }
 
     /// Whether the pen has a cursor of its own where it is, so the system pointer should be out of the way.
@@ -2441,6 +2463,28 @@ impl NoteApp {
         self.follow_pen_with_pointer();
         self.publish_screen();
         self.touch_status();
+        cx.notify();
+    }
+
+    /// Records that a chooser's list was opened or closed, and lets the cursor follow.
+    ///
+    /// The off answer is sent whether or not it was asked for: a press outside the box dismisses a list that
+    /// was never open (the press was on the page), and saying so is cheaper than asking the chooser. What
+    /// does *not* happen is a frame — a press that changed nothing about the list changes nothing on screen,
+    /// and a cursor rule that has already been followed is not worth one.
+    fn chooser_toggled(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.chooser_open == open {
+            return;
+        }
+
+        self.chooser_open = open;
+
+        // The list is a screen over the page for as long as it is up, so the ghost and the pointer swap over
+        // exactly as they do for the palette (see [`Self::ghost_suppressed`]) — and the canvas has to be told,
+        // or a ghost drawn a moment ago stays drawn.
+        self.follow_pen_with_pointer();
+        self.publish_screen();
+        self.draw_canvas();
         cx.notify();
     }
 
@@ -3647,6 +3691,10 @@ impl NoteApp {
                         self.answer(false, cx);
                     } else if self.naming.is_some() {
                         self.stop_note_name(window, cx);
+                    } else if self.chooser_open {
+                        // A chooser's list is dismissed by Escape too, and the app has to hear it: the flag is
+                        // what keeps the pointer the system's while the list is up (see [`Self::ghost_suppressed`]).
+                        self.chooser_toggled(false, cx);
                     } else if self.ink.has_selection() {
                         // A selection is let go of *before* the note is left: a reader who has just lassoed
                         // something meant to put it down, not to go home — the same precedence the name being
@@ -4833,10 +4881,10 @@ impl NoteApp {
             .child(self.page_controls(cx))
             .child(toolbar_divider(hairline))
             .child(control_label("Sheet", muted))
-            .child(self.chooser(&self.sheet_select))
+            .child(self.chooser("chooser-sheet", &self.sheet_select, cx))
             .child(toolbar_divider(hairline))
             .child(control_label("Style", muted))
-            .child(self.chooser(&self.rule_select))
+            .child(self.chooser("chooser-rule", &self.rule_select, cx))
             .child(toolbar_divider(hairline))
             .child(control_label("Paper", muted))
             .children(paper)
@@ -4845,7 +4893,7 @@ impl NoteApp {
             .children(ink)
             .child(toolbar_divider(hairline))
             .child(control_label("Weight", muted))
-            .child(self.chooser(&self.pen_select))
+            .child(self.chooser("chooser-pen", &self.pen_select, cx))
             .child(toolbar_divider(hairline))
             // A render option for the *page*, next to the colours it overrides: this row wraps, so
             // one more control here cannot push the others off the edge.
@@ -4861,8 +4909,33 @@ impl NoteApp {
     }
 
     /// One of the row's choosers, at the width the bar gives it.
-    fn chooser(&self, state: &Entity<SelectState<Vec<String>>>) -> impl IntoElement {
-        div().w(px(112.0)).child(Select::new(state).small())
+    ///
+    /// The wrapper is what lets the app know the list is up: the chooser keeps that to itself, and the two
+    /// presses that decide it are both seen here — the click on the box, which is the chooser's own toggle,
+    /// and a press anywhere else, which is what dismisses the list (see [`Self::chooser_toggled`]). Neither
+    /// listener consumes the event: the box still opens and closes the list it is the box for.
+    ///
+    /// `id` is the wrapper's own, because a press listener is a thing an identified element has: it is what
+    /// makes the click and the dismiss answerable at all.
+    fn chooser(
+        &self,
+        id: &'static str,
+        state: &Entity<SelectState<Vec<String>>>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .w(px(112.0))
+            .child(Select::new(state).small())
+            // The box opens the list; it does not close it. `Select` attaches its own toggle *only* while the
+            // list is shut (`allow_open`), so a second press on the box is not a press that closes it — and a
+            // wrapper that flipped on every click would go out of step with the list the moment one landed.
+            // Closing is the list's own business, and both ways it happens are read below.
+            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| app.chooser_toggled(true, cx)))
+            // A press outside the box is what dismisses the list (`Select` closes on exactly this), so it is
+            // also the answer for the cursor. Nothing is stopped here: the press belongs to whatever it landed
+            // on, ink included.
+            .on_mouse_down_out(cx.listener(|app, _, _, cx| app.chooser_toggled(false, cx)))
     }
 
     /// Keeps the three choosers showing what the note is actually written with.

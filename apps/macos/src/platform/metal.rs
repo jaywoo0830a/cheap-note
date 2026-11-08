@@ -105,7 +105,7 @@ fragment float4 page_fragment(PageVaryings in [[stage_in]],
 
 /// One filled or textured corner: where it is, in device pixels, and what colour it carries.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Vertex {
     x: f32,
     y: f32,
@@ -636,6 +636,20 @@ fn fill(
 /// is not zero. That is exact for any single closed loop, self-intersecting or not, and needs no ear to be
 /// clipped. One loop is all a stroke's outline ever is: a hole would need a second loop joined to the first
 /// by a bridge, which the ink model has no reason to make.
+///
+/// ## Why the edges are kept in an active list
+///
+/// The obvious way to find a band's crossings is to read every edge and keep the ones that reach it, which is
+/// what this did first. That is O(n²): a long stroke's outline is two points a reading and a ribbon's ends, so
+/// a stroke of a thousand readings is a polygon of two thousand, and the fill then did four million edge tests
+/// for triangles that are mostly a few hundred. The bands *and* the edges are both numbers the pen made, and
+/// the pen's readings are dense — so the quadratic term was not academic. Measured at the size a long stroke
+/// reaches, it was tens of milliseconds a stroke, on the thread that draws.
+///
+/// So the edges are sorted by their lower end once, and each band is answered from the ones that have started
+/// and not yet finished. That is the standard trapezoidal sweep and it is exact — the set of edges crossing a
+/// band is the same set, found without re-reading the whole polygon. Same triangles, in every case tried:
+/// self-crossing, shared heights, zero-width spikes, repeated points.
 fn tessellate(vertices: &mut Vec<Vertex>, polygon: &[(f32, f32)], colour: gpui_kit::Hsla) {
     if polygon.len() < 3 {
         return;
@@ -644,6 +658,38 @@ fn tessellate(vertices: &mut Vec<Vertex>, polygon: &[(f32, f32)], colour: gpui_k
     let mut bands: Vec<f32> = polygon.iter().map(|point| point.1).collect();
     bands.sort_by(|left, right| left.total_cmp(right));
     bands.dedup_by(|left, right| (*left - *right).abs() < f32::EPSILON);
+
+    // Every edge, with the span of heights it covers. A horizontal edge crosses nothing and is left out.
+    struct Edge {
+        low: f32,
+        high: f32,
+        from: (f32, f32),
+        to: (f32, f32),
+        winding: i32,
+    }
+
+    let mut edges: Vec<Edge> = Vec::with_capacity(polygon.len());
+
+    for index in 0..polygon.len() {
+        let (a, b) = (polygon[index], polygon[(index + 1) % polygon.len()]);
+
+        if a.1 == b.1 {
+            continue;
+        }
+
+        let (low, high) = if a.1 < b.1 { (a, b) } else { (b, a) };
+
+        edges.push(Edge {
+            low: low.1,
+            high: high.1,
+            from: a,
+            to: b,
+            winding: if b.1 > a.1 { 1 } else { -1 },
+        });
+    }
+
+    // By where they start: the sweep takes them in as the bands climb, and never looks back.
+    edges.sort_by(|left, right| left.low.total_cmp(&right.low));
 
     // One crossing of a band: where it is at the band's middle (which is what orders two crossings), which
     // way its edge runs, and where it meets the band's own bottom and top — one crossing gives a trapezoid
@@ -656,6 +702,8 @@ fn tessellate(vertices: &mut Vec<Vertex>, polygon: &[(f32, f32)], colour: gpui_k
     }
 
     let mut crossings: Vec<Crossing> = Vec::new();
+    let mut active: Vec<usize> = Vec::new();
+    let mut next = 0;
 
     for band in bands.windows(2) {
         let (bottom, top) = (band[0], band[1]);
@@ -664,32 +712,38 @@ fn tessellate(vertices: &mut Vec<Vertex>, polygon: &[(f32, f32)], colour: gpui_k
             continue;
         }
 
+        // The edges that begin at or below this band's top have started.
+        while next < edges.len() && edges[next].low <= top {
+            active.push(next);
+            next += 1;
+        }
+
         let middle = (bottom + top) * 0.5;
         crossings.clear();
 
-        for index in 0..polygon.len() {
-            let (a, b) = (polygon[index], polygon[(index + 1) % polygon.len()]);
-
-            if a.1 == b.1 {
-                continue;
-            }
-
-            let (low, high) = if a.1 < b.1 { (a, b) } else { (b, a) };
+        for &index in active.iter() {
+            let edge = &edges[index];
 
             // A band's ends are vertex heights, so an edge either covers it whole or does not reach it.
-            if low.1 > bottom || high.1 < top {
+            if edge.low > bottom || edge.high < top {
                 continue;
             }
 
-            let at = |y: f32| a.0 + (b.0 - a.0) * (y - a.1) / (b.1 - a.1);
+            let at = |y: f32| {
+                edge.from.0
+                    + (edge.to.0 - edge.from.0) * (y - edge.from.1) / (edge.to.1 - edge.from.1)
+            };
 
             crossings.push(Crossing {
                 middle: at(middle),
-                winding: if b.1 > a.1 { 1 } else { -1 },
+                winding: edge.winding,
                 bottom: at(bottom),
                 top: at(top),
             });
         }
+
+        // The edges that ended at or below this band's top reach no band above it.
+        active.retain(|&index| edges[index].high > top);
 
         crossings.sort_by(|left, right| left.middle.total_cmp(&right.middle));
 
@@ -1490,6 +1544,92 @@ mod tests {
 mod fill_tests {
     use super::*;
 
+    /// The fill answers the same as the obvious implementation, which reads every edge for every band.
+    ///
+    /// The sweep keeps an active list of edges and drops the ones that have finished; the obvious way reads
+    /// the whole polygon each time. They have to make the *same triangles*: the sweep is only a cheaper way
+    /// of finding the same crossings, so any disagreement is a stroke drawn wrongly rather than slowly.
+    ///
+    /// The shapes are the ones a ribbon's outline actually makes: a square, a stroke that crosses itself, one
+    /// with several points at one height, one tall edge beside short ones, a zero-width spike where the pen
+    /// turned round, repeated readings, and a star.
+    #[test]
+    fn the_sweep_finds_the_crossings_the_slow_way_does() {
+        let shapes: [(&str, Vec<(f32, f32)>); 7] = [
+            (
+                "square",
+                vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+            ),
+            (
+                "bowtie, crossing itself",
+                vec![(0.0, 0.0), (10.0, 10.0), (10.0, 0.0), (0.0, 10.0)],
+            ),
+            (
+                "several points at one height",
+                vec![
+                    (0.0, 0.0),
+                    (4.0, 0.0),
+                    (8.0, 0.0),
+                    (8.0, 5.0),
+                    (4.0, 5.0),
+                    (0.0, 5.0),
+                ],
+            ),
+            (
+                "one tall edge beside short ones",
+                vec![
+                    (0.0, 0.0),
+                    (0.0, 100.0),
+                    (1.0, 90.0),
+                    (2.0, 80.0),
+                    (3.0, 70.0),
+                    (4.0, 60.0),
+                    (5.0, 50.0),
+                    (6.0, 40.0),
+                    (7.0, 30.0),
+                    (8.0, 20.0),
+                    (9.0, 10.0),
+                ],
+            ),
+            (
+                "a spike where the pen turned round",
+                vec![(0.0, 0.0), (5.0, 0.0), (5.0, 20.0), (5.0, 0.0)],
+            ),
+            (
+                "repeated reading",
+                vec![(1.0, 1.0), (5.0, 1.0), (5.0, 1.0), (5.0, 9.0), (1.0, 9.0)],
+            ),
+            (
+                "a star, crossing itself three times",
+                (0..10)
+                    .map(|step| {
+                        let angle = step as f32 * std::f32::consts::TAU * 2.0 / 10.0;
+                        (50.0 + 40.0 * angle.cos(), 50.0 + 40.0 * angle.sin())
+                    })
+                    .collect(),
+            ),
+        ];
+
+        for (name, polygon) in shapes {
+            let sweep = fill_of(&polygon);
+            let slow = fill_the_slow_way(&polygon);
+
+            assert_eq!(
+                sweep.len(),
+                slow.len(),
+                "{name}: {} vertices against {}",
+                sweep.len(),
+                slow.len()
+            );
+
+            for (index, (left, right)) in sweep.iter().zip(&slow).enumerate() {
+                assert!(
+                    (left.x - right.x).abs() < 0.01 && (left.y - right.y).abs() < 0.01,
+                    "{name}: vertex {index} is {left:?} where the slow way says {right:?}"
+                );
+            }
+        }
+    }
     /// The area of the triangles a fill produced: half a cross product each, summed.
     fn area(vertices: &[Vertex]) -> f32 {
         vertices
@@ -2336,5 +2476,131 @@ mod fill_tests {
                 vertex.y
             );
         }
+    }
+    /// A polygon's triangles, as [`tessellate`] makes them.
+    fn fill_of(polygon: &[(f32, f32)]) -> Vec<Vertex> {
+        let mut vertices = Vec::new();
+        tessellate(&mut vertices, polygon, gpui_kit::Hsla::default());
+
+        vertices
+    }
+
+    /// The same fill, reading every edge for every band: what [`tessellate`] did before the active list.
+    ///
+    /// Slow on purpose — it is the definition, not the implementation — and quadratic, which is the cost the
+    /// sweep exists to avoid.
+    fn fill_the_slow_way(polygon: &[(f32, f32)]) -> Vec<Vertex> {
+        let mut vertices: Vec<Vertex> = Vec::new();
+
+        if polygon.len() < 3 {
+            return vertices;
+        }
+
+        let mut bands: Vec<f32> = polygon.iter().map(|point| point.1).collect();
+        bands.sort_by(|left, right| left.total_cmp(right));
+        bands.dedup_by(|left, right| (*left - *right).abs() < f32::EPSILON);
+
+        for band in bands.windows(2) {
+            let (bottom, top) = (band[0], band[1]);
+
+            if top - bottom < f32::EPSILON {
+                continue;
+            }
+
+            let middle = (bottom + top) * 0.5;
+            let mut crossings: Vec<(f32, i32, f32, f32)> = Vec::new();
+
+            for index in 0..polygon.len() {
+                let (a, b) = (polygon[index], polygon[(index + 1) % polygon.len()]);
+
+                if a.1 == b.1 {
+                    continue;
+                }
+
+                let (low, high) = if a.1 < b.1 { (a, b) } else { (b, a) };
+
+                if low.1 > bottom || high.1 < top {
+                    continue;
+                }
+
+                let at = |y: f32| a.0 + (b.0 - a.0) * (y - a.1) / (b.1 - a.1);
+
+                crossings.push((
+                    at(middle),
+                    if b.1 > a.1 { 1 } else { -1 },
+                    at(bottom),
+                    at(top),
+                ));
+            }
+
+            crossings.sort_by(|left, right| left.0.total_cmp(&right.0));
+
+            let mut winding = 0;
+            let mut span: Option<(f32, f32)> = None;
+
+            for crossing in &crossings {
+                let before = winding;
+                winding += crossing.1;
+
+                match (before == 0, winding == 0) {
+                    (true, false) => span = Some((crossing.2, crossing.3)),
+                    (false, true) => {
+                        if let Some((left_bottom, left_top)) = span.take() {
+                            trapezoid(
+                                &mut vertices,
+                                (left_bottom, bottom),
+                                (left_top, top),
+                                (crossing.3, top),
+                                (crossing.2, bottom),
+                                gpui_kit::Hsla::default(),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        vertices
+    }
+
+    /// How long the fill takes on a long stroke's outline, so a change to it can be measured rather than
+    /// guessed at. Run it with `--nocapture` to see the number.
+    #[test]
+    fn the_fill_of_a_long_stroke_is_quick() {
+        // A ribbon outline of the size a long stroke makes: two points a reading, plus the ends.
+        let readings = 2000;
+        let mut polygon: Vec<(f32, f32)> = (0..readings)
+            .map(|step| {
+                let along = step as f32 / readings as f32;
+                let y = 100.0 + along * 800.0 + 40.0 * (along * 60.0).sin();
+                let x = 100.0 + along * 900.0 + 30.0 * (along * 45.0).cos();
+                (x, y)
+            })
+            .collect();
+
+        let back: Vec<(f32, f32)> = polygon.iter().rev().map(|(x, y)| (x + 18.0, *y)).collect();
+        polygon.extend(back);
+
+        let mut vertices = Vec::new();
+
+        let started = std::time::Instant::now();
+        tessellate(&mut vertices, &polygon, colour());
+        let taken = started.elapsed();
+
+        eprintln!(
+            "a fill of {} points: {taken:?}, {} vertices",
+            polygon.len(),
+            vertices.len()
+        );
+
+        // The fill runs on the thread that draws, so it must not be what a frame waits for. Generous, because
+        // this is a debug build on whatever machine is running the tests -- but the old quadratic pass was
+        // minutes here, and the guard is what would notice the quadratic term coming back.
+        assert!(
+            taken.as_millis() < 250,
+            "a fill of {} points took {taken:?}",
+            polygon.len()
+        );
     }
 }

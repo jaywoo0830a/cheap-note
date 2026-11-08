@@ -259,6 +259,36 @@ fn wandering() -> Stroke {
     stroke
 }
 
+/// The model a stroke is drawn from at a zoom: the discs its nib left, worked out once.
+///
+/// A test that asks *what the ink is* asks this rather than reading the outline's vertices, because the
+/// outline is one way of drawing the model and the model is the claim. An outline's vertices are in a layout
+/// — left edge, a cap, right edge, a cap — and a test that counts them is a test about that layout: it breaks
+/// when the boundary is drawn in a different order, which says nothing about whether the ink is right. The
+/// model has no layout to break.
+fn model_of(stroke: &Stroke, zoom: f32) -> note_format::ink::Model {
+    note_format::ink::Model::of(&stroke.points, detail_zoom(zoom), Tip::Curved)
+}
+
+/// The longest step between two consecutive discs of the nib's path, times the zoom: how far the ink moves
+/// between two of the places it is drawn from, in window pixels.
+///
+/// This is what "how finely is the line cut" means, asked of the model rather than of the outline. The outline
+/// answers it only for the readings it was built from, and only if you know which of its vertices are the left
+/// edge and which are the caps; the model is the path itself, so the step is the distance between neighbours on
+/// it.
+fn longest_step(model: &note_format::ink::Model, zoom: f32) -> f32 {
+    model
+        .discs
+        .windows(2)
+        .map(|pair| {
+            let (dx, dy) = (pair[1].x - pair[0].x, pair[1].y - pair[0].y);
+
+            (dx * dx + dy * dy).sqrt() * zoom
+        })
+        .fold(0.0, f32::max)
+}
+
 /// The farthest any of these points is from the arc of this radius about the origin, times the
 /// zoom: how far the ink wanders from the line the hand meant, in window pixels on screen.
 fn wander(points: &[InkPoint], radius: f32, zoom: f32) -> f32 {
@@ -269,41 +299,28 @@ fn wander(points: &[InkPoint], radius: f32, zoom: f32) -> f32 {
         * zoom
 }
 
-/// The longest edge of one side of an outline, in the outline's own (sheet) units.
-/// One edge of a finished outline — the left side, from the first point to the last — with the caps at
-/// its ends left out.
+/// The sharpest turn between three consecutive discs of the nib's path, in degrees — the corner the path
+/// leaves at the step before, which is what the eye reads as a wobble.
 ///
-/// An outline is `left…`, the far end's cap, `right…`, the near end's cap (see `ink::ribbon_outline`),
-/// so the left edge is the first `points` vertices and nothing after them. Tests that measure how finely
-/// a *line* is cut ask about this, because a cap is a fixed arc that does not subdivide with the zoom.
-fn body_edge(outline: &[[f32; 2]], points: usize) -> &[[f32; 2]] {
-    &outline[..points.min(outline.len())]
-}
-
-fn longest_edge(side: &[[f32; 2]]) -> f32 {
-    (0..side.len().saturating_sub(1))
-        .map(|index| {
-            let [x0, y0] = side[index];
-            let [x1, y1] = side[index + 1];
-            ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt()
-        })
-        .fold(0.0, f32::max)
-}
-
-/// The sharpest turn between two consecutive edges of one side, in degrees — the corner a piece
-/// leaves at the end of the piece before it, which is what the eye reads as a wobble.
-fn sharpest_turn(side: &[[f32; 2]]) -> f32 {
+/// Asked of the model, so it measures the *line* rather than one side of the band's outline: a turn of the left
+/// edge is a turn of the path shifted by the width, and the two disagree wherever the width changes.
+fn sharpest_step(model: &note_format::ink::Model) -> f32 {
     let mut sharpest: f32 = 0.0;
-    for index in 1..side.len().saturating_sub(1) {
-        let along =
-            |from: usize, to: usize| (side[to][0] - side[from][0], side[to][1] - side[from][1]);
-        let (before, after) = (along(index - 1, index), along(index, index + 1));
+
+    for three in model.discs.windows(3) {
+        let (before, after) = (
+            (three[1].x - three[0].x, three[1].y - three[0].y),
+            (three[2].x - three[1].x, three[2].y - three[1].y),
+        );
+
         let turn = (before.0 * after.1 - before.1 * after.0)
             .atan2(before.0 * after.0 + before.1 * after.1)
             .to_degrees()
             .abs();
+
         sharpest = sharpest.max(turn);
     }
+
     sharpest
 }
 
@@ -337,34 +354,6 @@ fn bulge(from: InkPoint, to: InkPoint, run: &[InkPoint]) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// The side of the edge from `(x0, y0)` to `(x1, y1)` that `(x, y)` is on: positive is the left.
-fn side_of(x0: f32, y0: f32, x1: f32, y1: f32, x: f32, y: f32) -> f32 {
-    (x1 - x0) * (y - y0) - (x - x0) * (y1 - y0)
-}
-
-/// Whether a filled outline covers a point — the nonzero rule the fill uses, which is the rule the
-/// ribbon was drawn for (see `crate::app::solid_path`).
-///
-/// A winding count rather than a crossing count: the ribbon crosses itself wherever the pen did,
-/// and two crossings of the same direction are ink rather than a hole.
-fn covers(outline: &[[f32; 2]], x: f32, y: f32) -> bool {
-    let mut winding = 0i32;
-    for index in 0..outline.len() {
-        let [x0, y0] = outline[index];
-        let [x1, y1] = outline[(index + 1) % outline.len()];
-
-        if y0 <= y {
-            if y1 > y && side_of(x0, y0, x1, y1, x, y) > 0.0 {
-                winding += 1;
-            }
-        } else if y1 <= y && side_of(x0, y0, x1, y1, x, y) < 0.0 {
-            winding -= 1;
-        }
-    }
-
-    winding != 0
-}
-
 /// The detail a stroke is drawn with moves in rungs, so a pinch across the whole range rebuilds a
 /// page a handful of times rather than once per frame — and a rung is stable when it is handed
 /// back to itself, which is what keeps a rebuild from happening on every frame of a gesture.
@@ -396,16 +385,24 @@ fn the_detail_moves_in_rungs() {
 /// which is a handful of vertices apiece and no pieces along the line itself.
 #[test]
 fn the_detail_costs_nothing_at_one_to_one() {
-    let mut stroke = curve();
-    let points = stroke.points.len();
+    let stroke = curve();
+    let readings = stroke.points.len();
 
-    stroke.close_at(1.0);
+    // Asked of the model: at 1:1 the path is the readings themselves, so it is made of exactly as many discs as
+    // there are readings. That is what "costs nothing" means — no disc is inserted between two of them — and it
+    // is a statement about the ink rather than about how many vertices the boundary happens to take.
+    let at_one = model_of(&stroke, 1.0);
+    assert_eq!(
+        at_one.discs.len(),
+        readings,
+        "1:1 inserted discs between the readings: {} for {readings} readings",
+        at_one.discs.len()
+    );
 
-    // One straight edge per reading on each side, plus the two round ends. The ends are half circles of
-    // sixteen points, and the readings themselves are not added to at 1:1 — a curve that is already a point
-    // every three quarters of a pixel has nothing left to cut.
-    let edges = points * 2;
-    let ends = stroke.outline.len() - edges;
+    // And the outline is still one edge a reading a side, plus the two round ends.
+    let mut drawn = stroke;
+    drawn.close_at(1.0);
+    let ends = drawn.outline.len() - readings * 2;
 
     assert!(
         ends > 0 && ends <= 2 * END_VERTICES,
@@ -440,13 +437,13 @@ fn a_zoom_buys_detail_and_not_shape() {
         assert!(moved <= 0.25, "the line moved: {vertex:?} is {moved} away");
     }
 
-    // One edge of the band, with the caps at its ends left out of the measurement: what is being
-    // measured is how finely the *line* is cut, and a cap is a fixed arc that never subdivides.
-    let body = body_edge(&fine, stroke.points.len());
-    let longest = longest_edge(body);
+    // What is being measured is how finely the *line* is cut, asked of the model: the step between two
+    // neighbours on the nib's path, in window pixels. A cap is a fixed arc that never subdivides, and asking the
+    // outline would make this a test about where the caps sit in its vertex list.
+    let step = longest_step(&model_of(&stroke, 16.0), 16.0);
     assert!(
-        longest <= FACET * 1.25 / 16.0,
-        "the longest piece of a 16x line is {longest} logical pixels"
+        step <= FACET * 1.25,
+        "the longest step of a 16x line is {step} window pixels"
     );
 }
 
@@ -674,20 +671,24 @@ fn the_magnifier() {
         for zoom in [1.0f32, 16.0] {
             let as_it_was = drawn_flat(&stroke);
             let as_it_is = drawn(&stroke, zoom);
+            let modelled = model_of(&stroke, zoom);
+            let flat = note_format::ink::Model::of(&stroke.points, 0.0, Tip::Curved);
             let centre = stroke.points[focus];
             let (before, after) = (
-                grid(&as_it_was, centre, zoom, WIDTH, HEIGHT),
-                grid(&as_it_is, centre, zoom, WIDTH, HEIGHT),
+                grid(&flat, centre, zoom, WIDTH, HEIGHT),
+                grid(&modelled, centre, zoom, WIDTH, HEIGHT),
             );
 
-            for (label, outline) in [("as it was:", &as_it_was), ("as it is: ", &as_it_is)] {
-                let side = body_edge(&outline, stroke.points.len());
+            for (label, outline, model) in [
+                ("as it was:", &as_it_was, &flat),
+                ("as it is: ", &as_it_is, &modelled),
+            ] {
                 eprintln!(
-                    "    {zoom:>4.0}x {label} {:>5} vertices · longest piece {:>5.1} px · \
+                    "    {zoom:>4.0}x {label} {:>5} vertices · longest step {:>5.1} px · \
                      sharpest turn {:>4.1}°",
                     outline.len(),
-                    longest_edge(side) * zoom,
-                    sharpest_turn(side)
+                    longest_step(model, zoom),
+                    sharpest_step(model)
                 );
             }
 
@@ -701,21 +702,18 @@ fn the_magnifier() {
     eprintln!("───────────────────────────────────────────────────────────────\n");
 
     // The numbers the picture is about: at reading size there is nothing to interpolate, and at
-    // 16x a piece of ink is a pixel long on screen rather than twelve.
+    // 16x a step of ink is a pixel long on screen rather than twelve.
     let stroke = curve();
-    let at_one = drawn(&stroke, 1.0);
-    let reading_piece = longest_edge(body_edge(&at_one, curve().points.len()));
+    let at_one = longest_step(&model_of(&stroke, 1.0), 1.0);
     assert!(
-        reading_piece <= FACET,
-        "1:1 needs no pieces cut: {reading_piece} logical pixels is a piece"
+        at_one <= FACET,
+        "1:1 needs no pieces cut: {at_one} window pixels is a step"
     );
 
-    let at_sixteen = drawn(&stroke, 16.0);
-    let piece = longest_edge(body_edge(&at_sixteen, curve().points.len()));
+    let at_sixteen = longest_step(&model_of(&stroke, 16.0), 16.0);
     assert!(
-        piece <= FACET * 1.25 / 16.0,
-        "16x is drawn from pieces {piece} px long in the sheet, {} on screen",
-        piece * 16.0
+        at_sixteen <= FACET * 1.25,
+        "16x is drawn from steps {at_sixteen} window pixels long"
     );
 }
 
@@ -755,10 +753,17 @@ fn the_wobble_a_zoom_shows() {
     }
 
     // The picture at the zoom the complaint is about: the readings, one straight edge each, against
-    // the line this code draws from them.
+    // the line this code draws from them. Both are asked of the model, which is the ink either way — the
+    // difference between them is how finely the path was cut, not what the mark is.
     let centre = written.points[0];
-    let as_written = grid(&drawn_flat(&written), centre, 16.0, WIDTH, HEIGHT);
-    let as_drawn = grid(&drawn(&written, 16.0), centre, 16.0, WIDTH, HEIGHT);
+    let as_written = grid(
+        &note_format::ink::Model::of(&written.points, 0.0, Tip::Curved),
+        centre,
+        16.0,
+        WIDTH,
+        HEIGHT,
+    );
+    let as_drawn = grid(&model_of(&written, 16.0), centre, 16.0, WIDTH, HEIGHT);
 
     eprintln!("    16x      as written  |  as drawn");
     for row in 0..HEIGHT {
@@ -791,8 +796,11 @@ fn the_wobble_a_zoom_shows() {
 }
 
 /// A window of the sheet as characters: one *window* pixel to a character, the ink as `#`.
+///
+/// Sampled through the model, which is what the ink *is*. Drawing the picture from the outline would answer a
+/// question about the triangles rather than about the mark, and the picture is here to show the mark.
 fn grid(
-    outline: &[[f32; 2]],
+    model: &note_format::ink::Model,
     centre: InkPoint,
     zoom: f32,
     width: usize,
@@ -805,7 +813,7 @@ fn grid(
             // The window pixel this character stands for, in the sheet's own coordinates.
             let x = centre.x + (column as f32 + 0.5 - width as f32 / 2.0) / zoom;
             let y = centre.y + (row as f32 + 0.5 - height as f32 / 2.0) / zoom;
-            line.push(if covers(outline, x, y) { '#' } else { '.' });
+            line.push(if model.is_ink(x, y) { '#' } else { '.' });
         }
         rows.push(line);
     }

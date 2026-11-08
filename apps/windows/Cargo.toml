@@ -21,7 +21,7 @@ note-ui = { path = "../../crates/note-ui" }
 note-format = { path = "../../crates/note-format" }
 
 # UI framework: the canvas's own renderer registers a window plugin with it, and `main` boots it.
-gpui-kit = "=0.7.3"
+gpui-kit = "=0.8.1"
 
 # Low-latency pen input on Windows. This crate is not published on crates.io, so it is pinned to the
 # 0.3.0 git tag. Earlier tags worked out a reading's delay by subtracting a 32-bit stamp from a

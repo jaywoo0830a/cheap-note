@@ -23,7 +23,7 @@
 //! So nothing here spells a chord out: it names the *spec*, and [`label`] writes it in the
 //! convention the parsed chord came from — which `gpui` has already resolved for this platform.
 
-use gpui_kit::{Keystroke, Modifiers};
+use gpui_kit::{App, Keystroke, Modifiers};
 
 /// The chords, spelled once each: the strings a [`KeyBinding`](gpui_kit::KeyBinding) takes.
 ///
@@ -80,17 +80,25 @@ pub mod chord {
 /// Whether the platform's command modifier is down: `⌘` on macOS, `Ctrl` on Windows and Linux.
 ///
 /// `gpui`'s own answer, not this crate's (see the module docs): a handler that asked `control`
-/// directly would stop working the day this was built for a Mac.
-pub fn is_primary(modifiers: Modifiers) -> bool {
-    modifiers.secondary()
+/// directly would stop working the day this was built for a Mac. It is asked of the app rather than
+/// of the modifiers alone because which key *is* `secondary` is a fact about the platform the app is
+/// running on, and `gpui` keeps that on itself (since gpui-pre 0.3.10, where `Modifiers::secondary`
+/// grew the argument this passes).
+pub fn is_primary(modifiers: Modifiers, cx: &App) -> bool {
+    modifiers.secondary(cx)
 }
 
 /// Whether this platform's command key is `⌘` rather than `Ctrl`.
 ///
 /// The same question as [`is_primary`] asked of a *key* rather than of a keystroke, which is what a
 /// label needs: it decides the glyphs and the word "Redo" is spelt with (`⇧⌘Z` or `Ctrl+Y`).
+///
+/// It is answered from a *parsed chord* rather than from the app, because its callers are the tooltip
+/// texts — `LazyLock`s built once, with no `App` in reach. `gpui`'s parser resolves `secondary` per
+/// target (`platform` on macOS, `control` elsewhere), so a parsed `secondary-…` chord is the
+/// platform's own answer, and no `cfg` is needed to read it.
 fn command_is_glyph() -> bool {
-    Modifiers::secondary_key().platform
+    Keystroke::parse("secondary-z").is_ok_and(|keystroke| keystroke.modifiers.platform)
 }
 
 /// The chord as the platform writes it: `Ctrl+Shift+C` on Windows, `⇧⌘C` on macOS.
@@ -99,7 +107,12 @@ fn command_is_glyph() -> bool {
 /// *named* wherever it is shown. An unparseable spec comes back as it was written: a label is not
 /// worth a panic, and a spec that does not parse is a broken binding too — which
 /// [`tests::every_chord_parses`] is there to catch.
-pub fn label(spec: &str) -> String {
+///
+/// The spec is `&'static str` because that is what `Keystroke::parse` takes since gpui-pre 0.3.10: a
+/// parsed chord keeps the source it came from, so it may only borrow text that outlives it. Nothing
+/// here loses anything by that — every spec in this program is a constant in [`chord`], and one built
+/// at run time never reaches a tooltip.
+pub fn label(spec: &'static str) -> String {
     let Ok(keystroke) = Keystroke::parse(spec) else {
         return spec.to_string();
     };
@@ -179,6 +192,11 @@ pub mod tooltip {
     ///
     /// The same distinction the bindings make by binding both: Windows applications teach `Ctrl+Y`,
     /// and no other platform has ever used it for anything.
+    ///
+    /// Which convention this platform writes in is read off a *parsed chord* rather than asked of the
+    /// app: `secondary` resolves to `platform` on macOS and to `control` everywhere else, so a parsed
+    /// `secondary-…` chord already carries the platform's answer (see [`label`] and the module docs).
+    /// That matters here because this runs inside a `LazyLock`, where there is no `App` to ask.
     fn redo() -> &'static str {
         if command_is_glyph() {
             chord::REDO_ALT
@@ -188,7 +206,7 @@ pub mod tooltip {
     }
 
     /// `what (chord)`.
-    fn named(what: &str, spec: &str) -> String {
+    fn named(what: &str, spec: &'static str) -> String {
         format!("{what} ({})", label(spec))
     }
 }

@@ -1895,7 +1895,7 @@ impl NoteApp {
     fn on_wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let pointer = (event.position.x.into(), event.position.y.into());
 
-        if keys::is_primary(event.modifiers) {
+        if keys::is_primary(event.modifiers, cx) {
             // A wheel with the command modifier held is a zoom (`Ctrl`+wheel on Windows, where a trackpad's pinch
             // arrives as the same event), and a locked view does not take one: this is the gesture the lock exists
             // for — a roll of the wheel beside a page that is being read (see [`Settings::zoom_locked`]). The pan below
@@ -3380,7 +3380,7 @@ impl NoteApp {
     ) {
         let keystroke = &event.keystroke;
 
-        if keys::is_primary(keystroke.modifiers) {
+        if keys::is_primary(keystroke.modifiers, cx) {
             match keystroke.key.as_str() {
                 "n" => self.new_blank_sheet(cx),
                 "o" => self.prompt_for_pdf(cx),
@@ -3662,7 +3662,7 @@ impl NoteApp {
                 "right" | "down" => self.palette_spin(1, cx),
                 // The chord that put it up takes it away again; a press on the palette's own
                 // background is the other way out (see [`Self::palette_overlay`]).
-                "c" if keys::is_primary(keystroke.modifiers) && keystroke.modifiers.shift => {
+                "c" if keys::is_primary(keystroke.modifiers, cx) && keystroke.modifiers.shift => {
                     self.close_palette(cx)
                 }
                 _ => {}
@@ -3674,7 +3674,7 @@ impl NoteApp {
         // The palette at the pen: `C` for colour, on the one chord every drawing app spells it with —
         // and on *both* modifiers, so that the plain `Ctrl+C` a text field would expect stays
         // where it is.
-        if keys::is_primary(keystroke.modifiers)
+        if keys::is_primary(keystroke.modifiers, cx)
             && keystroke.modifiers.shift
             && keystroke.key.as_str() == "c"
         {
@@ -3682,7 +3682,7 @@ impl NoteApp {
             return;
         }
 
-        if !keys::is_primary(keystroke.modifiers) {
+        if !keys::is_primary(keystroke.modifiers, cx) {
             match keystroke.key.as_str() {
                 "escape" => {
                     if self.asking() {
@@ -3770,7 +3770,7 @@ impl NoteApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !keys::is_primary(event.keystroke.modifiers) {
+        if !keys::is_primary(event.keystroke.modifiers, cx) {
             return;
         }
 
@@ -3790,7 +3790,7 @@ impl NoteApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !keys::is_primary(event.keystroke.modifiers) {
+        if !keys::is_primary(event.keystroke.modifiers, cx) {
             return;
         }
 

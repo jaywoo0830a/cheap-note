@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 note-ui = { path = "../../crates/note-ui" }
 note-format = { path = "../../crates/note-format" }
-gpui-kit = "=0.7.3"
+gpui-kit = "=0.8.1"
 
 # The pen: `NSEvent`'s tablet fields, read on the thread that draws (see its own docs).
 pen-macos = { path = "pen-macos" }

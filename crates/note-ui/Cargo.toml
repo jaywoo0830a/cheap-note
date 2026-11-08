@@ -20,7 +20,7 @@ note-format = { path = "../note-format" }
 
 # UI framework. GPUI Kit 0.7.3 pulls in GPUI + gpui-base + gpui-component; the view never lists GPUI
 # itself. On Windows, macOS and Linux the platform crates behind it choose the backend.
-gpui-kit = "=0.7.3"
+gpui-kit = "=0.8.1"
 
 # The gamepad's left stick, as a pan of the sheet. Like GPUI Kit this is a cross-platform library —
 # one API over XInput/WGI on Windows and IOKit on macOS — so it belongs above the seam rather than

@@ -29,15 +29,32 @@ fn a_label_names_the_key_and_not_the_spec() {
     }
 }
 
-/// The primary modifier is the one this platform uses for commands, and asking `gpui` is how this
-/// crate stays free of `cfg`s.
+/// The primary modifier is the one this platform uses for commands, and it is `gpui` that decides
+/// which — asking the parser is how this crate stays free of `cfg`s.
+///
+/// Asked through a parsed chord rather than through [`is_primary`], because since gpui-pre 0.3.10 that
+/// function needs the `App` to ask *which* platform this is, and a test has none. The question is the
+/// same one either way: `secondary` is resolved by `gpui`'s own parser, per target, and what it
+/// resolved to is what `is_primary` reads.
 #[test]
 fn the_primary_modifier_is_the_platforms_command_key() {
-    assert!(is_primary(Modifiers::secondary_key()));
-    assert!(!is_primary(Modifiers::none()));
-
     let parsed = Keystroke::parse(chord::UNDO).expect("a chord");
-    assert!(is_primary(parsed.modifiers), "the undo chord is primary");
+
+    assert!(
+        parsed.modifiers.platform || parsed.modifiers.control,
+        "the undo chord carries no command modifier at all"
+    );
+
+    // And exactly one of the two: a chord that set both would be a chord no platform spells.
+    assert_ne!(
+        parsed.modifiers.platform,
+        parsed.modifiers.control,
+        "the command modifier is one key, not two"
+    );
+
+    // A chord with no modifier is nobody's command, which is the other half of what `is_primary` says.
+    let bare = Keystroke::parse("z").expect("a bare key");
+    assert!(!bare.modifiers.platform && !bare.modifiers.control);
 }
 
 /// `what (chord)` is what a tooltip is, and the chord in it is never the raw spec.

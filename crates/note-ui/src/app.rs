@@ -1892,7 +1892,7 @@ impl NoteApp {
     }
 
     /// Zooms or pans with the wheel — which is also where a trackpad's two-finger gesture arrives.
-    fn on_wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_wheel(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         let pointer = (event.position.x.into(), event.position.y.into());
 
         if keys::is_primary(event.modifiers, cx) {
@@ -5637,9 +5637,9 @@ impl Render for NoteApp {
             .text_color(foreground)
             // A trackpad's pinch, and a wheel with the command modifier held, both arrive here: the canvas is the
             // whole window's only interactive element, so it is what the gestures hit.
-            .on_scroll_wheel(cx.listener(|app, event: &ScrollWheelEvent, window, cx| {
-                app.on_wheel(event, window, cx)
-            }))
+            .on_scroll(
+                cx.listener(|app, event: &ScrollEvent, window, cx| app.on_wheel(event, window, cx)),
+            )
             .on_pinch(cx.listener(|app, event: &PinchEvent, _, cx| app.on_pinch(event, cx)))
             // The note's keyboard: Esc for the home screen, the two arrows for the page, and the three
             // commands a person reaches without letting go of the pen. A listener and not a binding,

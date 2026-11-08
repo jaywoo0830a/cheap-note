@@ -47,8 +47,7 @@ fn the_primary_modifier_is_the_platforms_command_key() {
 
     // And exactly one of the two: a chord that set both would be a chord no platform spells.
     assert_ne!(
-        parsed.modifiers.platform,
-        parsed.modifiers.control,
+        parsed.modifiers.platform, parsed.modifiers.control,
         "the command modifier is one key, not two"
     );
 

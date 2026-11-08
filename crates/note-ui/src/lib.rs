@@ -154,11 +154,38 @@ pub fn run(installer: Installer) {
         //
         // Registered on the application rather than on the view: a binding belongs to the window that
         // will receive the keystroke, and the view does not exist yet at this point.
-        cx.bind_keys([
-            KeyBinding::new(keys::chord::UNDO, Undo, None),
-            KeyBinding::new(keys::chord::REDO, Redo, None),
-            KeyBinding::new(keys::chord::REDO_ALT, Redo, None),
-        ]);
+        //
+        // `KeyBinding::load` rather than `KeyBinding::new`, since gpui-pre 0.3.10: `new` parses with a
+        // dummy keyboard mapper and a parser that does not resolve `secondary`, so a `secondary-z`
+        // binding panics on the unwrap inside it — which is exactly what upgrading this app did. `load`
+        // is handed the app, and with it the platform's real mapper and `parse_with_os`, which is what
+        // makes `secondary` mean ⌘ on macOS and Ctrl elsewhere (see the module docs in [`keys`]).
+        //
+        // A chord that will not parse is dropped with a line on stderr rather than taking the app down
+        // with it: `keys::tests::every_chord_parses` is what catches a typo, long before a person is
+        // running a window.
+        let mut bindings = Vec::with_capacity(3);
+
+        // Three bindings for two commands, each loaded against the app so `secondary` is resolved by the
+        // platform's own mapper — and each reported rather than panicked on if its chord is malformed.
+        let chords: [(&'static str, Box<dyn gpui_kit::Action>); 3] = [
+            (keys::chord::UNDO, Box::new(Undo)),
+            (keys::chord::REDO, Box::new(Redo)),
+            (keys::chord::REDO_ALT, Box::new(Redo)),
+        ];
+
+        for (chord, action) in chords {
+            match KeyBinding::load(chord, action, None, false, None, cx) {
+                Ok(binding) => bindings.push(binding),
+                Err(error) => {
+                    eprintln!(
+                        "cheap-note: {chord} is not a keystroke ({error}); that chord does nothing"
+                    );
+                }
+            }
+        }
+
+        cx.bind_keys(bindings);
 
         // What the app was asked to open: a path on the command line, which is what a file
         // association, a shortcut, or a drag onto the executable becomes. With one, the home screen is

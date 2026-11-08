@@ -104,10 +104,14 @@ These are the things the Windows side settled, and the Mac build inherits unchan
   the *host*; on a Mac they are not in the graph at all. Nothing the view depends on names a Windows API.
   The one device library it does depend on, `gilrs`, is cross-platform in the same way: its Windows
   backend is compiled only on Windows and its IOKit one only on macOS.
-* **The toolkit has a mac backend.** `gpui-kit` `0.7.3` → `gpui-pre-platform`, which selects
+* **The toolkit has a mac backend.** `gpui-kit` `0.9.0` → `gpui-pre-platform` (gpui-pre 0.3.11), which selects
   `gpui-pre-macos` + `gpui-pre-apple` for macOS (both published, 0.3.x).
 * **The chords are the platform's.** Bindings are `secondary-z`/`secondary-shift-c`/… and handlers ask
-  `Modifiers::secondary()`, which gpui resolves per target: `⌘` on macOS, `Ctrl` everywhere else.
+  `keys::is_primary`, which calls `Modifiers::secondary(cx)` — gpui resolves it per target: `⌘` on macOS,
+  `Ctrl` everywhere else. Since the 0.9.0 move the argument matters twice over: the resolution needs the
+  `App` to know which platform this is, and the *binding* has to be loaded with `KeyBinding::load(…, cx)`
+  rather than `KeyBinding::new`, because only `load` is handed the platform's keyboard mapper and
+  `parse_with_os` — `new` parses `secondary-z` with a dummy mapper and panics.
   Labels are computed from the chord (`⌘Z`, `⇧⌘C`) instead of being typed into strings.
 * **Pdfium is loaded the same way on all three.** `libloading` replaced the `LoadLibraryW` path;
   `LIBRARY_NAME` is `pdfium.dll` / `libpdfium.dylib` / `libpdfium.so`, and the search is the

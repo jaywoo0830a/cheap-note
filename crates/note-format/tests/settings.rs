@@ -7,7 +7,7 @@
 //! with different ink, which is the one thing the format promises not to do.
 
 use note_format::paper::{CanvasSize, CanvasStyle};
-use note_format::settings::{PenWeight, Settings};
+use note_format::settings::{PenWeight, Settings, FADE_CEILING};
 
 /// The defaults are a note that has never been told anything — and they are a *sane* set.
 ///
@@ -313,29 +313,70 @@ fn pressing_past_the_threshold_makes_the_line_solid() {
         ..Settings::default()
     };
 
-    let threshold = 0.7;
+    // Everything below it fades, and it is a fade rather than a step.
+    let mut pressure = 0.0;
 
-    // Everything below it fades.
-    for step in 0..14 {
-        let pressure = step as f32 / 20.0;
+    while pressure < FADE_CEILING {
         let alpha = settings.alpha_for_pressure(Some(pressure));
 
         assert!(
             alpha < 1.0,
             "a press at {pressure} should still be pale, not {alpha}"
         );
+        pressure += 0.01;
     }
 
     // At it, and every harder press above it, is solid — exactly one, not nearly one.
-    for step in 14..=20 {
-        let pressure = step as f32 / 20.0;
+    pressure = FADE_CEILING;
 
+    while pressure <= 1.0 {
         assert_eq!(
             settings.alpha_for_pressure(Some(pressure)),
             1.0,
             "a press at {pressure} is past the threshold and should be solid"
         );
+        pressure += 0.01;
     }
+}
+
+/// The threshold is inside the range a hand can actually press, which is the whole reason it works.
+///
+/// `NSEvent.pressure` is normalised and Apple is clear that it does not measure weight: a comfortable firm press
+/// lands around six or seven tenths, and one is rarely reached at all. A threshold above that is a threshold
+/// nobody crosses — the first version of this sat at `0.7` and the hardest press still drew a line that was only
+/// `96%` of the colour, which reads as ink with a smudge in it rather than as ink.
+///
+/// So this pins the *reachability*: pressing as hard as a hand comfortably can has to reach safety, and with
+/// something to spare rather than by a hair.
+#[test]
+fn a_comfortable_firm_press_reaches_solid() {
+    let settings = Settings {
+        pen_weight: PenWeight::Normal,
+        pressure_fades: true,
+        ..Settings::default()
+    };
+
+    // `0.6` is a firm, comfortable press — the upper end of what a hand produces while writing, and not the
+    // extreme of the scale. It has to be past the threshold with room to spare. Checked when this file is
+    // compiled: both sides are constants, so there is nothing to wait for a test run to find out.
+    const _: () = assert!(
+        FADE_CEILING <= 0.6,
+        "the threshold is at the edge of what a hand can press"
+    );
+
+    assert_eq!(
+        settings.alpha_for_pressure(Some(0.6)),
+        1.0,
+        "a firm press should be solid"
+    );
+
+    // And ordinary writing, at half that, is still visibly pale rather than half-way up.
+    let writing = settings.alpha_for_pressure(Some(0.3));
+
+    assert!(
+        writing < 0.95,
+        "ordinary writing at 0.3 drew {writing}, which is not a fade"
+    );
 }
 
 /// Below the threshold the fade is proportional to the hand, not curved.
@@ -352,8 +393,8 @@ fn below_the_threshold_the_fade_is_proportional() {
 
     let (none, half, full) = (
         settings.alpha_for_pressure(Some(0.0)),
-        settings.alpha_for_pressure(Some(0.35)),
-        settings.alpha_for_pressure(Some(0.7)),
+        settings.alpha_for_pressure(Some(FADE_CEILING / 2.0)),
+        settings.alpha_for_pressure(Some(FADE_CEILING)),
     );
 
     assert_eq!(full, 1.0, "the threshold itself is solid");
@@ -367,12 +408,14 @@ fn below_the_threshold_the_fade_is_proportional() {
 
     // And it rises with the hand rather than jumping about.
     let mut last = none;
+    let mut pressure = 0.0;
 
-    for step in 0..=14 {
-        let alpha = settings.alpha_for_pressure(Some(step as f32 / 20.0));
+    while pressure < FADE_CEILING {
+        let alpha = settings.alpha_for_pressure(Some(pressure));
 
         assert!(alpha >= last - 1e-6, "the fade went backwards");
         last = alpha;
+        pressure += 0.01;
     }
 }
 

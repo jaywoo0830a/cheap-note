@@ -35,6 +35,7 @@
 //! | `canvas_style` | a name: `Plain`, `Ruled`, `Grid`, `Dots` |
 //! | `page_display_width` | a number: logical pixels |
 //! | `grayscale_pages` | a flag |
+//! | `pressure_fades` | a flag |
 //! | `zoom` | a number, where `1.0` is the size the paper asks for |
 //! | `show_toolbar`, `show_status` | flags |
 //! | `export_dir` | a path, or no row at all |
@@ -286,6 +287,26 @@ pub struct Settings {
     /// in grey, another's is a diagram whose colours are the point.
     pub grayscale_pages: bool,
 
+    /// Whether a light touch lays a *pale* line as well as a thin one — the pencil's other half.
+    ///
+    /// A pencil pressed lightly does not only draw thinner, it draws greyer: less graphite reaches the page. Width
+    /// alone cannot say that, because a hairline in full black still reads as a pen's mark rather than a pencil's.
+    /// With this on, a stroke's ink is laid at the alpha its own pressure earned, so a light hand writes pale and a
+    /// heavy one writes dark.
+    ///
+    /// **On by default**, because it is what a hand writing with a pencil expects, and it is the behaviour the pen
+    /// already had for width: nothing new has to be discovered for the line to feel right.
+    ///
+    /// It is a *setting* rather than the only behaviour because the two ways of reading ink are both honest. A
+    /// diagram wants every line at full strength whatever the hand did on the day, and a reader who wants that
+    /// should be able to say so. Off, a stroke is laid at full opacity and only its width answers pressure — which
+    /// is exactly what this app did before the option existed.
+    ///
+    /// **It never changes ink already written.** The alpha is stamped into a stroke's colour when the nib goes
+    /// down (see [`crate::ink::with_alpha`]), the way a highlighter's is, so flipping this switch leaves every
+    /// line in the note exactly as it was drawn. A stroke is a record of a line, not a live view of a setting.
+    pub pressure_fades: bool,
+
     /// How large the sheet is drawn: `1.0` is the size the paper asks for.
     ///
     /// Not a paper size — choosing A5 is *paper*, while this is how close the reader is standing to
@@ -372,6 +393,9 @@ impl Default for Settings {
             canvas_size: CanvasSize::A4,
             canvas_style: CanvasStyle::Plain,
             grayscale_pages: false,
+            // A light touch writes pale as well as thin: the pencil every hand already knows. See
+            // [`Settings::pressure_fades`] for why it is a switch at all.
+            pressure_fades: true,
             // As large as the paper says. A sheet that fills a 1280-pixel window at its own scale
             // is the right place to start; Fit Width is one press away.
             zoom: 1.0,
@@ -430,6 +454,40 @@ impl Settings {
             None => self.no_pressure_width * weight,
         }
     }
+
+    /// How much of the page the ink for `pressure` lets through — the pencil's other half.
+    ///
+    /// With [`Settings::pressure_fades`] on, a light touch lays a pale line as well as a thin one, so a hand
+    /// writing softly reads as graphite rather than as a pen that happens to be fine. A hard press is full
+    /// strength: there is no ink darker than the colour chosen, and past a certain point a pencil cannot lay down
+    /// any more graphite either.
+    ///
+    /// The fade is a *ceiling*, not a multiplier on the colour: [`PenWeight::alpha`] is where it starts — the fine
+    /// pen is already a pencil and the heavier pens are already opaque — and pressure can only take the line below
+    /// that, never above it. So a bold pen at full pressure is still full strength, while the same pen under a light
+    /// hand is as pale as any other.
+    ///
+    /// The curve is the same one the width uses, for the same reason: a graze should be a graze in both senses at
+    /// once. A hand at a third of the pressure has laid about a fifth of the graphite (`1/3` raised to the pencil's
+    /// own exponent), so the line is thin *and* pale together rather than one outrunning the other.
+    ///
+    /// A pen with no pressure sensor gets its weight's own alpha and nothing more: it has reported no pressure, so
+    /// there is nothing for this to fade — guessing a value would make a flat pen's line wobble for no reason.
+    pub fn alpha_for_pressure(&self, pressure: Option<f32>) -> f32 {
+        let weight = self.pen_weight.alpha();
+
+        match pressure {
+            Some(pressure) if self.pressure_fades => {
+                let pressure = pressure.clamp(0.0, 1.0);
+                let graphite = pressure.powf(PRESSURE_CURVE);
+
+                // Never above what the weight allows, and never so faint the line disappears: a stroke the reader
+                // cannot see is not a light touch, it is a lost one.
+                weight * (PENCIL_ALPHA_FLOOR + (1.0 - PENCIL_ALPHA_FLOOR) * graphite).min(1.0)
+            }
+            _ => weight,
+        }
+    }
 }
 
 /// How the line answers a light touch: the curve a pencil's graphite lays down.
@@ -451,6 +509,23 @@ impl Settings {
 /// A pen with no pressure sensor is not on this curve at all — it reports nothing to bend, and draws at
 /// [`Settings::no_pressure_width`] (see [`Settings::width_for_pressure`]).
 const PRESSURE_CURVE: f32 = 2.2;
+
+/// How pale the very lightest touch may write, as a fraction of the colour chosen.
+///
+/// A pencil that has barely touched the paper still leaves a mark you can read; one that leaves nothing is not a
+/// light stroke, it is a stroke that went missing. The floor is what keeps a graze visible while still being
+/// unmistakably fainter than a press.
+///
+/// **`0.45` is set by the range a hand actually writes in**, not by the extremes. A person writing normally sits
+/// somewhere around four to six tenths of what the digitizer can report, and across that band the line has to be
+/// *readable* and still be visibly lighter than a press. With a tenth as the floor, half pressure came out at
+/// `0.30` — a third of the colour, which over paper is a pale smudge rather than writing. At `0.45` the same hand
+/// lays `0.61`, which reads as graphite laid down firmly: dark enough to read a page of it, and a clear step below
+/// the `1.0` of a full press so the fade is still doing something.
+///
+/// The very lightest graze lands at the floor itself — about half the colour — which is the faintest a stroke is
+/// allowed to be and still be a stroke.
+const PENCIL_ALPHA_FLOOR: f32 = 0.45;
 
 #[cfg(test)]
 mod tests {

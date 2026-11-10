@@ -1182,6 +1182,7 @@ impl NoteStore {
         into.page_color = row_value(conn, "page_color", into.page_color, colour_of)?;
         into.pen_weight = row_value(conn, "pen_weight", into.pen_weight, PenWeight::from_scale)?;
         into.grayscale_pages = row_value(conn, "grayscale_pages", into.grayscale_pages, flag_of)?;
+        into.pressure_fades = row_value(conn, "pressure_fades", into.pressure_fades, flag_of)?;
         into.canvas_size = row_value(
             conn,
             "canvas_size",
@@ -1241,6 +1242,7 @@ impl NoteStore {
         put_row(&tx, "page_color", settings.page_color)?;
         put_row(&tx, "pen_weight", settings.pen_weight.scale())?;
         put_flag(&tx, "grayscale_pages", settings.grayscale_pages)?;
+        put_flag(&tx, "pressure_fades", settings.pressure_fades)?;
         put_row(&tx, "canvas_size", settings.canvas_size.label())?;
         put_row(&tx, "canvas_style", settings.canvas_style.label())?;
         put_row(&tx, "page_display_width", settings.page_display_width)?;
@@ -2299,6 +2301,7 @@ mod tests {
             page_color: 0xF5_F0_E6,
             pen_weight: PenWeight::Fine,
             grayscale_pages: true,
+            pressure_fades: false,
             canvas_size: CanvasSize::A5,
             canvas_style: CanvasStyle::Ruled,
             page_display_width: 640.0,
@@ -2320,6 +2323,7 @@ mod tests {
             page_color: 0x20_20_24,
             pen_weight: PenWeight::Heavy,
             grayscale_pages: false,
+            pressure_fades: true,
             canvas_size: CanvasSize::Square,
             canvas_style: CanvasStyle::Grid,
             page_display_width: 720.0,

@@ -264,12 +264,102 @@ fn a_light_hand_draws_a_thin_line() {
     }
 }
 
+/// Soft ink: pressure decides how much of the colour reaches the page, and the switch decides whether it does.
+///
+/// The three things that have to hold at once. A soft hand writes paler than a firm one; a firm one reaches the
+/// colour exactly, because there is no ink darker than the colour chosen; and with the switch off nothing fades at
+/// all, whatever the hand did — which is what makes it a switch rather than a slider.
+#[test]
+fn soft_ink_fades_a_light_touch_and_only_when_asked() {
+    let on = Settings {
+        pen_weight: PenWeight::Normal,
+        pressure_fades: true,
+        ..Settings::default()
+    };
+    let off = Settings {
+        pressure_fades: false,
+        ..on.clone()
+    };
+
+    let (soft, firm) = (
+        on.alpha_for_pressure(Some(0.2)),
+        on.alpha_for_pressure(Some(1.0)),
+    );
+
+    assert!(soft < 0.9, "a light hand writes pale: {soft}");
+    assert_eq!(firm, 1.0, "a firm one reaches the colour exactly");
+    assert!(soft < firm);
+
+    // The switch is the whole difference: the same readings, and no fade at all.
+    assert_eq!(off.alpha_for_pressure(Some(0.2)), 1.0);
+    assert_eq!(off.alpha_for_pressure(Some(1.0)), 1.0);
+
+    // A pen with no sensor reports nothing for this to fade, so it keeps its weight's own alpha — a flat pen's
+    // line must not wobble because a fade was asked for.
+    assert_eq!(on.alpha_for_pressure(None), PenWeight::Normal.alpha());
+}
+
+/// The fade only ever takes the line *below* what its weight allows, never above it.
+///
+/// The fine pen is already a pencil, so soft ink must not make a light press on it darker than the pencil's own
+/// alpha — and a full press on any pen must not exceed one, because there is no ink more opaque than opaque.
+#[test]
+fn soft_ink_never_goes_above_the_weight() {
+    for weight in PenWeight::ALL {
+        let settings = Settings {
+            pen_weight: weight,
+            pressure_fades: true,
+            ..Settings::default()
+        };
+        let ceiling = weight.alpha();
+
+        for step in 0..=20 {
+            let alpha = settings.alpha_for_pressure(Some(step as f32 / 20.0));
+
+            assert!(
+                alpha <= ceiling + 1e-6,
+                "{weight:?} at pressure {} drew at {alpha}, above its own {ceiling}",
+                step as f32 / 20.0
+            );
+            assert!(alpha > 0.0, "{weight:?} drew nothing at all");
+        }
+
+        assert_eq!(
+            settings.alpha_for_pressure(Some(1.0)),
+            ceiling,
+            "{weight:?} at full pressure is its own alpha"
+        );
+    }
+}
+
+/// A graze still leaves a mark.
+///
+/// The floor's whole job: at no pressure at all the line is faint but present, because a stroke nobody can see is
+/// not a light stroke. Pinned against the pencil's own alpha so that the floor cannot rise above it unnoticed.
+#[test]
+fn the_lightest_touch_still_leaves_a_mark() {
+    let settings = Settings {
+        pen_weight: PenWeight::Normal,
+        pressure_fades: true,
+        ..Settings::default()
+    };
+
+    let graze = settings.alpha_for_pressure(Some(0.0));
+
+    assert!(graze > 0.0, "the lightest touch drew nothing");
+    assert!(
+        graze >= 0.4,
+        "a graze at {graze} is too faint to read as a line"
+    );
+    assert!(graze < 1.0, "a graze should be fainter than a press");
+}
+
 /// The fine pen is the pencil: its ink is the colour chosen, laid down at less than full strength.
 ///
 /// Every other pen is opaque, and the *number* it is stored as keeps no top byte — which is what
-/// [`alpha_of`] reads as fully opaque, and what every stroke written before this existed is. So a weight's
-/// alpha is a promise about two things at once: what the line looks like, and that choosing a heavier pen
-/// does not change a single byte of what is already written.
+/// [`alpha_of`] reads as fully opaque, and what every stroke written before this existed is. Soft ink is a
+/// ceiling on top of this rather than a replacement for it, so a weight's own alpha is still the most the line can
+/// reach.
 #[test]
 fn the_fine_pen_is_the_pencil_and_the_rest_are_opaque() {
     assert!(

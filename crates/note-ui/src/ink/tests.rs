@@ -590,6 +590,10 @@ fn a_page_turned_to_is_detailed_at_the_zoom_in_hand() {
 /// The palette is a set of pens, not a page setting: choosing a different colour has to leave
 /// what the previous one wrote exactly as it was, which is only true if the colour is stamped
 /// into the stroke when the nib goes down.
+///
+/// Soft ink is left on, because it is the state a reader's note is usually in, and because it is the harder
+/// case: the colour has to survive *under* an alpha as well as on its own, so the check is on the colour bits
+/// rather than the whole word.
 #[test]
 fn a_stroke_keeps_the_colour_it_was_written_in() {
     let mut ink = InkDocument::default();
@@ -605,11 +609,15 @@ fn a_stroke_keeps_the_colour_it_was_written_in() {
 
     assert_eq!(ink.finished().len(), 2);
     assert_eq!(
-        ink.finished()[0].color,
-        0xDC_26_26,
+        ink.finished()[0].color & 0x00FF_FFFF,
+        0x00DC_26_26,
         "the red line stays red"
     );
-    assert_eq!(ink.finished()[1].color, 0x1D_4E_D8, "the blue line is blue");
+    assert_eq!(
+        ink.finished()[1].color & 0x00FF_FFFF,
+        0x001D_4E_D8,
+        "the blue line is blue"
+    );
 }
 
 /// The steadier takes the panel's noise out and leaves the line where it was written: the ends of
@@ -2635,13 +2643,17 @@ fn a_highlighter_lays_down_a_wide_translucent_band() {
     );
 }
 
-/// A pen's ink is opaque, and it keeps following the hand's pressure: the two tools are one stroke type with
-/// different ink, and nothing about the pen changed when the highlighter was added.
+/// A pen follows the hand's pressure; a highlighter does not. The two are one stroke type with different ink.
+///
+/// With soft ink off, that is the whole of the difference — the pen's ink is opaque and only its width moves. The
+/// default has it on, so the same stroke is also pale, and this pins the width either way: the point of the pen
+/// answering pressure is that the *line* changes shape, which is true whatever the ink is doing.
 #[test]
 fn the_pen_is_not_a_highlighter() {
     let mut s = settings();
     s.min_width = 2.0;
     s.max_width = 12.0;
+    s.pressure_fades = false;
 
     let mut ink = InkDocument::default();
     ink.consume(&[reading(7, Phase::Down, 10.0, 10.0, Some(0.0))], &id(), &s);
@@ -2649,7 +2661,11 @@ fn the_pen_is_not_a_highlighter() {
 
     let stroke = &ink.finished()[0];
 
-    assert_eq!(alpha_of(stroke.color), 1.0, "pen ink is opaque");
+    assert_eq!(
+        alpha_of(stroke.color),
+        1.0,
+        "with soft ink off a pen's ink is opaque"
+    );
     assert!(
         (stroke.points[0].width - s.min_width).abs() < 0.01,
         "and a light touch is a thin line"
@@ -2705,16 +2721,18 @@ fn the_fine_pen_draws_graphite_and_still_answers_pressure() {
     );
 }
 
-/// A pen that is not the fine one is written as the plain colour it was set to, with no top byte on it.
+/// An opaque pen is written as the plain colour it was set to, with no top byte on it.
 ///
-/// The alpha is a weight's business, and only the pencil's is below one. Stamping `0xFF` on a normal pen would
-/// draw the same picture and mean something different: every new stroke would be a different number from the
-/// colour chosen, and the bytes of a note written before this existed would not match the ones written after.
+/// Stamping `0xFF` on a full-strength stroke would draw the same picture and mean something different: every new
+/// stroke would be a different number from the colour chosen, and the bytes of a note written before this existed
+/// would not match the ones written after. So the no-top-byte encoding is kept for every stroke that is fully
+/// opaque, whichever way it got there.
 #[test]
 fn an_opaque_pen_keeps_its_colour_exactly() {
     let mut s = settings();
     s.pen_weight = PenWeight::Normal;
     s.ink_color = 0xDC_26_26;
+    s.pressure_fades = false;
 
     let mut ink = InkDocument::default();
     ink.consume(&[reading(7, Phase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
@@ -2724,6 +2742,125 @@ fn an_opaque_pen_keeps_its_colour_exactly() {
         ink.finished()[0].color,
         0x00DC_2626,
         "a pen's colour is the number it was set to"
+    );
+}
+
+/// The same pen at full pressure is *also* written with no top byte, even with soft ink on.
+///
+/// The fade is a ceiling and full pressure reaches the top of it, so the stroke is opaque — and an opaque stroke is
+/// the plain number. This is the boundary between the two encodings, and the one a reader crosses every time they
+/// press hard: it must not change how the line is stored.
+#[test]
+fn a_hard_press_stores_the_plain_colour() {
+    let mut s = settings();
+    s.pen_weight = PenWeight::Normal;
+    s.ink_color = 0xDC_26_26;
+    s.pressure_fades = true;
+
+    let mut ink = InkDocument::default();
+    ink.consume(&[reading(7, Phase::Down, 10.0, 10.0, Some(1.0))], &id(), &s);
+    ink.consume(&[reading(7, Phase::Up, 18.0, 10.0, None)], &id(), &s);
+
+    assert_eq!(
+        ink.finished()[0].color,
+        0x00DC_2626,
+        "a full press reaches the top of the fade, and the top of it is opaque"
+    );
+}
+
+/// A light touch writes pale, and the softer the hand the paler it gets.
+///
+/// The whole point of the option: two strokes of the same pen and colour, pressed differently, are different
+/// numbers — the lighter one letting more of the page through — while both keep the colour that was chosen.
+#[test]
+fn a_light_touch_writes_pale() {
+    let mut s = settings();
+    s.pen_weight = PenWeight::Normal;
+    s.ink_color = 0x20_20_20;
+    s.pressure_fades = true;
+
+    let mut ink = InkDocument::default();
+
+    ink.consume(&[reading(7, Phase::Down, 10.0, 10.0, Some(0.2))], &id(), &s);
+    ink.consume(&[reading(7, Phase::Up, 60.0, 10.0, None)], &id(), &s);
+    ink.consume(&[reading(7, Phase::Down, 10.0, 40.0, Some(0.9))], &id(), &s);
+    ink.consume(&[reading(7, Phase::Up, 60.0, 40.0, None)], &id(), &s);
+
+    let (soft, firm) = (ink.finished()[0].color, ink.finished()[1].color);
+
+    assert!(
+        alpha_of(soft) < alpha_of(firm),
+        "the lighter hand is the paler line: {} then {}",
+        alpha_of(soft),
+        alpha_of(firm)
+    );
+    assert_eq!(
+        soft & 0x00FF_FFFF,
+        0x0020_2020,
+        "and the colour under the alpha is the one that was chosen"
+    );
+    assert_eq!(firm & 0x00FF_FFFF, 0x0020_2020);
+}
+
+/// Soft ink off leaves a stroke exactly as opaque as it always was, whatever the hand did.
+///
+/// The switch has to be a real one: with it off, the light and the hard press have to produce the same number, or
+/// turning it off would only fade less rather than not at all.
+#[test]
+fn soft_ink_off_makes_every_press_opaque() {
+    let mut s = settings();
+    s.pen_weight = PenWeight::Normal;
+    s.ink_color = 0x20_20_20;
+    s.pressure_fades = false;
+
+    let mut ink = InkDocument::default();
+
+    ink.consume(&[reading(7, Phase::Down, 10.0, 10.0, Some(0.2))], &id(), &s);
+    ink.consume(&[reading(7, Phase::Up, 60.0, 10.0, None)], &id(), &s);
+    ink.consume(&[reading(7, Phase::Down, 10.0, 40.0, Some(0.9))], &id(), &s);
+    ink.consume(&[reading(7, Phase::Up, 60.0, 40.0, None)], &id(), &s);
+
+    for stroke in ink.finished().iter() {
+        assert_eq!(
+            stroke.color, 0x20_20_20,
+            "with soft ink off every press is the plain colour"
+        );
+    }
+}
+
+/// Turning soft ink off does not reach back and rewrite what is already on the page.
+///
+/// The alpha is stamped into a stroke when the nib goes down, so the switch says what the *next* line is laid with.
+/// Recolouring the page when a setting changes would make a note's ink depend on its settings rather than on the
+/// hand that drew it.
+#[test]
+fn switching_soft_ink_off_leaves_written_ink_alone() {
+    let mut s = settings();
+    s.pen_weight = PenWeight::Normal;
+    s.ink_color = 0x20_20_20;
+    s.pressure_fades = true;
+
+    let mut ink = InkDocument::default();
+    ink.consume(&[reading(7, Phase::Down, 10.0, 10.0, Some(0.2))], &id(), &s);
+    ink.consume(&[reading(7, Phase::Up, 60.0, 10.0, None)], &id(), &s);
+
+    let written = ink.finished()[0].color;
+
+    assert!(alpha_of(written) < 1.0, "it was laid pale");
+
+    s.pressure_fades = false;
+    ink.consume(&[reading(7, Phase::Down, 10.0, 40.0, Some(0.2))], &id(), &s);
+    ink.consume(&[reading(7, Phase::Up, 60.0, 40.0, None)], &id(), &s);
+
+    assert_eq!(
+        ink.finished()[0].color,
+        written,
+        "the stroke drawn before the switch is untouched"
+    );
+    assert_eq!(
+        ink.finished()[1].color,
+        0x20_20_20,
+        "and the one drawn after it is opaque"
     );
 }
 

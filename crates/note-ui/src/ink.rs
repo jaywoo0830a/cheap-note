@@ -844,24 +844,33 @@ impl InkDocument {
                                 self.erase_at(x, y, settings);
                             }
                             Tool::Pen => {
-                                let width = settings.width_for_pressure(sample.applied_pressure());
+                                let pressure = sample.applied_pressure();
+                                let width = settings.width_for_pressure(pressure);
                                 // The pen in hand is stamped into the stroke: it is chosen at the
                                 // moment the nib goes down, and it stays with that line for good.
                                 //
-                                // Its *weight* is stamped in the same way, and in both the ways a weight
-                                // changes a line: the width above, and the alpha here. A fine pen is the
-                                // pencil, and a pencil's line is grey rather than black (see
-                                // `PenWeight::alpha`).
+                                // Its *weight* is stamped in the same way, and in all three of the ways
+                                // a weight changes a line: the width above, the pencil's own alpha
+                                // (`PenWeight::alpha`), and — when `pressure_fades` is on — how pale
+                                // this particular press leaves it.
                                 //
-                                // An opaque pen's colour is left *exactly* the `0xRRGGBB` it was set to,
-                                // with no top byte written on it. `with_alpha` would stamp `0xFF` there,
-                                // which draws the same but is not the same number: it would make every
-                                // new stroke unequal to the colour the reader chose, and rewrite the
-                                // bytes of every plain pen stroke in the note (see `alpha_of` for why
-                                // no top byte is the encoding's way of saying opaque).
+                                // The press is read *once*, here, at the reading that begins the stroke,
+                                // rather than point by point as it grows. A stroke is drawn as one
+                                // polygon in one colour, so one alpha is the only one it can have; and
+                                // taking it from the first reading is what keeps the decision honest,
+                                // since a stroke that faded as it grew would be showing its own middle
+                                // rather than the hand that started it. The width still follows every
+                                // reading: that is a shape, and this is a colour.
+                                //
+                                // An opaque stroke's colour is left *exactly* the `0xRRGGBB` it was set
+                                // to, with no top byte written on it. `with_alpha` would stamp `0xFF`
+                                // there, which draws the same but is not the same number: it would make
+                                // every new stroke unequal to the colour the reader chose, and rewrite
+                                // the bytes of every plain pen stroke in the note (see `alpha_of` for
+                                // why no top byte is the encoding's way of saying opaque).
                                 self.open_id = self.open_id.wrapping_add(1);
 
-                                let alpha = settings.pen_weight.alpha();
+                                let alpha = settings.alpha_for_pressure(pressure);
                                 let colour = if alpha >= 1.0 {
                                     settings.ink_color
                                 } else {

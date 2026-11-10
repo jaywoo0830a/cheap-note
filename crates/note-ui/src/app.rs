@@ -1795,6 +1795,15 @@ impl NoteApp {
         self.finish_setting(cx);
     }
 
+    /// Turns the pencil's fade on or off. See [`Settings::pressure_fades`].
+    ///
+    /// Like every other pen setting, it says what the *next* stroke is laid with and changes nothing already
+    /// written: the palette's colours are stamped into the strokes drawn with them, and so is this.
+    fn set_pressure_fades(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.pressure_fades = on;
+        self.finish_setting(cx);
+    }
+
     /// Locks or unlocks the zoom gestures. See [`Settings::zoom_locked`].
     ///
     /// Locking does not move the sheet and does not change the number: it says what the *next* wheel, pinch or fit
@@ -4904,6 +4913,17 @@ impl NoteApp {
                 cx,
                 |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
                     app.set_pdf_grayscale(on, cx)
+                },
+            ))
+            // The pen's own half of that row: a light hand writes pale as well as thin. Beside the weights it
+            // belongs to, and after the page's options so that the pen's controls stay together at the end.
+            .child(visibility_switch(
+                "pressure-fades",
+                "Soft ink",
+                self.settings.pressure_fades,
+                cx,
+                |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
+                    app.set_pressure_fades(on, cx)
                 },
             ))
     }

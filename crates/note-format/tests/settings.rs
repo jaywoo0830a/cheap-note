@@ -215,3 +215,85 @@ fn a_locked_zoom_holds_off_the_gestures() {
     assert!(!locked.gestures_zoom());
     assert!(Settings::default().gestures_zoom());
 }
+
+/// A light hand draws a *thin* line, not a middling one: the pressure curve is the pencil's.
+///
+/// This is the difference between a pencil and a pen that happens to be thin. Laid on a straight run between the
+/// nib's two widths, a third of full pressure would draw at `2.05 px` of the `1.0..4.5` on offer — more than half
+/// way, so a hand that is barely touching the paper writes as heavily as one pressing half as hard. A pencil does
+/// not do that: the nib only has to graze the paper to mark it, and the rest of the press is what thickens the
+/// line. Measured here as the shape of the road, since that is the thing that changed.
+#[test]
+fn a_light_hand_draws_a_thin_line() {
+    let settings = Settings {
+        pen_weight: PenWeight::Normal,
+        ..Settings::default()
+    };
+
+    let third = settings.width_for_pressure(Some(1.0 / 3.0));
+    let half = settings.width_for_pressure(Some(0.5));
+    let (least, most) = (settings.min_width, settings.max_width);
+    let straight = least + (most - least) / 3.0;
+
+    assert!(
+        third < straight * 0.75,
+        "a third of the pressure draws {}px, against {}px on a straight run",
+        third,
+        straight
+    );
+    assert!(
+        half < least + (most - least) / 2.0,
+        "half pressure is below the midpoint: {half}px"
+    );
+
+    // The ends of the road do not move. What the curve changes is the shape between them, so full and no
+    // pressure still land exactly where the two widths say — a pencil pressed hard is as thick as the nib is,
+    // and the lightest graze is as thin.
+    assert!((settings.width_for_pressure(Some(0.0)) - least).abs() < 1e-6);
+    assert!((settings.width_for_pressure(Some(1.0)) - most).abs() < 1e-6);
+
+    // And it only ever rises: no pressure is ever thinner than more pressure. A curve that crossed itself would
+    // draw a line that thinned out as the hand pressed harder.
+    let mut last = 0.0;
+
+    for step in 0..=20 {
+        let width = settings.width_for_pressure(Some(step as f32 / 20.0));
+
+        assert!(width >= last, "the line thinned as the hand pressed harder");
+        last = width;
+    }
+}
+
+/// The fine pen is the pencil: its ink is the colour chosen, laid down at less than full strength.
+///
+/// Every other pen is opaque, and the *number* it is stored as keeps no top byte — which is what
+/// [`alpha_of`] reads as fully opaque, and what every stroke written before this existed is. So a weight's
+/// alpha is a promise about two things at once: what the line looks like, and that choosing a heavier pen
+/// does not change a single byte of what is already written.
+#[test]
+fn the_fine_pen_is_the_pencil_and_the_rest_are_opaque() {
+    assert!(
+        PenWeight::Fine.alpha() < 1.0,
+        "the fine pen should read as graphite, not ink"
+    );
+
+    // Lighter than a pen, and still dark enough to write a margin note in — a hair over four fifths of the
+    // colour reaching the page leaves a soft grey rather than a ghost.
+    assert!(
+        PenWeight::Fine.alpha() >= 0.75,
+        "a fine pen at {} is too pale to read",
+        PenWeight::Fine.alpha()
+    );
+
+    for weight in PenWeight::ALL {
+        if weight == PenWeight::Fine {
+            continue;
+        }
+
+        assert_eq!(
+            weight.alpha(),
+            1.0,
+            "{weight:?} should be opaque: it is a pen, not a pencil"
+        );
+    }
+}

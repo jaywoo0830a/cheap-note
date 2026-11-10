@@ -139,6 +139,30 @@ impl PenWeight {
         }
     }
 
+    /// How much of the page a line drawn with this pen lets through, in `0.0..=1.0`.
+    ///
+    /// Every pen but the finest is opaque, and stays opaque: ink, in this app, has always been `0xRRGGBB` with no
+    /// top byte, and a line written years ago must not go pale because a weight learned about alpha after it was
+    /// drawn.
+    ///
+    /// [`PenWeight::Fine`] is the exception, and it is the pencil. A fine nib pressed lightly lays *graphite*
+    /// rather than ink: the paper's tooth shows through it, so the stroke is the same colour as a pen's but not
+    /// all of it reaches the page. At `0.82` a fine line over white paper reads as a soft grey while still being
+    /// unmistakably the colour the reader chose — dark enough to write a margin note in, and visibly lighter than
+    /// the pen beside it, which is the difference between a pencil and a pen that anyone can see from across a
+    /// desk.
+    ///
+    /// It is stamped into the stroke's colour when the nib goes down (the way a highlighter's is, see
+    /// [`crate::ink::with_alpha`]), so the note records a line and not a tool: a page written in the fine pen
+    /// opens in any application that can draw `0xAARRGGBB`, and opening it does not depend on this weight
+    /// existing.
+    pub fn alpha(self) -> f32 {
+        match self {
+            PenWeight::Fine => 0.82,
+            PenWeight::Light | PenWeight::Normal | PenWeight::Bold | PenWeight::Heavy => 1.0,
+        }
+    }
+
     /// How thick this pen is, in **millimetres of paper**.
     ///
     /// `no_pressure_width` is the setting's own width for a pen with no pressure sensor, and the one measured here
@@ -399,12 +423,34 @@ impl Settings {
         match pressure {
             Some(pressure) => {
                 let pressure = pressure.clamp(0.0, 1.0);
-                (self.min_width + pressure * (self.max_width - self.min_width)) * weight
+                let graphite = pressure.powf(PRESSURE_CURVE);
+
+                (self.min_width + graphite * (self.max_width - self.min_width)) * weight
             }
             None => self.no_pressure_width * weight,
         }
     }
 }
+
+/// How the line answers a light touch: the curve a pencil's graphite lays down.
+///
+/// A pencil pressed lightly does not draw half-way between its thinnest and its heaviest — it draws *almost* its
+/// thinnest, because a nib only has to graze the paper to mark it, and the rest of the press is what darkens the
+/// line. The response is therefore convex rather than straight: a reading at a third of the pressure draws a line
+/// far nearer the thin end than a straight run between the two widths would put it.
+///
+/// With the shipped widths, a hand at a third of full pressure draws at `0.6 px` of the `1.0..4.5` the nib offers,
+/// where a straight run would draw at `2.2 px` — more than half way, which is what makes a light hand look like a
+/// heavy one. Full pressure is still `4.5 px` and no pressure is still `1.0 px`: nothing about the *range* moves,
+/// only the shape of the road between its ends.
+///
+/// The exponent is the pencil's own rather than one chosen to look good in a screenshot: `2.2` sits just above the
+/// `2.0` a soft pencil's pressure-to-coverage curve is, so the very lightest graze still leaves a hairline rather
+/// than vanishing.
+///
+/// A pen with no pressure sensor is not on this curve at all — it reports nothing to bend, and draws at
+/// [`Settings::no_pressure_width`] (see [`Settings::width_for_pressure`]).
+const PRESSURE_CURVE: f32 = 2.2;
 
 #[cfg(test)]
 mod tests {

@@ -847,11 +847,28 @@ impl InkDocument {
                                 let width = settings.width_for_pressure(sample.applied_pressure());
                                 // The pen in hand is stamped into the stroke: it is chosen at the
                                 // moment the nib goes down, and it stays with that line for good.
+                                //
+                                // Its *weight* is stamped in the same way, and in both the ways a weight
+                                // changes a line: the width above, and the alpha here. A fine pen is the
+                                // pencil, and a pencil's line is grey rather than black (see
+                                // `PenWeight::alpha`).
+                                //
+                                // An opaque pen's colour is left *exactly* the `0xRRGGBB` it was set to,
+                                // with no top byte written on it. `with_alpha` would stamp `0xFF` there,
+                                // which draws the same but is not the same number: it would make every
+                                // new stroke unequal to the colour the reader chose, and rewrite the
+                                // bytes of every plain pen stroke in the note (see `alpha_of` for why
+                                // no top byte is the encoding's way of saying opaque).
                                 self.open_id = self.open_id.wrapping_add(1);
-                                self.open = Some(Stroke::new(
-                                    InkPoint::new(x, y, width),
-                                    settings.ink_color,
-                                ));
+
+                                let alpha = settings.pen_weight.alpha();
+                                let colour = if alpha >= 1.0 {
+                                    settings.ink_color
+                                } else {
+                                    with_alpha(settings.ink_color, alpha)
+                                };
+
+                                self.open = Some(Stroke::new(InkPoint::new(x, y, width), colour));
                             }
                             // A highlighter is a pen stroke whose ink lets the page through: one fixed width, and a
                             // colour with an alpha in it. Both are stamped in at the same moment the pen's are, so the
@@ -1327,8 +1344,20 @@ fn add_point(
     // A highlighter never follows the pressure at all: a marker has one tip, and a translucent band that thinned
     // out under a light touch would show the writing through in stripes. Which of the two this is comes from the
     // *stroke* rather than from the tool in hand, because a stroke knows what it was drawn with and the tool may
-    // have been changed since (see [`alpha_of`]).
-    let width = if alpha_of(stroke.color) < 1.0 {
+    // have been changed since.
+    //
+    // Being translucent is *not* what makes it a highlighter. A fine pen is translucent too — it is the pencil,
+    // and a pencil that stopped answering pressure would be a thin marker (see `PenWeight::alpha`). What a
+    // highlighter has and a pen does not is a **fixed width**: its points are all laid at the one tip's
+    // thickness, which is the tool's rather than the hand's. So the question asked here is whether every point so
+    // far is at the highlighter's width, and a stroke whose width has ever varied is one the pressure is moving.
+    let fixed = alpha_of(stroke.color) < 1.0
+        && stroke
+            .points
+            .iter()
+            .all(|point| (point.width - HIGHLIGHTER_WIDTH).abs() < 1e-3);
+
+    let width = if fixed {
         stroke
             .points
             .last()

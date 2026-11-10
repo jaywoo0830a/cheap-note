@@ -1,6 +1,7 @@
 use super::*;
 use crate::history::HISTORY_EDITS;
 use crate::input::{Phase, Point, Reading};
+use note_format::settings::PenWeight;
 
 /// A reading on a turned page is stored in the page's own coordinates, and reads back where it was
 /// written.
@@ -2652,6 +2653,77 @@ fn the_pen_is_not_a_highlighter() {
     assert!(
         (stroke.points[0].width - s.min_width).abs() < 0.01,
         "and a light touch is a thin line"
+    );
+}
+
+/// The fine pen is the pencil: its line is the colour chosen, laid down grey, and it still answers pressure.
+///
+/// Two things have to be true of it at once, and they pull against each other. It is *translucent*, which is the
+/// only way a line reads as graphite rather than ink — but translucency is also what a highlighter uses to say
+/// "do not follow the pressure", and a pencil that stopped answering pressure would be a thin marker. So this
+/// pins both halves: the colour carries an alpha, and the widths still move with the hand.
+#[test]
+fn the_fine_pen_draws_graphite_and_still_answers_pressure() {
+    let mut s = settings();
+    s.pen_weight = PenWeight::Fine;
+    s.ink_color = 0x00_00_00;
+
+    let mut ink = InkDocument::default();
+
+    // A light press, a harder one, and a lift: one stroke whose width is asked to change on the way.
+    ink.consume(
+        &[reading(7, Phase::Down, 10.0, 10.0, Some(0.05))],
+        &id(),
+        &s,
+    );
+    ink.consume(
+        &[reading(7, Phase::Move, 40.0, 10.0, Some(0.95))],
+        &id(),
+        &s,
+    );
+    ink.consume(&[reading(7, Phase::Up, 70.0, 10.0, None)], &id(), &s);
+
+    let stroke = &ink.finished()[0];
+
+    assert!(
+        alpha_of(stroke.color) < 1.0,
+        "a pencil's line is graphite: {}",
+        alpha_of(stroke.color)
+    );
+    assert_eq!(
+        stroke.color & 0x00FF_FFFF,
+        0x000000,
+        "and it is still the colour the reader chose, under the alpha"
+    );
+
+    let light = stroke.points[0].width;
+    let heavy = stroke.points[1].width;
+
+    assert!(
+        heavy > light,
+        "a pencil that does not thicken under the hand is a marker: {light}px then {heavy}px"
+    );
+}
+
+/// A pen that is not the fine one is written as the plain colour it was set to, with no top byte on it.
+///
+/// The alpha is a weight's business, and only the pencil's is below one. Stamping `0xFF` on a normal pen would
+/// draw the same picture and mean something different: every new stroke would be a different number from the
+/// colour chosen, and the bytes of a note written before this existed would not match the ones written after.
+#[test]
+fn an_opaque_pen_keeps_its_colour_exactly() {
+    let mut s = settings();
+    s.pen_weight = PenWeight::Normal;
+    s.ink_color = 0xDC_26_26;
+
+    let mut ink = InkDocument::default();
+    ink.consume(&[reading(7, Phase::Down, 10.0, 10.0, Some(0.5))], &id(), &s);
+    ink.consume(&[reading(7, Phase::Up, 18.0, 10.0, None)], &id(), &s);
+
+    assert_eq!(
+        ink.finished()[0].color,
+        0x00DC_2626,
+        "a pen's colour is the number it was set to"
     );
 }
 

@@ -151,15 +151,23 @@ pub struct Gamepads {
 }
 
 impl Gamepads {
-    /// Opens the platform's gamepad support, if there is any.
-    pub fn new() -> Self {
-        let gilrs = Gilrs::new().ok();
+    /// Opens the platform's gamepad support, if there is any and if the note asks for it.
+    ///
+    /// `enabled` is [`Settings::gamepad`]. Off, no `IOHIDManager` is created at all: the setting is a real off,
+    /// not a filter over a live manager, because the whole reason it exists is to stop this app from holding the
+    /// platform's HID layer open on a machine that is losing a Bluetooth pad.
+    pub fn new(enabled: bool) -> Self {
+        let gilrs = if enabled { Gilrs::new().ok() } else { None };
 
         if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
-            if let Some(gilrs) = gilrs.as_ref() {
-                for (id, pad) in gilrs.gamepads() {
-                    eprintln!("gamepad {id}: {} connected", pad.name());
+            match gilrs.as_ref() {
+                Some(gilrs) => {
+                    for (id, pad) in gilrs.gamepads() {
+                        eprintln!("gamepad {id}: {} connected", pad.name());
+                    }
                 }
+                None if enabled => eprintln!("gamepad: no pads, or the platform has none"),
+                None => eprintln!("gamepad: off (see the note's `gamepad` setting)"),
             }
         }
 
@@ -179,6 +187,20 @@ impl Gamepads {
         self.gilrs
             .as_ref()
             .is_some_and(|gilrs| gilrs.gamepads().next().is_some())
+    }
+
+    /// Whether the platform's HID layer is open at all — which is a different question from whether a pad is on.
+    ///
+    /// A machine with no pad attached still has a live manager once this app has opened one, and that is exactly
+    /// the state a reader turns off with [`Settings::gamepad`]. Exposed so the difference can be tested rather than
+    /// assumed: [`Self::is_connected`] is false both for "off" and for "on, but no pad", and only this method can
+    /// tell them apart.
+    ///
+    /// Nothing outside the tests asks — the app cares whether a *pad* is there, not whether the manager is — so it
+    /// is compiled only for them rather than left as an unused public method.
+    #[cfg(test)]
+    pub fn is_open(&self) -> bool {
+        self.gilrs.is_some()
     }
 
     /// What the sticks and shoulders ask for since the last call.

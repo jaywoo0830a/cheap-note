@@ -169,3 +169,36 @@ fn the_toggle_chord_is_one_pulse() {
     assert!(!chord_edge(true, &mut was), "still held");
     assert!(!chord_edge(false, &mut was), "released");
 }
+
+/// With the setting off, nothing is opened at all — not a manager that is merely ignored.
+///
+/// This is the difference the switch exists for. "Off" has to mean the platform's HID layer is never touched,
+/// because the reason a reader turns it off is a machine that is dropping a Bluetooth pad: a live manager that is
+/// simply not read would keep holding the device and would not help at all. So this asks the object rather than
+/// the setting — there is no `Gilrs` behind a disabled `Gamepads`, and the sticks therefore ask for nothing.
+#[test]
+fn a_disabled_gamepad_opens_nothing() {
+    let mut off = Gamepads::new(false);
+
+    assert!(
+        !off.is_open(),
+        "off means the HID manager was never created"
+    );
+    assert!(!off.is_connected(), "off means no pad is being read");
+    assert_eq!(
+        off.read(),
+        Sticks::default(),
+        "and the sticks ask for nothing"
+    );
+}
+
+/// Turned on, the manager is opened — which, on a machine with no pad attached, is still a live manager.
+///
+/// The converse, and the reason the switch is a rebuild rather than a filter: on has to actually open something,
+/// or flipping it would never start the sticks.
+#[test]
+fn an_enabled_gamepad_opens_the_manager() {
+    let on = Gamepads::new(true);
+
+    assert!(on.is_open(), "on means the manager exists");
+}

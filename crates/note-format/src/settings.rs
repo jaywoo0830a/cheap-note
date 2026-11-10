@@ -35,7 +35,7 @@
 //! | `canvas_style` | a name: `Plain`, `Ruled`, `Grid`, `Dots` |
 //! | `page_display_width` | a number: logical pixels |
 //! | `grayscale_pages` | a flag |
-//! | `pressure_fades` | a flag |
+//! | `pressure_fades`, `gamepad` | flags |
 //! | `zoom` | a number, where `1.0` is the size the paper asks for |
 //! | `show_toolbar`, `show_status` | flags |
 //! | `export_dir` | a path, or no row at all |
@@ -307,6 +307,22 @@ pub struct Settings {
     /// line in the note exactly as it was drawn. A stroke is a record of a line, not a live view of a setting.
     pub pressure_fades: bool,
 
+    /// Whether the app reads a gamepad at all.
+    ///
+    /// **On is not free, and this switch exists because of that.** Reading a pad means opening the platform's HID
+    /// manager, and on macOS that is `IOHIDManager` — the same layer Bluetooth controllers are connected through.
+    /// It is opened in shared mode (`kIOHIDOptionsTypeNone`), so the pad is not taken from anything, but a machine
+    /// that keeps losing a Bluetooth pad for reasons of its own does not need a second process holding the device
+    /// open while the question is investigated. Off, the manager is never created and the sticks simply ask for
+    /// nothing.
+    ///
+    /// **On by default**, because the sticks are a feature of the app and a pad that is in the drawer costs
+    /// nothing on a machine with no pad attached: `Gilrs::new` on a Mac with no pad still opens the manager.
+    ///
+    /// The setting says whether the app *reads* a pad, not whether a pad is connected — nothing here can change
+    /// what the operating system does with a device it has paired.
+    pub gamepad: bool,
+
     /// How large the sheet is drawn: `1.0` is the size the paper asks for.
     ///
     /// Not a paper size — choosing A5 is *paper*, while this is how close the reader is standing to
@@ -396,6 +412,8 @@ impl Default for Settings {
             // A light touch writes pale as well as thin: the pencil every hand already knows. See
             // [`Settings::pressure_fades`] for why it is a switch at all.
             pressure_fades: true,
+            // Reading a pad is a feature; a machine that never uses one should still be able to say so.
+            gamepad: true,
             // As large as the paper says. A sheet that fills a 1280-pixel window at its own scale
             // is the right place to start; Fit Width is one press away.
             zoom: 1.0,

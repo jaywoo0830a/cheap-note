@@ -993,6 +993,10 @@ impl NoteApp {
         );
         let sheet_focus = cx.focus_handle();
 
+        // Read before the struct literal takes `settings` by value: whether the pad's sticks are wanted decides
+        // whether the platform's HID layer is opened at all (see [`Settings::gamepad`]).
+        let gamepad_enabled = settings.gamepad;
+
         let mut app = NoteApp {
             settings,
             ink: Notes::new(),
@@ -1026,7 +1030,7 @@ impl NoteApp {
             view,
             scroll_waiting: (0.0, 0.0),
             scroll_asked: false,
-            gamepad: Gamepads::new(),
+            gamepad: Gamepads::new(gamepad_enabled),
             system_mouse,
             focus,
             system_buttons: (false, false),
@@ -1801,6 +1805,21 @@ impl NoteApp {
     /// written: the palette's colours are stamped into the strokes drawn with them, and so is this.
     fn set_pressure_fades(&mut self, on: bool, cx: &mut Context<Self>) {
         self.settings.pressure_fades = on;
+        self.finish_setting(cx);
+    }
+
+    /// Starts or stops reading a gamepad. See [`Settings::gamepad`].
+    ///
+    /// Turning it off drops the manager, which closes the HID layer this app had open; turning it on opens a fresh
+    /// one. It is rebuilt rather than filtered because "off" has to mean *not holding the device open* — a live
+    /// manager that is merely ignored would not help a machine that is losing a Bluetooth pad.
+    fn set_gamepad(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.settings.gamepad != on {
+            self.settings.gamepad = on;
+            self.gamepad = Gamepads::new(on);
+            self.pad_was = false;
+        }
+
         self.finish_setting(cx);
     }
 
@@ -4925,6 +4944,15 @@ impl NoteApp {
                 |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
                     app.set_pressure_fades(on, cx)
                 },
+            ))
+            // The pad's sticks, beside the pen's own options. Off, the app does not open the platform's HID
+            // layer at all — which is the answer for a machine where a Bluetooth pad is being dropped.
+            .child(visibility_switch(
+                "gamepad",
+                "Pad",
+                self.settings.gamepad,
+                cx,
+                |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| app.set_gamepad(on, cx),
             ))
     }
 

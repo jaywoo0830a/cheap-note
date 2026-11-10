@@ -610,12 +610,12 @@ fn a_stroke_keeps_the_colour_it_was_written_in() {
     assert_eq!(ink.finished().len(), 2);
     assert_eq!(
         ink.finished()[0].color & 0x00FF_FFFF,
-        0x00DC_26_26,
+        0xDC_26_26,
         "the red line stays red"
     );
     assert_eq!(
         ink.finished()[1].color & 0x00FF_FFFF,
-        0x001D_4E_D8,
+        0x1D_4E_D8,
         "the blue line is blue"
     );
 }
@@ -2781,7 +2781,11 @@ fn a_light_touch_writes_pale() {
 
     let mut ink = InkDocument::default();
 
-    ink.consume(&[reading(7, Phase::Down, 10.0, 10.0, Some(0.2))], &id(), &s);
+    ink.consume(
+        &[reading(7, Phase::Down, 10.0, 10.0, Some(0.05))],
+        &id(),
+        &s,
+    );
     ink.consume(&[reading(7, Phase::Up, 60.0, 10.0, None)], &id(), &s);
     ink.consume(&[reading(7, Phase::Down, 10.0, 40.0, Some(0.9))], &id(), &s);
     ink.consume(&[reading(7, Phase::Up, 60.0, 40.0, None)], &id(), &s);
@@ -2796,10 +2800,10 @@ fn a_light_touch_writes_pale() {
     );
     assert_eq!(
         soft & 0x00FF_FFFF,
-        0x0020_2020,
+        0x20_20_20,
         "and the colour under the alpha is the one that was chosen"
     );
-    assert_eq!(firm & 0x00FF_FFFF, 0x0020_2020);
+    assert_eq!(firm & 0x00FF_FFFF, 0x20_20_20);
 }
 
 /// Soft ink off leaves a stroke exactly as opaque as it always was, whatever the hand did.
@@ -2815,7 +2819,11 @@ fn soft_ink_off_makes_every_press_opaque() {
 
     let mut ink = InkDocument::default();
 
-    ink.consume(&[reading(7, Phase::Down, 10.0, 10.0, Some(0.2))], &id(), &s);
+    ink.consume(
+        &[reading(7, Phase::Down, 10.0, 10.0, Some(0.05))],
+        &id(),
+        &s,
+    );
     ink.consume(&[reading(7, Phase::Up, 60.0, 10.0, None)], &id(), &s);
     ink.consume(&[reading(7, Phase::Down, 10.0, 40.0, Some(0.9))], &id(), &s);
     ink.consume(&[reading(7, Phase::Up, 60.0, 40.0, None)], &id(), &s);
@@ -2841,7 +2849,11 @@ fn switching_soft_ink_off_leaves_written_ink_alone() {
     s.pressure_fades = true;
 
     let mut ink = InkDocument::default();
-    ink.consume(&[reading(7, Phase::Down, 10.0, 10.0, Some(0.2))], &id(), &s);
+    ink.consume(
+        &[reading(7, Phase::Down, 10.0, 10.0, Some(0.05))],
+        &id(),
+        &s,
+    );
     ink.consume(&[reading(7, Phase::Up, 60.0, 10.0, None)], &id(), &s);
 
     let written = ink.finished()[0].color;
@@ -2849,7 +2861,11 @@ fn switching_soft_ink_off_leaves_written_ink_alone() {
     assert!(alpha_of(written) < 1.0, "it was laid pale");
 
     s.pressure_fades = false;
-    ink.consume(&[reading(7, Phase::Down, 10.0, 40.0, Some(0.2))], &id(), &s);
+    ink.consume(
+        &[reading(7, Phase::Down, 10.0, 40.0, Some(0.05))],
+        &id(),
+        &s,
+    );
     ink.consume(&[reading(7, Phase::Up, 60.0, 40.0, None)], &id(), &s);
 
     assert_eq!(

@@ -500,24 +500,33 @@ impl Settings {
 /// The pressure at which the line becomes solid, and stays solid however much harder it is pressed.
 ///
 /// **It is set by what a hand can actually press, not by the top of the scale.** `NSEvent.pressure` is a
-/// *normalised* value, and Apple is explicit that it "is not intended to measure weight": a person writing with
-/// an Apple Pencil or a tablet stylus reaches somewhere around six or seven tenths when pressing as hard as is
-/// comfortable, and rarely reaches one at all. A threshold of `0.7` therefore sat at the very edge of what a hand
-/// can produce — the hardest press landed on `0.96`, so the line looked as though it never quite got there, which
-/// is exactly the complaint that made this number change.
+/// *normalised* value, and Apple is explicit that it "is not intended to measure weight". The scale is not a
+/// description of a hand's range: a person writing with an Apple Pencil or a tablet stylus sits far lower on it
+/// than the numbers suggest, and one is a place the hand almost never visits.
 ///
-/// `0.55` sits above the band ordinary writing occupies (roughly a quarter to a half) and below the firmest press
-/// a hand comfortably makes, so the three bands are all reachable:
+/// Two values have been tried and both were too high, which is the lesson worth keeping:
+///
+/// * `0.7` — at the very edge of a firm press. The hardest press landed on `0.96` and the line never quite
+///   arrived.
+/// * `0.55` — still above where a hand actually writes. Reported from use as never getting solid either.
+///
+/// `0.2` is the value that puts the threshold *inside* the range a hand is known to occupy rather than at the top
+/// of it. The bands a reader can reach are then all on the switched side of it:
 ///
 /// | Hand | Pressure | Line |
 /// |---|---|---|
-/// | a light touch | `0.05..=0.20` | faint |
-/// | ordinary writing | `0.25..=0.45` | pale |
-/// | a deliberate press | `0.55..=0.70` | **solid** |
+/// | resting or drifting | `0.00..=0.10` | faint |
+/// | a light touch | `0.10..=0.20` | pale, rising |
+/// | **anything a reader means as writing** | `0.20..` | **solid** |
 ///
-/// Nothing needs to reach `1.0` for the ink to be opaque, which is the point: a threshold a hand cannot reach is
-/// the same as no threshold at all.
-pub const FADE_CEILING: f32 = 0.55;
+/// That is a deliberate trade, and it is the right way round: the fade is a *softening* for the lightest touches,
+/// not a reward for pressing hard. A reader who wants the whole line pale should turn [`Settings::pressure_fades`]
+/// off, which is what the switch is for — one press is easier to find than a narrow band of pressure that has to
+/// be hit exactly.
+///
+/// The one thing this must not do is make ordinary writing look washed out, so the band below the threshold is
+/// narrow: it covers a nib that is barely touching the paper, and nothing a reader would call writing.
+pub const FADE_CEILING: f32 = 0.2;
 
 /// How the line answers a light touch: the curve a pencil's graphite lays down.
 ///

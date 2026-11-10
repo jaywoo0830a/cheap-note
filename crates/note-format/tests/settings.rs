@@ -281,8 +281,10 @@ fn soft_ink_fades_a_light_touch_and_only_when_asked() {
         ..on.clone()
     };
 
+    // A nib drifting on the paper, well below the threshold. The value matters: `0.2` is the threshold itself now,
+    // so the pale end of the range is the play above a resting nib rather than anything a reader writes at.
     let (soft, firm) = (
-        on.alpha_for_pressure(Some(0.2)),
+        on.alpha_for_pressure(Some(0.05)),
         on.alpha_for_pressure(Some(1.0)),
     );
 
@@ -291,7 +293,7 @@ fn soft_ink_fades_a_light_touch_and_only_when_asked() {
     assert!(soft < firm);
 
     // The switch is the whole difference: the same readings, and no fade at all.
-    assert_eq!(off.alpha_for_pressure(Some(0.2)), 1.0);
+    assert_eq!(off.alpha_for_pressure(Some(0.05)), 1.0);
     assert_eq!(off.alpha_for_pressure(Some(1.0)), 1.0);
 
     // A pen with no sensor reports nothing for this to fade, so it keeps its weight's own alpha — a flat pen's
@@ -339,43 +341,45 @@ fn pressing_past_the_threshold_makes_the_line_solid() {
     }
 }
 
-/// The threshold is inside the range a hand can actually press, which is the whole reason it works.
+/// The threshold is inside the range a hand actually presses, which is the whole reason it works.
 ///
-/// `NSEvent.pressure` is normalised and Apple is clear that it does not measure weight: a comfortable firm press
-/// lands around six or seven tenths, and one is rarely reached at all. A threshold above that is a threshold
-/// nobody crosses — the first version of this sat at `0.7` and the hardest press still drew a line that was only
-/// `96%` of the colour, which reads as ink with a smudge in it rather than as ink.
+/// `NSEvent.pressure` is normalised and Apple is clear that it does not measure weight. Two thresholds were tried
+/// and both were reported from use as never getting solid: `0.7` left the hardest press on `0.96`, and `0.55` was
+/// still above where a hand writes. The scale is not a description of a hand's range, so the threshold has to sit
+/// low on it rather than near the top.
 ///
-/// So this pins the *reachability*: pressing as hard as a hand comfortably can has to reach safety, and with
-/// something to spare rather than by a hair.
+/// So this pins the *reachability*, and against a value far below the scale's ceiling: a press anywhere near what
+/// a reader produces has to be solid, not by a hair. Checked when the file is compiled, because both sides are
+/// constants and there is nothing to wait for a test run to find out.
 #[test]
-fn a_comfortable_firm_press_reaches_solid() {
+fn a_press_a_reader_makes_is_solid() {
     let settings = Settings {
         pen_weight: PenWeight::Normal,
         pressure_fades: true,
         ..Settings::default()
     };
 
-    // `0.6` is a firm, comfortable press — the upper end of what a hand produces while writing, and not the
-    // extreme of the scale. It has to be past the threshold with room to spare. Checked when this file is
-    // compiled: both sides are constants, so there is nothing to wait for a test run to find out.
     const _: () = assert!(
-        FADE_CEILING <= 0.6,
-        "the threshold is at the edge of what a hand can press"
+        FADE_CEILING <= 0.25,
+        "the threshold is above where a hand presses, so nobody would ever reach it"
     );
 
-    assert_eq!(
-        settings.alpha_for_pressure(Some(0.6)),
-        1.0,
-        "a firm press should be solid"
-    );
+    // A press of a quarter of the scale is already well past it, and every press above that is solid.
+    for pressure in [0.25, 0.3, 0.5, 0.7, 1.0] {
+        assert_eq!(
+            settings.alpha_for_pressure(Some(pressure)),
+            1.0,
+            "a press at {pressure} should be solid"
+        );
+    }
 
-    // And ordinary writing, at half that, is still visibly pale rather than half-way up.
-    let writing = settings.alpha_for_pressure(Some(0.3));
+    // And the band below the threshold is the play in a nib, not a band a reader writes in: a tenth of the scale
+    // is still visibly short of the colour.
+    let resting = settings.alpha_for_pressure(Some(0.1));
 
     assert!(
-        writing < 0.95,
-        "ordinary writing at 0.3 drew {writing}, which is not a fade"
+        resting < 0.95,
+        "a nib barely touching the paper drew {resting}, which is not a fade"
     );
 }
 

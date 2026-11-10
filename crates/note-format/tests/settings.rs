@@ -299,6 +299,83 @@ fn soft_ink_fades_a_light_touch_and_only_when_asked() {
     assert_eq!(on.alpha_for_pressure(None), PenWeight::Normal.alpha());
 }
 
+/// Pressing past the threshold makes the line solid, and it stays solid however much harder the hand presses.
+///
+/// This is the shape the fade is meant to have: ordinary writing sits below the threshold and is pale, and a
+/// deliberate press is *fully* opaque rather than almost. A curve that climbed to one only at the very top of the
+/// range would spend its upper reach in shades nobody can tell apart, and the ink would look as though it never
+/// quite arrived.
+#[test]
+fn pressing_past_the_threshold_makes_the_line_solid() {
+    let settings = Settings {
+        pen_weight: PenWeight::Normal,
+        pressure_fades: true,
+        ..Settings::default()
+    };
+
+    let threshold = 0.7;
+
+    // Everything below it fades.
+    for step in 0..14 {
+        let pressure = step as f32 / 20.0;
+        let alpha = settings.alpha_for_pressure(Some(pressure));
+
+        assert!(
+            alpha < 1.0,
+            "a press at {pressure} should still be pale, not {alpha}"
+        );
+    }
+
+    // At it, and every harder press above it, is solid — exactly one, not nearly one.
+    for step in 14..=20 {
+        let pressure = step as f32 / 20.0;
+
+        assert_eq!(
+            settings.alpha_for_pressure(Some(pressure)),
+            1.0,
+            "a press at {pressure} is past the threshold and should be solid"
+        );
+    }
+}
+
+/// Below the threshold the fade is proportional to the hand, not curved.
+///
+/// A reader pressing half as hard gets half the fade, so the ink answers the hand predictably. Measured as the
+/// midpoint between the faintest touch and the threshold landing half-way up the climb.
+#[test]
+fn below_the_threshold_the_fade_is_proportional() {
+    let settings = Settings {
+        pen_weight: PenWeight::Normal,
+        pressure_fades: true,
+        ..Settings::default()
+    };
+
+    let (none, half, full) = (
+        settings.alpha_for_pressure(Some(0.0)),
+        settings.alpha_for_pressure(Some(0.35)),
+        settings.alpha_for_pressure(Some(0.7)),
+    );
+
+    assert_eq!(full, 1.0, "the threshold itself is solid");
+
+    let middle = (none + full) / 2.0;
+
+    assert!(
+        (half - middle).abs() < 0.02,
+        "half the way to the threshold should be half the fade: {half} against {middle}"
+    );
+
+    // And it rises with the hand rather than jumping about.
+    let mut last = none;
+
+    for step in 0..=14 {
+        let alpha = settings.alpha_for_pressure(Some(step as f32 / 20.0));
+
+        assert!(alpha >= last - 1e-6, "the fade went backwards");
+        last = alpha;
+    }
+}
+
 /// The fade only ever takes the line *below* what its weight allows, never above it.
 ///
 /// The fine pen is already a pencil, so soft ink must not make a light press on it darker than the pencil's own

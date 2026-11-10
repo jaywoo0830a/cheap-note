@@ -457,19 +457,20 @@ impl Settings {
 
     /// How much of the page the ink for `pressure` lets through — the pencil's other half.
     ///
-    /// With [`Settings::pressure_fades`] on, a light touch lays a pale line as well as a thin one, so a hand
-    /// writing softly reads as graphite rather than as a pen that happens to be fine. A hard press is full
-    /// strength: there is no ink darker than the colour chosen, and past a certain point a pencil cannot lay down
-    /// any more graphite either.
+    /// With [`Settings::pressure_fades`] on, a pen pressed below [`FADE_CEILING`] lays a pale line as well as a
+    /// thin one, and the rise from the faintest touch to full strength is straight: a hand at half the threshold
+    /// hands the page half the way back. Below the threshold the line is *that* colour, fading in step with the
+    /// hand and nothing else.
+    ///
+    /// At and above it the line is opaque, and it stays opaque for every harder press. That is the point of the
+    /// threshold: writing is done in the middle of a pen's range, and a reader pressing down has said they want
+    /// this line solid. Sliding up to solid asymptotically would never quite arrive — a firm hand would still be
+    /// laying `0.96` and the ink would look as though it had a smudge in it.
     ///
     /// The fade is a *ceiling*, not a multiplier on the colour: [`PenWeight::alpha`] is where it starts — the fine
     /// pen is already a pencil and the heavier pens are already opaque — and pressure can only take the line below
-    /// that, never above it. So a bold pen at full pressure is still full strength, while the same pen under a light
-    /// hand is as pale as any other.
-    ///
-    /// The curve is the same one the width uses, for the same reason: a graze should be a graze in both senses at
-    /// once. A hand at a third of the pressure has laid about a fifth of the graphite (`1/3` raised to the pencil's
-    /// own exponent), so the line is thin *and* pale together rather than one outrunning the other.
+    /// that, never above it. So a bold pen pressed past the threshold is full strength, while the same pen under a
+    /// light hand is as pale as any other.
     ///
     /// A pen with no pressure sensor gets its weight's own alpha and nothing more: it has reported no pressure, so
     /// there is nothing for this to fade — guessing a value would make a flat pen's line wobble for no reason.
@@ -479,16 +480,34 @@ impl Settings {
         match pressure {
             Some(pressure) if self.pressure_fades => {
                 let pressure = pressure.clamp(0.0, 1.0);
-                let graphite = pressure.powf(PRESSURE_CURVE);
 
-                // Never above what the weight allows, and never so faint the line disappears: a stroke the reader
-                // cannot see is not a light touch, it is a lost one.
-                weight * (PENCIL_ALPHA_FLOOR + (1.0 - PENCIL_ALPHA_FLOOR) * graphite).min(1.0)
+                if pressure >= FADE_CEILING {
+                    return weight;
+                }
+
+                // Straight from the floor at no pressure to the weight's own alpha at the threshold, so that a
+                // press half-way to the threshold is half-way up the fade.
+                let faded =
+                    PENCIL_ALPHA_FLOOR + (1.0 - PENCIL_ALPHA_FLOOR) * (pressure / FADE_CEILING);
+
+                (weight * faded).min(weight)
             }
             _ => weight,
         }
     }
 }
+
+/// The pressure at which the line becomes solid, and stays solid however much harder it is pressed.
+///
+/// Writing happens in the middle of a pen's range — around four to six tenths of what a digitizer can report —
+/// and this sits above that band so that ordinary writing stays pale while a deliberate press goes fully opaque.
+/// Below it the ink fades in proportion to the hand; at it, and above, there is no fade left to do.
+///
+/// It is a *ceiling* rather than the end of a gradual climb, and that shape is the whole point. A curve that rose
+/// smoothly to solid would spend its upper range in shades a reader cannot tell apart (`0.94`, then `0.97`, then
+/// `1.0`) — the ink would look as though it never quite got there. With a threshold, the same hand that presses
+/// down gets a line that is unmistakably solid, which is what pressing down is for.
+const FADE_CEILING: f32 = 0.7;
 
 /// How the line answers a light touch: the curve a pencil's graphite lays down.
 ///

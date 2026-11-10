@@ -2768,6 +2768,69 @@ fn a_hard_press_stores_the_plain_colour() {
     );
 }
 
+/// A stroke darkens when the hand presses harder part-way through it.
+///
+/// This is the reading the ink actually has to answer. A pen *arriving* on the paper is barely pressing — that
+/// is what arriving is — so a stroke's first reading is one of its lightest. Deciding the colour there made every
+/// line pale however hard the hand pressed afterwards, which is what made "press harder to draw darker" look
+/// broken. The colour follows the firmest press the stroke has been laid at, so pressing down mid-stroke darkens
+/// the line that is already on the page.
+#[test]
+fn a_stroke_darkens_as_the_hand_presses_harder() {
+    let mut s = settings();
+    s.pen_weight = PenWeight::Normal;
+    s.ink_color = 0x20_20_20;
+    s.pressure_fades = true;
+
+    let mut ink = InkDocument::default();
+
+    // Landed lightly, which is how a pen lands.
+    ink.consume(
+        &[reading(7, Phase::Down, 10.0, 10.0, Some(0.02))],
+        &id(),
+        &s,
+    );
+    ink.consume(
+        &[reading(7, Phase::Move, 40.0, 10.0, Some(0.05))],
+        &id(),
+        &s,
+    );
+
+    let landed = ink.open().expect("the stroke is being drawn").color;
+
+    assert!(
+        alpha_of(landed) < 1.0,
+        "it starts pale: {}",
+        alpha_of(landed)
+    );
+
+    // Pressing down, without lifting.
+    ink.consume(&[reading(7, Phase::Move, 70.0, 10.0, Some(0.8))], &id(), &s);
+
+    let pressed = ink.open().expect("the stroke is still open").color;
+
+    assert!(
+        alpha_of(pressed) > alpha_of(landed),
+        "pressing harder did not darken the line: {} then {}",
+        alpha_of(landed),
+        alpha_of(pressed)
+    );
+    assert_eq!(alpha_of(pressed), 1.0, "a firm press goes solid");
+
+    // Easing off does not take the ink back: the line holds what the hand has already shown it means.
+    ink.consume(
+        &[reading(7, Phase::Move, 100.0, 10.0, Some(0.03))],
+        &id(),
+        &s,
+    );
+
+    assert_eq!(
+        alpha_of(ink.open().expect("still open").color),
+        1.0,
+        "easing off made the ink paler again"
+    );
+}
+
 /// A light touch writes pale, and the softer the hand the paler it gets.
 ///
 /// The whole point of the option: two strokes of the same pen and colour, pressed differently, are different

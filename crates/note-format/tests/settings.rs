@@ -360,12 +360,12 @@ fn a_press_a_reader_makes_is_solid() {
     };
 
     const _: () = assert!(
-        FADE_CEILING <= 0.25,
+        FADE_CEILING <= 0.3,
         "the threshold is above where a hand presses, so nobody would ever reach it"
     );
 
-    // A press of a quarter of the scale is already well past it, and every press above that is solid.
-    for pressure in [0.25, 0.3, 0.5, 0.7, 1.0] {
+    // At the threshold and every press above it, a reader's press is solid.
+    for pressure in [FADE_CEILING, 0.4, 0.5, 0.7, 1.0] {
         assert_eq!(
             settings.alpha_for_pressure(Some(pressure)),
             1.0,
@@ -373,9 +373,9 @@ fn a_press_a_reader_makes_is_solid() {
         );
     }
 
-    // And the band below the threshold is the play in a nib, not a band a reader writes in: a tenth of the scale
-    // is still visibly short of the colour.
-    let resting = settings.alpha_for_pressure(Some(0.1));
+    // And the band below the threshold is the play in a nib, not a band a reader writes in: half of it is still
+    // visibly short of the colour.
+    let resting = settings.alpha_for_pressure(Some(FADE_CEILING / 2.0));
 
     assert!(
         resting < 0.95,

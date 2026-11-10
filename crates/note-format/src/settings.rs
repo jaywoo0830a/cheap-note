@@ -526,7 +526,7 @@ impl Settings {
 ///
 /// The one thing this must not do is make ordinary writing look washed out, so the band below the threshold is
 /// narrow: it covers a nib that is barely touching the paper, and nothing a reader would call writing.
-pub const FADE_CEILING: f32 = 0.2;
+pub const FADE_CEILING: f32 = 0.3;
 
 /// How the line answers a light touch: the curve a pencil's graphite lays down.
 ///

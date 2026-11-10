@@ -428,6 +428,23 @@ pub struct InkDocument {
     /// already built needs to know when the stroke it is looking at is a *different* one. The id
     /// changes when a new stroke begins and at no other time.
     open_id: u64,
+    /// The firmest press this open stroke has been laid at, in `0.0..=1.0`.
+    ///
+    /// **A stroke's ink is decided by this, not by the reading that began it.** A nib arriving on the paper is
+    /// barely pressing — that is what arriving is — so the first reading of every stroke is one of its lightest.
+    /// Deciding the alpha there made every line pale no matter how hard the hand pressed afterwards, which is
+    /// exactly backwards: a reader pressing down had done everything right and the ink did not answer.
+    ///
+    /// It only ever rises. Taking the peak rather than the latest reading means a stroke does not flicker paler
+    /// when the hand eases between letters, and that ink already laid is never taken *away* — the line can only
+    /// darken into what the hand has already shown it means. The width still follows every reading, because a
+    /// width is a shape and this is a colour.
+    ///
+    /// A stroke that never reported pressure at all — a pen with no sensor, a lasso's loop — keeps a reading of
+    /// `None` here, which [`Settings::alpha_for_pressure`] answers with the weight's own alpha. That is the
+    /// difference between "no hand to answer" and "a hand pressing nothing", and it must not be confused: reading
+    /// a sensorless pen as zero would make every line it drew pale.
+    peak_pressure: Option<f32>,
     /// The pointer that owns the turn: the pen or eraser that is currently down.
     active_pointer: Option<u32>,
     /// Which tool [`Self::active_pointer`] is using.
@@ -483,6 +500,7 @@ impl Default for InkDocument {
             history: History::new(),
             open: None,
             open_id: 0,
+            peak_pressure: None,
             active_pointer: None,
             active_tool: Tool::Pen,
             mode: Tool::Pen,
@@ -498,6 +516,22 @@ impl Default for InkDocument {
 }
 
 impl InkDocument {
+    /// The colour a pen stroke is laid in, for a hand pressing `pressure`.
+    ///
+    /// The one place the pen's ink is decided, so that the reading that begins a stroke and the ones that raise
+    /// its press cannot disagree about it. An opaque result is the plain `0xRRGGBB` with no top byte written on
+    /// it — see [`alpha_of`] for why that is the encoding's way of saying "opaque" — and a faded one carries its
+    /// alpha in the top byte, the way a highlighter's does.
+    fn pen_colour(settings: &Settings, pressure: Option<f32>) -> u32 {
+        let alpha = settings.alpha_for_pressure(pressure);
+
+        if alpha >= 1.0 {
+            settings.ink_color
+        } else {
+            with_alpha(settings.ink_color, alpha)
+        }
+    }
+
     /// An empty page.
     ///
     /// Named rather than derived because reading a page that is not in the note yet is a *blank*
@@ -854,14 +888,6 @@ impl InkDocument {
                                 // (`PenWeight::alpha`), and — when `pressure_fades` is on — how pale
                                 // this particular press leaves it.
                                 //
-                                // The press is read *once*, here, at the reading that begins the stroke,
-                                // rather than point by point as it grows. A stroke is drawn as one
-                                // polygon in one colour, so one alpha is the only one it can have; and
-                                // taking it from the first reading is what keeps the decision honest,
-                                // since a stroke that faded as it grew would be showing its own middle
-                                // rather than the hand that started it. The width still follows every
-                                // reading: that is a shape, and this is a colour.
-                                //
                                 // An opaque stroke's colour is left *exactly* the `0xRRGGBB` it was set
                                 // to, with no top byte written on it. `with_alpha` would stamp `0xFF`
                                 // there, which draws the same but is not the same number: it would make
@@ -869,13 +895,9 @@ impl InkDocument {
                                 // the bytes of every plain pen stroke in the note (see `alpha_of` for
                                 // why no top byte is the encoding's way of saying opaque).
                                 self.open_id = self.open_id.wrapping_add(1);
+                                self.peak_pressure = pressure;
 
-                                let alpha = settings.alpha_for_pressure(pressure);
-                                let colour = if alpha >= 1.0 {
-                                    settings.ink_color
-                                } else {
-                                    with_alpha(settings.ink_color, alpha)
-                                };
+                                let colour = Self::pen_colour(settings, pressure);
 
                                 self.open = Some(Stroke::new(InkPoint::new(x, y, width), colour));
                             }
@@ -1025,6 +1047,22 @@ impl InkDocument {
     fn push_point(&mut self, x: f32, y: f32, sample: &Reading, settings: &Settings, force: bool) {
         let alpha = self.alpha(sample, settings);
 
+        // The firmest press so far, raised before the point is added so that the colour and the shape of this
+        // reading agree with each other. `None` means the pen reported no force at all, which is not the same as
+        // no force being applied: a hovering pen and a sensorless one both stay `None`, and a stroke that only
+        // ever saw `None` keeps its weight's own alpha (see [`Self::peak_pressure`]).
+        if let Some(pressure) = sample.applied_pressure() {
+            self.peak_pressure = Some(
+                self.peak_pressure
+                    .map_or(pressure, |peak| peak.max(pressure)),
+            );
+        }
+
+        // Only the pen's own ink follows the hand. A highlighter is laid at one fixed alpha and its band must not
+        // be recoloured here, and a lasso's loop is not ink at all — both come through this same walk, so the
+        // question has to be asked of the tool rather than assumed from which caller reached it.
+        let pen = self.active_tool == Tool::Pen;
+
         if let Some(stroke) = self.open.as_mut() {
             add_point(
                 stroke,
@@ -1036,6 +1074,14 @@ impl InkDocument {
                 settings,
                 force,
             );
+
+            // The ink follows the hand as it presses harder. One colour for the whole stroke, so this recolours
+            // all of it rather than appending bands of different darkness — which is what keeps a stroke a
+            // single polygon and therefore free of the seams that translucent segments would show where they
+            // meet. It is the *same* stroke being laid darker, not a second one.
+            if pen && !stroke.points.is_empty() {
+                stroke.color = Self::pen_colour(settings, self.peak_pressure);
+            }
         }
     }
 

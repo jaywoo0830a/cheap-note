@@ -341,16 +341,16 @@ fn pressing_past_the_threshold_makes_the_line_solid() {
     }
 }
 
-/// The threshold is inside the range a hand actually presses, which is the whole reason it works.
+/// The threshold is somewhere a press can actually reach, checked when the file is compiled.
 ///
-/// `NSEvent.pressure` is normalised and Apple is clear that it does not measure weight. Two thresholds were tried
-/// and both were reported from use as never getting solid: `0.7` left the hardest press on `0.96`, and `0.55` was
-/// still above where a hand writes. The scale is not a description of a hand's range, so the threshold has to sit
-/// low on it rather than near the top.
+/// What counts as "reachable" changed with the peak. While the colour came from a stroke's *first* reading — the
+/// one where the nib is still barely touching — no threshold near the top of the scale could be crossed, and the
+/// guard here was a hard ceiling of `0.3`. Now the colour follows the firmest press of the stroke, so a hand that
+/// presses down does reach high on the scale, and `0.7` is a threshold a reader can cross deliberately.
 ///
-/// So this pins the *reachability*, and against a value far below the scale's ceiling: a press anywhere near what
-/// a reader produces has to be solid, not by a hair. Checked when the file is compiled, because both sides are
-/// constants and there is nothing to wait for a test run to find out.
+/// The guard is therefore about the top of the scale rather than about a particular number: a threshold at `1.0`
+/// would need a press exactly as hard as the device can report, which is the one thing a hand cannot be relied on
+/// to do. `0.7` leaves a third of the scale above it, which is a deliberate press with room to spare.
 #[test]
 fn a_press_a_reader_makes_is_solid() {
     let settings = Settings {
@@ -360,12 +360,12 @@ fn a_press_a_reader_makes_is_solid() {
     };
 
     const _: () = assert!(
-        FADE_CEILING <= 0.3,
-        "the threshold is above where a hand presses, so nobody would ever reach it"
+        FADE_CEILING <= 0.8,
+        "the threshold is so high that no press could reach it"
     );
 
-    // At the threshold and every press above it, a reader's press is solid.
-    for pressure in [FADE_CEILING, 0.4, 0.5, 0.7, 1.0] {
+    // At the threshold and every press above it is solid.
+    for pressure in [FADE_CEILING, FADE_CEILING + 0.1, 0.9, 1.0] {
         assert_eq!(
             settings.alpha_for_pressure(Some(pressure)),
             1.0,
@@ -373,13 +373,12 @@ fn a_press_a_reader_makes_is_solid() {
         );
     }
 
-    // And the band below the threshold is the play in a nib, not a band a reader writes in: half of it is still
-    // visibly short of the colour.
+    // And a press below it is still a fade rather than arriving instantly: ordinary writing stays pale.
     let resting = settings.alpha_for_pressure(Some(FADE_CEILING / 2.0));
 
     assert!(
         resting < 0.95,
-        "a nib barely touching the paper drew {resting}, which is not a fade"
+        "a press half way to the threshold drew {resting}, which is not a fade"
     );
 }
 

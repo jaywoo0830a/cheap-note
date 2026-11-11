@@ -5206,10 +5206,12 @@ impl NoteApp {
             ))
             .child(toolbar_divider(hairline))
             // The pen's own steadiness, beside the two things that pace a frame: what it corrects is the
-            // gesture that moves the sheet, and it is the one setting here that is about the *hardware*.
+            // gesture that moves the sheet — the pan and the zoom a held modifier makes of the nib — and it is
+            // the one setting here that is about the *hardware*. Named for the gesture rather than for the pen,
+            // because writing is not corrected at all: only a move of the sheet is.
             .child(visibility_switch(
                 "pen-jitter",
-                "Steady pen",
+                "Steady move",
                 self.settings.pen_jitter,
                 cx,
                 |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {

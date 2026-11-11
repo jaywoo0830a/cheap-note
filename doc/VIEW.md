@@ -777,6 +777,34 @@ The ink in the description is the finished strokes as one `Arc` — a pointer co
 of every stroke — plus the *open* stroke, closed live at the current zoom, and a `revision` number that
 counts the rebuilds a zoom's change of detail forced (see `ink_layer/render.rs`).
 
+### What a frame actually costs, and what it does not
+
+Measured on a 25-page, 8,182-stroke note at 2560×1600 on a 144 Hz display, with `CHEAP_NOTE_TRACE=1`: **143
+to 146 draws a second under continuous load**, with the ink at 350,000–400,000 vertices and one rebuild a
+second. That is the number to hold onto, because two things about it were not obvious and each cost a
+detour.
+
+**A still frame reports almost no draws, and that is not a drop.** The trace line shows two to five draws a
+second when nothing moves and nothing is rebuilding. The canvas draws only when there is something to draw —
+a drawable that is not ready is a frame to skip — so a page that has not changed asks for nothing, and macOS
+does not hand out frames nobody asked for. Reading that number as a frame rate is reading an idle counter
+as a slow one; the frame rate is what it says *while the hand is moving*, and a measurement with no
+stimulus in it measures nothing.
+
+**The vertices were never the cost.** A page at 356,000 vertices is under a fifth of a millisecond of vertex
+shading. The fragments are what a frame spends: 1280×800 logical at two device pixels a side is 4.1 M
+pixels, four samples a pixel of multisampled colour is 16.4 M samples, the page texture covers the whole
+window, and counting the page and the ink's own pass that is over 30 M samples against under a million
+vertices — tens of times the work, not a few. So raising `FACET` from 1 to 2 — a real halving of the
+geometry, and worth having — moved the frame's total cost by about a percent. It was the wrong lever for a
+frame-rate problem, and it was pulled before the measurement that would have said so. The geometry is still
+the right thing to economise, because it is free to do and the buffer is smaller; it is simply not where a
+dropped frame comes from.
+
+What that leaves, if a frame ever does drop under load, is in the fragments: the sample count, the resolve,
+and how much of the window the page texture has to cover. None of them has been touched, because none of
+them had to be.
+
 ## 12. The numbers, in one table
 
 | Constant | Value | What it decides |
@@ -806,6 +834,8 @@ counts the rebuilds a zoom's change of detail forced (see `ink_layer/render.rs`)
 | `BATCH_INTERVAL` / `BATCH_STROKES` | 500 ms / 200 | how long ink may wait in memory, and how much of it may |
 | `CHECKPOINT_QUIET_INTERVAL` / `CHECKPOINT_INTERVAL` | 5 s / 5 min | when the write-ahead log may be folded back into the note file, and how rarely |
 | `PAGE_SHADOW` | three steps | the spread, the offset beyond the spread, and the colour of each of the three rectangles a sheet's shadow is made of, widest and faintest first |
+| `FACET` | 2.0 window px | how long a straight piece of a stroke may be: the chord error at a pen's tightest turn is 0.17 px, under the quarter-of-a-pixel grid four samples a pixel resolve, so the curve cannot be seen through it. Raising it from 1 to 2 halved the geometry (6.98 M vertices to 3.49 M on a traced page) and the buffer with it — worth having, but it is not where a dropped frame comes from (§11) |
+| `SAMPLES` | 4 | what a pixel's colour is sampled at, and the one rendering constant that would matter if a frame ever did drop: multisampling is the frame's real cost, and it is 4 because Metal has no analytic antialiasing to give a polygon (Windows fills with coverage instead) |
 
 Every `PALETTE_*` length above is a *design* number, in the 96-DPI logical pixels a Windows display
 measures in. The palette is drawn at those numbers times `Platform::unit_scale` — `1.0` on Windows and

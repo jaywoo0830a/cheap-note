@@ -388,3 +388,32 @@ fn pan_by_does_accumulate() {
         "three readings of a hand that had travelled 120 px, added instead of placed"
     );
 }
+
+/// The sheet's *origin* follows the pan at once, without waiting for a frame.
+///
+/// The pen pump draws the canvas itself, from the sheet the last frame laid out — and that sheet is only
+/// rebuilt by the frame. A pan changes nothing about the layout except where it sits, so the origin is moved
+/// from the pan on the pen's own wake. Without that the paper trails the hand by exactly one frame, which a
+/// pan shows plainly: a stroke has its own ink to hide behind, and a pan has nothing.
+#[test]
+fn the_origin_follows_the_pan_at_once() {
+    let mut view = Viewport::new(1.0);
+
+    let resting = view.origin(SHEET, WINDOW, MARGIN);
+
+    view.set_pan((-120.0, -80.0));
+    view.hold_pan(SHEET, WINDOW, MARGIN);
+    let panned = view.origin(SHEET, WINDOW, MARGIN);
+
+    assert_ne!(
+        panned, resting,
+        "a pan moves where the sheet is drawn, with no frame to lay it out again"
+    );
+
+    // The direction: a negative pan scrolls the sheet up, so its top is drawn higher in the window. (The
+    // horizontal axis is clamped at the margin for this sheet and window, so only the vertical is asked.)
+    assert!(
+        panned.1 < resting.1,
+        "a pan that scrolls the sheet up draws it higher: {resting:?} -> {panned:?}"
+    );
+}

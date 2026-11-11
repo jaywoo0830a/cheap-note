@@ -809,6 +809,13 @@ pub struct NoteApp {
     scroll_waiting: (f32, f32),
     /// Whether a frame has been asked for to spend [`Self::scroll_waiting`].
     scroll_asked: bool,
+    /// Whether the sheet was moved since the last frame, by a gesture rather than by ink.
+    ///
+    /// The canvas draws itself on the pen's own wake, so a stroke needs no frame; a *pan* does, because the
+    /// bar and the page pill describe where the sheet is and are drawn by the frame. Set by the two paths that
+    /// move the view and cleared by the frame that spends them, so a gesture draw one frame per changed wake
+    /// rather than one per reading.
+    view_moved: bool,
     /// Where each page was being read, for as long as the note in hand is open.
     ///
     /// The *page's* place rather than the reader's: turning to a page added at the end of a note opens that page at
@@ -1037,6 +1044,7 @@ impl NoteApp {
             view,
             scroll_waiting: (0.0, 0.0),
             scroll_asked: false,
+            view_moved: false,
             pans: HashMap::new(),
             sheet: Sheet::default(),
             bar_bottom: Rc::new(Cell::new(None)),
@@ -1247,11 +1255,20 @@ impl NoteApp {
                 // was laid.
                 app.draw_canvas();
 
-                // The canvas was drawn above, on this wake. A frame is what the *interface* needs,
-                // not what the ink needs: notifying on every reading made the frame redraw the same
-                // canvas a second time, which is the one thing a stroke cannot afford. The line's
-                // stroke count can wait for the stroke to end.
-                if batch.readings.iter().any(|reading| {
+                // A frame is only for the *interface*, and only when the interface changed. The canvas was
+                // drawn above, on this wake, and the compositor shows the newest canvas it is given — so a
+                // notify here would redraw the whole window, canvas included, a second time, which is the one
+                // thing a stroke cannot afford.
+                //
+                // A gesture that moved the sheet is the other case that needs a frame: the sheet's *place* is
+                // drawn by the canvas but the page's own geometry is not, and a pan that never asked for a
+                // frame would leave the bar and the page pill describing a place the sheet had left. The flags
+                // are read here because they are set by the two paths that move the view — the pen's gesture
+                // and the wheel — and cleared by the frame that spends them.
+                if app.view_moved {
+                    app.view_moved = false;
+                    cx.notify();
+                } else if batch.readings.iter().any(|reading| {
                     matches!(
                         reading.phase,
                         crate::input::Phase::Up | crate::input::Phase::Cancel
@@ -2001,11 +2018,10 @@ impl NoteApp {
     /// the whole distance from the origin would add the same travel again and again — a hand moving at a steady
     /// pace would drag the page faster and faster, and a nib held still would keep going. Measured from the
     /// origin and *set*, the paper follows the hand exactly, and a nib that comes back leaves the sheet there.
-    fn pan_by_pen(&mut self, mode: PenGesture, at: (f32, f32), cx: &mut Context<Self>) {
+    fn pan_by_pen(&mut self, mode: PenGesture, at: (f32, f32), _cx: &mut Context<Self>) {
         let delta = (at.0 - mode.origin.0, at.1 - mode.origin.1);
 
         let sheet = self.sheet;
-        let was = self.view.pan();
 
         // Where the sheet belongs: the pan the gesture began at, moved by the whole distance so far — times
         // the gain, because a hand only has one screen's travel in it and a page is often longer than that
@@ -2022,9 +2038,20 @@ impl NoteApp {
             self.view.hold_pan(sheet.paper, sheet.window, PAGE_MARGIN);
         }
 
-        if self.view.pan() != was {
-            cx.notify();
-        }
+        // The canvas draws itself on this wake, below, from `self.sheet` — and that is only rebuilt by the
+        // frame. A pan changes nothing about it except *where* it sits, so the origin is moved here rather
+        // than leaving the canvas to draw the sheet where it was a frame ago. Without this the paper trails
+        // the hand by exactly one frame, which is felt as the lag a pan is most sensitive to: a stroke draws
+        // its own ink and hides it, but a pan has nothing to hide behind.
+        let offset = self.view.origin(sheet.paper, sheet.window, PAGE_MARGIN);
+        self.sheet.origin = offset;
+
+        // A flag rather than a notify. The canvas is drawn by the pen's own wake and reaches the screen
+        // through the compositor, so the sheet moves without one; what needs a frame is the *interface* —
+        // the bar and the page pill, which describe where the sheet is. Asking for one on every reading made
+        // the whole window redraw, canvas included, a second time per reading, which is what a pan felt as a
+        // stutter: the frame could not keep up with the pen.
+        self.view_moved = true;
     }
 
     /// Zooms the sheet from the gesture's own starting zoom, by how far up the nib has come.

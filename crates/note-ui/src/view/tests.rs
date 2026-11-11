@@ -296,3 +296,64 @@ fn every_fit_has_its_own_element_id() {
     assert_eq!(ids.len(), 2);
     assert_ne!(ids[0], ids[1]);
 }
+
+/// A pen gesture places the sheet; it does not add to it.
+///
+/// The pen's pan is measured from where the nib went down, and the view accumulates — so the app sets the pan
+/// rather than calling `pan_by` with the whole distance each reading. This pins the arithmetic that makes that
+/// true: the same nib position always lands on the same pan, however many readings it took to get there, and a
+/// hand that comes back leaves the sheet where it started.
+///
+/// The alternative is a real bug and a visible one: adding the whole travel on every reading adds it again and
+/// again, so the page accelerates under a steady hand and keeps drifting while the nib is still.
+#[test]
+fn a_pen_pan_is_a_place_and_not_a_running_total() {
+    let mut view = Viewport::new(1.0);
+    let start = view.pan();
+
+    // A nib that goes 40, then 80, then 120 pixels to the right.
+    let mut reached = Vec::new();
+    for travelled in [40.0, 80.0, 120.0] {
+        view.set_pan((start.0 + travelled, start.1));
+        reached.push(view.pan());
+    }
+
+    assert_eq!(
+        reached,
+        vec![
+            (start.0 + 40.0, start.1),
+            (start.0 + 80.0, start.1),
+            (start.0 + 120.0, start.1),
+        ],
+        "each reading places the sheet where the hand is"
+    );
+    assert_eq!(
+        reached[2].0 - start.0,
+        120.0,
+        "not 40 + 80 + 120, which is what adding would have given"
+    );
+
+    // Back to where the nib went down, and the sheet is where it started.
+    view.set_pan(start);
+    assert_eq!(
+        view.pan(),
+        start,
+        "a hand that returns takes the sheet with it"
+    );
+}
+
+/// And the accumulation it avoids is real, so the test above is guarding something.
+#[test]
+fn pan_by_does_accumulate() {
+    let mut view = Viewport::new(1.0);
+
+    view.pan_by((40.0, 0.0));
+    view.pan_by((80.0, 0.0));
+    view.pan_by((120.0, 0.0));
+
+    assert_eq!(
+        view.pan(),
+        (240.0, 0.0),
+        "three readings of a hand that had travelled 120 px, added instead of placed"
+    );
+}

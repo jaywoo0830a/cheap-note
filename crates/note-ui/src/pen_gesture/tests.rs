@@ -4,7 +4,9 @@
 //! of held keys asks for, and how far a given travel zooms — rather than the reading of a keyboard, which is
 //! `device_query`'s business and not this crate's.
 
-use crate::pen_gesture::{is_option, pen_zoom_factor, Gesture, Held, PEN_ZOOM_PER_PIXEL};
+use crate::pen_gesture::{
+    is_option, pen_zoom_factor, Gesture, Held, PEN_ZOOM_CORRECTION, PEN_ZOOM_TRAVEL,
+};
 
 /// Nothing held is writing, so the pen is a pen.
 #[test]
@@ -102,28 +104,24 @@ fn no_gesture_while_a_screen_is_in_front() {
 /// Up is closer and down is further away, and a nib that has not moved zooms nothing.
 #[test]
 fn the_nib_zooms_the_way_it_moves() {
-    assert_eq!(pen_zoom_factor(0.0), 1.0, "a nib that has not moved");
+    assert_eq!(pen_zoom_factor(0.0, 1.0), 1.0, "a nib that has not moved");
+
+    let up = pen_zoom_factor(100.0, 1.0);
+    let down = pen_zoom_factor(-100.0, 1.0);
+
+    assert!(up > 1.0, "up is closer: {up}");
+    assert!(down < 1.0, "down is further away: {down}");
     assert!(
-        pen_zoom_factor(100.0) > 1.0,
-        "up is closer: {}",
-        pen_zoom_factor(100.0)
-    );
-    assert!(
-        pen_zoom_factor(-100.0) < 1.0,
-        "down is further away: {}",
-        pen_zoom_factor(-100.0)
-    );
-    assert!(
-        (pen_zoom_factor(100.0) * pen_zoom_factor(-100.0) - 1.0).abs() < 1e-4,
-        "the same distance either way undoes itself"
+        (up * down - 1.0).abs() < 1e-4,
+        "the same distance either way undoes itself: {up} * {down}"
     );
 }
 
-/// The zoom is an exponent, so the same distance is the same multiple wherever the gesture began.
+/// The zoom is an exponent, so the same distance is the same multiple from the same starting zoom.
 #[test]
 fn the_pen_zoom_is_an_exponent() {
-    let one = pen_zoom_factor(50.0);
-    let two = pen_zoom_factor(100.0);
+    let one = pen_zoom_factor(50.0, 1.0);
+    let two = pen_zoom_factor(100.0, 1.0);
 
     assert!(
         (two - one * one).abs() < 1e-5,
@@ -131,23 +129,89 @@ fn the_pen_zoom_is_an_exponent() {
     );
 }
 
+/// A doubling takes the documented travel at 100%, and it takes more as the zoom grows — which is why the
+/// travel is not fixed.
+///
+/// This is the complaint that started it: at a high zoom the same hand movement flew across the page, so the
+/// sheet could only be nudged a pixel at a time. The rate is now `PEN_ZOOM_TRAVEL * zoom^0.25` pixels to a
+/// doubling, so 400% takes a little more travel than 100% does and the gesture feels calmer in the hand.
+#[test]
+fn a_doubling_takes_more_travel_at_a_higher_zoom() {
+    let travel = |zoom: f32| PEN_ZOOM_TRAVEL * zoom.powf(PEN_ZOOM_CORRECTION);
+
+    // At the sheet's own size, the documented travel is exactly one doubling.
+    let at_one = pen_zoom_factor(travel(1.0), 1.0);
+    assert!(
+        (at_one - 2.0).abs() < 1e-3,
+        "100% doubles in {PEN_ZOOM_TRAVEL} px of travel: got {at_one}"
+    );
+
+    // And at every other zoom, its own travel is one doubling too.
+    for zoom in [0.25, 0.5, 2.0, 4.0, 8.0] {
+        let at = pen_zoom_factor(travel(zoom), zoom);
+        assert!(
+            (at - 2.0).abs() < 1e-3,
+            "{zoom} doubles in {} px: got {at}",
+            travel(zoom)
+        );
+    }
+
+    // The point of the correction: a *fixed* travel would do more at a high zoom than at a low one, which is
+    // exactly the bug.
+    let same = 100.0;
+    assert!(
+        pen_zoom_factor(same, 4.0) < pen_zoom_factor(same, 1.0),
+        "a fixed travel is too quick at a high zoom"
+    );
+
+    // And the correction is mild enough that a high zoom is still nowhere near immune to the hand: 50 pixels
+    // must move it by more than a tenth, at every zoom.
+    for zoom in [0.25, 1.0, 4.0, 8.0] {
+        let factor = pen_zoom_factor(50.0, zoom);
+        assert!(
+            factor > 1.1,
+            "at {zoom} a 50 px stroke moved the sheet by only {factor}"
+        );
+    }
+}
+
 /// A wild reading from a driver, or a hand that left the surface and came back, is clamped.
 #[test]
 fn a_wild_pen_travel_is_clamped() {
-    assert_eq!(pen_zoom_factor(100_000.0), 5.0);
-    assert_eq!(pen_zoom_factor(-100_000.0), 0.2);
-    assert_eq!(pen_zoom_factor(f32::NAN), 1.0);
-    assert_eq!(pen_zoom_factor(f32::INFINITY), 1.0);
+    assert_eq!(pen_zoom_factor(100_000.0, 1.0), 5.0);
+    assert_eq!(pen_zoom_factor(-100_000.0, 1.0), 0.2);
+    assert_eq!(pen_zoom_factor(f32::NAN, 1.0), 1.0);
+    assert_eq!(pen_zoom_factor(f32::INFINITY, 1.0), 1.0);
+    assert_eq!(pen_zoom_factor(100.0, f32::NAN), 1.0);
+    assert_eq!(pen_zoom_factor(100.0, 0.0), 1.0);
+    assert_eq!(pen_zoom_factor(100.0, -1.0), 1.0);
 }
 
-/// The rate is gentler than a wheel's, because a hand moving a pen is not a wheel being spun.
+/// The pen is quicker than a wheel, because a hand on a pen has far finer control than a wheel being spun.
+///
+/// A wheel is 1.25 a notch of 96 pixels, which is a doubling every 298; the pen is 200. The earlier rate was a
+/// fixed 300, which sat closer to the wheel than to the hand and is what felt sluggish.
 #[test]
-fn the_pen_zooms_more_slowly_than_a_wheel() {
-    // A wheel's own per-pixel rate: 1.25 a notch of 96 pixels.
-    let wheel_per_pixel = 1.25_f32.powf(1.0 / 96.0);
+fn the_pen_zooms_more_quickly_than_a_wheel() {
+    let wheel_travel = 96.0 / 1.25_f32.log2();
 
     assert!(
-        PEN_ZOOM_PER_PIXEL < wheel_per_pixel,
-        "the pen is the gentler of the two: {PEN_ZOOM_PER_PIXEL} vs {wheel_per_pixel}"
+        PEN_ZOOM_TRAVEL < wheel_travel,
+        "the pen doubles in {PEN_ZOOM_TRAVEL} px and a wheel in {wheel_travel}"
+    );
+    // The number the complaint was about: under the old fixed rate, 300 pixels of travel was one doubling. The
+    // same 200 pixels now does more than that old 300 did, which is exactly the increase in responsiveness the
+    // complaint asked for.
+    let old_rate = 1.002_313_2_f32; // the fixed per-pixel base this replaced: a doubling every 300 px
+    let old_at_two_hundred = old_rate.powf(PEN_ZOOM_TRAVEL);
+    let now_at_two_hundred = pen_zoom_factor(PEN_ZOOM_TRAVEL, 1.0);
+
+    assert!(
+        old_at_two_hundred < 2.0,
+        "the old rate needed 300 px to double, so 200 px fell short: {old_at_two_hundred}"
+    );
+    assert!(
+        now_at_two_hundred > old_at_two_hundred,
+        "200 px now does more than it used to: {now_at_two_hundred} vs {old_at_two_hundred}"
     );
 }

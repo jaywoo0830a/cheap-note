@@ -694,10 +694,10 @@ fn palette_id(swatch: &Swatch) -> ElementId {
 /// The pen gesture in play, and where it began.
 ///
 /// Kept beside the field that holds it because it is the *state* of a gesture rather than a thing the app
-/// owns: the mode, the point the nib went down at, and — for a zoom — the zoom it started from. Storing the
-/// starting zoom rather than multiplying factors reading by reading is what makes the gesture absolute: a
-/// hand that moves up and back down returns to the zoom it started at, because the last reading is asked
-/// about against the first and not against the one before it.
+/// owns: the mode, the point the nib went down at, and — for both gestures — the view's own numbers as they
+/// were when the gesture began. Storing the starting values rather than accumulating a delta reading by
+/// reading is what makes a gesture absolute: a hand that moves up and back down returns the sheet to the zoom
+/// and the place it started at, because each reading is asked about against the first.
 #[derive(Clone, Copy, Debug)]
 struct PenGesture {
     /// What the pen is doing.
@@ -706,6 +706,12 @@ struct PenGesture {
     origin: (f32, f32),
     /// The sheet's zoom when the gesture began.
     zoom: f32,
+    /// The sheet's pan when the gesture began, for a gesture that moves it.
+    ///
+    /// A pan is *set* from here rather than added to, because [`Viewport::pan_by`] accumulates: a nib that
+    /// travels 50 pixels would otherwise be added to the sheet on every reading, so a hand moving at a steady
+    /// pace would drag the page faster and faster (see [`NoteApp::pan_by_pen`]).
+    pan: (f32, f32),
 }
 
 /// The application view.
@@ -1537,6 +1543,7 @@ impl NoteApp {
             mode: gesture,
             origin: at,
             zoom: self.view.zoom(),
+            pan: self.view.pan(),
         });
 
         if ended {
@@ -1545,7 +1552,7 @@ impl NoteApp {
         }
 
         match gesture {
-            Gesture::Pan => self.pan_by_pen(mode.origin, at, cx),
+            Gesture::Pan => self.pan_by_pen(mode, at, cx),
             Gesture::Zoom => self.zoom_by_pen(mode, at, cx),
             Gesture::Ink => unreachable!("handled above"),
         }
@@ -1987,20 +1994,24 @@ impl NoteApp {
 
     /// Pans the sheet so the point the nib touched stays under it.
     ///
-    /// `origin` is where the gesture began and `at` is where the nib is now, both in window logical pixels.
-    /// The difference is what the sheet moves by, with the sign that keeps the paper under the hand: a nib
-    /// moved right shows what is further left, exactly as a two-finger drag does. Measured from the origin
-    /// rather than from the reading before, so a hand that wanders and comes back leaves the sheet where it
-    /// started instead of somewhere the sum of its wanderings put it.
-    fn pan_by_pen(&mut self, origin: (f32, f32), at: (f32, f32), cx: &mut Context<Self>) {
-        let delta = (at.0 - origin.0, at.1 - origin.1);
-        if delta == (0.0, 0.0) {
-            return;
-        }
+    /// `mode` is the gesture as it began and `at` is where the nib is now, both in window logical pixels. The
+    /// sheet is *placed* at the pan the gesture started from plus the distance travelled: set, not added.
+    ///
+    /// That distinction is the gesture. [`Viewport::pan_by`] accumulates, so calling it once per reading with
+    /// the whole distance from the origin would add the same travel again and again — a hand moving at a steady
+    /// pace would drag the page faster and faster, and a nib held still would keep going. Measured from the
+    /// origin and *set*, the paper follows the hand exactly, and a nib that comes back leaves the sheet there.
+    fn pan_by_pen(&mut self, mode: PenGesture, at: (f32, f32), cx: &mut Context<Self>) {
+        let delta = (at.0 - mode.origin.0, at.1 - mode.origin.1);
 
         let sheet = self.sheet;
         let was = self.view.pan();
-        self.view.pan_by(delta);
+
+        // Where the sheet belongs: the pan the gesture began at, moved by the whole distance so far.
+        let wanted = (mode.pan.0 + delta.0, mode.pan.1 + delta.1);
+        if !self.view.set_pan(wanted) {
+            return;
+        }
 
         if sheet.window.0 > 0.0 && sheet.window.1 > 0.0 {
             self.view.hold_pan(sheet.paper, sheet.window, PAGE_MARGIN);
@@ -2019,7 +2030,7 @@ impl NoteApp {
     /// slow drag into a runaway zoom and leave nothing to come back to.
     fn zoom_by_pen(&mut self, mode: PenGesture, at: (f32, f32), cx: &mut Context<Self>) {
         let rise = mode.origin.1 - at.1;
-        let wanted = mode.zoom * crate::pen_gesture::pen_zoom_factor(rise);
+        let wanted = mode.zoom * crate::pen_gesture::pen_zoom_factor(rise, mode.zoom);
 
         if self.view.set_zoom(wanted) {
             self.finish_zoom(cx);

@@ -22,10 +22,16 @@ use device_query::{DeviceState, Keycode};
 
 /// The keys the pen's gestures answer to, as the platform reports them.
 ///
-/// The variants are per-platform aliases in `device_query`'s own list: `Space` is one key everywhere, while
-/// the option key is `LAlt`/`RAlt` on some layouts, `LOption`/`ROption` on others and `LMeta`/`RMeta` on a
-/// third. Any of them means "the option key is held", because a reader pressing the key their keyboard
-/// calls Option should not have to know which name the crate gave it.
+/// `device_query` has three spellings for the choice modifier — `Alt`, `Option` and `Meta` — and **only one of
+/// them exists on any given platform**. On macOS its own table maps `readkey::Keycode::Option` to `LOption`
+/// and `Keycode::Command` to `Command`, so the left and right Option keys arrive as `LOption`/`ROption` and
+/// `LAlt`/`RAlt`/`LMeta`/`RMeta` are never produced at all. On Windows it is the reverse: `LAlt`/`RAlt` are
+/// the modifier and the `Option`/`Meta` spellings do not appear.
+///
+/// So all four names are accepted rather than one, because the same source has to be right on both — and
+/// **`Command` is deliberately not among them.** On a Mac that is the key next to the space bar that every
+/// other application uses for its own commands, and a pen gesture that fired under it would be a gesture that
+/// fired while the reader was reaching for `⌘C`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Held {
     /// Space is down: a drag with the nib pans the sheet.
@@ -44,19 +50,18 @@ impl Held {
 
         Self {
             space: keys.contains(&Keycode::Space),
-            option: keys.iter().any(|key| {
-                matches!(
-                    key,
-                    Keycode::LAlt
-                        | Keycode::RAlt
-                        | Keycode::LOption
-                        | Keycode::ROption
-                        | Keycode::LMeta
-                        | Keycode::RMeta
-                )
-            }),
+            option: keys.iter().copied().any(is_option),
         }
     }
+}
+
+/// Whether a keycode is one of the platform's names for the option key. See [`Held`] for why the list is
+/// four names long and why `Command` is not in it.
+fn is_option(key: Keycode) -> bool {
+    matches!(
+        key,
+        Keycode::LOption | Keycode::ROption | Keycode::LAlt | Keycode::RAlt
+    )
 }
 
 /// What the pen is doing, given the keys its hand is not holding.

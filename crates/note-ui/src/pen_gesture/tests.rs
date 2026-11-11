@@ -4,7 +4,7 @@
 //! of held keys asks for, and how far a given travel zooms — rather than the reading of a keyboard, which is
 //! `device_query`'s business and not this crate's.
 
-use crate::pen_gesture::{pen_zoom_factor, Gesture, Held, PEN_ZOOM_PER_PIXEL};
+use crate::pen_gesture::{is_option, pen_zoom_factor, Gesture, Held, PEN_ZOOM_PER_PIXEL};
 
 /// Nothing held is writing, so the pen is a pen.
 #[test]
@@ -47,6 +47,45 @@ fn space_wins_over_option() {
         Gesture::Pan,
         "a gesture that began as a pan stays one"
     );
+}
+
+/// The key names are the *platform's*, and the wrong ones would be a gesture that never fires.
+///
+/// `device_query` spells the choice modifier three ways and produces only one of them per platform: macOS
+/// maps its Option key to `LOption`/`ROption` and never emits `LAlt`, `RAlt`, `LMeta` or `RMeta` at all. So
+/// the four that mean "option" are checked here against the names that really exist — the test is what keeps
+/// a future edit from "simplifying" this to `LAlt` alone and quietly breaking every Mac.
+///
+/// `Command` is deliberately absent, and this is the half that matters most: on a Mac it is the key every
+/// application's own commands live under, so accepting it would fire a zoom while a reader was reaching for
+/// `⌘C`.
+#[test]
+fn the_option_key_is_the_one_the_platform_reports() {
+    use device_query::Keycode;
+
+    // The names macOS actually produces.
+    let mac = [Keycode::LOption, Keycode::ROption];
+    for key in mac {
+        assert!(is_option(key), "{key:?} is what macOS calls the option key");
+    }
+
+    // The names Windows and Linux produce, for the same source to be right there too.
+    let elsewhere = [Keycode::LAlt, Keycode::RAlt];
+    for key in elsewhere {
+        assert!(is_option(key), "{key:?} is the option key off macOS");
+    }
+
+    // Not the option key: the Mac's command key, and its meta aliases, which macOS never emits.
+    for key in [
+        Keycode::Command,
+        Keycode::RCommand,
+        Keycode::LMeta,
+        Keycode::RMeta,
+        Keycode::Space,
+        Keycode::A,
+    ] {
+        assert!(!is_option(key), "{key:?} must not zoom");
+    }
 }
 
 /// A key held while something other than the sheet has the pen means nothing at all.

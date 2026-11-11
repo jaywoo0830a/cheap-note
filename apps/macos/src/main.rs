@@ -9,7 +9,6 @@
 //! |---|---|
 //! | [`platform::pen`] | `pen-macos`: the digitizer's position, pressure and tilt |
 //! | [`platform::pointer`] | `NSCursor`, so the system pointer can be put away while a ghost is up |
-//! | [`platform::mouse`] | Core Graphics events, so the gamepad can drive the desktop while another app is in front |
 //! | [`platform::canvas`] | the desk, the paper and the ink: Metal geometry, drawn by the platform |
 //!
 //! Plus `main`, which assembles them and installs the one hook the release profile needs.

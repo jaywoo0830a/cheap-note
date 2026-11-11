@@ -3,7 +3,6 @@
 pub mod canvas;
 pub mod ghost;
 pub mod metal;
-pub mod mouse;
 pub mod pen;
 pub mod pointer;
 
@@ -91,9 +90,5 @@ fn install(window: &mut Window) -> Platform {
         // lengths multiplied by three quarters are the same size in the hand as they are on Windows.
         unit_scale: 0.75,
         pen: Box::new(pen),
-        // The gamepad's second job: while another app is in front, these sticks are its pointer.
-        // Accessibility is asked for by the first gesture, not here (see `mouse.rs`).
-        mouse: mouse::install(),
-        focus: Box::new(mouse::AppActive),
     }
 }

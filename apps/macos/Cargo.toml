@@ -54,8 +54,5 @@ objc2-metal = { version = "0.3", features = [
 ] }
 objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSProcessInfo", "NSString"] }
 foreign-types-shared = "0.3"
-# The canvas itself: geometry on the GPU, drawn by `metal.rs`; Core Graphics also posts the
-# system pointer's events while the gamepad is driving it (see `platform/mouse.rs`).
+# The canvas itself: geometry on the GPU, drawn by `metal.rs`.
 core-graphics = { version = "0.24", features = ["highsierra"] }
-# The dictionary `AXIsProcessTrustedWithOptions` takes, to ask for Accessibility once.
-core-foundation = "0.10"

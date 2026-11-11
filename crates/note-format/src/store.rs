@@ -1183,7 +1183,6 @@ impl NoteStore {
         into.pen_weight = row_value(conn, "pen_weight", into.pen_weight, PenWeight::from_scale)?;
         into.grayscale_pages = row_value(conn, "grayscale_pages", into.grayscale_pages, flag_of)?;
         into.pressure_fades = row_value(conn, "pressure_fades", into.pressure_fades, flag_of)?;
-        into.gamepad = row_value(conn, "gamepad", into.gamepad, flag_of)?;
         into.canvas_size = row_value(
             conn,
             "canvas_size",
@@ -1244,7 +1243,6 @@ impl NoteStore {
         put_row(&tx, "pen_weight", settings.pen_weight.scale())?;
         put_flag(&tx, "grayscale_pages", settings.grayscale_pages)?;
         put_flag(&tx, "pressure_fades", settings.pressure_fades)?;
-        put_flag(&tx, "gamepad", settings.gamepad)?;
         put_row(&tx, "canvas_size", settings.canvas_size.label())?;
         put_row(&tx, "canvas_style", settings.canvas_style.label())?;
         put_row(&tx, "page_display_width", settings.page_display_width)?;
@@ -2304,7 +2302,6 @@ mod tests {
             pen_weight: PenWeight::Fine,
             grayscale_pages: true,
             pressure_fades: false,
-            gamepad: false,
             canvas_size: CanvasSize::A5,
             canvas_style: CanvasStyle::Ruled,
             page_display_width: 640.0,
@@ -2327,7 +2324,6 @@ mod tests {
             pen_weight: PenWeight::Heavy,
             grayscale_pages: false,
             pressure_fades: true,
-            gamepad: true,
             canvas_size: CanvasSize::Square,
             canvas_style: CanvasStyle::Grid,
             page_display_width: 720.0,

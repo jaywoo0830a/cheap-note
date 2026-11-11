@@ -26,7 +26,6 @@
 //! | `keys`      | the chords, and how this platform writes them (`Ctrl+Z`, `⌘Z`)     |
 //! | [`ink`]     | readings to strokes: edges, resampling, width, erasing             |
 //! | [`canvas`]  | the sheet's size, colour and ruling                                |
-//! | [`gamepad`] | the sticks: the left pans, the right's Y zooms                   |
 //! | [`ink_layer`] | the canvas *description*: what the surface is asked to paint     |
 //! | [`view`]    | zoom, fit, and where the sheet sits in the window                  |
 //! | [`cursor`]  | the pen's ghost cursor: where it is and how it leans               |
@@ -54,9 +53,8 @@
 //!
 //! Below this crate is a platform, and it depends on this crate rather than the other way round. What
 //! a platform lends is in [`platform`] — a pen to read, a ghost cursor to follow the nib, a pointer to
-//! hide, a surface to paint the desk and the ink on, a system mouse to drive while another app is in
-//! front, and a focus answer to say which job a gamepad has — and `apps/windows` is one implementation
-//! of those six. A macOS build would be another, and would leave everything above the seam alone; the
+//! hide, and a surface to paint the desk and the ink on — and `apps/windows` is one implementation
+//! of those. A macOS build would be another, and would leave everything above the seam alone; the
 //! work that build needs is written down in `doc/MACOS.md`.
 //!
 //! ## The documents
@@ -85,7 +83,6 @@ pub mod platform;
 mod app;
 mod bookmarks;
 mod canvas;
-mod gamepad;
 mod history;
 mod home;
 mod ink;

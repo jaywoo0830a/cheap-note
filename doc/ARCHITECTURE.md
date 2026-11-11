@@ -415,7 +415,6 @@ the seam the platforms implement.
 | `ink` | readings in, strokes out: edges, pointer identity, resampling, width, the lasso's selection |
 | `history` | what an edit *is* (apply and revert), a page's history, and the bytes the note's log holds |
 | `cursor` | the ghost's shape: where the pen is, and how it leans |
-| `gamepad` | the sticks: pan and scroll on the left, zoom and pointer on the right, clicks on the shoulders |
 | **What is written on** | |
 | `canvas` | the sheet: its size (physical), its colour, its ruling |
 | `view` | zoom, the two fits, and where the sheet sits in the window |
@@ -439,7 +438,7 @@ the seam the platforms implement.
 | `timing` | what every hot path costs, measured rather than guessed |
 | `theme` | the palette, the bundled font, and the icons' asset source |
 | `error` | the error type every fallible boundary returns |
-| `platform` | the seam: `PenSource`, `GhostFeed`, `SystemPointer`, `InkSurface`, `SystemMouse`, `AppFocus`, `Platform`, `Installer` |
+| `platform` | the seam: `PenSource`, `GhostFeed`, `SystemPointer`, `InkSurface`, `Platform`, `Installer` |
 
 The **platform** modules are the other half — each implements those traits and is imported by nothing
 above the seam:
@@ -450,7 +449,6 @@ above the seam:
 | `cursor_overlay` | `platform::ghost` + `platform::metal` | where the ghost is, and drawing it above the ink |
 | `system_cursor` | `platform::pointer` | putting the system pointer away while the ghost is up |
 | `ink_layer` (Direct2D) | `platform::canvas` + `platform::metal` (Metal) | the desk, the sheet, the page and the ink |
-| — | `platform::mouse` | the gamepad driving the desktop while another app is in front |
 | `main` | `main` | the window, the theme, the key bindings, and the command line |
 
 ## 10. What is measured
@@ -591,19 +589,11 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
   platform's own API in it; and `apps/windows` and `apps/macos` are the platforms: the canvas, the pen
   capture, the ghost cursor, the pointer, Pdfium's entry points, and `main`. The view depends on the
   format and each platform depends on the view, which is what a second platform needed: `note-ui`'s
-  `platform.rs` is the seam — a pen, a ghost, a pointer, a surface, and, for the Mac's system-wide gamepad,
-  a mouse and a focus answer — and `apps/macos` is `apps/windows` rewritten behind them (Metal instead of
-  Direct2D, `NSEvent` instead of `pen-windows`, the ghost drawn in the canvas pass instead of in a window
-  of its own). The view's `store`, `note`, `pages`, `settings` and `history` modules are re-exports of the
-  format's, so no path inside the view changed.
-* **The gamepad is above the seam too.** Its sticks are `gilrs`, a cross-platform library in the
-  same sense GPUI Kit is — one API over XInput/WGI on Windows and IOKit on macOS — so `note-ui` reads
-  it directly instead of asking a platform crate for it. A machine with no gamepad is not an error:
-  the sticks simply read as still. While a note is open and this app is in front the sticks pan and
-  zoom it and the shoulders turn its pages; on the home list, or while another app is in front, they
-  are its pointer and scroll, with the shoulders as clicks. The Mac posts those events with Core
-  Graphics (behind the Accessibility permission); Windows answers the stub — no system mouse, and
-  always in front — so its in-app behaviour is unchanged.
+  `platform.rs` is the seam — a pen, a ghost, a pointer, and a surface — and `apps/macos` is
+  `apps/windows` rewritten behind them (Metal instead of Direct2D, `NSEvent` instead of `pen-windows`,
+  the ghost drawn in the canvas pass instead of in a window of its own). The view's `store`, `note`,
+  `pages`, `settings` and `history` modules are re-exports of the format's, so no path inside the view
+  changed.
 * **Pdfium is not in the repository.** It is downloaded into `vendor/` (`vendor/README.md`; the current
   build is 158.0.8125.0), and a build copies the platform's library (`pdfium.dll`; the loader also
   knows `libpdfium.dylib` and `libpdfium.so`) from `vendor/lib` next to the executable it produces, so

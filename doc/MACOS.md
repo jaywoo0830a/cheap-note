@@ -11,11 +11,11 @@ If you are changing a platform service, [§4](#4-the-platform-services-one-each)
 If you read only one paragraph, read this one:
 
 > **The Mac build is `apps/windows` rewritten behind the same seam.** `crates/note-format` and
-> `crates/note-ui` are unchanged and platform-free; `apps/macos` implements the six traits `note-ui`'s
-> `platform.rs` declares — a pen, a ghost, a pointer, a surface, and (for the gamepad's second job) a
-> mouse and a focus answer — with Metal instead of Direct2D, `NSEvent` instead of `pen-windows`, and the
-> ghost drawn in the canvas pass instead of in a window of its own. The format a note is written in does
-> not change, so a note written on the Mac opens on Windows and the reverse.
+> `crates/note-ui` are unchanged and platform-free; `apps/macos` implements the traits `note-ui`'s
+> `platform.rs` declares — a pen, a ghost, a pointer, and a surface — with Metal instead of Direct2D,
+> `NSEvent` instead of `pen-windows`, and the ghost drawn in the canvas pass instead of in a window of
+> its own. The format a note is written in does not change, so a note written on the Mac opens on
+> Windows and the reverse.
 
 ## 1. The shape, in one paragraph
 
@@ -26,10 +26,10 @@ The repository is four workspace members, and the two boundaries face opposite w
 | `crates/note-format` | the note on disk: SQLite schema, the ink's byte format, the page list, the settings, the zip | **yes**, no window/pen/GPU/PDF |
 | `crates/note-ui` | everything the application *does*: the bar, the home screen, the sheet, the gestures, the PDF page cache, the ink model, the frame loop, the chords | **yes**, and it declares **no platform crate at all** |
 | `apps/windows` | the Windows platform: Direct2D canvas, `pen-windows` capture, the ghost cursor's layered window, the pointer hook, `main` | no, and it does not need to be |
-| `apps/macos` | the macOS platform: Metal canvas, `pen-macos` (`NSEvent`) capture, the ghost drawn in the canvas pass, the transparent-cursor pointer, the Core Graphics mouse, `main` | no, and it does not need to be |
+| `apps/macos` | the macOS platform: Metal canvas, `pen-macos` (`NSEvent`) capture, the ghost drawn in the canvas pass, the transparent-cursor pointer, `main` | no, and it does not need to be |
 
 The Mac build is therefore everything above the seam unchanged, plus one crate that implements the traits
-the view declares: `PenSource`, `GhostFeed`, `SystemPointer`, `InkSurface`, `SystemMouse` and `AppFocus`
+the view declares: `PenSource`, `GhostFeed`, `SystemPointer` and `InkSurface`
 (`crates/note-ui/src/platform.rs`), and nothing above them.
 
 ### Where we are
@@ -107,8 +107,6 @@ These are the things the Windows side settled, and the Mac build inherits unchan
   aarch64-apple-darwin` still prints `windows-sys`/`windows-link`, but those are reached only through a
   **proc-macro** graph (gpui-kit's `rust-embed`/`rust-i18n` and their `dirs`/`ignore`), which builds for
   the *host*; on a Mac they are not in the graph at all. Nothing the view depends on names a Windows API.
-  The one device library it does depend on, `gilrs`, is cross-platform in the same way: its Windows
-  backend is compiled only on Windows and its IOKit one only on macOS.
 * **The toolkit has a mac backend.** `gpui-kit` `0.9.0` → `gpui-pre-platform` (gpui-pre 0.3.11), which selects
   `gpui-pre-macos` + `gpui-pre-apple` for macOS (both published, 0.3.x).
 * **The chords are the platform's.** Bindings are `secondary-z`/`secondary-shift-c`/… and handlers ask
@@ -122,9 +120,6 @@ These are the things the Windows side settled, and the Mac build inherits unchan
   `LIBRARY_NAME` is `pdfium.dll` / `libpdfium.dylib` / `libpdfium.so`, and the search is the
   executable's directory → the four directories above it (`vendor/lib`, `vendor`) → the working
   directory. The handle is owned by `Api`, so the mapping is never released under a live document.
-* **The gamepad is above the seam too.** Its sticks are `gilrs`, a cross-platform library in the same
-  sense GPUI Kit is — one API over XInput/WGI on Windows and IOKit on macOS — so `note-ui` reads it
-  directly. A machine with no gamepad is not an error: the sticks simply read as still.
 
 
 ## 4. The platform services, one each
@@ -260,32 +255,6 @@ the old plan), whose canvas lives *outside* the frame exactly as Windows' does. 
 the interface on both platforms, the ink is presented per pen batch on both, and no trait grew that
 method.
 
-### The gamepad's second job
-
-The gamepad is the one input with two jobs, so the seam has two small traits rather than one big one:
-
-* `AppFocus::is_active` says whether cheap-note is the app in front. The Mac answers with
-  `NSApplication::isActive`; the Windows stub answers `true`, which keeps its in-app behaviour.
-* `SystemMouse` is the machine's pointer while another app is in front: `move_by`, `scroll`, `button`
-  and `release_all`. The Mac answers with Core Graphics events from `platform/mouse.rs`; Windows answers
-  `None`.
-
-The split matters because the *policy* is portable and only the *events* are not: the view decides that
-the left stick scrolls at `GAMEPAD_SCROLL_SPEED` and the shoulders are the pointer's buttons, and the
-platform decides how a scroll or a click is expressed on its system. One sign is the platform's alone:
-Core Graphics counts a positive horizontal wheel as a scroll to the *left*, the opposite of the view's
-right-positive X, so `platform/mouse.rs` negates that one axis. While a note is open and cheap-note is in
-front the same sticks pan and zoom it, and the shoulders turn its pages (LB back, RB forward); on the
-home list, or with another app in front, they are the desktop's.
-
-Posting events is **Accessibility**, not a link-time capability: macOS gates `CGEventPost` behind System
-Settings → Privacy & Security → Accessibility. The app asks the first time a controller is actually used
-while another app is in front (`AXIsProcessTrustedWithOptions`), and `SystemMouse::is_ready` is asked
-before a gesture is spent, so a build without the grant says so in the status line instead of looking
-broken. The grant is tied to the signed code, so the ad-hoc bundle `bundle.sh` makes may be asked again
-after a rebuild; a Developer ID signature keeps one grant across releases. Start+Select toggles the
-desktop job, so the controller can be given back to a game.
-
 ## 6. What must not change
 
 * **The format.** A note written on the Mac must open on Windows, and the reverse — that is the whole
@@ -346,7 +315,6 @@ pen, and stay unchecked in the repository because they need the hardware in hand
 | the system pointer | `apps/macos/src/platform/pointer.rs` |
 | the ghost's state, and when it shows | `apps/macos/src/platform/ghost.rs` |
 | the canvas view, and the Metal renderer | `apps/macos/src/platform/canvas.rs`, `metal.rs` |
-| the gamepad driving the desktop | `apps/macos/src/platform/mouse.rs` |
 | Pdfium loading, and its search path | `crates/note-ui/src/pdfium/api.rs` |
 | the note itself | `crates/note-format/`, and [`doc/STORE.md`](STORE.md) |
 

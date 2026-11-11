@@ -35,7 +35,6 @@ use crate::canvas::{
     HIGHLIGHTER_COLORS, INK_COLORS, PAPER_COLORS,
 };
 use crate::cursor::{nib_radius_for_width, PenCursor};
-use crate::gamepad::{Gamepads, Sticks};
 use crate::home::Home;
 use crate::ink::{paper_of_drawn, InkTransform, Notes, Stroke, Tool, HIGHLIGHTER_WIDTH};
 use crate::ink_layer::{Canvas, Ink, Page, Rect};
@@ -46,10 +45,7 @@ use crate::note::{self, Note, NoteWriter, Report};
 use crate::outline::{Outline, OutlinePages};
 use crate::pages::{swaps_axes, Pages, Quarters};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
-use crate::platform::{
-    AppFocus, GhostFeed, InkSurface, MouseButton, PenSource, Platform, Screen, SystemMouse,
-    SystemPointer,
-};
+use crate::platform::{GhostFeed, InkSurface, PenSource, Platform, Screen, SystemPointer};
 use crate::recent::{self, Recent};
 use crate::settings::{PenWeight, Settings};
 use crate::status_log::StatusLog;
@@ -778,26 +774,6 @@ pub struct NoteApp {
     scroll_waiting: (f32, f32),
     /// Whether a frame has been asked for to spend [`Self::scroll_waiting`].
     scroll_asked: bool,
-    /// The gamepads the app can see: their left stick is a pan, read by the housekeeping pump.
-    gamepad: Gamepads,
-    /// The system's pointer, when the platform can post events to it: the gamepad's job while this
-    /// app is behind another.
-    system_mouse: Option<Box<dyn SystemMouse>>,
-    /// Whether this app is in front, as the platform sees it: the answer that decides whether the
-    /// sticks are the sheet's or the desktop's.
-    focus: Box<dyn AppFocus>,
-    /// Which of the pointer's buttons the gamepad is holding, so a focus change can let them go.
-    system_buttons: (bool, bool),
-    /// Whether the gamepad drives the desktop while another app is in front.
-    ///
-    /// On by default, and Start+Select is the one way to give the controller back to a game: a
-    /// system-wide mapper that cannot be turned off is a controller nobody else can use.
-    system_mouse_enabled: bool,
-    /// The focus the last wake saw, so a trace can say when the app changes places rather than every
-    /// millisecond that it has not.
-    focus_was: Option<bool>,
-    /// Whether the last wake saw a gamepad, so the status line can say when one is connected.
-    pad_was: bool,
     /// Where each page was being read, for as long as the note in hand is open.
     ///
     /// The *page's* place rather than the reader's: turning to a page added at the end of a note opens that page at
@@ -926,8 +902,6 @@ impl NoteApp {
             pointer: system_cursor,
             unit_scale,
             pen,
-            mouse: system_mouse,
-            focus,
         } = platform;
 
         // What the pen says about itself, or the reason it could not be read — a pen that cannot be
@@ -993,10 +967,6 @@ impl NoteApp {
         );
         let sheet_focus = cx.focus_handle();
 
-        // Read before the struct literal takes `settings` by value: whether the pad's sticks are wanted decides
-        // whether the platform's HID layer is opened at all (see [`Settings::gamepad`]).
-        let gamepad_enabled = settings.gamepad;
-
         let mut app = NoteApp {
             settings,
             ink: Notes::new(),
@@ -1030,13 +1000,6 @@ impl NoteApp {
             view,
             scroll_waiting: (0.0, 0.0),
             scroll_asked: false,
-            gamepad: Gamepads::new(gamepad_enabled),
-            system_mouse,
-            focus,
-            system_buttons: (false, false),
-            system_mouse_enabled: true,
-            focus_was: None,
-            pad_was: false,
             pans: HashMap::new(),
             sheet: Sheet::default(),
             bar_bottom: Rc::new(Cell::new(None)),
@@ -1377,41 +1340,10 @@ impl NoteApp {
             let alive = this.update(cx, |app, cx| {
                 let now = Instant::now();
 
-                // The gamepad's sticks, on the same clock as the rest of the housekeeping: a stick
-                // is a position rather than a stream of readings, so there is no queue to park on.
-                // It has two jobs — the sheet's while this app is in front, the desktop's while it
-                // is not — and the platform's focus answer is what decides which one this wake is.
-                let sticks = app.gamepad.read();
-                let active = app.focus.is_active();
-
-                // A pad the app can see is the first thing to know when the sticks do nothing: the
-                // status line says `pad` while one is connected, and the connection itself is what
-                // asks for the line to be rebuilt.
-                let pad = app.gamepad.is_connected();
-                if pad != app.pad_was {
-                    app.pad_was = pad;
-                    app.touch_status();
-                }
-
-                if app.focus_was != Some(active) {
-                    if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
-                        eprintln!(
-                            "focus: {}",
-                            if active { "cheap-note" } else { "another app" }
-                        );
-                    }
-
-                    app.focus_was = Some(active);
-                    // The status line says which job the sticks have (`pad: desktop`/`canvas`),
-                    // and the answer changed with the focus.
-                    app.touch_status();
-                }
-
                 // The counters are the one part of the line that moves on its own. Rebuild it
                 // once a second while a note is in front, so a person watching a stroke sees the
                 // numbers move; the rest of the line still waits for a change the reader made.
-                if active
-                    && !app.home_is_open()
+                if !app.home_is_open()
                     && now.saturating_duration_since(app.status_refreshed_at)
                         >= STATUS_REFRESH_INTERVAL
                 {
@@ -1422,81 +1354,6 @@ impl NoteApp {
                     if app.status != before {
                         cx.notify();
                     }
-                }
-
-                let covered = app.home_is_open()
-                    || app.marks.is_open()
-                    || app.outline.is_open()
-                    || app.asking()
-                    || app.naming.is_some();
-
-                // The desktop's job: another app is in front, or cheap-note is on its own home list —
-                // there is no page to pan there, and a cursor is what the sticks should be. A note in
-                // front keeps them on the sheet.
-                let desktop = !active || app.home_is_open();
-
-                // The one chord: give the controller back to whatever app is in front, or take it
-                // back for the desktop. A system-wide mapper with no way out is a borrowed controller.
-                if sticks.toggle {
-                    app.system_mouse_enabled = !app.system_mouse_enabled;
-
-                    if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
-                        eprintln!(
-                            "controller mouse: {}",
-                            if app.system_mouse_enabled {
-                                "on"
-                            } else {
-                                "off"
-                            }
-                        );
-                    }
-
-                    if !app.system_mouse_enabled {
-                        app.release_system_buttons();
-                    }
-
-                    app.report(format!(
-                        "controller mouse: {}",
-                        if app.system_mouse_enabled {
-                            "on"
-                        } else {
-                            "off"
-                        }
-                    ));
-                }
-
-                if desktop {
-                    // The home list is the place a person first tries the controller, so it is the
-                    // place the Accessibility prompt has to be able to appear: the app is in front,
-                    // and the sticks are the desktop's rather than a page's.
-                    if app.system_mouse_enabled {
-                        app.zoom_with_stick(1.0, cx);
-                        app.drive_system_mouse(&sticks);
-                    } else {
-                        app.zoom_with_stick(1.0, cx);
-                    }
-                } else {
-                    // The app has a note in front: let go of anything the desktop was holding.
-                    app.release_system_buttons();
-
-                    if !covered {
-                        // The shoulders turn the page while the sheet is in front — the same two
-                        // commands the page pill's arrows and the arrow keys use.
-                        if sticks.left == Some(true) {
-                            app.previous_page(cx);
-                        }
-
-                        if sticks.right == Some(true) {
-                            app.next_page(cx);
-                        }
-
-                        app.pan_sheet(sticks.pan, cx);
-                    }
-
-                    // Spent only while the sheet is in front; behind a screen the zoom still
-                    // *settles*, so a gesture held when one opened becomes the note's setting
-                    // rather than being lost with the view it moved.
-                    app.zoom_with_stick(if covered { 1.0 } else { sticks.zoom }, cx);
                 }
 
                 // The page the view is waiting for, paid for here rather than inside a frame: it is
@@ -1808,21 +1665,6 @@ impl NoteApp {
         self.finish_setting(cx);
     }
 
-    /// Starts or stops reading a gamepad. See [`Settings::gamepad`].
-    ///
-    /// Turning it off drops the manager, which closes the HID layer this app had open; turning it on opens a fresh
-    /// one. It is rebuilt rather than filtered because "off" has to mean *not holding the device open* — a live
-    /// manager that is merely ignored would not help a machine that is losing a Bluetooth pad.
-    fn set_gamepad(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.settings.gamepad != on {
-            self.settings.gamepad = on;
-            self.gamepad = Gamepads::new(on);
-            self.pad_was = false;
-        }
-
-        self.finish_setting(cx);
-    }
-
     /// Locks or unlocks the zoom gestures. See [`Settings::zoom_locked`].
     ///
     /// Locking does not move the sheet and does not change the number: it says what the *next* wheel, pinch or fit
@@ -2014,126 +1856,6 @@ impl NoteApp {
 
         if self.view.pan() != was {
             cx.notify();
-        }
-    }
-
-    /// Zooms with the gamepad's right stick, about the window's centre.
-    ///
-    /// The view is moved on every wake — a stick should zoom as smoothly as it pans — while the note's
-    /// setting is written once, when the stick is let go: a write per millisecond is not a setting. The
-    /// zoom field still follows every frame because it reads the view ([`Self::sync_choosers`]).
-    fn zoom_with_stick(&mut self, factor: f32, cx: &mut Context<Self>) {
-        if factor == 1.0 {
-            // The stick is still: a zoom it left behind becomes the note's, once.
-            if self.settings.zoom != self.view.zoom() {
-                self.finish_zoom(cx);
-            }
-            return;
-        }
-
-        // A stick is a gesture the lock holds off, like the wheel and the pinch: a controller knocked
-        // while writing must not take the line away from the nib.
-        if !self.settings.gestures_zoom() {
-            return;
-        }
-
-        let sheet = self.sheet;
-        if sheet.window.0 <= 0.0 || sheet.window.1 <= 0.0 {
-            return;
-        }
-
-        let centre = (sheet.window.0 / 2.0, sheet.window.1 / 2.0);
-        if self
-            .view
-            .zoom_around(factor, centre, sheet.paper, sheet.window, PAGE_MARGIN)
-        {
-            cx.notify();
-        }
-    }
-
-    /// Lets go of any pointer button the gamepad is holding for the desktop.
-    ///
-    /// Called when this app comes back to the front: a controller that clicked somewhere else and
-    /// was still held must not leave the desktop mid-drag while the sticks go back to the sheet.
-    fn release_system_buttons(&mut self) {
-        if self.system_buttons == (false, false) {
-            return;
-        }
-
-        if let Some(mouse) = self.system_mouse.as_mut() {
-            mouse.release_all();
-        }
-
-        self.system_buttons = (false, false);
-    }
-
-    /// Drives the machine's pointer with the sticks and shoulders, while another app is in front.
-    ///
-    /// The view owns the policy and the platform owns the events (see [`SystemMouse`]). A service
-    /// that cannot post is not an error to handle everywhere: it is a sentence in the status line,
-    /// which is where a person coming back to the app will read why the controller did nothing.
-    fn drive_system_mouse(&mut self, sticks: &Sticks) {
-        let ready = self
-            .system_mouse
-            .as_ref()
-            .is_some_and(|mouse| mouse.is_ready());
-
-        if !ready {
-            // Only a gesture is worth a permission prompt: a controller at rest is not a reason to
-            // ask, and a person who never uses one should never see the dialog.
-            let tried = sticks.pointer != (0.0, 0.0)
-                || sticks.scroll != (0.0, 0.0)
-                || sticks.left == Some(true)
-                || sticks.right == Some(true);
-
-            if tried {
-                if let Some(mouse) = self.system_mouse.as_mut() {
-                    mouse.request();
-                } else {
-                    return;
-                }
-
-                self.report(String::from(
-                    "controller mouse: grant cheap-note Accessibility in System Settings",
-                ));
-            }
-
-            return;
-        }
-
-        let Some(mouse) = self.system_mouse.as_mut() else {
-            return;
-        };
-
-        if sticks.pointer != (0.0, 0.0) {
-            mouse.move_by(sticks.pointer);
-        }
-
-        if sticks.scroll != (0.0, 0.0) {
-            mouse.scroll(sticks.scroll);
-        }
-
-        if let Some(pressed) = sticks.left {
-            if pressed {
-                mouse.button(MouseButton::Left, true);
-                self.system_buttons.0 = true;
-            } else if self.system_buttons.0 {
-                // A release for a button this service is not holding is not a click: it is what a
-                // shoulder does when the app changed places mid-press, and the desktop never saw the
-                // down. Letting a stray up through would be a click nobody asked for.
-                mouse.button(MouseButton::Left, false);
-                self.system_buttons.0 = false;
-            }
-        }
-
-        if let Some(pressed) = sticks.right {
-            if pressed {
-                mouse.button(MouseButton::Right, true);
-                self.system_buttons.1 = true;
-            } else if self.system_buttons.1 {
-                mouse.button(MouseButton::Right, false);
-                self.system_buttons.1 = false;
-            }
         }
     }
 
@@ -4185,21 +3907,6 @@ impl NoteApp {
             parts.push(self.pdf.stats().summary());
         }
 
-        // The controller, when there is one, and which job its sticks have right now: `desktop`
-        // while another app is in front or the home list is up, `canvas` while a note is in front,
-        // and `off` after Start+Select. A person whose cursor did not move can read why here.
-        if self.gamepad.is_connected() {
-            let mode = if !self.system_mouse_enabled {
-                "off"
-            } else if !self.focus.is_active() || self.home_is_open() {
-                "desktop"
-            } else {
-                "canvas"
-            };
-
-            parts.push(format!("pad: {mode}"));
-        }
-
         // Where the reading goes and what it costs to put it there. The zoom is the one piece of
         // view state the sheet's own controls cannot show a number for, and the rest is the
         // measurement this app runs on itself. A locked zoom says so here as well as in the pill: the
@@ -4944,15 +4651,6 @@ impl NoteApp {
                 |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
                     app.set_pressure_fades(on, cx)
                 },
-            ))
-            // The pad's sticks, beside the pen's own options. Off, the app does not open the platform's HID
-            // layer at all — which is the answer for a machine where a Bluetooth pad is being dropped.
-            .child(visibility_switch(
-                "gamepad",
-                "Pad",
-                self.settings.gamepad,
-                cx,
-                |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| app.set_gamepad(on, cx),
             ))
     }
 

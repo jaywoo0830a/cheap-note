@@ -57,7 +57,14 @@ const SHADERS: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
-struct Vertex { float2 position; float r; float g; float b; float a; };
+// Twelve bytes a corner: the two that place it, and the four that colour it packed into one word.
+//
+// The colour was four floats here — sixteen of the twenty-four bytes a vertex took — and every corner of
+// every stroke carried its own copy of a colour the whole stroke already agrees on. A page of writing is
+// about 1.7 million corners, which was forty megabytes uploaded three times over, on a surface that is
+// re-drawn a hundred and forty-four times a second. Four bytes of unorm is 255 steps a channel, which is
+// what the display has anyway.
+struct Vertex { packed_float2 position; uchar4 colour; };
 struct Varyings { float4 position [[position]]; float4 colour; };
 
 // A pixel of the window in, a corner of the clip volume out. y is turned round here, once: the canvas
@@ -75,8 +82,8 @@ vertex Varyings solid_vertex(uint id [[vertex_id]],
     // The ink is baked in the paper's own units and placed by `transform` — a scale and a shift, in device
     // pixels. The desk, the page and the pen's mark are already placed, and are drawn through the identity.
     Varyings out;
-    out.position = place(vertices[id].position * transform.xy + transform.zw, viewport);
-    out.colour = float4(vertices[id].r, vertices[id].g, vertices[id].b, vertices[id].a);
+    out.position = place(float2(vertices[id].position) * transform.xy + transform.zw, viewport);
+    out.colour = float4(vertices[id].colour) / 255.0;
     return out;
 }
 
@@ -104,15 +111,18 @@ fragment float4 page_fragment(PageVaryings in [[stage_in]],
 "#;
 
 /// One filled or textured corner: where it is, in device pixels, and what colour it carries.
+///
+/// Twelve bytes rather than twenty-four: the colour is four bytes of unorm rather than four floats, and it is
+/// most of what a vertex used to be. A page of writing is ~1.7 million corners, so the floats were forty
+/// megabytes of buffer per upload, three slots deep, for colours that 255 steps a channel describe exactly as
+/// well as the display renders them (see [`Vertex::new`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 struct Vertex {
     x: f32,
     y: f32,
-    r: f32,
-    g: f32,
-    b: f32,
-    a: f32,
+    /// `r`, `g`, `b`, `a` in that order, 8 bits each — the order `uchar4` reads them in.
+    colour: [u8; 4],
 }
 
 /// One corner of the document's page: where it is, and which texel of the page is there.
@@ -585,16 +595,18 @@ fn quad(vertices: &mut Vec<Vertex>, rect: Rect, colour: gpui_kit::Hsla) {
 }
 
 impl Vertex {
+    /// A corner at `(x, y)`, in device pixels, in `colour`.
+    ///
+    /// The colour is packed here rather than carried as four floats, which is the whole of what made a vertex
+    /// twelve bytes instead of twenty-four (see [`Vertex`]).
     fn new(x: f32, y: f32, colour: gpui_kit::Hsla) -> Self {
         let rgba = gpui_kit::Rgba::from(colour);
+        let byte = |component: f32| (component.clamp(0.0, 1.0) * 255.0).round() as u8;
 
         Vertex {
             x,
             y,
-            r: rgba.r,
-            g: rgba.g,
-            b: rgba.b,
-            a: rgba.a,
+            colour: [byte(rgba.r), byte(rgba.g), byte(rgba.b), byte(rgba.a)],
         }
     }
 }
@@ -2666,5 +2678,64 @@ mod fill_tests {
             outline > resample,
             "the resampling cost more than the outline: {resample:?} against {outline:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod vertex_tests {
+    use super::*;
+
+    /// A corner is twelve bytes, and the shader reads exactly that.
+    ///
+    /// The number is the whole point of the packing and it is not something the compiler promises: `repr(C)`
+    /// lays out two `f32`s and a `[u8; 4]` in that order with no padding, which is twelve, and MSL's
+    /// `packed_float2` + `uchar4` is twelve too. If they ever disagree the vertex buffer describes one stride
+    /// and the shader another, and every stroke on the page is drawn from the wrong memory — a picture that is
+    /// obviously wrong but not obviously *this*. So the size is asserted rather than assumed.
+    #[test]
+    fn a_vertex_is_twelve_bytes_and_the_shader_agrees() {
+        assert_eq!(std::mem::size_of::<Vertex>(), 12);
+        assert_eq!(std::mem::align_of::<Vertex>(), 4);
+
+        // The three fields sit where `packed_float2` and `uchar4` expect them.
+        assert_eq!(std::mem::offset_of!(Vertex, x), 0);
+        assert_eq!(std::mem::offset_of!(Vertex, y), 4);
+        assert_eq!(std::mem::offset_of!(Vertex, colour), 8);
+    }
+
+    /// The shader's own declaration is the other half of the same promise.
+    #[test]
+    fn the_shader_declares_the_same_twelve_bytes() {
+        assert!(
+            SHADERS.contains("struct Vertex { packed_float2 position; uchar4 colour; };"),
+            "the shader's vertex must be the same twelve bytes the buffer carries"
+        );
+    }
+
+    /// A colour goes through the bytes unaltered, in r, g, b, a order.
+    ///
+    /// `uchar4` reads its four bytes in that order, so a colour that arrived with red and blue swapped — or
+    /// premultiplied, which `Rgba::from(Hsla)` is not — would tint every stroke on the page.
+    #[test]
+    fn a_colour_packs_in_rgba_order() {
+        let red = Vertex::new(1.0, 2.0, gpui_kit::rgba(0xFF_00_00_FF).into());
+        assert_eq!(red.colour, [255, 0, 0, 255], "opaque red");
+        assert_eq!((red.x, red.y), (1.0, 2.0), "and where it was placed");
+
+        let blue_half = Vertex::new(0.0, 0.0, gpui_kit::rgba(0x00_00_FF_80).into());
+        assert_eq!(blue_half.colour, [0, 0, 255, 128], "half-transparent blue");
+
+        // A colour out of range is clamped rather than wrapping, which would turn a bright stroke dark.
+        let clamped = Vertex::new(
+            0.0,
+            0.0,
+            gpui_kit::Hsla {
+                h: 0.0,
+                s: 1.0,
+                l: 1.0,
+                a: 2.0,
+            },
+        );
+        assert_eq!(clamped.colour[3], 255, "alpha above one is opaque");
     }
 }

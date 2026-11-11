@@ -315,14 +315,21 @@ fn distance_to_segment_squared(x: f32, y: f32, from: InkPoint, to: InkPoint) -> 
 /// visible: the same ink written at 1:1 and examined at 16x needs pieces sixteen times shorter in
 /// sheet coordinates to look the same.
 ///
-/// **One and a half, and the error it costs is the reason.** A chord of length `f` standing in for an
-/// arc of radius `r` is off by `r(1 - cos(f/2r))`, which is at most `f²/8r` — for the tightest turn a
-/// pen makes, a 3-pixel radius, 1.5 gives 0.09 pixels and 2.0 gives 0.17. Both are under the
-/// antialiasing the edge is sampled with, so neither can be seen; at 1.0 the error was 0.04 and the
-/// geometry was a third larger than it needed to be. That third is not free: a page of writing is
-/// millions of corners, and every one of them is uploaded from the CPU and shaded by the GPU on every
-/// frame — 6.98 million vertices on one traced page, 80 MB of buffer, against 4.65 million.
-pub const FACET: f32 = 1.5;
+/// **Two, and the error it costs is the reason.** A chord of length `f` standing in for an arc of radius
+/// `r` is off by `r(1 - cos(f/2r))`, which is at most `f²/8r` — for the tightest turn a pen makes, a
+/// three-pixel radius, that is 0.04 pixels at 1.0, 0.09 at 1.5, and 0.17 at 2.0. The edge is sampled four
+/// times a pixel, so an error under a quarter of a pixel cannot be resolved by the antialiasing that draws
+/// it: all three are invisible, and 2.0 is the coarsest that stays under. What it buys is not small — a
+/// page of writing is millions of corners and every one of them is shaded by the GPU on every frame: the
+/// same traced page is 6.98 million vertices at 1.0, 4.65 at 1.5, and 3.49 at 2.0, so 80 MB of buffer
+/// became 40.
+///
+/// A pen's own curvature is far gentler than the bound this is checked against. The tightest turn in real
+/// handwriting is the reversal at a stroke's tip, which the model draws as a disc rather than as a chain of
+/// chords (see `Tip` and the arcs in `arc_between`), so the straight pieces are almost always standing in
+/// for a curve of a far larger radius — where the error falls as `1/r` and 2.0 is off by a hundredth of a
+/// pixel.
+pub const FACET: f32 = 2.0;
 
 /// The most pieces one segment of a stroke may be cut into.
 ///

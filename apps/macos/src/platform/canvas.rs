@@ -104,6 +104,16 @@ impl InkSurface for InkCanvas {
         // The pen's mark is part of the frame, now: above the ink, below the interface.
         Ok(self.surface.draw(canvas, self.ghost.mark().as_ref()))
     }
+
+    /// Waits for the display's clock, or does not.
+    ///
+    /// `CAMetalLayer.displaySyncEnabled` is the whole of it on this platform: Metal itself has no
+    /// present-with-an-interval, and the layer is what turns a frame into a scan-out. Turning it off is
+    /// the experiment `CHEAP_NOTE_NO_VSYNC` used to be — a frame goes out the moment it is drawn, which
+    /// is lower latency and can tear.
+    fn set_vsync(&mut self, on: bool) {
+        self.surface.set_vsync(on);
+    }
 }
 
 /// A length in logical pixels, in device pixels: at least one, because a texture of none is no texture.

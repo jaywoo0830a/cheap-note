@@ -886,6 +886,31 @@ under the 144 it asks for, and that is what a cap of this shape does — each fr
 below the ceiling. A cap is a ceiling, and settling under it is the honest outcome rather than a defect to
 tune away.
 
+### Vertical sync, and the honest measure of it
+
+`V-Sync` sits beside the cap: whether a frame waits for the display's own clock before it is shown. On is the
+default. `CAMetalLayer.displaySyncEnabled` is the whole of the mechanism on macOS, and `set_vsync` moves it
+the moment the switch does — the property is consulted at present time, not at layer creation, so there is
+no restart and no new window.
+
+**It does not change the frame rate, and that was measured rather than assumed.** With the cap at `360 Hz`
+and the note open, the trace read **144 draws/s with the switch on and 142 to 144 with it off**. The reason
+is that `displaySyncEnabled` is not what paces this canvas: macOS's window compositor decides when a drawn
+frame reaches a scan-out, and on a 144 Hz display it does that 144 times a second either way. Turning the
+flag off changes whether the layer waits on that clock before handing a frame over, which is a matter of
+tearing under a *different* pacing regime — one this app does not reach, because `allowsNextDrawableTimeout`
+is off and a drawable that is not ready is a skipped frame rather than a wait.
+
+Repeated on a second note — 3,739 strokes, 17 pages, `360 Hz` cap — to be sure the first reading was not a
+page that happened to be idle: **144 to 145 draws/s both ways.** With the cap at `360` and the display at
+`144`, the switch makes no difference at all, because the compositor is the one that decides.
+
+So the switch is here because it is the true statement of a choice the platform offers, and it is documented
+as the narrower thing it is. Where it would matter is a display whose compositor lets a layer present outside
+the scan-out; nothing measured here does. Windows has no choice to make at all — it presents at a sync
+interval of zero always, for reasons `device.rs` records — so its `set_vsync` is empty and the setting is
+carried with the note regardless.
+
 ## 12. The numbers, in one table
 
 | Constant | Value | What it decides |
@@ -920,6 +945,7 @@ tune away.
 | `DETAIL_SETTLE_INTERVAL` | 32 ms | how long a zoom must be quiet before the detail rung it asked for is built: two frames at any pointer rate, and the pause that keeps a 23.7 ms rebuild out of the frame that crossed the rung (§11) |
 | `RUNG` (`detail_zoom`) | 1.5 | the factor between detail rungs. Crossing one re-derives every stroke on the page, so the step size is a trade between how often that happens and how far the drawn detail can lag the zoom — and at 1.5 the lag is under a quarter of a pixel |
 | `FrameCap` (`frame_cap`) | `Unlimited` | the most frames a second the canvas draws, whatever the display can show: `60`, `144`, `180`, `240`, `360` or none. A ceiling on the canvas's own work, checked against the time since the last frame was handed over, and not a display mode — a display slower than the chosen rate simply draws at its own |
+| `vsync` | on | whether a frame waits for the display's clock before it is shown: `CAMetalLayer.displaySyncEnabled` on macOS, nothing on Windows, which presents at a sync interval of zero always. Measured not to change the frame rate on either — the compositor paces the scan-out — so it is a statement about tearing rather than about speed (§11) |
 
 Every `PALETTE_*` length above is a *design* number, in the 96-DPI logical pixels a Windows display
 measures in. The palette is drawn at those numbers times `Platform::unit_scale` — `1.0` on Windows and

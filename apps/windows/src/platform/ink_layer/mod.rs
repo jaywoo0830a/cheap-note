@@ -171,4 +171,13 @@ impl note_ui::platform::InkSurface for InkLayer {
         // compositor decides which frame it shows (see `device.rs`).
         Ok(true)
     }
+
+    /// Nothing to do, and not a failure: this platform has no choice to make.
+    ///
+    /// Windows presents with a sync interval of zero on purpose — `device.rs` measured waiting for the
+    /// compositor at 47 presents a second against the 165 the display could take — so a note that asks
+    /// for vertical sync is a note whose wish this platform cannot grant. The setting is still stored
+    /// with it, because a note is carried between machines and the platform that *can* honour it is
+    /// the one that should.
+    fn set_vsync(&mut self, _on: bool) {}
 }

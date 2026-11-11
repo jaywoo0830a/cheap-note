@@ -36,6 +36,7 @@
 //! | `page_display_width` | a number: logical pixels |
 //! | `grayscale_pages` | a flag |
 //! | `frame_cap` | a name: `60 Hz`, `144 Hz`, `180 Hz`, `240 Hz`, `360 Hz`, `Unlimited` |
+//! | `vsync` | a flag |
 //! | `pressure_fades` | a flag |
 //! | `zoom` | a number, where `1.0` is the size the paper asks for |
 //! | `show_toolbar`, `show_status` | flags |
@@ -295,6 +296,21 @@ pub struct Settings {
     /// note is the one worth pacing, and a fresh one is not, and a person knows which they have open.
     pub frame_cap: FrameCap,
 
+    /// Whether a frame waits for the display's own clock before it is shown.
+    ///
+    /// **On** is the tear-free answer and the one a pen is judged by: a frame the compositor is allowed
+    /// to show whenever it likes can be shown half-written, and a torn stroke under a moving nib is the
+    /// one artefact a reader notices. **Off** is lower latency — the frame goes out the moment it is
+    /// drawn rather than at the next scan-out — at the price of that tear, which is the trade
+    /// `CHEAP_NOTE_NO_VSYNC` was added to measure before this setting existed.
+    ///
+    /// One platform does not have the choice to make. Windows presents with a sync interval of zero
+    /// always (see `apps/windows/platform/ink_layer/device.rs`), because waiting there measured 47
+    /// presents a second against the 165 the display could take; the setting is stored and honoured as
+    /// far as that platform can, which is not at all, and the status line is where such a difference
+    /// would have to be said if it ever mattered.
+    pub vsync: bool,
+
     /// Whether a light touch lays a *pale* line as well as a thin one — the pencil's other half.
     ///
     /// A pencil pressed lightly does not only draw thinner, it draws greyer: less graphite reaches the page. Width
@@ -402,6 +418,7 @@ impl Default for Settings {
             canvas_style: CanvasStyle::Plain,
             grayscale_pages: false,
             frame_cap: FrameCap::Unlimited,
+            vsync: true,
             // A light touch writes pale as well as thin: the pencil every hand already knows. See
             // [`Settings::pressure_fades`] for why it is a switch at all.
             pressure_fades: true,

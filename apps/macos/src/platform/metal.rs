@@ -216,9 +216,12 @@ impl Surface {
         // compositor. The next wake tries again (see `NoteApp::present_canvas`).
         layer.setAllowsNextDrawableTimeout(false);
         // The display's clock is the compositor's; a frame that waits for it is a frame the pen
-        // waited for. `CHEAP_NOTE_NO_VSYNC=1` is the experiment: present immediately and see
-        // whether the tear is worth the latency.
-        layer.setDisplaySyncEnabled(std::env::var_os("CHEAP_NOTE_NO_VSYNC").is_none());
+        // waited for. Whether to wait is the note's setting (see `Settings::vsync`), applied here as
+        // the layer's default and moved by `Surface::set_vsync` when the switch is thrown. The
+        // environment variable is what the trade was measured with before there was a switch, and it
+        // still wins over the setting so an experiment does not need a note written to try it.
+        let waits = std::env::var_os("CHEAP_NOTE_NO_VSYNC").is_none();
+        layer.setDisplaySyncEnabled(waits);
 
         view.setWantsLayer(true);
         view.setLayer(Some(&layer));
@@ -317,6 +320,21 @@ fn pipeline(
 }
 
 impl Surface {
+    /// Waits for the display's clock before a frame is shown, or stops waiting.
+    ///
+    /// One property of the layer, which is why this can be answered the moment the switch moves rather
+    /// than at the next launch: `displaySyncEnabled` is consulted when a drawable is presented, not when
+    /// the layer is made. The environment variable still overrides it — see `install` — because that is
+    /// the *experiment*, and an experiment that could be overridden by a note setting would be a
+    /// measurement of the note rather than of the toggle.
+    pub(super) fn set_vsync(&mut self, on: bool) {
+        if std::env::var_os("CHEAP_NOTE_NO_VSYNC").is_some() {
+            return;
+        }
+
+        self.layer.setDisplaySyncEnabled(on);
+    }
+
     /// Rebuilds the finished ink, when what the triangles are a function of has changed.
     ///
     /// Two reasons to build: the ink *is* different (a stroke added, a zoom rung, a turn of the page — the

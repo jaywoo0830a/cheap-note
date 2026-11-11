@@ -1950,6 +1950,27 @@ impl NoteApp {
         self.finish_setting(cx);
     }
 
+    /// Waits for the display's clock before showing a frame, or stops waiting.
+    ///
+    /// Handed to the surface rather than kept here: this is a property of the layer that presents, and a
+    /// platform whose layer has no such property ignores it (see [`InkSurface::set_vsync`]). Nothing is
+    /// redrawn — the next frame that is already coming is the one that waits, or does not.
+    fn set_vsync(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.vsync = on;
+        self.apply_vsync();
+        self.finish_setting(cx);
+    }
+
+    /// Tells the canvas whether to wait for the display, if there is a canvas to tell.
+    ///
+    /// Called at install and whenever the switch moves, so a surface never has to guess: the note's own
+    /// answer is the only one it is ever given.
+    fn apply_vsync(&mut self) {
+        if let Some(ink) = self.ink_layer.as_mut() {
+            ink.set_vsync(self.settings.vsync);
+        }
+    }
+
     /// Renders PDF pages in grayscale, or back in colour.
     fn set_pdf_grayscale(&mut self, on: bool, cx: &mut Context<Self>) {
         self.settings.grayscale_pages = on;
@@ -3324,6 +3345,11 @@ impl NoteApp {
         // travel with *it* and not with whoever was written in last.
         note.store().read_settings(&mut self.settings)?;
         note.store_mut().set_settings(&self.settings)?;
+
+        // The note's own answer for vertical sync, handed to the surface now: the layer that presents
+        // is the platform's, and a note opened asking for something the surface already offers stops
+        // offering it at the next frame.
+        self.apply_vsync();
 
         // A whole note, not a page turn: the pan is reset with the zoom, because the sheet that was
         // being looked at is not the sheet in hand any more.
@@ -5052,6 +5078,16 @@ impl NoteApp {
             // canvas's work, not the display's. See [`FrameCap`].
             .child(control_label("Frames", muted))
             .child(self.chooser("chooser-frames", &self.frame_select, cx))
+            .child(toolbar_divider(hairline))
+            // The display's clock, beside the canvas's own ceiling: the two are the whole of what paces
+            // a frame, and they are the reader's to trade against each other (see [`Settings::vsync`]).
+            .child(visibility_switch(
+                "vsync",
+                "V-Sync",
+                self.settings.vsync,
+                cx,
+                |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| app.set_vsync(on, cx),
+            ))
             .child(toolbar_divider(hairline))
             // A render option for the *page*, next to the colours it overrides: this row wraps, so
             // one more control here cannot push the others off the edge.

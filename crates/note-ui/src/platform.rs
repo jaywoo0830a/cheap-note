@@ -131,6 +131,14 @@ pub trait InkSurface {
     /// (see [`crate::app`]). The error is a sentence rather than a type: it is shown in the status
     /// line, once, and the app keeps running without a canvas rather than failing to start.
     fn draw(&mut self, canvas: &Canvas) -> Result<bool, String>;
+
+    /// Whether frames wait for the display's own clock before they are shown.
+    ///
+    /// A surface whose platform offers no such choice ignores this rather than failing: the setting is
+    /// stored with the note on every platform, and Windows presents at a sync interval of zero for
+    /// reasons of its own (see `apps/windows/platform/ink_layer/device.rs`). Called when the setting
+    /// moves and once at install, so a surface never has to guess what the note wanted.
+    fn set_vsync(&mut self, on: bool);
 }
 
 /// Where the pen's readings come from.

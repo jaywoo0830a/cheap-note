@@ -51,6 +51,21 @@ fn the_defaults_are_a_note_that_has_never_been_told_anything() {
     assert!(FrameCap::ALL.contains(&settings.frame_cap));
 }
 
+/// Vertical sync is on by default, and it is a *flag* — so the note's round trip is the plain one.
+///
+/// On is the default because it is the answer a pen is judged by: a frame the compositor may show
+/// whenever it likes can be shown half-written, and a torn stroke under a moving nib is the artefact a
+/// reader notices. The switch exists for the platform that can honour it (macOS's `CAMetalLayer`);
+/// Windows presents at a sync interval of zero regardless, which is why nothing here asserts that the
+/// setting *does* anything — only that it survives a note.
+#[test]
+fn vertical_sync_is_on_by_default() {
+    assert!(
+        Settings::default().vsync,
+        "a fresh note should not tear before anyone asks it to"
+    );
+}
+
 /// A frame cap is named by its own label and by nothing else, and every one has an interval that says
 /// what it is called.
 ///

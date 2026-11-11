@@ -28,7 +28,7 @@ use crate::pages::Quarters;
 ///
 /// Re-exported rather than defined here, because the note remembers both in its own settings (see
 /// [`note_format::paper`]). The names the app uses are unchanged.
-pub use note_format::paper::{CanvasSize, CanvasStyle};
+pub use note_format::paper::{CanvasSize, CanvasStyle, FrameCap};
 
 /// The thickness of a rule, in logical pixels.
 ///

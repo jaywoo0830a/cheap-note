@@ -856,6 +856,36 @@ So a pan would be given the pump's treatment only if its cull ever grew to a fra
 `measures_the_rung_costs` is what would say so: it asserts the cull stays under 2 ms, two orders of magnitude
 above where it is.
 
+### The frame cap, and what it is not
+
+The bar's `Frames` chooser sets `frame_cap`: the most frames a second **the canvas** will draw. It is not a
+display mode — nothing about the monitor changes — and it is not a request to the compositor either. It is
+one comparison in `draw_canvas`, against the time since the last frame was handed over:
+
+```rust
+if held_by_cap(self.settings.frame_cap, self.last_present.map(|last| last.elapsed())) {
+    self.canvas_dirty = true;   // the pump tries again; the newest description draws next time
+    return;
+}
+```
+
+Two details decide whether it paces anything. The comparison is `since < interval` rather than `<=`, so a
+display at 60 Hz and a cap of 60 Hz agree instead of each waiting for the other. And a frame that arrives
+early is **dropped rather than deferred**: the description is rebuilt from the model each time, so the next
+frame draws the newest state anyway, and holding a stale one back would only add latency to a drawing that
+is already on its way.
+
+`last_present` is the clock, and it is only ever set where a frame was actually handed over — a failed
+`nextDrawable` leaves it alone, so a run of missed drawables does not accumulate credit. Setting a new cap
+clears it, so a cap moved down is not held back by a frame drawn a moment ago and one moved up does not wait
+for the old interval to expire.
+
+Measured on the 25-page note: **57 to 58 draws/s at `60 Hz`** and **124 to 127 at `144 Hz`**. The second is
+under the 144 it asks for, and that is what a cap of this shape does — each frame is scheduled from the
+*previous* one, so a little of every frame's own cost is added to the interval, and the rate settles slightly
+below the ceiling. A cap is a ceiling, and settling under it is the honest outcome rather than a defect to
+tune away.
+
 ## 12. The numbers, in one table
 
 | Constant | Value | What it decides |
@@ -889,6 +919,7 @@ above where it is.
 | `SAMPLES` | 4 | what a pixel's colour is sampled at, and the one rendering constant that would matter if a frame ever did drop: multisampling is the frame's real cost, and it is 4 because Metal has no analytic antialiasing to give a polygon (Windows fills with coverage instead) |
 | `DETAIL_SETTLE_INTERVAL` | 32 ms | how long a zoom must be quiet before the detail rung it asked for is built: two frames at any pointer rate, and the pause that keeps a 23.7 ms rebuild out of the frame that crossed the rung (§11) |
 | `RUNG` (`detail_zoom`) | 1.5 | the factor between detail rungs. Crossing one re-derives every stroke on the page, so the step size is a trade between how often that happens and how far the drawn detail can lag the zoom — and at 1.5 the lag is under a quarter of a pixel |
+| `FrameCap` (`frame_cap`) | `Unlimited` | the most frames a second the canvas draws, whatever the display can show: `60`, `144`, `180`, `240`, `360` or none. A ceiling on the canvas's own work, checked against the time since the last frame was handed over, and not a display mode — a display slower than the chosen rate simply draws at its own |
 
 Every `PALETTE_*` length above is a *design* number, in the 96-DPI logical pixels a Windows display
 measures in. The palette is drawn at those numbers times `Platform::unit_scale` — `1.0` on Windows and

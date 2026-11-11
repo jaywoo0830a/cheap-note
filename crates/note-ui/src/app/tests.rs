@@ -1,7 +1,7 @@
 // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
 // scope and shadow the attribute this module needs.
 use super::{
-    bar_line, confirmed, file_label, file_stem, notch_in_pixels, page_of_write,
+    bar_line, confirmed, file_label, file_stem, held_by_cap, notch_in_pixels, page_of_write,
     page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face, palette_id,
     palette_in_hand, palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width,
     scroll_amount, sheet_matches, spun, touches_paper, wheel_pan, wheel_zoom_factor, zoom_text,
@@ -770,5 +770,86 @@ fn a_gesture_settles_only_after_a_real_gap() {
     assert!(
         GESTURE_SETTLE_INTERVAL <= Duration::from_millis(200),
         "a settled zoom should reach the note quickly: {GESTURE_SETTLE_INTERVAL:?}"
+    );
+}
+
+/// The frame cap holds a frame that arrives early, and only that.
+///
+/// The whole of the setting is this one comparison, so it is checked against both sides of every
+/// boundary: a frame inside the interval is held, one at or past it goes, and `Unlimited` never holds
+/// anything. The *first* frame has no interval behind it and must always go — a cap that delayed the
+/// first frame would be a cap that made a page open slower, which is the one thing pacing must not do.
+#[test]
+fn the_frame_cap_holds_only_a_frame_that_arrived_early() {
+    use note_format::paper::FrameCap;
+
+    // Nothing has drawn yet: no gap to measure, so no cap to apply.
+    for cap in FrameCap::ALL {
+        assert!(
+            !held_by_cap(cap, None),
+            "{} held the very first frame",
+            cap.label()
+        );
+    }
+
+    // Unlimited is never a cap, whatever the gap since the last frame.
+    assert!(!held_by_cap(FrameCap::Unlimited, Some(Duration::ZERO)));
+
+    let interval = FrameCap::Hz60.interval().expect("60 Hz has an interval");
+
+    assert!(
+        held_by_cap(FrameCap::Hz60, Some(Duration::ZERO)),
+        "a frame at the same instant as the last is held"
+    );
+    assert!(
+        held_by_cap(FrameCap::Hz60, Some(interval - Duration::from_micros(1))),
+        "a frame a microsecond early is held"
+    );
+    assert!(
+        !held_by_cap(FrameCap::Hz60, Some(interval)),
+        "a frame exactly one interval later goes: a display and a cap that agree must not stall"
+    );
+    assert!(
+        !held_by_cap(FrameCap::Hz60, Some(interval * 2)),
+        "a frame long after the last one goes"
+    );
+
+    // The same gap, two caps, two answers — this is what makes the setting do anything at all. A gap of
+    // 1 ms is too soon for every named rate and goes out under `Unlimited` alone; a gap of 4 ms is long
+    // enough for 240 Hz and still too soon for 360 Hz.
+    let soon = Duration::from_millis(1);
+    assert!(
+        held_by_cap(FrameCap::Hz60, Some(soon)),
+        "1 ms is not a 60 Hz frame"
+    );
+    assert!(held_by_cap(FrameCap::Hz360, Some(soon)), "nor a 360 Hz one");
+    assert!(
+        !held_by_cap(FrameCap::Unlimited, Some(soon)),
+        "unlimited holds nothing, however early"
+    );
+
+    let later = Duration::from_millis(4);
+    assert!(
+        !held_by_cap(FrameCap::Hz360, Some(later)),
+        "4 ms is past 360 Hz's 2.78 ms, so it goes"
+    );
+    assert!(
+        held_by_cap(FrameCap::Hz240, Some(later)),
+        "4 ms is still under 240 Hz's 4.17 ms, so it is held"
+    );
+    assert!(
+        held_by_cap(FrameCap::Hz60, Some(later)),
+        "and well under 60 Hz's 16.7 ms"
+    );
+
+    // A gap shorter than the tightest cap still holds under the tightest cap: 2 ms is early for 360 Hz.
+    let early = Duration::from_millis(2);
+    assert!(
+        held_by_cap(FrameCap::Hz360, Some(early)),
+        "2 ms is under 360 Hz's 2.78 ms"
+    );
+    assert!(
+        held_by_cap(FrameCap::Hz240, Some(early)),
+        "and under 240 Hz's 4.17 ms as well: the tighter cap holds what the looser one does too"
     );
 }

@@ -35,6 +35,7 @@
 //! | `canvas_style` | a name: `Plain`, `Ruled`, `Grid`, `Dots` |
 //! | `page_display_width` | a number: logical pixels |
 //! | `grayscale_pages` | a flag |
+//! | `frame_cap` | a name: `60 Hz`, `144 Hz`, `180 Hz`, `240 Hz`, `360 Hz`, `Unlimited` |
 //! | `pressure_fades` | a flag |
 //! | `zoom` | a number, where `1.0` is the size the paper asks for |
 //! | `show_toolbar`, `show_status` | flags |
@@ -62,7 +63,7 @@
 
 use std::path::PathBuf;
 
-use crate::paper::{CanvasSize, CanvasStyle};
+use crate::paper::{CanvasSize, CanvasStyle, FrameCap};
 
 /// How heavy the pen in hand is.
 ///
@@ -287,6 +288,13 @@ pub struct Settings {
     /// in grey, another's is a diagram whose colours are the point.
     pub grayscale_pages: bool,
 
+    /// The most frames a second the canvas will draw, whatever the display can show.
+    ///
+    /// The app's own ceiling and not a display mode — see [`FrameCap`] for what it is and what it is not.
+    /// Stored with the note rather than with the machine because it is a *reading* preference: a long
+    /// note is the one worth pacing, and a fresh one is not, and a person knows which they have open.
+    pub frame_cap: FrameCap,
+
     /// Whether a light touch lays a *pale* line as well as a thin one — the pencil's other half.
     ///
     /// A pencil pressed lightly does not only draw thinner, it draws greyer: less graphite reaches the page. Width
@@ -393,6 +401,7 @@ impl Default for Settings {
             canvas_size: CanvasSize::A4,
             canvas_style: CanvasStyle::Plain,
             grayscale_pages: false,
+            frame_cap: FrameCap::Unlimited,
             // A light touch writes pale as well as thin: the pencil every hand already knows. See
             // [`Settings::pressure_fades`] for why it is a switch at all.
             pressure_fades: true,

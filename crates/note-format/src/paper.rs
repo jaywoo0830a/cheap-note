@@ -35,7 +35,85 @@ use serde::{Deserialize, Serialize};
 /// applications have to agree on: it is the unit the ink is stored in.
 pub const PIXELS_PER_MM: f32 = 720.0 / 210.0;
 
-/// The shape and scale of the sheet written on when no PDF is open.
+/// The most frames a second the canvas will draw, whatever the display can show.
+///
+/// A *ceiling*, not a display mode: nothing here changes what the monitor runs at, and a display slower
+/// than the one chosen simply draws at its own rate. What it caps is the canvas's own work — the ink,
+/// the ruling and the page, presented on the pen's wake and on the frame's — which is the part of an
+/// app that a reader can choose to spend less power on. Two reasons to want it: a page of handwriting
+/// costs milliseconds per frame, and a laptop on battery draws that page four times as long as it needs
+/// to at 60 rather than 240; and a redraw that arrives faster than the compositor can show it is work
+/// nobody sees.
+///
+/// `Unlimited` is the default because it is the honest one: the display already decides how often it
+/// shows a frame, so the app's job is to have one ready, not to guess how many are wanted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameCap {
+    /// Sixty, the rate of most screens and the one a paced app is usually thinking of.
+    Hz60,
+    /// A hundred and forty-four: the common high-refresh rate.
+    Hz144,
+    /// A hundred and eighty.
+    Hz180,
+    /// Two hundred and forty: the fastest a display portably runs at today.
+    Hz240,
+    /// Three hundred and sixty, for the panels that reach it.
+    Hz360,
+    /// As fast as the display and the compositor allow: whatever the work costs, paid.
+    Unlimited,
+}
+
+impl FrameCap {
+    /// Every cap the toolbar offers, in the order it offers them.
+    pub const ALL: [FrameCap; 6] = [
+        FrameCap::Hz60,
+        FrameCap::Hz144,
+        FrameCap::Hz180,
+        FrameCap::Hz240,
+        FrameCap::Hz360,
+        FrameCap::Unlimited,
+    ];
+
+    /// The label on this cap's option.
+    pub fn label(self) -> &'static str {
+        match self {
+            FrameCap::Hz60 => "60 Hz",
+            FrameCap::Hz144 => "144 Hz",
+            FrameCap::Hz180 => "180 Hz",
+            FrameCap::Hz240 => "240 Hz",
+            FrameCap::Hz360 => "360 Hz",
+            FrameCap::Unlimited => "Unlimited",
+        }
+    }
+
+    /// The cap a label names, for a chooser carrying a choice back as the text that was showing.
+    ///
+    /// Looked up by name rather than by position, for the reason [`CanvasSize::from_label`] gives: the
+    /// position is the part of the list that may change, and a rate inserted in the middle must not
+    /// rename a choice already made.
+    pub fn from_label(label: &str) -> Option<FrameCap> {
+        FrameCap::ALL
+            .iter()
+            .copied()
+            .find(|cap| cap.label() == label)
+    }
+
+    /// The shortest gap allowed between two frames, or `None` for no cap at all.
+    ///
+    /// A `Duration` rather than a rate, because that is what it is compared against: the time since the
+    /// last frame was handed to the compositor.
+    pub fn interval(self) -> Option<std::time::Duration> {
+        match self {
+            FrameCap::Hz60 => Some(std::time::Duration::from_micros(16_667)),
+            FrameCap::Hz144 => Some(std::time::Duration::from_micros(6_944)),
+            FrameCap::Hz180 => Some(std::time::Duration::from_micros(5_556)),
+            FrameCap::Hz240 => Some(std::time::Duration::from_micros(4_167)),
+            FrameCap::Hz360 => Some(std::time::Duration::from_micros(2_778)),
+            FrameCap::Unlimited => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CanvasSize {
     /// ISO A4, 210 by 297 mm: the default.

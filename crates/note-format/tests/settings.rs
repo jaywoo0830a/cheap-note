@@ -6,7 +6,7 @@
 //! applied in that order. A build that got the order the other way round would draw the same note
 //! with different ink, which is the one thing the format promises not to do.
 
-use note_format::paper::{CanvasSize, CanvasStyle};
+use note_format::paper::{CanvasSize, CanvasStyle, FrameCap};
 use note_format::settings::{PenWeight, Settings, FADE_CEILING};
 
 /// The defaults are a note that has never been told anything — and they are a *sane* set.
@@ -48,6 +48,70 @@ fn the_defaults_are_a_note_that_has_never_been_told_anything() {
 
     assert!(CanvasSize::ALL.contains(&settings.canvas_size));
     assert!(CanvasStyle::ALL.contains(&settings.canvas_style));
+    assert!(FrameCap::ALL.contains(&settings.frame_cap));
+}
+
+/// A frame cap is named by its own label and by nothing else, and every one has an interval that says
+/// what it is called.
+///
+/// The row is a *name*, so the round trip is the whole contract: a note written at `144 Hz` has to come
+/// back as `144 Hz` rather than as the fourth option in today's list, for the reason every other named
+/// setting is stored by name. And the interval is where the name becomes work — a cap of 60 Hz that
+/// returned 16.667 ms *permitted* rather than a maximum gap would be a cap that paces nothing.
+#[test]
+fn a_frame_cap_is_named_by_its_own_label() {
+    for cap in FrameCap::ALL {
+        assert_eq!(
+            FrameCap::from_label(cap.label()),
+            Some(cap),
+            "{} did not survive its own label",
+            cap.label()
+        );
+    }
+
+    assert_eq!(
+        FrameCap::from_label("120 Hz"),
+        None,
+        "not a cap this build has"
+    );
+
+    // The intervals are the reciprocal of the names, near enough that a 60 Hz cap is 60 frames and not 59.
+    for (cap, micros) in [
+        (FrameCap::Hz60, 16_667.0f64),
+        (FrameCap::Hz144, 6_944.0),
+        (FrameCap::Hz180, 5_556.0),
+        (FrameCap::Hz240, 4_167.0),
+        (FrameCap::Hz360, 2_778.0),
+    ] {
+        let interval = cap.interval().expect("a named rate has an interval");
+        let difference = (interval.as_micros() as f64 - micros).abs();
+        assert!(
+            difference < 1.0,
+            "{} is {:?}, which is not one frame at that rate",
+            cap.label(),
+            interval
+        );
+    }
+
+    assert_eq!(
+        FrameCap::Unlimited.interval(),
+        None,
+        "the point of unlimited is that nothing is checked"
+    );
+
+    // And faster rates are shorter gaps, in the order the toolbar lists them: a list that offered them
+    // out of order would be a menu that reads as wrong even when every entry is right.
+    let caps = FrameCap::ALL;
+    for pair in caps.windows(2) {
+        if let (Some(earlier), Some(later)) = (pair[0].interval(), pair[1].interval()) {
+            assert!(
+                later < earlier,
+                "{} is not a tighter cap than {}",
+                pair[1].label(),
+                pair[0].label()
+            );
+        }
+    }
 }
 
 /// A weight is named by its own multiplier, and by nothing else.

@@ -31,8 +31,8 @@ use gpui_kit::*;
 
 use crate::bookmarks::{Bookmarks, MarkedPages, Marks};
 use crate::canvas::{
-    contrast_color, relative_luminance, CanvasSize, CanvasStyle, Ruling, RulingSheet, Swatch,
-    HIGHLIGHTER_COLORS, INK_COLORS, PAPER_COLORS,
+    contrast_color, relative_luminance, CanvasSize, CanvasStyle, FrameCap, Ruling, RulingSheet,
+    Swatch, HIGHLIGHTER_COLORS, INK_COLORS, PAPER_COLORS,
 };
 use crate::cursor::{nib_radius_for_width, PenCursor};
 use crate::home::Home;
@@ -925,6 +925,11 @@ pub struct NoteApp {
     /// Its labels are *built* rather than spelled out, because each one is the pen's thickness in millimetres
     /// ([`PenWeight::describe`]) and that belongs to the note in hand: hence `String` rather than `&'static str`.
     pen_select: Entity<SelectState<Vec<String>>>,
+    /// The bar's frame-cap chooser: the most frames a second the canvas will draw.
+    ///
+    /// Not a display mode — see [`FrameCap`] — so it sits with the render options rather than with the
+    /// paper: what it caps is the canvas's own work.
+    frame_select: Entity<SelectState<Vec<String>>>,
     /// Whether one of the bar's choosers has its list open.
     ///
     /// The list is a popup that hangs *below* the box, over the page — so the place the reader is aiming
@@ -1014,6 +1019,20 @@ impl NoteApp {
             PenWeight::ALL
                 .iter()
                 .position(|weight| *weight == settings.pen_weight),
+            window,
+            cx,
+        );
+
+        // The frame cap's labels are their own names — `60 Hz` and the rest — because the number *is* what
+        // a person choosing one wants to know.
+        let frame_select = choice_of(
+            FrameCap::ALL
+                .iter()
+                .map(|cap| cap.label().to_string())
+                .collect(),
+            FrameCap::ALL
+                .iter()
+                .position(|cap| *cap == settings.frame_cap),
             window,
             cx,
         );
@@ -1108,6 +1127,7 @@ impl NoteApp {
             sheet_select,
             rule_select,
             pen_select,
+            frame_select,
             chooser_open: false,
             home: Home::open(window, cx),
         };
@@ -1164,6 +1184,20 @@ impl NoteApp {
                         PenWeight::from_label(label, app.settings.no_pressure_width)
                     {
                         app.set_pen_weight(weight, cx);
+                    }
+                }
+            },
+        )
+        .detach();
+
+        cx.subscribe(
+            &app.frame_select,
+            |app, _, event: &SelectEvent<Vec<String>>, cx| {
+                app.chooser_toggled(false, cx);
+
+                if let SelectEvent::Confirm(Some(label)) = event {
+                    if let Some(cap) = FrameCap::from_label(label) {
+                        app.set_frame_cap(cap, cx);
                     }
                 }
             },
@@ -1369,6 +1403,19 @@ impl NoteApp {
             return;
         }
 
+        // The cap the reader chose, against the time since the last frame was handed over. A frame that
+        // arrives early is *dropped*, not deferred: the newest description is what the next one draws
+        // anyway, so waiting would only add latency to a drawing that is already on its way. The canvas is
+        // marked dirty so the pump tries again, which is where the next frame comes from when nothing else
+        // is moving — the pen's own wake is faster than any cap and is not relied on here.
+        if held_by_cap(
+            self.settings.frame_cap,
+            self.last_present.map(|last| last.elapsed()),
+        ) {
+            self.canvas_dirty = true;
+            return;
+        }
+
         self.describe_ink();
         self.present_canvas();
     }
@@ -1478,11 +1525,15 @@ impl NoteApp {
                 // skipped while the pen is laying ink, so the ink pump keeps taking readings.
                 let page_rendered = app.serve_pdf(now);
 
-                // A canvas that could not get a drawable is still the newest canvas: try again on
-                // this wake rather than leaving the last reading unpresented. `nextDrawable` does
-                // not block (see `metal.rs`), so a retry is a cheap check.
+                // A canvas that could not get a drawable — or that the reader's frame cap held back — is
+                // still the newest canvas: try again on this wake rather than leaving the last reading
+                // unpresented. `nextDrawable` does not block (see `metal.rs`), so a retry is a cheap check.
+                //
+                // Through `draw_canvas` and not `present_canvas`, so that the cap is checked here too: the
+                // pump is the *only* thing drawing when the page is still, and a retry that skipped the cap
+                // would be a cap that does not hold at rest.
                 if app.canvas_dirty {
-                    app.present_canvas();
+                    app.draw_canvas();
                 }
 
                 // The note's own housekeeping, on the same clock: ink still in memory is handed
@@ -1882,6 +1933,20 @@ impl NoteApp {
     /// Changes what is printed on the sheet.
     fn set_canvas_style(&mut self, style: CanvasStyle, cx: &mut Context<Self>) {
         self.settings.canvas_style = style;
+        self.finish_setting(cx);
+    }
+
+    /// Caps how many frames a second the canvas draws, whatever the display can show.
+    ///
+    /// Nothing about the display changes: the cap is the app's own ceiling, checked in
+    /// [`Self::draw_canvas`] against the time since the last frame was handed over. A higher cap than
+    /// the display can show simply never binds, which is why `Unlimited` is safe as the default.
+    fn set_frame_cap(&mut self, cap: FrameCap, cx: &mut Context<Self>) {
+        self.settings.frame_cap = cap;
+        // A frame drawn a moment ago must not hold back the first one after the cap moves *down*, and a
+        // cap moved *up* should not have to wait for the old interval to run out: the clock starts again.
+        self.last_present = None;
+        self.draw_canvas();
         self.finish_setting(cx);
     }
 
@@ -4983,6 +5048,11 @@ impl NoteApp {
             .child(control_label("Weight", muted))
             .child(self.chooser("chooser-pen", &self.pen_select, cx))
             .child(toolbar_divider(hairline))
+            // The canvas's own ceiling, beside the render option it is a sibling of: what it paces is the
+            // canvas's work, not the display's. See [`FrameCap`].
+            .child(control_label("Frames", muted))
+            .child(self.chooser("chooser-frames", &self.frame_select, cx))
+            .child(toolbar_divider(hairline))
             // A render option for the *page*, next to the colours it overrides: this row wraps, so
             // one more control here cannot push the others off the edge.
             .child(visibility_switch(
@@ -5037,7 +5107,7 @@ impl NoteApp {
             .on_mouse_down_out(cx.listener(|app, _, _, cx| app.chooser_toggled(false, cx)))
     }
 
-    /// Keeps the three choosers showing what the note is actually written with.
+    /// Keeps the four choosers showing what the note is actually written with.
     fn sync_choosers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (canvas_size, canvas_style, pen_weight) = (
             self.settings.canvas_size,
@@ -5056,6 +5126,10 @@ impl NoteApp {
             (
                 self.pen_select.clone(),
                 chosen_index(&PenWeight::ALL, pen_weight),
+            ),
+            (
+                self.frame_select.clone(),
+                chosen_index(&FrameCap::ALL, self.settings.frame_cap),
             ),
         ];
 
@@ -6112,6 +6186,23 @@ fn bar_line(shown: bool, measured: Option<f32>) -> f32 {
     }
 
     measured.filter(|edge| *edge > 0.0).unwrap_or(BAR_HEIGHT)
+}
+
+/// Whether the reader's frame cap holds back a frame, given how long ago the last one was handed over.
+///
+/// `since` is `None` for a canvas that has never drawn, which is a frame that must go out: the cap paces
+/// a stream, it does not delay the first one. The comparison is `<` rather than `<=` so that a cap of
+/// exactly one interval's worth of time draws — a display at 60 Hz and a cap of 60 Hz have to agree rather
+/// than each waiting for the other to move first.
+///
+/// A free function because the decision is the part worth testing: it is one comparison, and it is the
+/// whole of what the setting does.
+fn held_by_cap(cap: FrameCap, since: Option<std::time::Duration>) -> bool {
+    let (Some(interval), Some(since)) = (cap.interval(), since) else {
+        return false;
+    };
+
+    since < interval
 }
 
 /// Describes a frame's canvas: the desk, the page's shadow, and the sheet — in the order painted.

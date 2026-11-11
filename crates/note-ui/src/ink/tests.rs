@@ -2112,14 +2112,41 @@ fn measures_the_ink_costs() {
 ///
 /// It is measured because it is the one cost a zoom cannot spread across frames cheaply: the rung moves
 /// in steps, so the step lands in whichever frame the hand happens to cross it in — and a page of eight
-/// thousand strokes is a page whose crossing someone would feel. The number is what decided to take the
-/// rebuild out of the frame that crosses it: 23.7 ms is three and a half frames at 144 Hz, so
-/// `request_detail` records the ask and the pump builds it between frames.
+/// thousand strokes is a page whose crossing someone would feel. The number is what decided two things:
+/// to take the rebuild out of the frame that crosses it (`request_detail` records the ask, the pump
+/// builds it between frames), and to spread the build over the pool rather than run it in a `for` loop.
+/// The pool turned 23.6 ms into 5.0 ms on a twelve-core M6, which is the difference between three and a
+/// half frames at 144 Hz and one third of one.
 ///
 /// Run `cargo test --release -- --nocapture measures_the_rung_costs` for the numbers.
 #[test]
 fn measures_the_rung_costs() {
     eprintln!("\n── a zoom rung, measured ──────────────────────────────────────");
+
+    // How many threads the rung rebuild actually spreads over, which is the claim the timing rests on:
+    // a build that ran on one core would show 1 here however fast the machine is.
+    {
+        use std::collections::BTreeSet;
+        use std::sync::Mutex;
+
+        let seen = Mutex::new(BTreeSet::new());
+        let mut page = written_page(8_182);
+        page.request_detail(2.25);
+        Arc::make_mut(&mut page.finished)
+            .par_iter_mut()
+            .for_each(|stroke| {
+                seen.lock()
+                    .expect("no panic")
+                    .insert(format!("{:?}", std::thread::current().id()));
+                Arc::make_mut(stroke).freeze(detail_zoom(2.25), Tip::Curved);
+            });
+        let threads = seen.lock().expect("no panic").len();
+        eprintln!("  threads the rebuild spread over      {threads:>9}");
+        assert!(
+            threads > 1 || std::thread::available_parallelism().map_or(true, |n| n.get() == 1),
+            "the rung rebuild ran on one core, so the pool was not used"
+        );
+    }
 
     for count in [500usize, 2_000, 8_182] {
         // The page as written: every stroke is already detailed for the zoom it was written at.
@@ -2196,6 +2223,48 @@ fn measures_the_rung_costs() {
         pan_cull.as_micros() < 2_000 || cfg!(debug_assertions),
         "culling a page for a pan took {pan_cull:?}, which is a frame's budget"
     );
+}
+
+/// The pool rebuilds a page into exactly the geometry a single loop would have.
+///
+/// `build_detail` runs one stroke per core now, and the stakes of getting that wrong are silent: a
+/// stroke rebuilt on the wrong detail draws at the wrong fineness, and a stroke missed altogether draws
+/// as nothing. So the parallel build is checked against the same page rebuilt one stroke at a time
+/// through the public path a single stroke has — not against itself with `par_iter` swapped out, which
+/// would only prove the two calls agree.
+#[test]
+fn a_parallel_rung_build_matches_a_serial_one() {
+    let mut page = written_page(300);
+
+    // Build one rung in parallel, the way the pump does.
+    assert!(page.set_zoom(8.0), "8x is a new rung");
+    let parallel: Vec<(Vec<[f32; 2]>, Vec<note_format::ink::InkPoint>)> = page
+        .finished()
+        .iter()
+        .map(|stroke| (stroke.outline.clone(), stroke.points.clone()))
+        .collect();
+
+    // Every stroke carries the detail it was built for, and none was left behind at the old one.
+    let detail = detail_zoom(8.0);
+    for stroke in page.finished().iter() {
+        let mut alone = stroke.as_ref().clone();
+        alone.freeze(detail, Tip::Curved);
+        assert_eq!(
+            stroke.outline, alone.outline,
+            "a stroke rebuilt in the pool differs from the same stroke rebuilt alone"
+        );
+    }
+
+    // And going back to 1:1 rebuilds all of them again, rather than leaving any at 8x.
+    assert!(page.set_zoom(1.0), "1:1 is another rung");
+    for (index, stroke) in page.finished().iter().enumerate() {
+        let (before, points) = &parallel[index];
+        assert_eq!(&stroke.points, points, "a rebuild moved the ink itself");
+        assert_ne!(
+            &stroke.outline, before,
+            "stroke {index} kept its 8x outline after a 1:1 rebuild"
+        );
+    }
 }
 
 /// A zoom's new detail is asked for by the frame and built by the pump, and the page keeps drawing the

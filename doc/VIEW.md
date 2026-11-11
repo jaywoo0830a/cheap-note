@@ -855,12 +855,30 @@ hitch would come round more often and be easier to feel. The step is information
 different rung is a different number of pieces per curve, and no amount of easing changes how many pieces
 there are.
 
-What was done instead splits the work across the seam it always belonged on. `InkDocument::request_detail`
-records the rung a frame wants and `build_detail` does the work; the frame calls the first, the housekeeping
-pump calls the second once the gesture has been quiet for `DETAIL_SETTLE_INTERVAL`. The page keeps drawing
-the rung it has until then — between rungs that is under a quarter of a pixel of chord error, which is
-[`FACET`]'s own bound and invisible under four samples a pixel. Measured after the split, the frame pays
-**0.0 ns** for a rung and the pump pays the 24 ms between frames.
+What was done instead splits the work across the seam it always belonged on, and then puts every core on it.
+`InkDocument::request_detail` records the rung a frame wants and `build_detail` does the work; the frame
+calls the first, the housekeeping pump calls the second once the gesture has been quiet for
+`DETAIL_SETTLE_INTERVAL`. The page keeps drawing the rung it has until then — between rungs that is under a
+quarter of a pixel of chord error, which is [`FACET`]'s own bound and invisible under four samples a pixel.
+Measured after the split, the frame pays **0.0 ns** for a rung and the pump pays the rebuild between frames.
+
+Even after the split, the pump's 24 ms was time the frame loop could not use: a rung was three and a half
+frames of drawing at 144 Hz, paid on the thread that also draws. The second decision was to stop spending one
+core on work that is one stroke wide. Every stroke's outline is derived from that stroke alone, so the
+strokes are independent and the loop over them was the one place in the view where the machine's other cores
+were doing nothing. `build_detail` now runs the rebuild over a `rayon` pool:
+
+| 8,182 strokes, one rung | time |
+| --- | --- |
+| a `for` loop, one core | 23.6 ms |
+| the pool, twelve-core M6 | **5.0 ms** |
+
+It is not twelve times faster because a stroke takes about three microseconds: at that size the pool's own
+scheduling and the `Arc::make_mut` copy a shared stroke costs are a real share of the work. What the 4.7×
+buys is that a rung is now a third of a frame at 144 Hz instead of three and a half — under the budget
+rather than over it, which matters because the pump shares the main thread with the frame loop. The same
+pool `note-format` seals chunks with, and it is the only parallelism in the view: everything else that runs
+per frame is already cheap enough that spreading it would cost more in scheduling than it saved.
 
 Live, on that page: **144 draws/s with the ink at 2.25 M vertices** while rungs were being rebuilt three
 times a second. The number to remember is that a rung is not a frame's work, and this is the seam that says

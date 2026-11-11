@@ -3945,6 +3945,7 @@ dependencies = [
  "image",
  "libloading 0.9.0",
  "note-format",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

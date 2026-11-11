@@ -47,6 +47,11 @@ anyhow = "=1.0.104"
 # Raw pixel buffers, used to hand a rendered PDF page to GPUI's image pipeline.
 image = { version = "0.25", default-features = false }
 
+# A work-stealing pool for the one operation that is big enough to want one: rebuilding a page's
+# outlines when a zoom crosses a detail rung (`InkDocument::build_detail`). The same crate and the
+# same pin as `note-format`, which uses it to seal chunks: one version, so one copy of the pool.
+rayon = "=1.12.0"
+
 # Pdfium is loaded at run time rather than linked, so the handful of C entry points this view calls
 # (`src/pdfium/`) have to be declared once. `libloading` is the loader: one `dlopen`/`LoadLibrary`
 # behind one API, so the same code finds `pdfium.dll`, `libpdfium.dylib` or `libpdfium.so`

@@ -6,7 +6,7 @@
 //! together is the element tree that [`Render for NoteApp`] builds.
 //!
 //! Everything this module decides at length — why the bar floats over the canvas, what the frame loop
-//! may and may not wait for, why the status line is not on a clock, what a wheel notch and a
+//! may and may not wait for, why the status line is not on a clock, what a rung of detail and a
 //! rasterised page are worth, and every rule the pen obeys — is written out in `doc/VIEW.md`, which is
 //! the map of this module; `doc/ARCHITECTURE.md` is the map of the whole program. What is left here is
 //! the line-long "why" a reader wants where they are reading.
@@ -65,15 +65,6 @@ const PDF_RENDER_SCALE: f32 = 2.0;
 
 /// The ladder of bitmap widths a page may be rendered at.
 const PDF_PIXEL_WIDTHS: [u32; 4] = [1_024, 1_536, 2_304, 3_456];
-
-/// How much of the sheet's size one notch of a wheel adds.
-const WHEEL_ZOOM_STEP: f32 = 1.25;
-
-/// How many *lines* the platform reports for one notch of a wheel.
-const WHEEL_LINES_PER_NOTCH: f32 = 3.0;
-
-/// How many logical pixels one *line* of a scroll is worth, for panning.
-const WHEEL_LINE_HEIGHT: f32 = 32.0;
 
 /// The margin, in logical pixels, between a sheet and the window's edges.
 const PAGE_MARGIN: f32 = 24.0;
@@ -283,9 +274,9 @@ const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long a continuous zoom gesture has to be quiet before it is taken to have ended.
 ///
-/// A pinch and a wheel deliver a stream of events with no final one, so the end has to be inferred. Long
-/// enough that no gap inside a real gesture reaches it — a pinch at 120 Hz sends one every 8 ms, and a fast
-/// wheel a few dozen a second — and short enough that the number a reader typed is committed before they look
+/// A pinch delivers a stream of events with no final one, so the end has to be inferred. Long
+/// enough that no gap inside a real gesture reaches it — a pinch at 120 Hz sends one every 8 ms — and
+/// short enough that the number a reader typed is committed before they look
 /// away. A tenth of a second is both: more than ten times the slowest event of a live gesture, and well under
 /// the time a hand takes to leave the trackpad.
 const GESTURE_SETTLE_INTERVAL: Duration = Duration::from_millis(100);
@@ -866,7 +857,13 @@ pub struct NoteApp {
     unit_scale: f32,
     /// How large the sheet is drawn, and where it sits in the window.
     view: Viewport,
-    /// The scroll readings the wheel has left for the frame that will show them, in logical pixels.
+    /// The desk colour the canvas was last described with.
+    ///
+    /// Kept because the description is now written from two places — the frame, which reads the theme, and the
+    /// pump, which has no `cx` to ask — and both have to write the *same* desk or the pump's frame would paint
+    /// the window in a colour the theme no longer chose.
+    desk: Hsla,
+    /// The scroll readings the trackpad has left for the frame that will show them, in logical pixels.
     ///
     /// A trackpad reports its movement faster than the screen takes frames — a hundred or so readings a
     /// second against sixty — and a reading spent on its own is a pan nobody sees and a canvas asked to
@@ -890,7 +887,7 @@ pub struct NoteApp {
     detail_owed: bool,
     /// When the last continuous zoom event arrived, or `None` when no zoom gesture is in flight.
     ///
-    /// A pinch and a wheel are *streams*: the events say where the zoom is now, and the platform does not say
+    /// A pinch is a *stream*: the events say where the zoom is now, and the platform does not say
     /// when they have stopped. So the end is a gap — the pump commits the zoom to the note once a whole interval
     /// has passed with nothing new, which is the write [`Self::finish_zoom`] does and the one thing a stream of
     /// events must not do per event.
@@ -993,7 +990,7 @@ pub struct NoteApp {
     /// A field rather than a third pair of buttons, because the zoom a person wants is usually a *number* they already
     /// have in mind — the size they read at, or the number the page was laid out at — and stepping to 60% is a dozen
     /// presses. What it shows is the truth about the view ([`Self::sync_choosers`]), whether the view changed by a
-    /// press, a wheel, a pinch, a fit or a note being opened.
+    /// press, a pinch, a fit or a note being opened.
     zoom_input: Entity<InputState>,
     /// What the zoom field says: Enter takes the number, a click away leaves the view's own.
     _zoom_events: Subscription,
@@ -1140,6 +1137,7 @@ impl NoteApp {
             scale: window.scale_factor(),
             unit_scale,
             view,
+            desk: cx.theme().background,
             scroll_waiting: (0.0, 0.0),
             scroll_asked: false,
             view_moved: false,
@@ -1379,7 +1377,7 @@ impl NoteApp {
                 // drawn by the canvas but the page's own geometry is not, and a pan that never asked for a
                 // frame would leave the bar and the page pill describing a place the sheet had left. The flags
                 // are read here because they are set by the two paths that move the view — the pen's gesture
-                // and the wheel — and cleared by the frame that spends them.
+                // and the trackpad — and cleared by the frame that spends them.
                 if app.view_moved {
                     app.view_moved = false;
                     cx.notify();
@@ -1439,6 +1437,96 @@ impl NoteApp {
             selection: shown.then_some(self.selection_colour),
             lasso,
         };
+    }
+
+    /// Describes the sheet — desk, paper, ruling, page and ink — for the canvas layer, and asks for the frame
+    /// that draws it.
+    ///
+    /// This is the whole of "the canvas now shows where the sheet is", and it is written from two places for
+    /// the same reason [`Self::describe_ink`] is: the frame, which knows the window and the theme, and the
+    /// pump, which draws the canvas on its own wake. A pinch is the case that made it a method — a trackpad
+    /// sends pinch events but nothing wakes the pump, so a zoom that only moved `self.sheet` was a zoom whose
+    /// canvas was not described until the gesture ended and the settle wrote the note.
+    fn describe_sheet(&mut self, sheet: &Sheet, desk: Hsla, page: Option<&RenderedPage>) {
+        let page_color: Hsla = rgb(self.settings.page_color).into();
+        self.desk = desk;
+
+        describe_canvas(&mut self.canvas, sheet, self.scale, page_color, desk);
+
+        // The ruling is printed on the paper and grows with it, so it is handed the sheet's own rectangle. A
+        // PDF page is its own paper, and a blank sheet's ruling has nothing to sit on, which is why the page
+        // arriving is the one reason not to build it.
+        let (ink_width, ink_height) = sheet.ink_paper();
+        let paper_bounds = Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(ink_width * sheet.zoom), px(ink_height * sheet.zoom)),
+        };
+
+        if page.is_none() {
+            let started = Instant::now();
+            let before = self.ruling.rebuilds();
+            let rules = self.ruling.rules(
+                RulingSheet {
+                    paper: paper_bounds,
+                    turns: sheet.rotation,
+                },
+                self.settings.canvas_style,
+                self.settings.page_color,
+                sheet.zoom,
+            );
+
+            // A cache hit is not a build, and recording one as a build would hide the cost of the builds
+            // that do happen behind the many frames that do not.
+            if self.ruling.rebuilds() != before {
+                self.timings.ruling.record(started.elapsed());
+                self.timings.count_ruling();
+            }
+
+            for rule in Ruling::rules_at(&rules, sheet.origin) {
+                self.canvas.rule(rule);
+            }
+        }
+
+        let (page_width, page_height) = sheet.drawn();
+        self.canvas.page = page.map(|page| Page {
+            image: Arc::clone(&page.image),
+            rect: Rect {
+                x: sheet.origin.0,
+                y: sheet.origin.1,
+                width: page_width,
+                height: page_height,
+            },
+        });
+
+        // Described after the desk and the page, because it is the ink's placement that depends on the sheet
+        // this call was given.
+        self.describe_ink();
+
+        // What the canvas was asked to draw, counted for the status line: the layer draws it and this does
+        // not touch a polygon, but the numbers a person reads are the numbers they read before — strokes on
+        // the sheet, the outline points they cost, and how many were off it.
+        let visible = sheet.visible();
+        let (mut painted, mut vertices, mut culled) = (0u64, 0u64, 0u64);
+
+        for stroke in self.canvas.ink.strokes.iter() {
+            if stroke.visible_in(visible) {
+                painted += 1;
+                vertices += stroke.outline.len() as u64;
+            } else {
+                culled += 1;
+            }
+        }
+
+        if let Some(stroke) = &self.canvas.ink.open {
+            painted += 1;
+            vertices += stroke.outline.len() as u64;
+        }
+
+        self.timings.count_painted(painted, vertices, culled);
+
+        // The same call the pen's pump makes: a frame is what changed the *sheet* — the zoom, the pan, the
+        // page, the paper — and the ink is redrawn with it rather than waiting for the next reading.
+        self.draw_canvas();
     }
 
     /// Describes the ink for the canvas, then hands the canvas to its layer.
@@ -1542,9 +1630,9 @@ impl NoteApp {
                 }
 
                 // A zoom gesture that has stopped talking is a zoom that has finished: commit it to the note
-                // and ask for the frame that shows the new number. This is the write a pinch or a wheel must
-                // not do per event (see [`Self::zoom_settles_at`]), and the gap is the only end either of them
-                // has — the platform reports where a gesture is, not when it stopped.
+                // and ask for the frame that shows the new number. This is the write a pinch must not do per
+                // event (see [`Self::zoom_settles_at`]), and the gap is the only end a pinch has — the
+                // platform reports where a gesture is, not when it stopped.
                 if app.zoom_settles_at.is_some_and(|last| {
                     now.saturating_duration_since(last) >= GESTURE_SETTLE_INTERVAL
                 }) {
@@ -1664,7 +1752,7 @@ impl NoteApp {
     /// A pan gesture also settles its stored pan back inside the layout's bounds here, once, at the end. During
     /// the gesture the pan is kept exactly where the hand put it, because that is what lets the sheet come back
     /// the moment the hand does (see [`Self::pan_by_pen`]); but a pan left far outside its bounds would mean a
-    /// later wheel — or the next gesture's own start — unwinding travel nobody can see. Settling at the end
+    /// later scroll — or the next gesture's own start — unwinding travel nobody can see. Settling at the end
     /// keeps both: the sheet follows the hand while the hand is moving, and the end of a sheet is an end once
     /// it stops.
     fn end_pen_gesture(&mut self, cx: &mut Context<Self>) {
@@ -2090,7 +2178,7 @@ impl NoteApp {
 
     /// Locks or unlocks the zoom gestures. See [`Settings::zoom_locked`].
     ///
-    /// Locking does not move the sheet and does not change the number: it says what the *next* wheel, pinch or fit
+    /// Locking does not move the sheet and does not change the number: it says what the *next* pinch or fit
     /// does, which is nothing.
     fn set_zoom_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
         self.settings.zoom_locked = locked;
@@ -2135,7 +2223,7 @@ impl NoteApp {
     /// Keeps the settings and the status line in step with a zoom the view already accepted.
     ///
     /// The *committing* half of a zoom. It writes the note's settings and asks for a frame, both of which are
-    /// far too expensive to do per reading of a continuous gesture — a pinch and a wheel send dozens of events
+    /// far too expensive to do per reading of a continuous gesture — a pinch sends dozens of events
     /// a second, and each one was doing a four-table SQLite transaction and a whole-window redraw. A gesture in
     /// flight calls [`Self::step_zoom`] instead, and this once when it ends.
     ///
@@ -2148,14 +2236,14 @@ impl NoteApp {
         self.settle_pan();
         self.finish_setting(cx);
         // The zoom field *is* the readout of the zoom, so it has to be redrawn after any change to it — by a button,
-        // a wheel, a pinch or a fit ([`Self::sync_choosers`] puts the number in it, this is what asks for the frame).
+        // a pinch or a fit ([`Self::sync_choosers`] puts the number in it, this is what asks for the frame).
         cx.notify();
     }
 
     /// Shows a zoom the view has just taken, without committing it to the note.
     ///
-    /// The *gesture* half of a zoom, and the reason it exists: a pinch delivers an event per frame and a wheel
-    /// delivers one per notch, and a note's settings are not a thing written per notch. The numbers the reader
+    /// The *gesture* half of a zoom, and the reason it exists: a pinch delivers an event per frame, and a
+    /// note's settings are not a thing written per event. The numbers the reader
     /// sees are updated here so the field and the canvas agree while the hand is still moving; the write and the
     /// frame wait for [`Self::finish_zoom`], which the end of the gesture calls once.
     ///
@@ -2230,41 +2318,24 @@ impl NoteApp {
         });
     }
 
-    /// Zooms or pans with the wheel — which is also where a trackpad's two-finger gesture arrives.
-    fn on_wheel(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let pointer = (event.position.x.into(), event.position.y.into());
-
-        if keys::is_primary(event.modifiers, cx) {
-            // A wheel with the command modifier held is a zoom (`Ctrl`+wheel on Windows, where a trackpad's pinch
-            // arrives as the same event), and a locked view does not take one: this is the gesture the lock exists
-            // for — a roll of the wheel beside a page that is being read (see [`Settings::zoom_locked`]). The pan below
-            // is not a zoom and is left alone.
-            if !self.settings.gestures_zoom() {
-                return;
-            }
-
-            let (amount, in_pixels) = match event.delta {
-                ScrollDelta::Lines(delta) => (delta.y, false),
-                ScrollDelta::Pixels(delta) => (delta.y.into(), true),
-            };
-            let factor = wheel_zoom_factor(amount, in_pixels);
-            let sheet = self.sheet;
-
-            if self
-                .view
-                .zoom_around(factor, pointer, sheet.paper, sheet.window, PAGE_MARGIN)
-            {
-                // A wheel arrives one notch at a time and the command chord is held for the whole roll, so
-                // this is a gesture until the events stop. The note is written and the frame asked for in
-                // `settle_gesture`, which the housekeeping pump calls when a gesture has gone quiet.
-                self.step_zoom();
-                self.zoom_settles_at = Some(Instant::now());
-            }
+    /// Pans with a trackpad's two-finger scroll.
+    ///
+    /// The trackpad is the only pointer this app takes a scroll from: a mouse wheel is not read at all, so
+    /// there is no notch to convert, no line height to guess at, and no `⌘`-wheel zoom competing with the
+    /// pinch for the same event. A trackpad reports pixels, which are the units the view already pans in,
+    /// so what arrives is the distance and nothing has to be scaled.
+    ///
+    /// Zooming is the pinch ([`Self::on_pinch`]) and only the pinch. A two-finger scroll pans, always, and
+    /// the modifier keys do not turn it into something else.
+    fn on_scroll(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let ScrollDelta::Pixels(delta) = event.delta else {
+            // A line-based delta is a wheel's, and a wheel is not read (see this method's docs). Ignoring
+            // it here is what keeps a plugged-in mouse from moving the sheet at a step the trackpad never
+            // asked for.
             return;
-        }
+        };
 
-        let (dx, dy, in_pixels) = scroll_amount(event.delta);
-        let distance = wheel_pan((dx, dy), in_pixels);
+        let distance = (f32::from(delta.x), f32::from(delta.y));
 
         if !distance.0.is_finite() || !distance.1.is_finite() {
             return;
@@ -2284,7 +2355,7 @@ impl NoteApp {
         }
     }
 
-    /// Pans the sheet by everything the wheel has left, once, in the frame that shows it.
+    /// Pans the sheet by everything the trackpad has left, once, in the frame that shows it.
     fn spend_scroll(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.scroll_asked = false;
 
@@ -2300,8 +2371,8 @@ impl NoteApp {
             eprintln!("pan: ({:.1}, {:.1})", distance.0, distance.1);
         }
 
-        // Held where the layout can show it, so that a wheel turned past the end of the sheet leaves
-        // no debt for the next turn to pay off (see [`Viewport::hold_pan`]).
+        // Held where the layout can show it, so that a scroll taken past the end of the sheet leaves
+        // no debt for the next one to pay off (see [`Viewport::hold_pan`]).
         self.pan_sheet(distance, cx);
     }
 
@@ -2324,7 +2395,7 @@ impl NoteApp {
         }
 
         if self.view.pan() != was {
-            // Already once per frame — the wheel's readings are accumulated and spent together (see
+            // Already once per frame — the trackpad's readings are accumulated and spent together (see
             // [`Self::scroll_waiting`]) — so this is not the per-reading notify a pan cannot afford. The
             // sheet is settled as well, because the pen's wake may draw the canvas before the frame lands.
             self.settle_sheet();
@@ -2394,8 +2465,8 @@ impl NoteApp {
     /// Zooms the sheet from the gesture's own starting zoom, by how far up the nib has come.
     ///
     /// Set rather than multiplied: the factor is worked out from the whole distance travelled since the nib
-    /// went down, and applied to the zoom the gesture started from. Multiplying a factor per reading — which
-    /// is what a wheel does, correctly, because a wheel *is* a sequence of steps — would compound a hand's
+    /// went down, and applied to the zoom the gesture started from. Multiplying a factor per reading
+    /// — which a pinch does, correctly, because a pinch reports the change it made — would compound a hand's
     /// slow drag into a runaway zoom and leave nothing to come back to.
     fn zoom_by_pen(&mut self, mut mode: PenGesture, at: (f32, f32), _cx: &mut Context<Self>) {
         // The rise is measured to the hand's settled position, for the same reason a pan is: the zoom's factor
@@ -2409,6 +2480,12 @@ impl NoteApp {
             // reading: this shows the zoom and leaves the write to the end of the gesture, when the nib lifts
             // or the key is let go (see [`Self::consume_pen_gesture`]).
             self.step_zoom();
+
+            // The pump wakes on the reading and draws the canvas, but it draws the description it is given:
+            // without this the sheet has a new zoom and the canvas still shows the old one.
+            let sheet = self.sheet;
+            let page = self.current_page();
+            self.describe_sheet(&sheet, self.desk, page.as_ref());
         }
     }
 
@@ -2428,9 +2505,16 @@ impl NoteApp {
             .view
             .zoom_around(factor, pointer, sheet.paper, sheet.window, PAGE_MARGIN)
         {
-            // A pinch is a stream of events, not a step: see `on_wheel`. Its end is a gap in the events.
+            // The note is written once the pinch has gone quiet (`zoom_settles_at`, below). The *drawing* is
+            // not deferred: a trackpad wakes no pump the way a pen does, so a zoom that only moved the sheet
+            // was a zoom nobody saw until the settle asked for a frame — the paper jumped to its final size
+            // with the whole gesture drawn nowhere. Describing it here is what shows the frames in between.
             self.step_zoom();
             self.zoom_settles_at = Some(Instant::now());
+
+            let sheet = self.sheet;
+            let page = self.current_page();
+            self.describe_sheet(&sheet, self.desk, page.as_ref());
         }
     }
 
@@ -4478,7 +4562,7 @@ impl NoteApp {
         // Where the reading goes and what it costs to put it there. The zoom is the one piece of
         // view state the sheet's own controls cannot show a number for, and the rest is the
         // measurement this app runs on itself. A locked zoom says so here as well as in the pill: the
-        // lock is the reason a wheel or a Fit did nothing, and a person who pressed Fit wants to know
+        // lock is the reason a pinch or a Fit did nothing, and a person who pressed Fit wants to know
         // that it was not a bug.
         parts.push(format!(
             "view {:.0}%{}",
@@ -5324,7 +5408,7 @@ impl NoteApp {
         }
 
         // The zoom field is the same kind of readout, and needs the same treatment: the view changes the number under
-        // it — a wheel, a pinch, a fit, a note being opened — and a field left showing the number that was typed last
+        // it — a pinch, a fit, a note being opened — and a field left showing the number that was typed last
         // would be showing a zoom the sheet is not drawn at. Left alone while it has the keyboard, because then the
         // field is a number being *typed* and [`Self::zoom_event`] is what writes it back.
         let typing = self.zoom_input.read(cx).focus_handle(cx).is_focused(window);
@@ -5502,9 +5586,9 @@ impl NoteApp {
                     IconName::LockOpen
                 },
                 if locked {
-                    "Zoom locked: the wheel, a pinch and Fit leave it alone"
+                    "Zoom locked: a pinch and Fit leave it alone"
                 } else {
-                    "Lock the zoom, so a wheel, a pinch or Fit cannot move it"
+                    "Lock the zoom, so a pinch or Fit cannot move it"
                 },
                 locked,
                 cx,
@@ -5856,105 +5940,15 @@ impl Render for NoteApp {
             self.detail_owed = true;
         }
 
-        let page_size = sheet.drawn();
-
-        // The paper's own rectangle, and the rectangle it is drawn in: the ruling is printed on the
-        // paper, so it is built on the first and placed in the second, turned with the page (see
-        // [`crate::canvas::RulingSheet`]). A page turned a quarter is drawn the other way round, so the
-        // two rectangles are each other's transpose — which is exactly the difference the ruling has to
-        // show.
-        let (ink_width, ink_height) = sheet.ink_paper();
-        let paper_bounds = Bounds {
-            origin: point(px(0.0), px(0.0)),
-            size: size(px(ink_width * sheet.zoom), px(ink_height * sheet.zoom)),
-        };
-        // Built here rather than in a paint callback: a full page of grid lines is several hundred
-        // marks, and `Ruling` hands back the same set until the sheet itself changes — which
-        // includes its zoom, because the ruling is printed on the paper and grows with it.
-        //
-        // A PDF page is its own paper, so a blank sheet's ruling has nothing to sit on.
-        let rules = page.is_none().then(|| {
-            let started = Instant::now();
-            let before = self.ruling.rebuilds();
-            let rules = self.ruling.rules(
-                RulingSheet {
-                    paper: paper_bounds,
-                    turns: sheet.rotation,
-                },
-                self.settings.canvas_style,
-                self.settings.page_color,
-                sheet.zoom,
-            );
-
-            // A cache hit is not a build, and recording one as a build would hide the cost of the
-            // builds that do happen behind the many frames that do not.
-            if self.ruling.rebuilds() != before {
-                self.timings.ruling.record(started.elapsed());
-                self.timings.count_ruling();
-            }
-
-            rules
-        });
+        // The ruling is built inside `describe_sheet`, which owns the sheet's rectangle for the same reason.
 
         // The stroke under the pen is closed for the ink description, and where the sheet is: see
         // [`Self::describe_ink`], which the pen's pump calls for the same reason.
 
-        let page_color: Hsla = rgb(self.settings.page_color).into();
-
         // What the canvas is, described for its own renderer: the desk, the shadow and the sheet, then what
         // is printed on the paper, the document's page, and the ink. The drawing is timed where it happens,
-        // in [`Self::draw_canvas`], because the pen's pump draws the canvas too.
-        {
-            describe_canvas(&mut self.canvas, &sheet, self.scale, page_color, background);
-
-            for rule in rules
-                .iter()
-                .flat_map(|rules| Ruling::rules_at(rules, sheet.origin))
-            {
-                self.canvas.rule(rule);
-            }
-
-            self.canvas.page = page.as_ref().map(|page| Page {
-                image: Arc::clone(&page.image),
-                rect: Rect {
-                    x: sheet.origin.0,
-                    y: sheet.origin.1,
-                    width: page_size.0,
-                    height: page_size.1,
-                },
-            });
-
-            let visible = sheet.visible();
-
-            // Re-described rather than left to the pump: this is where the sheet it is drawn on was decided.
-            self.describe_ink();
-
-            // What the canvas was asked to draw, counted for the status line: the layer draws it and
-            // this does not touch a polygon, but the numbers a person reads are the numbers they read
-            // before — strokes on the sheet, the outline points they cost, and how many were off it.
-            let (mut painted, mut vertices, mut culled) = (0u64, 0u64, 0u64);
-
-            for stroke in self.canvas.ink.strokes.iter() {
-                if stroke.visible_in(visible) {
-                    painted += 1;
-                    vertices += stroke.outline.len() as u64;
-                } else {
-                    culled += 1;
-                }
-            }
-
-            if let Some(stroke) = &self.canvas.ink.open {
-                painted += 1;
-                vertices += stroke.outline.len() as u64;
-            }
-
-            self.timings.count_painted(painted, vertices, culled);
-
-            // The same call the pen's pump makes: a frame is what changed the *sheet* — the zoom, the pan,
-            // the page, the paper — and the ink is redrawn with it rather than waiting for the next
-            // reading (see [`Self::draw_canvas`]).
-            self.draw_canvas();
-        }
+        // in [`Self::draw_canvas`], which this calls last — the pen's pump draws the canvas too.
+        self.describe_sheet(&sheet, background, page.as_ref());
 
         // The desk belongs to the canvas layer when there is one — those pixels are left to it — and to
         // this element when there is not.
@@ -5988,10 +5982,9 @@ impl Render for NoteApp {
             .size_full()
             .bg(desk)
             .text_color(foreground)
-            // A trackpad's pinch, and a wheel with the command modifier held, both arrive here: the canvas is the
-            // whole window's only interactive element, so it is what the gestures hit.
+            // A trackpad's two-finger scroll pans. A pinch arrives on its own event (`on_pinch` below).
             .on_scroll(
-                cx.listener(|app, event: &ScrollEvent, window, cx| app.on_wheel(event, window, cx)),
+                cx.listener(|app, event: &ScrollEvent, window, cx| app.on_scroll(event, window, cx)),
             )
             .on_pinch(cx.listener(|app, event: &PinchEvent, _, cx| app.on_pinch(event, cx)))
             // The note's keyboard: Esc for the home screen, the two arrows for the page, and the three
@@ -6489,41 +6482,6 @@ fn touches_paper(phase: crate::input::Phase) -> bool {
     use crate::input::Phase;
 
     matches!(phase, Phase::Down | Phase::Move)
-}
-
-/// A scroll's delta as (x, y, whether it is in pixels rather than lines).
-fn scroll_amount(delta: ScrollDelta) -> (f32, f32, bool) {
-    match delta {
-        ScrollDelta::Lines(delta) => (delta.x, delta.y, false),
-        ScrollDelta::Pixels(delta) => (delta.x.into(), delta.y.into(), true),
-    }
-}
-
-/// How much a scroll zooms, as a factor to multiply the current zoom by.
-fn wheel_zoom_factor(delta: f32, in_pixels: bool) -> f32 {
-    if !delta.is_finite() {
-        return 1.0;
-    }
-
-    let notches = if in_pixels {
-        delta / notch_in_pixels()
-    } else {
-        delta / WHEEL_LINES_PER_NOTCH
-    };
-
-    WHEEL_ZOOM_STEP.powf(notches).clamp(0.2, 5.0)
-}
-
-/// How far a trackpad reports a scroll for one notch's worth of zoom.
-fn notch_in_pixels() -> f32 {
-    WHEEL_LINE_HEIGHT * WHEEL_LINES_PER_NOTCH
-}
-
-/// How much a scroll pans, in logical pixels.
-fn wheel_pan(delta: (f32, f32), in_pixels: bool) -> (f32, f32) {
-    let scale = if in_pixels { 1.0 } else { WHEEL_LINE_HEIGHT };
-
-    (delta.0 * scale, delta.1 * scale)
 }
 
 /// How much a pinch zooms, as a factor to multiply the current zoom by.

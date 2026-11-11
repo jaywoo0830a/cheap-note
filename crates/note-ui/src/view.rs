@@ -17,7 +17,7 @@
 //!
 //! ## Why zooming is anchored
 //!
-//! A pinch or a wheel zoom is a gesture *at a place*: the sheet should grow around the point under
+//! A pinch is a gesture *at a place*: the sheet should grow around the point under
 //! the fingers, or the thing being looked at slides away as it grows. [`Viewport::zoom_around`]
 //! does that arithmetic, and it is the only reason the pan is stored rather than recomputed from a
 //! centre each frame.
@@ -195,9 +195,9 @@ impl Viewport {
 
     /// Keeps the pan where the layout can show it, reporting whether that moved it.
     ///
-    /// [`Self::pan_by`] accumulates and [`axis_origin`] only clamps what it *draws*, so a wheel turned past
+    /// [`Self::pan_by`] accumulates and [`axis_origin`] only clamps what it *draws*, so a scroll taken past
     /// the end of the sheet keeps adding to an offset nobody can see. The sheet then sits still for as long
-    /// as it takes to unwind that debt when the wheel is turned back — on a trackpad, whose momentum goes on
+    /// as it takes to unwind that debt when the scroll comes back — on a trackpad, whose momentum goes on
     /// arriving after the fingers have left, that is most of a gesture spent getting back to where the page
     /// still was. Holding the pan inside its own bounds is what makes the end of a sheet an end.
     pub fn hold_pan(&mut self, sheet: (f32, f32), window: (f32, f32), margin: f32) -> bool {

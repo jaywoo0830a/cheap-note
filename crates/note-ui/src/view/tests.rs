@@ -6,7 +6,7 @@ const SHEET: (f32, f32) = (720.0, 1018.0);
 const WINDOW: (f32, f32) = (1280.0, 900.0);
 const MARGIN: f32 = 24.0;
 
-/// The end of the sheet is an end: a wheel turned past it leaves no debt to unwind.
+/// The end of the sheet is an end: a scroll taken past it leaves no debt to unwind.
 ///
 /// The pan used to accumulate while the drawing clamped it, so a scroll past the bottom of a page
 /// built up an invisible offset and the next scroll *up* was spent paying it back — which is a page
@@ -37,7 +37,7 @@ fn a_pan_held_at_the_end_of_the_sheet_owes_nothing_back() {
 
 /// A pen drag past the end and back moves the paper the whole way, because a gesture clamps only at its end.
 ///
-/// This is the rule the wheel test above states the opposite half of, and they are not in conflict: a wheel is
+/// This is the rule the pan test above states the opposite half of, and they are not in conflict: a scroll is
 /// a *sequence of steps*, so each step must start from where the last left the sheet or a scroll past the end
 /// builds a debt. A pen is an *absolute position* — every reading is measured from the gesture's origin — so
 /// holding the stored pan mid-gesture throws away where the hand is, and there is no later reading that can
@@ -95,7 +95,7 @@ fn a_pen_drag_past_the_end_and_back_moves_the_paper_the_whole_way() {
         "the hand came back to an offset of -100 from a floor of {dragged_floor}, so the paper should have moved {expected} px, not {moved}"
     );
 
-    // And once the gesture ends, the pan settles inside its bounds — the wheel's own debt rule still holds.
+    // And once the gesture ends, the pan settles inside its bounds — the scroll's own debt rule still holds.
     // `hold_pan` works in `margin + offset` space and takes the margin back off, so its lower bound is
     // `floor - MARGIN`, one margin further out than the place the sheet is drawn at.
     view.set_pan(beyond);
@@ -429,7 +429,7 @@ fn a_pen_pan_is_the_gains_times_the_distance_place() {
 
 /// A gesture begins where the sheet was left, not at the view's resting place.
 ///
-/// A reader may pan with the wheel and *then* pick up the pen. The gesture carries the pan it began at, so the
+/// A reader may scroll and *then* pick up the pen. The gesture carries the pan it began at, so the
 /// first reading moves the sheet from there; assuming the origin would snap the page back on the first touch.
 #[test]
 fn a_pen_pan_begins_where_the_sheet_was_left() {
@@ -442,7 +442,7 @@ fn a_pen_pan_begins_where_the_sheet_was_left() {
     assert_eq!(
         view.pan(),
         (340.0, -50.0),
-        "the gesture moves the sheet from where the wheel left it"
+        "the gesture moves the sheet from where the scroll left it"
     );
 }
 

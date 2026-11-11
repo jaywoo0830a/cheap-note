@@ -209,7 +209,7 @@ The zoom pill holds two steps, the zoom itself, the two fits, and a lock. The zo
 read at, the number the page was laid out at — and stepping to 60% is a dozen presses, so a number typed
 into it is taken on Enter and understood as a percentage ("60" and "60%" are the same answer). It is given a
 fixed width so that stepping from 99% to 100% to 101% does not shuffle the buttons either side of it, and it
-shows the *view's* zoom at every frame (`sync_choosers`), whether the view changed by a press, a wheel, a
+shows the *view's* zoom at every frame (`sync_choosers`), whether the view changed by a press, a pinch, a
 pinch, a fit or a note being opened — a field that showed the number typed last would be showing a zoom the
 sheet is not drawn at. A click away puts the view's own number back rather than leaving a half-typed one, and
 a number the view will not take (nonsense, zero, or something outside its range) is refused out loud rather
@@ -217,9 +217,9 @@ than snapped to the nearest limit. Zoom lives here rather than on the bar becaus
 and the pill it sits in is the one the page commands left behind.
 
 **The lock holds the gestures off, and only the gestures** (`settings::Settings::zoom_locked`). A reader who
-has set a page to 60% and is writing on it wants it to stay at 60%: a wheel rolled while reading, a palm
+has set a page to 60% and is writing on it wants it to stay at 60%: a palm settling onto a trackpad and a
 settling onto a trackpad and a stray pinch all move the zoom without being meant, and one of them landing
-mid-sentence takes the line being written away from the nib. Locked, a wheel, a pinch, the right
+mid-sentence takes the line being written away from the nib. Locked, a pinch, the right
 stick and Fit Width/Height do nothing — the fit says so on the status line rather than failing
 silently — while the two ways a zoom is
 *asked for*, the steps and the typed number, still work: a lock that stood in their way would be a lock with
@@ -648,10 +648,15 @@ the unfinished bitmap.
 
 ## 9. Gestures
 
-A wheel with `Ctrl` held zooms about the pointer — what every viewer does, and what a trackpad's pinch is
-delivered as when the platform sends it as a wheel rather than as a gesture. Without `Ctrl`, a scroll pans
-the sheet, which is what a two-finger drag is asking for. A pinch zooms about the point between the
-fingers, with the sheet moving the way the *view* was pushed.
+The trackpad is the only pointer this app takes a scroll from. A two-finger drag pans the sheet, and a pinch
+zooms about the point between the fingers, with the sheet moving the way the *view* was pushed. A mouse
+wheel is not read at all — not the scroll, not a `⌘`-held roll — because a wheel reports lines and a trackpad
+reports pixels, and the conversion between them was a guess about a system setting this app has no API for.
+Pans and pinches both report pixels, which are the units the view already pans in, so nothing is converted.
+
+Ignoring the wheel is a deliberate loss of support rather than an oversight: a line-based delta is dropped at
+`NoteApp::on_scroll`, so a plugged-in mouse pans nothing and zooms nothing. The advantage is that there is one
+zoom gesture and one pan gesture, with no chord that turns one into the other.
 
 **The pen's own two gestures take the nib off the paper.** With **space held**, a nib that is down moves the
 sheet instead of writing on it: the paper follows the hand exactly, and either the pen or the key may end the
@@ -678,12 +683,12 @@ throws away where the hand is, and no later reading can bring it back, because e
 gesture's origin rather than from the stored value. A hand that took the sheet past its edge and came back would
 watch the paper sit still through the whole return and then jump; measured at **500 px of travel with nothing
 moving**, on a sheet drawn twice the window's height. The gesture settles its pan inside the bounds **once, at
-the end** (`NoteApp::settle_pan`), so the wheel's rule still holds — the end of a sheet is an end — without the
+the end** (`NoteApp::settle_pan`), so the scroll's rule still holds — the end of a sheet is an end — without the
 paper detaching from the hand while it is moving.
 
-That is not the same rule as the wheel's, and the two must not be confused. A wheel is a *sequence of steps*, so
+That is not the same rule as the scroll's, and the two must not be confused. A scroll is a *sequence of steps*, so
 each step starts from where the last left the sheet, and a scroll past the end would otherwise build an invisible
-debt (`Viewport::hold_pan`). A nib is an *absolute position*, so there is no step to unwind: the fix for the wheel
+debt (`Viewport::hold_pan`). A nib is an *absolute position*, so there is no step to unwind: the fix for the scroll
 is exactly the bug for the pen.
 
 **Both gestures are taken from the hand's settled position, not from the raw reading** (`PenJitter`). A pen's
@@ -705,9 +710,9 @@ throwing the switch mid-gesture cannot jump the sheet.
 
 **The zoom's rate does not depend on the zoom.** A doubling takes `PEN_ZOOM_TRAVEL` — 200 logical pixels of
 vertical travel — whether the sheet is at 25% or at 800%. That is the rule a reader has to learn, and it is one
-sentence: this much travel is this much zoom. A wheel scales its step with the zoom because a wheel *is* a
-series of detents and there is no way to spin one by a distance; a nib is not, because the hand knows exactly
-how far it moved.
+sentence: this much travel is this much zoom. A pinch is not that rule and does not need to be: it reports the
+change its own fingers made, as a factor, so there is no travel to measure and no zoom to scale by. A nib is not
+a factor either, because the hand knows exactly how far it moved.
 
 **A nib in the air is not a nib on the paper.** A digitizer reports a hovering pen, and hovering is where the
 ghost cursor is drawn and nothing else: with a key held, a hand resting over the display does not move the
@@ -728,21 +733,14 @@ The numbers behind that are all *derived* rather than picked:
 
 | Number | Value | Where it comes from |
 |---|---|---|
-| `WHEEL_ZOOM_STEP` | 1.25 | the same step as the toolbar's own zoom buttons, because both are asking the same question and should answer it at the same rate |
-| `WHEEL_LINES_PER_NOTCH` | 3 | GPUI scales a wheel notch by the system's "lines to scroll per notch" setting, which is three on a machine at its defaults, so a notch of a *real* wheel reaches the app as three lines. Assuming it here is what makes one notch zoom like one press of the button. A machine set differently zooms proportionally faster or slower per notch — a small, self-consistent difference, and measuring it would mean reading a system setting this app has no API for |
-| `WHEEL_LINE_HEIGHT` | 32 logical px | the platform does not say what a line is: Windows' notion is a fraction of a "page" whose size comes from the mouse settings, and 32 px lands within a few pixels of it at the defaults |
-| a trackpad's notch | 96 px | `WHEEL_LINES_PER_NOTCH` × `WHEEL_LINE_HEIGHT` — the distance that asks for what a notch asks for. Without it the pixel path zooms three times faster per gesture than the line path, and it *was* three times too fast the first time this was written |
-| `PEN_ZOOM_TRAVEL` | 200 px | the nib's travel for a doubling, at any zoom: a little over half a finger's movement, and shorter than a wheel's 298 — a hand on a pen has finer control than a wheel being spun |
+| `PEN_ZOOM_TRAVEL` | 200 px | the nib's travel for a doubling, at any zoom: a little over half a finger's movement, and shorter than a pair of fingers needs to pinch — a hand on a pen has finer control than two fingers |
 | `PEN_PAN_GAIN` | 2.0 | how far the sheet moves per pixel the nib travels: a hand has one screen's travel in it and a page is often longer, so 1:1 would make a long page unreachable without lifting the pen |
 | `PEN_JITTER_SPAN` | 0.5 px | what a gesture treats as the hand moving: readings under it are the digitizer's own tremor (a resting hand, a spinning fan) and are ignored, so a page held still does not shiver. Chosen against the hardware rather than estimated: two tenths still shivered under a spinning fan, and half a pixel is below what a hand can aim at, so nothing meant is lost. A threshold rather than an average, so there is no lag |
-| pan settle | once, at gesture end | when a pen pan is clamped inside the layout's bounds. Never mid-gesture: a clamp discards where the hand is and no later reading can recover it, because each is measured from the gesture's origin — measured at 500 px of hand travel with the paper motionless (§9). The wheel's rule is the opposite one, and rightly: a wheel accumulates steps, a nib names a place |
+| pan settle | once, at gesture end | when a pen pan is clamped inside the layout's bounds. Never mid-gesture: a clamp discards where the hand is and no later reading can recover it, because each is measured from the gesture's origin — measured at 500 px of hand travel with the paper motionless (§9). The scroll's rule is the opposite one, and rightly: a scroll accumulates steps, a nib names a place |
 
-Two notches are the step applied **twice**, not twice the step, so a fast roll zooms smoothly instead of in
-jumps, and the result is clamped, because one enormous delta from a driver should not take the sheet from
-100% to 1600% in a single event. A pinch's delta is already a fraction of the current size, so its factor
-is one more than the delta — clamped as a *factor* rather than as a fraction, so a nonsense delta cannot
-invert the sheet — and a pinch *replaces* the pan offset with its anchor rather than adding to it, which is
-what cancels a pan that the same physical gesture asked for by arriving as a wheel as well.
+A pinch's delta is already a fraction of the current size, so its factor is one more than the delta — clamped as a
+*factor* rather than as a fraction, so a nonsense delta cannot invert the sheet — and a pinch *replaces* the pan
+offset with its anchor rather than adding to it, so a zoom never drifts away from the point under the fingers.
 
 ## 10. The note in hand
 
@@ -988,9 +986,6 @@ records, so its `set_vsync` is empty and the setting is carried with the note re
 | `PDF_QUIET_INTERVAL` | 120 ms | how long the pen must be still before a page render is paid for: an eighth of a second, so a person pausing to think sees the sharp page land and the pause between two letters of a word does not count |
 | `PDF_PIXEL_WIDTHS` | 1024, 1536, 2304, 3456 | the ladder a request is quantised onto; the rungs are half again as wide each time because the cost is quadratic |
 | `PDF_RENDER_SCALE` | 2.0 | the bitmap-width multiplier: twice the logical width keeps page text crisp when scaled, and is paid once per page |
-| `WHEEL_ZOOM_STEP` | 1.25 | one notch of a wheel, and one press of the toolbar's zoom buttons — the same question, answered at the same rate |
-| `WHEEL_LINES_PER_NOTCH` | 3 | what the platform turns one notch into; 32 logical px per line; 96 px is a trackpad's notch |
-| `WHEEL_LINE_HEIGHT` | 32 logical px | what one line of a scroll is worth when panning |
 | `PALETTE_KEY` | `Ctrl+Shift+C` | the palette at the pen's one chord, for opening it and for putting it away; the status line says so while it is up |
 | `PALETTE_RING_RADIUS` / `PALETTE_TOOL_RADIUS` | 104 / 54 logical px | how far the colours and the three tools sit from the palette's centre: the tools are in the well inside and the colours are on the ring outside, and both rings are far enough out that no point on the palette is within reach of two controls |
 | `PALETTE_DISC` / `PALETTE_DISC_BOX` | 30 / 38 logical px | a colour disc, and the box it draws in — the box carries the ring that marks the keyboard's place, so a placement is measured in the box rather than in the disc |
@@ -1027,7 +1022,7 @@ no reason, because the next person will keep a rule whose justification has gone
 
 
 Panning is a distance in logical pixels, in the direction of the scroll: up is earlier in the page, so a
-wheel turned away from the user moves the sheet *down* — the same rule a document viewer follows, applied
+scroll taken away from the user moves the sheet *down* — the same rule a document viewer follows, applied
 to both axes. The left stick is the same distance asked for by a position rather than by a stream: it pans
 the *view*, so right is later in the page and the sheet moves left, and up is earlier in the page and the
 sheet moves down. The right stick's Y axis is the same kind of rate for the zoom, anchored on the window's

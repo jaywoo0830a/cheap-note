@@ -244,7 +244,7 @@ reused ink uploads nothing and a page that is only being panned costs one drawab
 
 The same rule applies above the seam: `note-ui` collects a frame's worth of scroll readings and spends
 them once (`NoteApp::spend_scroll`), and holds the pan inside the layout's bounds (`Viewport::hold_pan`),
-so a wheel turned past the end of a sheet leaves no invisible offset for the next turn to pay off.
+so a scroll taken past the end of a sheet leaves no invisible offset for the next one to pay off.
 
 ## 5. The seam change the port needed
 

@@ -103,9 +103,9 @@ impl Gesture {
 /// positive rise is a factor above one. The rate is one number, `PEN_ZOOM_TRAVEL`, and it does not depend on
 /// the zoom: a nib that travels 200 pixels doubles the sheet whether the sheet is at 25% or at 800%.
 ///
-/// That is deliberate, and it is the simpler of the two rules. The scroll wheel scales its own step with the
-/// zoom, which is right for a wheel — a wheel *is* a series of detents, and there is no way to spin one by a
-/// distance. A nib is not: the hand knows exactly how far it moved, and the only thing a reader has to learn is
+/// That is deliberate, and it is the simpler of the two rules. A pinch reports the change its fingers made as a
+/// factor, which is right for a pinch — there is no travel to measure, and the factor *is* the gesture. A nib is
+/// not: the hand knows exactly how far it moved, and the only thing a reader has to learn is
 /// "this much travel is this much zoom". Scaling that by the current zoom means the same gesture is a different
 /// size depending on where you are, which is a rule nobody can hold in their head — and the two corrections
 /// that were tried here (the square root, the fourth root) were each a guess about which way to bend it.
@@ -123,9 +123,9 @@ pub fn pen_zoom_factor(rise: f32) -> f32 {
 
 /// How far the nib travels, in logical pixels, to double the sheet — at any zoom.
 ///
-/// Two hundred pixels is a little over half a finger's movement on a tablet. That is shorter than a wheel's
-/// doubling (298 pixels), deliberately: a hand on a pen has far more control than a wheel being spun, and the
-/// pen should reward that rather than make the reader spin.
+/// Two hundred pixels is a little over half a finger's movement on a tablet, and it is short deliberately: a
+/// hand on a pen has far more control than a pair of fingers pinching, and the pen should reward that rather
+/// than make the reader swipe.
 pub const PEN_ZOOM_TRAVEL: f32 = 200.0;
 
 /// How far the sheet moves for each pixel the nib travels while a pan is in play.

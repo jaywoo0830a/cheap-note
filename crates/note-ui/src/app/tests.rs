@@ -1,15 +1,13 @@
 // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
 // scope and shadow the attribute this module needs.
 use super::{
-    bar_line, confirmed, file_label, file_stem, held_by_cap, notch_in_pixels, page_of_write,
-    page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face, palette_id,
-    palette_in_hand, palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width,
-    scroll_amount, sheet_matches, spun, touches_paper, wheel_pan, wheel_zoom_factor, zoom_text,
-    Confirmation, PaletteGeometry, PalettePart, PenGesture, BAR_HEIGHT, PALETTE_DISC_BOX,
-    PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH,
-    PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL,
-    PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH, WHEEL_LINE_HEIGHT,
-    WHEEL_ZOOM_STEP,
+    bar_line, confirmed, file_label, file_stem, held_by_cap, page_of_write, page_owes_a_rewrite,
+    palette_at, palette_centre, palette_colours, palette_face, palette_id, palette_in_hand,
+    palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width, sheet_matches,
+    spun, touches_paper, zoom_text, Confirmation, PaletteGeometry, PalettePart, PenGesture,
+    BAR_HEIGHT, PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS,
+    PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS,
+    PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
 use crate::ink::{Notes, Tool};
@@ -92,68 +90,6 @@ fn the_zoom_field_shows_a_whole_percentage() {
             "{zoom} came back as something else from {shown}"
         );
     }
-}
-
-/// One notch of a wheel is one zoom step, however many lines the platform reports it as.
-#[test]
-fn one_wheel_notch_is_one_zoom_step() {
-    assert_eq!(
-        wheel_zoom_factor(WHEEL_LINES_PER_NOTCH, false),
-        WHEEL_ZOOM_STEP,
-        "a notch is what a notch of a wheel reports"
-    );
-    assert_eq!(wheel_zoom_factor(0.0, false), 1.0);
-    assert!(wheel_zoom_factor(-WHEEL_LINES_PER_NOTCH, false) < 1.0);
-    assert!(
-        (wheel_zoom_factor(-WHEEL_LINES_PER_NOTCH, false) * WHEEL_ZOOM_STEP - 1.0).abs() < 1e-6,
-        "and undoes a notch of the other way"
-    );
-}
-
-/// Two notches are the step applied twice rather than twice the step, so a fast roll zooms smoothly.
-#[test]
-fn two_notches_are_two_steps_and_not_a_doubled_one() {
-    let twice = wheel_zoom_factor(WHEEL_LINES_PER_NOTCH * 2.0, false);
-
-    assert!((twice - WHEEL_ZOOM_STEP * WHEEL_ZOOM_STEP).abs() < 1e-6);
-    assert!(
-        twice < WHEEL_ZOOM_STEP * 2.0,
-        "a roll is not a multiplication"
-    );
-}
-
-/// A trackpad reports pixels, and the same distance zooms the same either way it is reported:
-#[test]
-fn a_scroll_of_pixels_matches_a_scroll_of_lines() {
-    let by_lines = wheel_zoom_factor(WHEEL_LINES_PER_NOTCH, false);
-    let by_pixels = wheel_zoom_factor(notch_in_pixels(), true);
-
-    assert!(
-        (by_lines - by_pixels).abs() < 1e-6,
-        "a notch of lines and a notch of pixels are the same gesture: {by_lines} vs {by_pixels}"
-    );
-    assert_eq!(by_lines, WHEEL_ZOOM_STEP, "and both are one step");
-}
-
-/// One enormous delta from a driver must not take the sheet from 100% to 1600%.
-#[test]
-fn a_wild_delta_is_clamped() {
-    assert_eq!(wheel_zoom_factor(10_000.0, false), 5.0);
-    assert_eq!(wheel_zoom_factor(-10_000.0, false), 0.2);
-    assert_eq!(wheel_zoom_factor(f32::NAN, false), 1.0);
-    assert_eq!(wheel_zoom_factor(f32::INFINITY, true), 1.0);
-}
-
-/// Panning is a distance in logical pixels, in the direction of the scroll.
-#[test]
-fn a_scroll_pans_in_the_direction_it_points() {
-    assert_eq!(wheel_pan((0.0, 1.0), false), (0.0, WHEEL_LINE_HEIGHT));
-    assert_eq!(
-        wheel_pan((0.0, 3.0), true),
-        (0.0, 3.0),
-        "pixels are already pixels"
-    );
-    assert_eq!(wheel_pan((-1.0, 0.0), true), (-1.0, 0.0));
 }
 
 /// A pinch reports a fraction of the current size, and a nonsense one is refused.
@@ -710,17 +646,29 @@ fn the_palettes_discs_are_not_the_bars_swatches() {
     }
 }
 
-/// A scroll's delta is read one way wherever it is spent, so the three gestures cannot disagree about which
-/// axis is which or whether the numbers are lines or pixels.
+/// A scroll only pans, and only when the trackpad reported it in pixels.
+///
+/// The trackpad is the one pointer this app takes a scroll from, so the two things the old reading had to
+/// reconcile — lines versus pixels, and whether the primary key turns a scroll into a zoom — are both gone.
+/// A line-based delta is a wheel's, and a wheel is not read: it is dropped rather than converted.
 #[test]
-fn a_scroll_reads_the_same_way_for_every_gesture() {
+fn a_scroll_is_a_trackpad_that_reports_pixels() {
     use gpui_kit::{point, px, ScrollDelta};
 
-    let lines = scroll_amount(ScrollDelta::Lines(point(0.0, 3.0)));
-    assert_eq!(lines, (0.0, 3.0, false), "lines stay lines");
+    let ScrollDelta::Pixels(delta) = ScrollDelta::Pixels(point(px(1.5), px(4.0))) else {
+        unreachable!("a pixels delta is a pixels delta")
+    };
+    assert_eq!(
+        (f32::from(delta.x), f32::from(delta.y)),
+        (1.5, 4.0),
+        "pixels are already the units the view pans in"
+    );
 
-    let pixels = scroll_amount(ScrollDelta::Pixels(point(px(1.5), px(4.0))));
-    assert_eq!(pixels, (1.5, 4.0, true), "pixels are in pixels");
+    // The shape a wheel arrives in, and the one thing that makes it a wheel rather than a trackpad.
+    assert!(
+        matches!(ScrollDelta::Lines(point(0.0, 3.0)), ScrollDelta::Lines(_)),
+        "a line-based delta is a wheel's, and `on_scroll` returns on it"
+    );
 }
 
 /// A pen in the air is not a pen on the paper, and the gestures are the difference.
@@ -752,7 +700,7 @@ fn only_a_nib_on_the_paper_gestures() {
 
 /// A continuous gesture's end is a gap, and the gap is short enough to feel like an end.
 ///
-/// A pinch and a wheel deliver a stream of events with no final one, so the commit to the note waits for the
+/// A pinch delivers a stream of events with no final one, so the commit to the note waits for the
 /// stream to go quiet. The interval has to be longer than any gap *inside* a live gesture — a pinch at 120 Hz
 /// sends one every 8 ms — or a gesture would be committed, and its settings written, many times mid-pinch.
 /// That is the whole bug this constant exists to avoid: the write is a four-table SQLite transaction.

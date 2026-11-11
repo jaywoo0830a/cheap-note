@@ -1723,7 +1723,7 @@ impl Notes {
     ///
     /// Returns whether the page being drawn had to be rebuilt, which is what a caller uses to decide
     /// whether a frame is worth scheduling. The detail moves in rungs (see
-    /// [`InkDocument::set_zoom`]), so a pinch or a wheel across the whole zoom range costs a handful
+    /// [`InkDocument::set_zoom`]), so a pinch across the whole zoom range costs a handful
     /// of rebuilds rather than one per frame — and none at all while the zoom stays in one rung.
     /// Asks for the page to be detailed for `zoom`, and says whether that asked for a rebuild it has
     /// not done yet.

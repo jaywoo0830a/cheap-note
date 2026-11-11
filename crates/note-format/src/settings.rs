@@ -358,11 +358,12 @@ pub struct Settings {
 
     /// Whether the gestures that zoom are held off, so that only an *asked-for* zoom moves the sheet.
     ///
-    /// A reader who has set a page to 60% and is writing on it wants it to stay at 60%: a wheel rolled while reading, a
-    /// palm settling onto a trackpad and a stray pinch all move the zoom without being meant, and one of them landing
-    /// mid-sentence takes the line being written away from the nib. Locked, the two things that *say* a zoom — the
-    /// steps and the typed number (the app's `NoteApp`) — still work, because a lock that stood in their way would be a lock
-    /// with no key, while the wheel, a pinch and Fit Width/Height are ignored ([`Self::gestures_zoom`]).
+    /// A reader who has set a page to 60% and is writing on it wants it to stay at 60%: a palm settling onto a
+    /// trackpad and a stray pinch both move the zoom without being meant, and one of them landing mid-sentence
+    /// takes the line being written away from the nib. A two-finger scroll is not a zoom and is left alone, so it
+    /// is not one of them. Locked, the two things that *say* a zoom — the steps and the typed number (the app's
+    /// `NoteApp`) — still work, because a lock that stood in their way would be a lock with no key, while a pinch
+    /// and Fit Width/Height are ignored ([`Self::gestures_zoom`]).
     pub zoom_locked: bool,
 
     /// The least distance, in logical pixels, between two ink points that are kept.
@@ -468,7 +469,7 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Whether a zoom *gesture* — a wheel, a pinch, or a fit — may move the sheet.
+    /// Whether a zoom *gesture* — a pinch, or a fit — may move the sheet.
     ///
     /// The lock's whole rule, in the one place it is asked, so that "locked" means one thing at every site that zooms
     /// without being asked to by name. See [`Settings::zoom_locked`] for why the steps and the typed number are not
@@ -820,8 +821,8 @@ mod tests {
 
     /// The zoom lock holds off the gestures, and a fresh note is unlocked.
     ///
-    /// One line of rule, but it is the line every zooming site asks: [`Settings::gestures_zoom`] is what the wheel, a
-    /// pinch and a fit consult, so a lock that answered wrongly would either do nothing or hold off the steps and the
+    /// One line of rule, but it is the line every zooming site asks: [`Settings::gestures_zoom`] is what a pinch
+    /// and a fit consult, so a lock that answered wrongly would either do nothing or hold off the steps and the
     /// typed number — a lock with no key. See [`Settings::zoom_locked`].
     #[test]
     fn a_zoom_lock_holds_off_gestures_and_a_note_starts_unlocked() {

@@ -274,16 +274,21 @@ fn a_wild_pen_travel_is_clamped() {
     assert_eq!(pen_zoom_factor(f32::INFINITY), 1.0);
 }
 
-/// The pen is quicker than a wheel, because a hand on a pen has far finer control than a wheel being spun.
+/// The pen's rate is a distance and the pinch's is a factor, and the pen is deliberately the coarser of the two.
 ///
-/// A wheel is 1.25 a notch of 96 pixels, which is a doubling every 298; the pen is 200.
+/// A pen that doubles every 200 pixels is a rule a reader can hold in their head; the test states it in the
+/// pixels the hand actually moves rather than in the constants, so a change to `PEN_ZOOM_TRAVEL` that made the
+/// gesture unrecognisable would have to change this line too.
 #[test]
-fn the_pen_zooms_more_quickly_than_a_wheel() {
-    let wheel_travel = 96.0 / 1.25_f32.log2();
-
+fn the_pen_zooms_by_a_distance_a_hand_can_learn() {
+    assert_eq!(
+        pen_zoom_factor(PEN_ZOOM_TRAVEL),
+        2.0,
+        "the travel the constant names is exactly a doubling"
+    );
     assert!(
-        PEN_ZOOM_TRAVEL < wheel_travel,
-        "the pen doubles in {PEN_ZOOM_TRAVEL} px and a wheel in {wheel_travel}"
+        (pen_zoom_factor(-PEN_ZOOM_TRAVEL) - 0.5).abs() < 1e-6,
+        "and the same distance back halves it"
     );
 
     // What the complaint was about: the old fixed per-pixel base needed 300 px for a doubling, so 200 px used

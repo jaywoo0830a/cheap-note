@@ -2157,11 +2157,44 @@ fn measures_the_rung_costs() {
     let requested = started.elapsed() / rounds;
 
     eprintln!("  ...what a frame pays (the request)   {requested:>9.1?}");
+
+    // ── A pan, for comparison ────────────────────────────────────────────
+    //
+    // A pan rebuild is *not* the rung rebuild: nothing re-derives an outline. It is the cull — asking each
+    // stroke whether it is on screen — plus turning the survivors' already-built outlines into triangles.
+    // The cull is what the surface's `refresh_ink` pays when a scroll leaves the region it built for, so
+    // this is the number that says whether a pan needs the same treatment a zoom got. It is two orders of
+    // magnitude cheaper, which is why it does not.
+    let page = written_page(8_182);
+    let rect = [0.0, 0.0, 800.0, 600.0];
+    let rounds = 50u32;
+
+    let started = std::time::Instant::now();
+    for _ in 0..rounds {
+        let mut on_screen = 0usize;
+        for stroke in page.finished().iter() {
+            if stroke.visible_in(rect) {
+                on_screen += stroke.outline.len();
+            }
+        }
+        std::hint::black_box(on_screen);
+    }
+    let pan_cull = started.elapsed() / rounds;
+
+    eprintln!("  a pan's cull, 8,182 strokes         {pan_cull:>9.1?}");
     eprintln!("───────────────────────────────────────────────────────────────\n");
 
     assert!(
         requested.as_micros() < 1_000 || cfg!(debug_assertions),
         "asking for a rung took {requested:?}, which is not free"
+    );
+
+    // A pan's cull is not a rung: a thousandth of the work, so it has no need of the pump. If this ever
+    // grows to a frame's worth, a pan will want the same split a zoom got — this is the number that
+    // decides it.
+    assert!(
+        pan_cull.as_micros() < 2_000 || cfg!(debug_assertions),
+        "culling a page for a pan took {pan_cull:?}, which is a frame's budget"
     );
 }
 

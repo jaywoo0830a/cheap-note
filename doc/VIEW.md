@@ -831,6 +831,31 @@ Live, on that page: **144 draws/s with the ink at 2.25 M vertices** while rungs 
 times a second. The number to remember is that a rung is not a frame's work, and this is the seam that says
 so.
 
+### Why a pan needed nothing
+
+A pan does not get the same treatment, and the reason is arithmetic rather than taste. The two gestures look
+alike and cost nothing alike:
+
+| | 8,182 strokes |
+|---|---|
+| a zoom rung, re-deriving every outline | **24.3 ms** |
+| a pan's cull, asking every stroke if it is on screen | **6.3 µs** |
+
+Three thousand eight hundred times apart. A pan was already close to free before this change, for two
+reasons that compose: the triangles are built in the **paper's** units, so a scroll is a `Transform` the
+shader applies and not a rebuild at all; and when a scroll does leave the region the surface built for, what
+it costs is `visible_in` per stroke — four comparisons against a precomputed bounding box — plus the fan over
+the survivors' outlines, which already exist. There is no second `ribbon_outline` in a pan to move out of a
+frame.
+
+`CULL_SPAN` is what buys the room: the built region is the visible rectangle grown by half itself, so a pan
+has a quarter-screen of slack on every side before it rebuilds anything. Measured with the pen on a 25-page
+note: **143 to 145 draws/s through a full-screen pan**, `rebuilds/s` at 0 or 1.
+
+So a pan would be given the pump's treatment only if its cull ever grew to a frame, and the measurement in
+`measures_the_rung_costs` is what would say so: it asserts the cull stays under 2 ms, two orders of magnitude
+above where it is.
+
 ## 12. The numbers, in one table
 
 | Constant | Value | What it decides |

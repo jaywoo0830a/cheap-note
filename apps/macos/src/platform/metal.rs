@@ -150,11 +150,13 @@ pub(super) struct Surface {
     ink: Vec<Vertex>,
     /// What `ink` was built from — see [`InkKey`].
     ink_key: Option<InkKey>,
-    /// The part of the sheet that was on screen when `ink` was built, in the paper's units.
+    /// The region of the paper the ink covers, in the paper's units: the visible rectangle grown by
+    /// [`CULL_SPAN`] at the moment of the build.
     ///
-    /// The one thing that moves while the ink stays valid: a build leaves out every stroke that was off
-    /// screen, so scrolling towards one has to bring it back (see [`CULL_SLACK`]).
-    ink_visible: [f32; 4],
+    /// A frame reuses the ink while the screen still fits inside this (see [`fits`]). A scroll moves the screen
+    /// around within it and a zoom inward shrinks the screen inside it, so neither costs a build; a scroll out
+    /// of it or a zoom out of it is a build, because both show paper this does not cover.
+    ink_covered: [f32; 4],
     /// The open stroke's triangles, appended as the pen adds points.
     open: Vec<Vertex>,
     /// The identity of the stroke `open` was built from.
@@ -234,7 +236,13 @@ impl Surface {
             layer,
             ink: Vec::new(),
             ink_key: None,
-            ink_visible: [0.0; 4],
+            // Nothing built yet: an empty region, so the first frame always does.
+            ink_covered: [
+                f32::INFINITY,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ],
             open: Vec::new(),
             open_id: 0,
             open_points: 0,
@@ -310,22 +318,26 @@ fn pipeline(
 
 impl Surface {
     /// Rebuilds the finished ink, when what the triangles are a function of has changed.
-    fn refresh_ink(&mut self, canvas: &Canvas, scale: f32) {
+    ///
+    /// Two reasons to build: the ink *is* different (a stroke added, a zoom rung, a turn of the page — the
+    /// [`InkKey`]), or the region it was built for no longer covers what the screen shows ([`fits`]). The
+    /// second is what has to be right for a scroll and a zoom to cost nothing, and it is a containment test
+    /// rather than a distance for the reason [`CULL_SPAN`] gives.
+    fn refresh_ink(&mut self, canvas: &Canvas) {
         let key = InkKey::of(canvas);
         let ink = &canvas.ink;
 
-        // How far the sheet may scroll before a stroke left out of the build could be back on screen: the
-        // culling rectangle is grown by this, and the ink is drawn again once the sheet has moved past it.
-        let slack = CULL_SLACK / (ink.zoom * scale).max(f32::MIN_POSITIVE);
-        let stale = moved(self.ink_visible, ink.visible) > slack;
+        // A build covers the visible rectangle grown by the margin; every frame after it is free while the
+        // screen still fits inside that.
+        let covered = fits(ink.visible, self.ink_covered);
 
-        if self.ink_key.as_ref() == Some(&key) && !stale {
+        if self.ink_key.as_ref() == Some(&key) && covered {
             return;
         }
 
         self.ink.clear();
         self.ink_key = Some(key);
-        self.ink_visible = ink.visible;
+        self.ink_covered = cull_of(ink.visible);
 
         if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
             report::rebuilt();
@@ -333,7 +345,7 @@ impl Surface {
 
         let list = ink.strokes.as_slice();
         let mapping = Mapping::of(canvas);
-        let cull = grow(ink.visible, slack);
+        let cull = self.ink_covered;
         let in_hand = |index: usize| ink.selected.get(index).copied().unwrap_or(false);
 
         for (index, stroke) in list.iter().enumerate() {
@@ -943,21 +955,54 @@ fn disc(vertices: &mut Vec<Vertex>, centre: (f32, f32), radius: f32, colour: gpu
 /// Windows: Metal has no per-primitive coverage, so the edge is sampled instead.
 const SAMPLES: usize = 4;
 
-/// How far the sheet may be scrolled before the ink's culling rectangle is drawn again, in device pixels.
+/// How far the sheet may move before the built ink is thrown away, as a fraction of the screen.
 ///
-/// The ink is baked in the paper's units and placed by a transform, so scrolling is not a reason to rebuild
-/// anything — but a build leaves out the strokes that were off screen, and scrolling towards one has to
-/// bring it back. Growing the culling rectangle by this much is what bounds how far the sheet can move while
-/// the ink stays as it is: a scroll of `CULL_SLACK` device pixels in any direction is answered by the ink that
-/// is already built, and only a scroll past that pays for another build.
+/// The model, stated once: the ink is built for a **region of the paper**, and a frame reuses it while the
+/// region the screen shows still fits inside the one it was built for. Scrolling and zooming both change the
+/// visible region, so both are answered by the same test — *does the new visible rectangle fit in the old
+/// culled one* — and only a rectangle that no longer fits pays for a build.
 ///
-/// **Five hundred and twelve, not four thousand.** That was the number and it was wrong by an order of
-/// magnitude: the rectangle it grew to was a hundred and thirty-nine times the area of an A4 sheet, so
-/// nothing was being culled at all. A note of two thousand strokes reported 1.95 million vertices on every
-/// frame — at 144 Hz, for a page whose visible part is one screen — and the frames that could not carry them
-/// are what a reader saw as a stutter. Half a screen's worth of slack makes a frame's scroll free (a fast
-/// flick is about 200 device pixels a frame at 144 Hz) and still leaves the rest of the page out.
-const CULL_SLACK: f32 = 512.0;
+/// **The old test was a distance, and it was the wrong shape.** It asked whether any edge of the visible
+/// rectangle had moved more than `SCREEN * span`, which is a fine test for a scroll and a bad one for a zoom:
+/// zooming does not *move* the edges, it moves some in and some out, and the largest movement is proportional
+/// to the screen rather than to the margin. A twenty-percent zoom moved an edge by more than the margin, so a
+/// zoom rebuilt every frame — and each rebuild stored a smaller rectangle, so the next one was smaller still.
+/// That is the fourteen-fold swing in the vertex count a trace showed: 413,964 to 5,867,880, for a reader who
+/// was only zooming.
+///
+/// A fraction of the screen rather than a distance in pixels, because it is the *screen* the margin is for:
+/// room to scroll between builds, in the units the scrolling happens in.
+const CULL_SPAN: f32 = 0.5;
+
+/// The region of the paper the ink is built for: the visible rectangle, grown by [`CULL_SPAN`] of itself.
+///
+/// Grown on every side, so a scroll in any direction — and a zoom around any point — has room inside it. The
+/// growth is a fraction of the *visible extent*, which is what makes the same constant right at every zoom: a
+/// screen at 400% shows a quarter of the paper and gets a quarter of the margin, and the margin is still half a
+/// screen of scrolling in device pixels.
+fn cull_of(visible: [f32; 4]) -> [f32; 4] {
+    let (width, height) = (visible[2] - visible[0], visible[3] - visible[1]);
+    let (across, down) = (width * CULL_SPAN, height * CULL_SPAN);
+
+    [
+        visible[0] - across,
+        visible[1] - down,
+        visible[2] + across,
+        visible[3] + down,
+    ]
+}
+
+/// Whether `visible` still fits inside the region the ink was built for.
+///
+/// The whole test, and the reason it is containment rather than distance: a rectangle that fits costs nothing,
+/// whatever moved to get there, and one that does not is a build. A scroll inside the margin fits; a zoom
+/// inward fits; a zoom outward does not, because it shows paper the build never covered.
+fn fits(visible: [f32; 4], built_for: [f32; 4]) -> bool {
+    visible[0] >= built_for[0]
+        && visible[1] >= built_for[1]
+        && visible[2] <= built_for[2]
+        && visible[3] <= built_for[3]
+}
 
 /// What the finished ink's triangles were built from.
 ///
@@ -1008,22 +1053,6 @@ impl InkKey {
             }),
         }
     }
-}
-
-/// A culling rectangle, grown by `by` on every side.
-fn grow(rect: [f32; 4], by: f32) -> [f32; 4] {
-    [rect[0] - by, rect[1] - by, rect[2] + by, rect[3] + by]
-}
-
-/// How far one rectangle's edges are from another's: the largest movement of any of the four.
-///
-/// A rectangle of infinities — "everything is visible" — is infinitely far from anything else, which is
-/// `NaN` once subtracted; `f32::max` keeps the zero instead, so the ink is not redrawn for a rectangle that
-/// cannot be compared.
-fn moved(from: [f32; 4], to: [f32; 4]) -> f32 {
-    (0..4)
-        .map(|edge| (to[edge] - from[edge]).abs())
-        .fold(0.0, f32::max)
 }
 
 /// The ink's coordinates to the sheet's *drawn* ones: the same numbers at every zoom, turned the way the
@@ -1189,7 +1218,7 @@ impl Surface {
             quad(&mut behind, device(mark.rect, scale), mark.colour);
         }
 
-        self.refresh_ink(canvas, scale);
+        self.refresh_ink(canvas);
         if !self.ink_slots_valid[slot] {
             self.upload_ink(slot);
             self.ink_slots_valid[slot] = true;
@@ -1535,27 +1564,91 @@ mod tests {
         }
     }
 
-    /// The culling rectangle is the one thing that moves while the ink stays valid, and the ink is drawn
-    /// again once it has moved further than the slack the cull was grown by.
+    /// A build covers the screen plus a margin, and a frame reuses it while the screen still fits inside.
+    ///
+    /// The model in one test: the ink is built for a *region*, and the question each frame asks is whether the
+    /// visible rectangle is still inside it. A scroll within the margin fits; a zoom inward fits, because the
+    /// screen it shows is smaller; a zoom outward does not, because it shows paper the build never covered.
     #[test]
-    fn a_scroll_that_leaves_the_culling_behind_asks_for_the_ink_again() {
-        assert_eq!(moved([0.0; 4], [0.0; 4]), 0.0);
-        assert_eq!(
-            moved([0.0, 0.0, 100.0, 100.0], [0.0, -50.0, 100.0, 50.0]),
-            50.0
+    fn a_build_is_reused_while_the_screen_fits_inside_it() {
+        let screen = [100.0, 200.0, 1100.0, 1000.0];
+        let covered = cull_of(screen);
+
+        assert!(
+            fits(screen, covered),
+            "the screen it was built for always fits"
         );
 
-        // "Everything is visible" cannot be compared with itself — the difference of two infinities is
-        // `NaN` — and a rectangle that cannot be compared must not ask for a redraw on every frame.
-        let everything = [
-            f32::NEG_INFINITY,
-            f32::NEG_INFINITY,
-            f32::INFINITY,
-            f32::INFINITY,
-        ];
-        assert_eq!(moved(everything, everything), 0.0);
+        // A scroll of half the margin, in every direction at once.
+        let scrolled = [100.0 + 100.0, 200.0 + 100.0, 1100.0 + 100.0, 1000.0 + 100.0];
+        assert!(
+            fits(scrolled, covered),
+            "a scroll inside the margin is free"
+        );
 
-        assert_eq!(grow([0.0, 0.0, 10.0, 10.0], 5.0), [-5.0, -5.0, 15.0, 15.0]);
+        // Out past the margin: the ink does not cover it.
+        let away = [100.0 + 1000.0, 200.0, 1100.0 + 1000.0, 1000.0];
+        assert!(!fits(away, covered), "a scroll out of the margin builds");
+
+        // A zoom in, around the middle: a smaller rectangle inside the same place.
+        let closer = [400.0, 400.0, 800.0, 800.0];
+        assert!(fits(closer, covered), "zooming in fits inside the build");
+
+        // A zoom out, around the middle: smaller numbers on the paper, so a *larger* rectangle.
+        let further = [-600.0, -400.0, 1800.0, 1600.0];
+        assert!(
+            !fits(further, covered),
+            "zooming out shows paper the build never covered"
+        );
+    }
+
+    /// A build always covers the rectangle it was asked for, so a frame never builds twice in a row.
+    ///
+    /// The bug this rules out is subtle and was real: a build that stored a rectangle *smaller* than the one
+    /// it had just been given would fail its own containment test on the very next frame, and rebuild forever.
+    #[test]
+    fn a_build_covers_the_rectangle_it_was_asked_for() {
+        for visible in [
+            [0.0, 0.0, 640.0, 906.0],
+            [-2000.0, 500.0, -1000.0, 700.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ] {
+            let covered = cull_of(visible);
+
+            assert!(
+                fits(visible, covered),
+                "{visible:?} is not inside the region built for it, {covered:?}"
+            );
+            // And the region is larger, never smaller, unless the rectangle had no extent at all.
+            if visible[2] > visible[0] && visible[3] > visible[1] {
+                assert!(covered[0] < visible[0] && covered[2] > visible[2]);
+                assert!(covered[1] < visible[1] && covered[3] > visible[3]);
+            }
+        }
+    }
+
+    /// The margin is a fraction of the screen, so it is the same *screenful* of scrolling at every zoom.
+    ///
+    /// A distance in device pixels would make the margin a different fraction at every zoom — and the test
+    /// that matters is what a zoom does to it. At 400% the paper is four times as large, so the screen shows a
+    /// quarter of it if the visible rectangle is in paper units: the margin shrinks by the same factor and
+    /// stays half a screen of scrolling.
+    #[test]
+    fn the_margin_is_a_screenful_at_every_zoom() {
+        // The same screen, at two zooms, in the paper's units.
+        let near = [0.0, 0.0, 720.0, 1018.0];
+        let far = [0.0, 0.0, 180.0, 254.5];
+
+        for visible in [near, far] {
+            let covered = cull_of(visible);
+            let margin = visible[0] - covered[0];
+            let width = visible[2] - visible[0];
+
+            assert!(
+                (margin - width * CULL_SPAN).abs() < 1e-3,
+                "the margin is a fraction of the screen at every zoom: {margin} against {width}"
+            );
+        }
     }
 }
 
@@ -2744,68 +2837,5 @@ mod vertex_tests {
             },
         );
         assert_eq!(clamped.colour[3], 255, "alpha above one is opaque");
-    }
-}
-
-#[cfg(test)]
-mod cull_tests {
-    use super::*;
-
-    /// The culling rectangle stays near the screen, because a slack that does not is no culling at all.
-    ///
-    /// This is the test the old 4096 would have failed. The slack is a *margin* around the visible part of the
-    /// sheet — room for the scroll between builds — and the mistake here was a margin so large that every
-    /// stroke on a long page survived it. At 4096 an A4 sheet's rectangle came out a hundred and thirty-nine
-    /// times its own area: a two-thousand-stroke note drew 1.95 million vertices on every frame of a 144 Hz
-    /// panel, and the frames that could not carry them were the stutter.
-    ///
-    /// The bound is a screen's worth — a fast two-finger flick moves about 200 device pixels in one frame at
-    /// 144 Hz — times a small margin. Anything past that is ink the reader cannot see.
-    #[test]
-    fn the_culling_slack_is_a_margin_and_not_a_page() {
-        // The sheet's own extent, which the slack is a margin around. An A4 at 100% is 640x906.
-        let (width, height) = (640.0, 906.0);
-        let cull = [
-            -CULL_SLACK,
-            -CULL_SLACK,
-            width + CULL_SLACK,
-            height + CULL_SLACK,
-        ];
-        let area = (cull[2] - cull[0]) * (cull[3] - cull[1]);
-        let sheet = width * height;
-
-        assert!(
-            area < sheet * 12.0,
-            "the culling rectangle is {:.1}x the sheet, which keeps ink nobody can see",
-            area / sheet
-        );
-
-        // And large enough that a frame's scroll is free: at 144 Hz a flick moves about 200 device pixels.
-        assert!(
-            CULL_SLACK > 200.0,
-            "a frame's scroll must not ask for a rebuild: {CULL_SLACK}"
-        );
-    }
-
-    /// A stroke near the page is kept; one far from it is dropped.
-    ///
-    /// The two halves of what the slack buys: everything past the margin costs nothing, and everything inside
-    /// it is already built when the reader scrolls to it.
-    #[test]
-    fn a_slack_keeps_what_is_near_and_drops_what_is_far() {
-        let visible = [0.0, 0.0, 640.0, 906.0];
-        let cull = grow(visible, CULL_SLACK);
-
-        // A frame's scroll away is still inside.
-        assert!(
-            cull[1] < -200.0 && cull[3] > 906.0 + 200.0,
-            "a flick is free"
-        );
-
-        // Three screens down is outside, so it is not drawn.
-        assert!(
-            3.0 * 906.0 > cull[3],
-            "a stroke three screens away must not be drawn"
-        );
     }
 }

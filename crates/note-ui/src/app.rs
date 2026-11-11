@@ -2084,8 +2084,14 @@ impl NoteApp {
     /// far too expensive to do per reading of a continuous gesture — a pinch and a wheel send dozens of events
     /// a second, and each one was doing a four-table SQLite transaction and a whole-window redraw. A gesture in
     /// flight calls [`Self::step_zoom`] instead, and this once when it ends.
+    ///
+    /// A zoom also moves the pan — that is what [`Viewport::zoom_around`] does, so the point under the fingers
+    /// stays under them — and that pan is kept out of range while the gesture is in flight, for the reason
+    /// [`Self::pan_by_pen`] gives. The end of the gesture is where it settles inside its bounds, once, so a
+    /// page left of its own edge comes back to it rather than waiting for an unrelated change to clamp it.
     fn finish_zoom(&mut self, cx: &mut Context<Self>) {
         self.settings.zoom = self.view.zoom();
+        self.settle_pan();
         self.finish_setting(cx);
         // The zoom field *is* the readout of the zoom, so it has to be redrawn after any change to it — by a button,
         // a wheel, a pinch or a fit ([`Self::sync_choosers`] puts the number in it, this is what asks for the frame).

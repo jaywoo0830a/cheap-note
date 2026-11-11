@@ -229,6 +229,13 @@ impl Viewport {
     /// is the space it is drawn into, and `margin` is the strip kept clear at its edges. The pan is
     /// adjusted so that the sheet coordinate under the pointer does not move — which is what makes
     /// a pinch feel like pulling the page rather than pushing it away.
+    ///
+    /// **The pan is held to the layout's bounds here, and that is not the same clamp a pen's pan does not
+    /// do.** [`Self::origin`] adds the margin back before clamping, so a pan has to be stored in the margin's
+    /// own frame or the anchor slips by one margin per step: measured, a 1.3x zoom about a fixed point landed
+    /// 24 px away with the clamp left out and exactly on it with the clamp in. What made the pen's pan a bug
+    /// was clamping *and* recomputing from the clamped value; a zoom recomputes its anchor from the origin it
+    /// drew, which is clamped too, so the two agree.
     pub fn zoom_around(
         &mut self,
         factor: f32,

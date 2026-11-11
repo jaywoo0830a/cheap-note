@@ -774,6 +774,25 @@ pub struct NoteApp {
     scroll_waiting: (f32, f32),
     /// Whether a frame has been asked for to spend [`Self::scroll_waiting`].
     scroll_asked: bool,
+    /// The zoom the option key has left for the frame that will show it, as a factor to multiply by.
+    ///
+    /// Collected for the same reason as [`Self::scroll_waiting`] and spent on the same frame: a two-finger
+    /// drag with Option held arrives faster than frames do, and multiplying each reading in turn would be
+    /// one zoom compounding on itself rather than one gesture. Multiplying factors is safe in a way that
+    /// adding them is not — two halves of a step make one whole step — so the buffer is a product rather
+    /// than a sum, and `1.0` is what "nothing waiting" means.
+    zoom_waiting: f32,
+    /// Whether the space bar is being held, which is what makes a two-finger drag a pan.
+    ///
+    /// A trackpad already pans on two fingers, so this changes nothing while nothing else is held — it exists
+    /// for the *priority*: with space down a gesture is a pan even when the option key is also down, so a
+    /// reader who pans with space can put their other hand on option without the gesture turning into a zoom
+    /// under them. Up is a pan and down is still a pan, which is the promise the key makes.
+    ///
+    /// Cleared when the sheet loses the keyboard, because a key-up that arrives while a dialog has the focus
+    /// never reaches this element — a flag left standing would make every later scroll a pan that ignores
+    /// option.
+    space_held: bool,
     /// Where each page was being read, for as long as the note in hand is open.
     ///
     /// The *page's* place rather than the reader's: turning to a page added at the end of a note opens that page at
@@ -1000,6 +1019,8 @@ impl NoteApp {
             view,
             scroll_waiting: (0.0, 0.0),
             scroll_asked: false,
+            zoom_waiting: 1.0,
+            space_held: false,
             pans: HashMap::new(),
             sheet: Sheet::default(),
             bar_bottom: Rc::new(Cell::new(None)),
@@ -1761,65 +1782,105 @@ impl NoteApp {
         });
     }
 
+    /// What a scroll means here, decided by [`gesture_of`] before anything moves.
+    fn gesture_of(modifiers: Modifiers, space_held: bool, primary: bool) -> Gesture {
+        gesture_of(modifiers, space_held, primary)
+    }
+
     /// Zooms or pans with the wheel — which is also where a trackpad's two-finger gesture arrives.
     fn on_wheel(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         let pointer = (event.position.x.into(), event.position.y.into());
 
-        if keys::is_primary(event.modifiers, cx) {
-            // A wheel with the command modifier held is a zoom (`Ctrl`+wheel on Windows, where a trackpad's pinch
-            // arrives as the same event), and a locked view does not take one: this is the gesture the lock exists
-            // for — a roll of the wheel beside a page that is being read (see [`Settings::zoom_locked`]). The pan below
-            // is not a zoom and is left alone.
-            if !self.settings.gestures_zoom() {
-                return;
+        match Self::gesture_of(
+            event.modifiers,
+            self.space_held,
+            keys::is_primary(event.modifiers, cx),
+        ) {
+            Gesture::ZoomAtPointer => {
+                // A wheel with the command modifier held is a zoom (`Ctrl`+wheel on Windows, where a trackpad's pinch
+                // arrives as the same event), and a locked view does not take one: this is the gesture the lock exists
+                // for — a roll of the wheel beside a page that is being read (see [`Settings::zoom_locked`]). The pan
+                // below is not a zoom and is left alone.
+                if !self.settings.gestures_zoom() {
+                    return;
+                }
+
+                let (amount, in_pixels) = match event.delta {
+                    ScrollDelta::Lines(delta) => (delta.y, false),
+                    ScrollDelta::Pixels(delta) => (delta.y.into(), true),
+                };
+                let factor = wheel_zoom_factor(amount, in_pixels);
+                let sheet = self.sheet;
+
+                if self
+                    .view
+                    .zoom_around(factor, pointer, sheet.paper, sheet.window, PAGE_MARGIN)
+                {
+                    self.finish_zoom(cx);
+                }
             }
+            Gesture::ZoomAtCentre => {
+                // The option key turns the vertical part of a scroll into a zoom: up is closer, down is
+                // further away. It is the modifier every viewer puts a two-finger zoom on, and it is the
+                // one gesture a trackpad can make with one hand while a pen is held.
+                //
+                // The same zoom as the command chord by a second route, so it obeys the same lock and settles
+                // into the note's setting the same way. The horizontal part is dropped rather than panned,
+                // because a gesture that zooms on one axis and pans on the other answers a diagonal drag with
+                // two things at once.
+                if !self.settings.gestures_zoom() {
+                    return;
+                }
 
-            let (amount, in_pixels) = match event.delta {
-                ScrollDelta::Lines(delta) => (delta.y, false),
-                ScrollDelta::Pixels(delta) => (delta.y.into(), true),
-            };
-            let factor = wheel_zoom_factor(amount, in_pixels);
-            let sheet = self.sheet;
+                let (_, dy, in_pixels) = scroll_amount(event.delta);
+                let factor = wheel_zoom_factor(dy, in_pixels);
+                if !factor.is_finite() || factor == 1.0 {
+                    return;
+                }
 
-            if self
-                .view
-                .zoom_around(factor, pointer, sheet.paper, sheet.window, PAGE_MARGIN)
-            {
-                self.finish_zoom(cx);
+                self.zoom_waiting *= factor;
+
+                if !self.scroll_asked {
+                    self.scroll_asked = true;
+                    cx.on_next_frame(window, |app, window, cx| app.spend_scroll(window, cx));
+                }
             }
-            return;
-        }
+            Gesture::Pan => {
+                let (dx, dy, in_pixels) = scroll_amount(event.delta);
+                let distance = wheel_pan((dx, dy), in_pixels);
 
-        let (dx, dy) = match event.delta {
-            ScrollDelta::Lines(delta) => (delta.x, delta.y),
-            ScrollDelta::Pixels(delta) => (delta.x.into(), delta.y.into()),
-        };
-        let in_pixels = matches!(event.delta, ScrollDelta::Pixels(_));
-        let distance = wheel_pan((dx, dy), in_pixels);
+                if !distance.0.is_finite() || !distance.1.is_finite() {
+                    return;
+                }
 
-        if !distance.0.is_finite() || !distance.1.is_finite() {
-            return;
-        }
+                // Left for the frame that shows it, not spent here: the readings arrive faster than frames do, and a
+                // pan the compositor never draws is a canvas asked to move somewhere the hand has already left (see
+                // [`Self::scroll_waiting`]).
+                self.scroll_waiting = (
+                    self.scroll_waiting.0 + distance.0,
+                    self.scroll_waiting.1 + distance.1,
+                );
 
-        // Left for the frame that shows it, not spent here: the readings arrive faster than frames do, and a
-        // pan the compositor never draws is a canvas asked to move somewhere the hand has already left (see
-        // [`Self::scroll_waiting`]).
-        self.scroll_waiting = (
-            self.scroll_waiting.0 + distance.0,
-            self.scroll_waiting.1 + distance.1,
-        );
-
-        if !self.scroll_asked {
-            self.scroll_asked = true;
-            cx.on_next_frame(window, |app, window, cx| app.spend_scroll(window, cx));
+                if !self.scroll_asked {
+                    self.scroll_asked = true;
+                    cx.on_next_frame(window, |app, window, cx| app.spend_scroll(window, cx));
+                }
+            }
         }
     }
 
-    /// Pans the sheet by everything the wheel has left, once, in the frame that shows it.
+    /// Pans the sheet by everything the wheel has left, and zooms by everything the option key has, once, in
+    /// the frame that shows it.
     fn spend_scroll(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.scroll_asked = false;
 
+        let zoom = std::mem::replace(&mut self.zoom_waiting, 1.0);
         let distance = std::mem::take(&mut self.scroll_waiting);
+
+        if zoom != 1.0 {
+            self.zoom_at_centre(zoom, cx);
+        }
+
         if distance == (0.0, 0.0) {
             return;
         }
@@ -1856,6 +1917,31 @@ impl NoteApp {
 
         if self.view.pan() != was {
             cx.notify();
+        }
+    }
+
+    /// Zooms by a factor about the window's centre, and settles it into the note's setting as a gesture does.
+    ///
+    /// The centre rather than the pointer: the option key's zoom is made with the hand that is not holding the
+    /// pen, over a trackpad the pointer is nowhere near, and anchoring it to a stray mouse position would move
+    /// the sheet sideways for no reason the reader asked for. A still gesture is a zoom that has finished, so
+    /// the setting is written once here — the same rule a pinch and a wheel follow.
+    ///
+    /// The lock is *not* re-checked: [`Self::on_wheel`] asks it before a factor is buffered, so a locked view
+    /// never has one waiting to spend.
+    fn zoom_at_centre(&mut self, factor: f32, cx: &mut Context<Self>) {
+        let sheet = self.sheet;
+        if sheet.window.0 <= 0.0 || sheet.window.1 <= 0.0 {
+            return;
+        }
+
+        let centre = (sheet.window.0 / 2.0, sheet.window.1 / 2.0);
+
+        if self
+            .view
+            .zoom_around(factor, centre, sheet.paper, sheet.window, PAGE_MARGIN)
+        {
+            self.finish_zoom(cx);
         }
     }
 
@@ -3053,6 +3139,11 @@ impl NoteApp {
 
         if in_front {
             self.sheet_focus.focus(window, cx);
+        } else {
+            // A key-up that arrives while something else has the keyboard never reaches the sheet, so the
+            // space bar is let go of here: a flag left standing would make every later drag a pan that
+            // ignored the option key (see [`Self::space_held`]).
+            self.space_held = false;
         }
     }
 
@@ -3462,6 +3553,11 @@ impl NoteApp {
                 // arrows belong to the field, and a caret that turned the page instead would be a trap.
                 "left" if self.naming.is_none() => self.previous_page(cx),
                 "right" if self.naming.is_none() => self.next_page(cx),
+                // Space held makes a drag a pan: with option also down, the gesture stays the pan it started
+                // rather than becoming a zoom (see [`Self::on_wheel`]). Held rather than pressed, so the key
+                // is read here and let go of in [`Self::note_key_up`] — and only while no name is being typed,
+                // where a space is a character.
+                "space" if self.naming.is_none() => self.space_held = true,
                 _ => {}
             }
             return;
@@ -3511,6 +3607,15 @@ impl NoteApp {
             "up" => self.previous_bookmark(cx),
             _ => {}
         }
+    }
+
+    /// The sheet's keyboard, released: the space bar, which is the one key the gestures depend on being *held*.
+    ///
+    /// Nothing else listens here. A key that is pressed and released in one breath — Escape, an arrow, a letter —
+    /// is answered where it is pressed, and a key-up handler that answered those too would answer each twice.
+    fn note_key_up(&mut self, _event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.space_held = false;
+        cx.notify();
     }
 
     /// The bookmark list's keyboard: the app's own chords, and nothing the list wants.
@@ -5376,36 +5481,42 @@ impl Render for NoteApp {
             self.bar_handle(cx).into_any_element()
         };
 
-        let mut screen = div()
-            .relative()
-            .size_full()
-            .bg(desk)
-            .text_color(foreground)
-            // A trackpad's pinch, and a wheel with the command modifier held, both arrive here: the canvas is the
-            // whole window's only interactive element, so it is what the gestures hit.
-            .on_scroll(
-                cx.listener(|app, event: &ScrollEvent, window, cx| app.on_wheel(event, window, cx)),
-            )
-            .on_pinch(cx.listener(|app, event: &PinchEvent, _, cx| app.on_pinch(event, cx)))
-            // The note's keyboard: Esc for the home screen, the two arrows for the page, and the three
-            // commands a person reaches without letting go of the pen. A listener and not a binding,
-            // because a *list* of rows wants the same keys (see [`crate::home`]); it is heard because this
-            // element is the sheet's, and the sheet holds the keyboard whenever it is the screen in front
-            // (see [`Self::claim_sheet_keyboard`]).
-            .on_key_down(cx.listener(|app, event: &KeyDownEvent, window, cx| {
-                app.note_key_down(event, window, cx)
-            }))
-            // A name field that has just closed leaves the focus on a handle that is no longer drawn, which
-            // is what [`Self::claim_sheet_keyboard`] fixes on the next frame: the handle is tracked here so
-            // the focus has somewhere in this element to land.
-            .track_focus(&self.sheet_focus)
-            // The canvas is not drawn here: it has a surface of its own *behind* this element, and what
-            // this element paints is nothing — which is what keeps the desk, the sheet and the ink out of
-            // the frame (see [`crate::ink_layer`]).
-            .child(bar)
-            // The desk's own row: the page in the middle, the counters at the edge. Last, so it
-            // paints over the sheet — a page pill *under* the paper would be no pill at all.
-            .child(self.bottom_row(cx));
+        let mut screen =
+            div()
+                .relative()
+                .size_full()
+                .bg(desk)
+                .text_color(foreground)
+                // A trackpad's pinch, and a wheel with the command modifier held, both arrive here: the canvas is the
+                // whole window's only interactive element, so it is what the gestures hit.
+                .on_scroll(cx.listener(|app, event: &ScrollEvent, window, cx| {
+                    app.on_wheel(event, window, cx)
+                }))
+                .on_pinch(cx.listener(|app, event: &PinchEvent, _, cx| app.on_pinch(event, cx)))
+                // The note's keyboard: Esc for the home screen, the two arrows for the page, and the three
+                // commands a person reaches without letting go of the pen. A listener and not a binding,
+                // because a *list* of rows wants the same keys (see [`crate::home`]); it is heard because this
+                // element is the sheet's, and the sheet holds the keyboard whenever it is the screen in front
+                // (see [`Self::claim_sheet_keyboard`]).
+                .on_key_down(cx.listener(|app, event: &KeyDownEvent, window, cx| {
+                    app.note_key_down(event, window, cx)
+                }))
+                // The other half of a held key. Space turns a drag into a pan, and a flag that outlived the key
+                // would leave every later scroll ignoring option (see [`NoteApp::space_held`]).
+                .on_key_up(cx.listener(|app, event: &KeyUpEvent, window, cx| {
+                    app.note_key_up(event, window, cx)
+                }))
+                // A name field that has just closed leaves the focus on a handle that is no longer drawn, which
+                // is what [`Self::claim_sheet_keyboard`] fixes on the next frame: the handle is tracked here so
+                // the focus has somewhere in this element to land.
+                .track_focus(&self.sheet_focus)
+                // The canvas is not drawn here: it has a surface of its own *behind* this element, and what
+                // this element paints is nothing — which is what keeps the desk, the sheet and the ink out of
+                // the frame (see [`crate::ink_layer`]).
+                .child(bar)
+                // The desk's own row: the page in the middle, the counters at the edge. Last, so it
+                // paints over the sheet — a page pill *under* the paper would be no pill at all.
+                .child(self.bottom_row(cx));
 
         // The palette at the pen, over the sheet: what the hand is reaching for is drawn in front of
         // what it is writing on, and under the question below, which is about the page (see
@@ -5830,6 +5941,40 @@ fn parse_zoom(text: &str) -> Option<f32> {
 /// are a quarter of the way at a time, and the two fits land wherever the window puts them.
 fn zoom_text(zoom: f32) -> String {
     format!("{:.0}%", zoom * 100.0)
+}
+
+/// What a scroll is asking for, before any of it is spent.
+///
+/// The three gestures share one event: a wheel, a trackpad's two fingers, and the same two fingers with a
+/// modifier down. They are decided in one place so the precedence is stated once and can be tested without a
+/// window — space over option, the command chord over both, and a plain drag a pan.
+fn gesture_of(modifiers: Modifiers, space_held: bool, primary: bool) -> Gesture {
+    if primary {
+        Gesture::ZoomAtPointer
+    } else if modifiers.alt && !space_held {
+        Gesture::ZoomAtCentre
+    } else {
+        Gesture::Pan
+    }
+}
+
+/// What a scroll is asking for, before any of it is spent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gesture {
+    /// A zoom about the pointer, under the platform's command modifier.
+    ZoomAtPointer,
+    /// A zoom about the window's centre, under the option key.
+    ZoomAtCentre,
+    /// A pan by the distance the gesture moved — a drag, or the same drag with space held.
+    Pan,
+}
+
+/// A scroll's delta as (x, y, whether it is in pixels rather than lines).
+fn scroll_amount(delta: ScrollDelta) -> (f32, f32, bool) {
+    match delta {
+        ScrollDelta::Lines(delta) => (delta.x, delta.y, false),
+        ScrollDelta::Pixels(delta) => (delta.x.into(), delta.y.into(), true),
+    }
 }
 
 /// How much a scroll zooms, as a factor to multiply the current zoom by.

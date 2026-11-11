@@ -1,18 +1,18 @@
 // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
 // scope and shadow the attribute this module needs.
 use super::{
-    bar_line, confirmed, file_label, file_stem, notch_in_pixels, page_of_write,
+    bar_line, confirmed, file_label, file_stem, gesture_of, notch_in_pixels, page_of_write,
     page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face, palette_id,
     palette_in_hand, palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width,
-    sheet_matches, spun, wheel_pan, wheel_zoom_factor, zoom_text, Confirmation, PaletteGeometry,
-    PalettePart, BAR_HEIGHT, PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN,
-    PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC,
-    PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH,
-    WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
+    scroll_amount, sheet_matches, spun, wheel_pan, wheel_zoom_factor, zoom_text, Confirmation,
+    Gesture, PaletteGeometry, PalettePart, BAR_HEIGHT, PALETTE_DISC_BOX, PALETTE_HUB,
+    PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS,
+    PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD,
+    PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH, WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
 use crate::ink::{Notes, Tool};
-use gpui_kit::ElementId;
+use gpui_kit::{ElementId, Modifiers};
 use std::time::{Duration, Instant};
 
 /// A destructive command is reachable only through an answer.
@@ -707,4 +707,75 @@ fn the_palettes_discs_are_not_the_bars_swatches() {
             swatch.name
         );
     }
+}
+
+/// The three gestures are one event, decided by the modifiers: command zooms at the pointer, option zooms
+/// at the centre, and neither pans.
+///
+/// The precedence is what this pins down. A reader who holds space and option together started a pan and
+/// must keep it, so space is asked first; a reader on the command chord gets the zoom that anchors where
+/// they are looking, which is the gesture every viewer has had for decades.
+#[test]
+fn a_scroll_is_whichever_gesture_its_modifiers_ask_for() {
+    let plain = Modifiers::default();
+    let option = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+
+    assert_eq!(
+        gesture_of(plain, false, false),
+        Gesture::Pan,
+        "a drag with nothing held pans"
+    );
+    assert_eq!(
+        gesture_of(option, false, false),
+        Gesture::ZoomAtCentre,
+        "option alone zooms"
+    );
+    assert_eq!(
+        gesture_of(option, true, false),
+        Gesture::Pan,
+        "space keeps the pan the reader started, even with option down"
+    );
+    assert_eq!(
+        gesture_of(plain, true, false),
+        Gesture::Pan,
+        "space alone is still a pan"
+    );
+}
+
+/// The command chord outranks both: it is the zoom that anchors on the pointer, and holding space during one
+/// does not turn it into a pan.
+#[test]
+fn the_command_chord_outranks_option_and_space() {
+    let command = Modifiers {
+        control: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+
+    assert_eq!(
+        gesture_of(command, false, true),
+        Gesture::ZoomAtPointer,
+        "the command chord zooms at the pointer"
+    );
+    assert_eq!(
+        gesture_of(command, true, true),
+        Gesture::ZoomAtPointer,
+        "and space does not take it back"
+    );
+}
+
+/// A scroll's delta is read one way wherever it is spent, so the three gestures cannot disagree about which
+/// axis is which or whether the numbers are lines or pixels.
+#[test]
+fn a_scroll_reads_the_same_way_for_every_gesture() {
+    use gpui_kit::{point, px, ScrollDelta};
+
+    let lines = scroll_amount(ScrollDelta::Lines(point(0.0, 3.0)));
+    assert_eq!(lines, (0.0, 3.0, false), "lines stay lines");
+
+    let pixels = scroll_amount(ScrollDelta::Pixels(point(px(1.5), px(4.0))));
+    assert_eq!(pixels, (1.5, 4.0, true), "pixels are in pixels");
 }

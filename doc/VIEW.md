@@ -652,6 +652,19 @@ delivered as when the platform sends it as a wheel rather than as a gesture. Wit
 the sheet, which is what a two-finger drag is asking for. A pinch zooms about the point between the
 fingers, with the sheet moving the way the *view* was pushed.
 
+**The option key zooms a drag**, about the window's centre: a two-finger drag up is closer and down is
+further away. That is the same zoom as the `Ctrl` chord by a second route, so it obeys the zoom lock and
+settles into the note's setting the same way; the horizontal part of the drag is dropped rather than
+panned, because a gesture that zoomed on one axis and panned on the other would answer a diagonal drag with
+two things at once. It is on the centre and not the pointer because it is made with the hand that is not
+holding the pen, over a trackpad the pointer is nowhere near.
+
+**Space held makes a drag a pan that stays one**, even with option down. A two-finger drag is already a
+pan, so the key adds nothing a trackpad could not do — it exists for the precedence: a reader who is
+panning can put their other hand on option without the gesture turning into a zoom under them. The three
+are decided in one place, before anything moves: the command chord first, then option with space not held,
+and a pan otherwise.
+
 The numbers behind that are all *derived* rather than picked:
 
 | Number | Value | Where it comes from |

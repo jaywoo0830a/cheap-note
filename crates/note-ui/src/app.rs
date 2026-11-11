@@ -281,6 +281,15 @@ const HOUSEKEEPING_INTERVAL: Duration = Duration::from_millis(1);
 /// frame's: rebuilding the line on every wake would make the interface compete with the pen.
 const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How long a continuous zoom gesture has to be quiet before it is taken to have ended.
+///
+/// A pinch and a wheel deliver a stream of events with no final one, so the end has to be inferred. Long
+/// enough that no gap inside a real gesture reaches it — a pinch at 120 Hz sends one every 8 ms, and a fast
+/// wheel a few dozen a second — and short enough that the number a reader typed is committed before they look
+/// away. A tenth of a second is both: more than ten times the slowest event of a live gesture, and well under
+/// the time a hand takes to leave the trackpad.
+const GESTURE_SETTLE_INTERVAL: Duration = Duration::from_millis(100);
+
 /// How long the pen has to be quiet before a page is rendered for it.
 const PDF_QUIET_INTERVAL: Duration = Duration::from_millis(120);
 
@@ -816,6 +825,13 @@ pub struct NoteApp {
     /// move the view and cleared by the frame that spends them, so a gesture draw one frame per changed wake
     /// rather than one per reading.
     view_moved: bool,
+    /// When the last continuous zoom event arrived, or `None` when no zoom gesture is in flight.
+    ///
+    /// A pinch and a wheel are *streams*: the events say where the zoom is now, and the platform does not say
+    /// when they have stopped. So the end is a gap — the pump commits the zoom to the note once a whole interval
+    /// has passed with nothing new, which is the write [`Self::finish_zoom`] does and the one thing a stream of
+    /// events must not do per event.
+    zoom_settles_at: Option<Instant>,
     /// Where each page was being read, for as long as the note in hand is open.
     ///
     /// The *page's* place rather than the reader's: turning to a page added at the end of a note opens that page at
@@ -1045,6 +1061,7 @@ impl NoteApp {
             scroll_waiting: (0.0, 0.0),
             scroll_asked: false,
             view_moved: false,
+            zoom_settles_at: None,
             pans: HashMap::new(),
             sheet: Sheet::default(),
             bar_bottom: Rc::new(Cell::new(None)),
@@ -1394,6 +1411,17 @@ impl NoteApp {
             let alive = this.update(cx, |app, cx| {
                 let now = Instant::now();
 
+                // A zoom gesture that has stopped talking is a zoom that has finished: commit it to the note
+                // and ask for the frame that shows the new number. This is the write a pinch or a wheel must
+                // not do per event (see [`Self::zoom_settles_at`]), and the gap is the only end either of them
+                // has — the platform reports where a gesture is, not when it stopped.
+                if app.zoom_settles_at.is_some_and(|last| {
+                    now.saturating_duration_since(last) >= GESTURE_SETTLE_INTERVAL
+                }) {
+                    app.zoom_settles_at = None;
+                    app.finish_zoom(cx);
+                }
+
                 // The counters are the one part of the line that moves on its own. Rebuild it
                 // once a second while a note is in front, so a person watching a stroke sees the
                 // numbers move; the rest of the line still waits for a change the reader made.
@@ -1493,6 +1521,23 @@ impl NoteApp {
         self.ink.consume(samples, &transform, &self.settings)
     }
 
+    /// Lets the pen gesture go, committing what it did if it was a zoom.
+    ///
+    /// A pan is already written down: it *is* the view's own pan, which the note's settings do not hold. A
+    /// zoom is a setting, and the gesture has been *showing* it without writing it (see [`Self::step_zoom`]) —
+    /// so this is where the note learns it, once, however many readings it took to get there.
+    fn end_pen_gesture(&mut self, cx: &mut Context<Self>) {
+        let zoomed = self
+            .pen_mode
+            .is_some_and(|mode| mode.mode == crate::pen_gesture::Gesture::Zoom);
+
+        self.pen_mode = None;
+
+        if zoomed {
+            self.finish_zoom(cx);
+        }
+    }
+
     /// Spends a batch as a pen gesture — a pan or a zoom — when a key is asking for one.
     ///
     /// Returns whether the readings were spent, which is what tells [`Self::consume_ink`] that they are not
@@ -1527,7 +1572,7 @@ impl NoteApp {
         if gesture == Gesture::Ink {
             // The keys are up. A gesture that was in play has ended, and the pen goes back to writing from
             // this reading — the nib is already where the reader wants the next stroke to start.
-            self.pen_mode = None;
+            self.end_pen_gesture(cx);
             return false;
         }
 
@@ -1547,12 +1592,12 @@ impl NoteApp {
         } else if self.pen_mode.is_some_and(|mode| mode.mode != gesture) {
             // The key changed mid-stroke: let the old gesture go and begin the new one at the nib's place
             // now, rather than at a place from the gesture before.
-            self.pen_mode = None;
+            self.end_pen_gesture(cx);
             return true;
         } else if !touching && !ended {
             // A gesture already in play, and the nib has come off the paper without a `Up` — a hover that
             // followed a touch. The gesture is over; the ink is not, because none was laid.
-            self.pen_mode = None;
+            self.end_pen_gesture(cx);
             return false;
         }
 
@@ -1564,7 +1609,7 @@ impl NoteApp {
         });
 
         if ended {
-            self.pen_mode = None;
+            self.end_pen_gesture(cx);
             return true;
         }
 
@@ -1864,12 +1909,52 @@ impl NoteApp {
     }
 
     /// Keeps the settings and the status line in step with a zoom the view already accepted.
+    ///
+    /// The *committing* half of a zoom. It writes the note's settings and asks for a frame, both of which are
+    /// far too expensive to do per reading of a continuous gesture — a pinch and a wheel send dozens of events
+    /// a second, and each one was doing a four-table SQLite transaction and a whole-window redraw. A gesture in
+    /// flight calls [`Self::step_zoom`] instead, and this once when it ends.
     fn finish_zoom(&mut self, cx: &mut Context<Self>) {
         self.settings.zoom = self.view.zoom();
         self.finish_setting(cx);
         // The zoom field *is* the readout of the zoom, so it has to be redrawn after any change to it — by a button,
         // a wheel, a pinch or a fit ([`Self::sync_choosers`] puts the number in it, this is what asks for the frame).
         cx.notify();
+    }
+
+    /// Shows a zoom the view has just taken, without committing it to the note.
+    ///
+    /// The *gesture* half of a zoom, and the reason it exists: a pinch delivers an event per frame and a wheel
+    /// delivers one per notch, and a note's settings are not a thing written per notch. The numbers the reader
+    /// sees are updated here so the field and the canvas agree while the hand is still moving; the write and the
+    /// frame wait for [`Self::finish_zoom`], which the end of the gesture calls once.
+    ///
+    /// The canvas needs no frame of its own: it is drawn by the pen's wake or by the next frame the gesture
+    /// asks for, and its geometry is read from `self.sheet`, which [`Self::settle_view`] moves.
+    fn step_zoom(&mut self) {
+        self.settings.zoom = self.view.zoom();
+        self.settle_view();
+    }
+
+    /// Moves `self.sheet` to where the view has just put the sheet, without a frame to lay it out again.
+    ///
+    /// The sheet is normally rebuilt by the frame, which is the only place the window's size is known. A pan or
+    /// a zoom changes nothing about what the sheet *is* — the paper, the rotation, the window it is drawn into
+    /// are all unchanged — so the two numbers the view owns can be moved here and the canvas, which draws on
+    /// the pen's own wake, gets the right place instead of trailing the hand by one frame.
+    ///
+    /// The zoom comes with it because the view holds it too: a pinch that set a new zoom and left the sheet's
+    /// old one behind would draw the paper at the size it used to be. What is *not* done here is the ink's own
+    /// rebuild — the outlines a stroke is made of are detailed for a zoom rung, and doing that per reading
+    /// would rebuild every stroke in the note hundreds of times a second. That waits for the frame the settled
+    /// gesture asks for (see [`crate::ink_layer`]).
+    fn settle_view(&mut self) {
+        let before = self.sheet;
+        self.settle_sheet();
+
+        if self.sheet.origin != before.origin || self.sheet.zoom != before.zoom {
+            self.view_moved = true;
+        }
     }
 
     /// What the zoom field says: Enter takes the number that was typed, and a click away puts the view's own back.
@@ -1939,7 +2024,11 @@ impl NoteApp {
                 .view
                 .zoom_around(factor, pointer, sheet.paper, sheet.window, PAGE_MARGIN)
             {
-                self.finish_zoom(cx);
+                // A wheel arrives one notch at a time and the command chord is held for the whole roll, so
+                // this is a gesture until the events stop. The note is written and the frame asked for in
+                // `settle_gesture`, which the housekeeping pump calls when a gesture has gone quiet.
+                self.step_zoom();
+                self.zoom_settles_at = Some(Instant::now());
             }
             return;
         }
@@ -2005,8 +2094,32 @@ impl NoteApp {
         }
 
         if self.view.pan() != was {
+            // Already once per frame — the wheel's readings are accumulated and spent together (see
+            // [`Self::scroll_waiting`]) — so this is not the per-reading notify a pan cannot afford. The
+            // sheet is settled as well, because the pen's wake may draw the canvas before the frame lands.
+            self.settle_sheet();
             cx.notify();
         }
+    }
+
+    /// Moves `self.sheet` to match the view, without asking for a frame.
+    ///
+    /// [`Self::settle_view`] does the same and *sets* the flag that asks for one; this is for callers that are
+    /// about to ask anyway.
+    fn settle_sheet(&mut self) {
+        let sheet = self.sheet;
+        if sheet.window.0 <= 0.0 || sheet.window.1 <= 0.0 {
+            return;
+        }
+
+        let zoom = self.view.zoom();
+        let origin = self.view.origin(sheet.paper, sheet.window, PAGE_MARGIN);
+
+        self.sheet = Sheet {
+            zoom,
+            origin,
+            ..sheet
+        };
     }
 
     /// Pans the sheet so the point the nib touched stays under it.
@@ -2038,20 +2151,9 @@ impl NoteApp {
             self.view.hold_pan(sheet.paper, sheet.window, PAGE_MARGIN);
         }
 
-        // The canvas draws itself on this wake, below, from `self.sheet` — and that is only rebuilt by the
-        // frame. A pan changes nothing about it except *where* it sits, so the origin is moved here rather
-        // than leaving the canvas to draw the sheet where it was a frame ago. Without this the paper trails
-        // the hand by exactly one frame, which is felt as the lag a pan is most sensitive to: a stroke draws
-        // its own ink and hides it, but a pan has nothing to hide behind.
-        let offset = self.view.origin(sheet.paper, sheet.window, PAGE_MARGIN);
-        self.sheet.origin = offset;
-
-        // A flag rather than a notify. The canvas is drawn by the pen's own wake and reaches the screen
-        // through the compositor, so the sheet moves without one; what needs a frame is the *interface* —
-        // the bar and the page pill, which describe where the sheet is. Asking for one on every reading made
-        // the whole window redraw, canvas included, a second time per reading, which is what a pan felt as a
-        // stutter: the frame could not keep up with the pen.
-        self.view_moved = true;
+        // The canvas draws itself on this wake, from `self.sheet`, which is only rebuilt by a frame — so the
+        // place is moved here as well. See [`Self::settle_view`].
+        self.settle_view();
     }
 
     /// Zooms the sheet from the gesture's own starting zoom, by how far up the nib has come.
@@ -2060,17 +2162,20 @@ impl NoteApp {
     /// went down, and applied to the zoom the gesture started from. Multiplying a factor per reading — which
     /// is what a wheel does, correctly, because a wheel *is* a sequence of steps — would compound a hand's
     /// slow drag into a runaway zoom and leave nothing to come back to.
-    fn zoom_by_pen(&mut self, mode: PenGesture, at: (f32, f32), cx: &mut Context<Self>) {
+    fn zoom_by_pen(&mut self, mode: PenGesture, at: (f32, f32), _cx: &mut Context<Self>) {
         let rise = mode.origin.1 - at.1;
         let wanted = mode.zoom * crate::pen_gesture::pen_zoom_factor(rise);
 
         if self.view.set_zoom(wanted) {
-            self.finish_zoom(cx);
+            // A pen sends readings far faster than a screen takes frames, and the note is not written per
+            // reading: this shows the zoom and leaves the write to the end of the gesture, when the nib lifts
+            // or the key is let go (see [`Self::consume_pen_gesture`]).
+            self.step_zoom();
         }
     }
 
     /// Zooms with a trackpad's pinch, about the point between the fingers.
-    fn on_pinch(&mut self, event: &PinchEvent, cx: &mut Context<Self>) {
+    fn on_pinch(&mut self, event: &PinchEvent, _cx: &mut Context<Self>) {
         // A pinch is the likeliest of the accidents a lock is for: a palm settling onto a trackpad is a pinch as far as
         // the platform is concerned, and it happens while a hand is writing (see [`Settings::zoom_locked`]).
         if !self.settings.gestures_zoom() {
@@ -2085,7 +2190,9 @@ impl NoteApp {
             .view
             .zoom_around(factor, pointer, sheet.paper, sheet.window, PAGE_MARGIN)
         {
-            self.finish_zoom(cx);
+            // A pinch is a stream of events, not a step: see `on_wheel`. Its end is a gap in the events.
+            self.step_zoom();
+            self.zoom_settles_at = Some(Instant::now());
         }
     }
 

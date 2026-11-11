@@ -748,3 +748,27 @@ fn only_a_nib_on_the_paper_gestures() {
         assert!(!touches_paper(air), "{air:?} is not a nib on the paper");
     }
 }
+
+/// A continuous gesture's end is a gap, and the gap is short enough to feel like an end.
+///
+/// A pinch and a wheel deliver a stream of events with no final one, so the commit to the note waits for the
+/// stream to go quiet. The interval has to be longer than any gap *inside* a live gesture — a pinch at 120 Hz
+/// sends one every 8 ms — or a gesture would be committed, and its settings written, many times mid-pinch.
+/// That is the whole bug this constant exists to avoid: the write is a four-table SQLite transaction.
+#[test]
+fn a_gesture_settles_only_after_a_real_gap() {
+    use super::GESTURE_SETTLE_INTERVAL;
+
+    // A fast pinch: one event every 8 ms at 120 Hz.
+    let fastest_gap_between_events = Duration::from_millis(8);
+    assert!(
+        GESTURE_SETTLE_INTERVAL > fastest_gap_between_events * 5,
+        "the settle must not fire inside a live pinch: {GESTURE_SETTLE_INTERVAL:?}"
+    );
+
+    // And short enough that a reader who stops sees the number written before they look away.
+    assert!(
+        GESTURE_SETTLE_INTERVAL <= Duration::from_millis(200),
+        "a settled zoom should reach the note quickly: {GESTURE_SETTLE_INTERVAL:?}"
+    );
+}

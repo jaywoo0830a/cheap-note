@@ -63,13 +63,25 @@ pub mod chord {
     pub const MARKED: &str = "secondary-shift-b";
     /// The document's own table of contents.
     pub const CONTENTS: &str = "secondary-shift-o";
+    /// Show or hide the bar across the top of the window.
+    ///
+    /// **`⌘\` on macOS and `Ctrl+\` on Windows**, which is the same chord on both because the two platforms
+    /// already agree on it: it is the panel-and-sidebar toggle in Xcode, VS Code, Photoshop and Illustrator.
+    /// A key that already means "show or hide a strip of the interface" everywhere else is one this app does
+    /// not have to teach — which is the whole reason not to reach for a letter here. Every letter worth having
+    /// is taken (`B` marks, `R` turns, `O` opens, `S` saves, `M` measures), and `T`, the obvious one for
+    /// toolbar, is `Ctrl+Shift+T` on every browser there is.
+    ///
+    /// It is spelled `secondary` like every other chord, so `label` writes `⌘\` on a Mac and `Ctrl+\`
+    /// elsewhere from this one spec (see [`super::label`]).
+    pub const BAR: &str = "secondary-\\";
 
     /// Every chord above, for the test that none of them is misspelled.
     ///
     /// Test-only on purpose: the interface names these chords one at a time, and a list nothing reads
     /// would be a list that drifts out of date. Only a test reads it, so only a test gets it.
     #[cfg(test)]
-    pub const ALL: [&str; 12] = [
+    pub const ALL: [&str; 13] = [
         UNDO,
         REDO,
         REDO_ALT,
@@ -82,6 +94,7 @@ pub mod chord {
         MARK,
         MARKED,
         CONTENTS,
+        BAR,
     ];
 }
 
@@ -212,6 +225,8 @@ pub mod tooltip {
     /// `The document's own contents (Ctrl+Shift+O)`.
     pub static CONTENTS: LazyLock<String> =
         LazyLock::new(|| named("The document's own contents", chord::CONTENTS));
+    /// `Show or hide the bar (Ctrl+\)`.
+    pub static BAR: LazyLock<String> = LazyLock::new(|| named("Show or hide the bar", chord::BAR));
 
     /// The chord this platform spells redo with: `⇧⌘Z` on a Mac, `Ctrl+Y` everywhere else.
     ///

@@ -4058,6 +4058,14 @@ impl NoteApp {
             // contents is what a document is opened *by*, so the two chords sit on one key as the two
             // bookmark chords do. A document without one is answered in words (see [`Self::show_outline`]).
             "o" if keystroke.modifiers.shift => self.show_outline(cx),
+            // The bar, on the key the two platforms already agree means "show or hide a strip of the
+            // interface": `⌘\` on a Mac and `Ctrl+\` on Windows (see [`keys::chord::BAR`]). The *whole*
+            // toggle, not just the flag — hiding the bar gives the page the strip back, and the pen's
+            // ghost and the system pointer have to be told now rather than on the next frame (see
+            // [`Self::set_toolbar_shown`]).
+            "\\" if !keystroke.modifiers.shift => {
+                self.set_toolbar_shown(!self.settings.show_toolbar, cx)
+            }
             "n" => self.new_blank_sheet(cx),
             "o" => self.prompt_for_pdf(cx),
             "s" => self.save(cx),
@@ -4794,9 +4802,12 @@ impl NoteApp {
         // ghost is deliberately not one of them — it is the cursor, and a pen with none is not a state
         // anybody chose (see [`Self::pen_cursor`]).
         let switches = vec![
-            visibility_switch(
+            // The one switch with a chord, so the one that names it on hover: `⌘\` or `Ctrl+\`, the panel
+            // toggle both platforms already know (see [`keys::chord::BAR`]).
+            chorded_switch(
                 "show-bar",
                 "Bar",
+                keys::tooltip::BAR.as_str(),
                 self.settings.show_toolbar,
                 cx,
                 |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
@@ -6147,6 +6158,27 @@ fn visibility_switch(
         .checked(on)
         .label(label)
         .small()
+        .on_change(cx.listener(move |app, checked: &bool, _, cx| handler(app, *checked, cx)))
+}
+
+/// A visibility switch that also names its chord, for the one of them a key can reach.
+///
+/// The bar is the only switch here with a chord, so it is the only one that needs a tooltip: the others are
+/// pointers-only, and a tooltip that says nothing but their own label would be noise on hover. The text comes
+/// from [`keys::tooltip`], so the words and the key are written in the platform's own spelling.
+fn chorded_switch(
+    id: &'static str,
+    label: &'static str,
+    tooltip: &'static str,
+    on: bool,
+    cx: &mut Context<NoteApp>,
+    handler: impl Fn(&mut NoteApp, bool, &mut Context<NoteApp>) + 'static,
+) -> Switch {
+    Switch::new(id)
+        .checked(on)
+        .label(label)
+        .small()
+        .tooltip(tooltip)
         .on_change(cx.listener(move |app, checked: &bool, _, cx| handler(app, *checked, cx)))
 }
 

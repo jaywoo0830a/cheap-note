@@ -340,6 +340,7 @@ platform it is running on: `gpui` answers both questions.
 | `Ctrl+S` | `Save`, which writes the file a person carries rather than one more write into a note that is already written (§10) |
 | `Ctrl+M` | the measurement session, on the letter with nothing else to mean |
 | `Ctrl+Shift+C` | the palette at the pen: it opens under the nib, and the same chord puts it away — `C` for colour, on the chord every drawing app spells it with (§6, below) |
+| `Ctrl+\` | show or hide the bar: not a letter, because every letter worth having is taken (`B` marks, `R` turns, `O` opens, `S` saves, `M` measures) and `T` is `Ctrl+Shift+T` in every browser. `Ctrl+\` is already the panel toggle in Xcode, VS Code, Photoshop and Illustrator, so it is the one key that needs no teaching — and it is the same key on the Mac, `⌘\` |
 
 **The palette at the pen** is an overlay that takes the keyboard the way a *box* does rather than the way
 a screen does: while it is up the arrows walk its ring, `Enter` takes the colour the ring marks, `Escape`

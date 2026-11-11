@@ -95,6 +95,9 @@ fn a_chord_is_written_the_windows_way() {
     assert_eq!(label(chord::UNDO), "Ctrl+Z");
     assert_eq!(label(chord::PALETTE), "Ctrl+Shift+C");
     assert_eq!(label(chord::TURN_PAGES_CCW), "Ctrl+Alt+Shift+R");
+    // The same key the Mac writes, with the platform's own command key and its separator.
+    assert_eq!(label(chord::BAR), "Ctrl+\\");
+    assert_eq!(tooltip::BAR.as_str(), "Show or hide the bar (Ctrl+\\)");
     assert_eq!(tooltip::MARK.as_str(), "Bookmark this page (Ctrl+B)");
     assert_eq!(tooltip::REDO.as_str(), "Redo (Ctrl+Y)");
 }
@@ -106,6 +109,10 @@ fn a_chord_is_written_the_mac_way() {
     assert_eq!(label(chord::UNDO), "⌘Z");
     assert_eq!(label(chord::PALETTE), "⇧⌘C");
     assert_eq!(label(chord::TURN_PAGES_CCW), "⌥⇧⌘R");
+    // The bar's toggle, on the one key both platforms spell the same way: no shift, and the backslash
+    // itself — a spec left as `secondary-\` would come back unchanged and this would be the failing line.
+    assert_eq!(label(chord::BAR), "⌘\\");
+    assert_eq!(tooltip::BAR.as_str(), "Show or hide the bar (⌘\\)");
     assert_eq!(tooltip::MARK.as_str(), "Bookmark this page (⌘B)");
     assert_eq!(tooltip::REDO.as_str(), "Redo (⇧⌘Z)");
 }

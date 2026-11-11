@@ -309,13 +309,20 @@ fn distance_to_segment_squared(x: f32, y: f32, from: InkPoint, to: InkPoint) -> 
 /// straight edge. At 1:1 that is invisible — the spacing is under a pixel — but a zoom magnifies the
 /// line *and* the corner at the end of every piece, so a stroke of curves read at 8x is a chain of
 /// straight pieces. That is what "the ink wobbles when I zoom in" is made of, and cutting the pieces
-/// down to this length is what removes it: a straight edge shorter than a pixel cannot be told from
-/// the curve it stands in for.
+/// down to this length is what removes it.
 ///
 /// Measured in *window* pixels rather than the sheet's, because the zoom is what makes a piece
 /// visible: the same ink written at 1:1 and examined at 16x needs pieces sixteen times shorter in
 /// sheet coordinates to look the same.
-pub const FACET: f32 = 1.0;
+///
+/// **One and a half, and the error it costs is the reason.** A chord of length `f` standing in for an
+/// arc of radius `r` is off by `r(1 - cos(f/2r))`, which is at most `f²/8r` — for the tightest turn a
+/// pen makes, a 3-pixel radius, 1.5 gives 0.09 pixels and 2.0 gives 0.17. Both are under the
+/// antialiasing the edge is sampled with, so neither can be seen; at 1.0 the error was 0.04 and the
+/// geometry was a third larger than it needed to be. That third is not free: a page of writing is
+/// millions of corners, and every one of them is uploaded from the CPU and shaded by the GPU on every
+/// frame — 6.98 million vertices on one traced page, 80 MB of buffer, against 4.65 million.
+pub const FACET: f32 = 1.5;
 
 /// The most pieces one segment of a stroke may be cut into.
 ///

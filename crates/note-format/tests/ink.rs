@@ -305,3 +305,40 @@ fn polygon_area(points: &[[f32; 2]]) -> f32 {
 
     twice.abs() * 0.5
 }
+
+/// The straight pieces a stroke is cut into are short enough that the curve cannot be seen through them,
+/// and no shorter than that.
+///
+/// A chord of length `f` standing in for an arc of radius `r` is off by `r(1 - cos(f/2r))`, which is at
+/// most `f²/8r`. The threshold that matters is the antialiasing the edge is drawn with — a fraction of a
+/// pixel — because an error under it is an error nobody can see. This test states the bound the constant
+/// was chosen against, so that raising it later has to argue with the arithmetic rather than with a
+/// feeling: a page of writing is millions of corners and every one costs buffer and shading on every
+/// frame.
+#[test]
+fn a_facet_is_short_enough_to_hide_and_no_shorter() {
+    // The tightest turn a pen makes, in window pixels: a nib's own radius, and a small one.
+    let tightest = 3.0_f32;
+
+    // The error a chord of `FACET` makes against that arc: at most f²/8r.
+    let error = |facet: f32| facet * facet / (8.0 * tightest);
+
+    let chosen = error(note_format::ink::FACET);
+    assert!(
+        chosen < 0.25,
+        "a facet of {} is off by {chosen} px at the tightest turn, which can be seen",
+        note_format::ink::FACET
+    );
+
+    // And one pixel would be a third more geometry for an error a quarter of that — the trade the
+    // constant is not making.
+    let one_pixel = error(1.0);
+    assert!(
+        chosen > one_pixel,
+        "the facet is not coarser than a pixel, which would be the point of raising it"
+    );
+    assert!(
+        chosen < one_pixel * 4.0,
+        "and not so coarse that the error is four times a pixel's: {chosen} against {one_pixel}"
+    );
+}

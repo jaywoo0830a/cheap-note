@@ -4,11 +4,11 @@ use super::{
     bar_line, confirmed, file_label, file_stem, notch_in_pixels, page_of_write,
     page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face, palette_id,
     palette_in_hand, palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width,
-    scroll_amount, sheet_matches, spun, wheel_pan, wheel_zoom_factor, zoom_text, Confirmation,
-    PaletteGeometry, PalettePart, BAR_HEIGHT, PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING,
-    PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS,
-    PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL,
-    WHEEL_LINES_PER_NOTCH, WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
+    scroll_amount, sheet_matches, spun, touches_paper, wheel_pan, wheel_zoom_factor, zoom_text,
+    Confirmation, PaletteGeometry, PalettePart, BAR_HEIGHT, PALETTE_DISC_BOX, PALETTE_HUB,
+    PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS,
+    PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD,
+    PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH, WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
 use crate::ink::{Notes, Tool};
@@ -720,4 +720,31 @@ fn a_scroll_reads_the_same_way_for_every_gesture() {
 
     let pixels = scroll_amount(ScrollDelta::Pixels(point(px(1.5), px(4.0))));
     assert_eq!(pixels, (1.5, 4.0, true), "pixels are in pixels");
+}
+
+/// A pen in the air is not a pen on the paper, and the gestures are the difference.
+///
+/// A digitizer reports a hovering pen, and hovering is where the ghost cursor is drawn and nothing else. With
+/// a key held, a nib that is merely near the screen must not move the sheet — that was a real bug: the check
+/// named the rule in a comment and then let `Hover` through, so a hand resting over the display dragged the
+/// page around while the nib touched nothing.
+///
+/// `Down` begins a gesture and `Move` continues it; `Up` and `Cancel` end it. Everything else is air.
+#[test]
+fn only_a_nib_on_the_paper_gestures() {
+    use crate::input::Phase;
+
+    assert!(touches_paper(Phase::Down), "the nib came down");
+    assert!(touches_paper(Phase::Move), "the nib is down and moving");
+
+    for air in [
+        Phase::Hover,
+        Phase::Enter,
+        Phase::Idle,
+        Phase::Leave,
+        Phase::Up,
+        Phase::Cancel,
+    ] {
+        assert!(!touches_paper(air), "{air:?} is not a nib on the paper");
+    }
 }

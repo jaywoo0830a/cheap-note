@@ -654,10 +654,15 @@ fingers, with the sheet moving the way the *view* was pushed.
 
 **The pen's own two gestures take the nib off the paper.** With **space held**, a nib that is down moves the
 sheet instead of writing on it: the paper follows the hand exactly, and lifting either the pen or the key ends
-the gesture. With **option held**, the nib's vertical travel zooms — up is closer, down is further away —
-measured from where the nib went down, so a hand that wanders and comes back returns the sheet to the zoom it
-started at. Space wins when both are held, because a hand that is panning may rest on option without meaning to
-zoom.
+the gesture. With **option held** (`⌥` on macOS, `Alt` elsewhere), the nib's vertical travel zooms — up is
+closer, down is further away — measured from where the nib went down, so a hand that wanders and comes back
+returns the sheet to the zoom it started at. Space wins when both are held, because a hand that is panning may
+rest on option without meaning to zoom.
+
+**A nib in the air is not a nib on the paper.** A digitizer reports a hovering pen, and hovering is where the
+ghost cursor is drawn and nothing else: with a key held, a hand resting over the display does not move the
+sheet. Only `Down` and `Move` are contact — `Hover`, `Enter`, `Leave`, `Idle`, `Up` and `Cancel` are all air
+(see `touches_paper`).
 
 Either key ends its gesture when it is let go, and the nib goes back to writing from wherever it is: neither
 the pen nor the key has to be lifted and pressed again. A gesture never opens a stroke, so the ink already on

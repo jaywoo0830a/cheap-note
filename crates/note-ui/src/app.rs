@@ -1510,11 +1510,15 @@ impl NoteApp {
 
         let at = (last.pixel.x / self.scale, last.pixel.y / self.scale);
         let ended = matches!(last.phase, Phase::Up | Phase::Cancel);
+        // The nib is on the paper. A pen that is merely *above* the display is not gesturing: a hand resting
+        // over the screen with a key held would otherwise drag the sheet around while the nib touched nothing,
+        // which is the one thing a pen that hovers cannot do. See [`touches_paper`].
+        let touching = touches_paper(last.phase);
 
         if self.pen_mode.is_none() {
-            // A gesture starts on a nib that is down, below the bar: a key held while the pen hovers is not
-            // a gesture yet, and one held over the toolbar is a press on a control.
-            if ended || at.1 < self.bar_edge() {
+            // A gesture starts on a nib that is touching, below the bar: a key held while the pen hovers is not
+            // a gesture at all, and one held over the toolbar is a press on a control.
+            if !touching || at.1 < self.bar_edge() {
                 return false;
             }
         } else if self.pen_mode.is_some_and(|mode| mode.mode != gesture) {
@@ -1522,6 +1526,11 @@ impl NoteApp {
             // now, rather than at a place from the gesture before.
             self.pen_mode = None;
             return true;
+        } else if !touching && !ended {
+            // A gesture already in play, and the nib has come off the paper without a `Up` — a hover that
+            // followed a touch. The gesture is over; the ink is not, because none was laid.
+            self.pen_mode = None;
+            return false;
         }
 
         let mode = *self.pen_mode.get_or_insert(PenGesture {
@@ -5988,6 +5997,20 @@ fn parse_zoom(text: &str) -> Option<f32> {
 /// are a quarter of the way at a time, and the two fits land wherever the window puts them.
 fn zoom_text(zoom: f32) -> String {
     format!("{:.0}%", zoom * 100.0)
+}
+
+/// Whether a reading's phase means the nib is *on* the paper rather than above it.
+///
+/// The one distinction the pen's gestures rest on. A digitizer reports a pen that is hovering, and a hover is
+/// where the ghost cursor is drawn and nothing else: a hand resting over the screen with a key held must not
+/// drag the sheet, or the sheet would follow a nib that is touching nothing.
+///
+/// `Down` is the first reading with the nib down and `Move` is every one after it (see [`Phase`]); `Up` and
+/// `Cancel` end a reading rather than begin one, and are answered before this is asked.
+fn touches_paper(phase: crate::input::Phase) -> bool {
+    use crate::input::Phase;
+
+    matches!(phase, Phase::Down | Phase::Move)
 }
 
 /// A scroll's delta as (x, y, whether it is in pixels rather than lines).

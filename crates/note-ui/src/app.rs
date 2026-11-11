@@ -290,6 +290,16 @@ const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 /// the time a hand takes to leave the trackpad.
 const GESTURE_SETTLE_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How long a zoom has to be quiet before the detail rung it asked for is built.
+///
+/// Shorter than [`GESTURE_SETTLE_INTERVAL`], because the two answer different questions. That one waits
+/// for a gesture to *end* so a note is written once; this one waits for a gap between two events, so a
+/// pinch that crossed a rung stops asking and the build lands in the pause rather than between two
+/// readings. Two frames is a real gap at any pointer rate — a 120 Hz digitizer sends one every 8 ms — and
+/// a pen that is still moving keeps the old rung, which differs from the new one by under a quarter of a
+/// pixel (see `FACET`).
+const DETAIL_SETTLE_INTERVAL: Duration = Duration::from_millis(32);
+
 /// How long the pen has to be quiet before a page is rendered for it.
 const PDF_QUIET_INTERVAL: Duration = Duration::from_millis(120);
 
@@ -825,6 +835,12 @@ pub struct NoteApp {
     /// move the view and cleared by the frame that spends them, so a gesture draw one frame per changed wake
     /// rather than one per reading.
     view_moved: bool,
+    /// Whether the page in front has been asked for a detail rung it is not drawn at yet.
+    ///
+    /// A zoom asks for one from `render` and the pump builds it between frames (see the note at the
+    /// `set_zoom` call): a rung is 23.7 ms on a page of thousands of strokes, and a frame cannot pay it.
+    /// Cleared when the build happens, so a still page asks for nothing.
+    detail_owed: bool,
     /// When the last continuous zoom event arrived, or `None` when no zoom gesture is in flight.
     ///
     /// A pinch and a wheel are *streams*: the events say where the zoom is now, and the platform does not say
@@ -1061,6 +1077,7 @@ impl NoteApp {
             scroll_waiting: (0.0, 0.0),
             scroll_asked: false,
             view_moved: false,
+            detail_owed: false,
             zoom_settles_at: None,
             pans: HashMap::new(),
             sheet: Sheet::default(),
@@ -1410,6 +1427,25 @@ impl NoteApp {
 
             let alive = this.update(cx, |app, cx| {
                 let now = Instant::now();
+
+                // The detail a zoom asked for, built between frames rather than in one. A rung is 23.7 ms
+                // on a page of 8,182 strokes — three and a half frames at 144 Hz (see
+                // `measures_the_rung_costs`) — so the frame that crossed it records the request and this
+                // pays for it. Waited for until the gesture has stopped talking, because a pinch still in
+                // flight would ask for the next rung before this one was finished with; the page draws at
+                // the rung it already has until then, which differs by under a quarter of a pixel.
+                if app.detail_owed
+                    && app.zoom_settles_at.is_none_or(|last| {
+                        now.saturating_duration_since(last) >= DETAIL_SETTLE_INTERVAL
+                    })
+                {
+                    app.detail_owed = !app.ink.build_detail();
+                    if !app.detail_owed {
+                        app.ink_revision += 1;
+                        app.canvas_dirty = true;
+                        cx.notify();
+                    }
+                }
 
                 // A zoom gesture that has stopped talking is a zoom that has finished: commit it to the note
                 // and ask for the frame that shows the new number. This is the write a pinch or a wheel must
@@ -5559,8 +5595,14 @@ impl Render for NoteApp {
         // as the stroke, so the outlines are rebuilt when the *detail* rung the zoom asks for moves and not
         // on every frame of a pinch. That also tells the canvas layer its geometry is stale, without any
         // stroke's identity having changed (see [`crate::ink_layer::render`] and `InkDocument::set_zoom`).
+        //
+        // What is asked for here and what is *built* here are different things on purpose: a rung costs
+        // 23.7 ms on the page this was measured against, which is three and a half frames at 144 Hz, and
+        // paying it inside the frame that renders is the hitch a pinch shows. The request is recorded, the
+        // page keeps drawing at the detail it already has, and the pump builds the new rung between frames
+        // (`housekeeping`, via `InkDocument::build_detail`).
         if self.ink.set_zoom(sheet.zoom) {
-            self.ink_revision += 1;
+            self.detail_owed = true;
         }
 
         let page_size = sheet.drawn();

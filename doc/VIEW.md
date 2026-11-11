@@ -805,6 +805,32 @@ What that leaves, if a frame ever does drop under load, is in the fragments: the
 and how much of the window the page texture has to cover. None of them has been touched, because none of
 them had to be.
 
+### The one place a zoom did hitch, and why it was not the easing
+
+A pinch on a long page stepped rather than glided, and the step was not in the zoom — that is a continuous
+`f32` and `pen_zoom_factor` is a smooth exponential. It was in the **detail**: a stroke's outline is cut for
+the rung the zoom falls in (`detail_zoom`, a factor of 1.5), and crossing a rung re-derived every stroke on
+the page. Measured on the page of 8,182 strokes, one rung was **23.7 ms** — three and a half frames at
+144 Hz — and it was done inside `render`, so the frame that crossed the rung paid for all of it. A nib
+travelling 117 pixels crosses a rung, so the hitch came round every 117 pixels of a pinch.
+
+The tempting answer was to ease the zoom, and it is the wrong one twice over. The zoom is already
+continuous, so there is nothing to smooth; and easing would make the hand *dwell* near a boundary — the
+hitch would come round more often and be easier to feel. The step is information, not a rough edge: a
+different rung is a different number of pieces per curve, and no amount of easing changes how many pieces
+there are.
+
+What was done instead splits the work across the seam it always belonged on. `InkDocument::request_detail`
+records the rung a frame wants and `build_detail` does the work; the frame calls the first, the housekeeping
+pump calls the second once the gesture has been quiet for `DETAIL_SETTLE_INTERVAL`. The page keeps drawing
+the rung it has until then — between rungs that is under a quarter of a pixel of chord error, which is
+[`FACET`]'s own bound and invisible under four samples a pixel. Measured after the split, the frame pays
+**0.0 ns** for a rung and the pump pays the 24 ms between frames.
+
+Live, on that page: **144 draws/s with the ink at 2.25 M vertices** while rungs were being rebuilt three
+times a second. The number to remember is that a rung is not a frame's work, and this is the seam that says
+so.
+
 ## 12. The numbers, in one table
 
 | Constant | Value | What it decides |
@@ -836,6 +862,8 @@ them had to be.
 | `PAGE_SHADOW` | three steps | the spread, the offset beyond the spread, and the colour of each of the three rectangles a sheet's shadow is made of, widest and faintest first |
 | `FACET` | 2.0 window px | how long a straight piece of a stroke may be: the chord error at a pen's tightest turn is 0.17 px, under the quarter-of-a-pixel grid four samples a pixel resolve, so the curve cannot be seen through it. Raising it from 1 to 2 halved the geometry (6.98 M vertices to 3.49 M on a traced page) and the buffer with it — worth having, but it is not where a dropped frame comes from (§11) |
 | `SAMPLES` | 4 | what a pixel's colour is sampled at, and the one rendering constant that would matter if a frame ever did drop: multisampling is the frame's real cost, and it is 4 because Metal has no analytic antialiasing to give a polygon (Windows fills with coverage instead) |
+| `DETAIL_SETTLE_INTERVAL` | 32 ms | how long a zoom must be quiet before the detail rung it asked for is built: two frames at any pointer rate, and the pause that keeps a 23.7 ms rebuild out of the frame that crossed the rung (§11) |
+| `RUNG` (`detail_zoom`) | 1.5 | the factor between detail rungs. Crossing one re-derives every stroke on the page, so the step size is a trade between how often that happens and how far the drawn detail can lag the zoom — and at 1.5 the lag is under a quarter of a pixel |
 
 Every `PALETTE_*` length above is a *design* number, in the 96-DPI logical pixels a Windows display
 measures in. The palette is drawn at those numbers times `Platform::unit_scale` — `1.0` on Windows and

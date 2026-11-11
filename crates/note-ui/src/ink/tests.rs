@@ -2107,6 +2107,121 @@ fn measures_the_ink_costs() {
     );
 }
 
+/// A zoom crossing a rung boundary rebuilds every stroke on the page, and that rebuild is the whole
+/// of what a pinch's frame pays at the moment it crosses.
+///
+/// It is measured because it is the one cost a zoom cannot spread across frames cheaply: the rung moves
+/// in steps, so the step lands in whichever frame the hand happens to cross it in — and a page of eight
+/// thousand strokes is a page whose crossing someone would feel. The number is what decided to take the
+/// rebuild out of the frame that crosses it: 23.7 ms is three and a half frames at 144 Hz, so
+/// `request_detail` records the ask and the pump builds it between frames.
+///
+/// Run `cargo test --release -- --nocapture measures_the_rung_costs` for the numbers.
+#[test]
+fn measures_the_rung_costs() {
+    eprintln!("\n── a zoom rung, measured ──────────────────────────────────────");
+
+    for count in [500usize, 2_000, 8_182] {
+        // The page as written: every stroke is already detailed for the zoom it was written at.
+        let mut page = written_page(count);
+        let at_one = page.finished()[0].outline.len();
+
+        // Two rungs a step apart, alternated so that every call is a real rebuild and never a cache
+        // hit — `detail_zoom` rounds up, so 1.0 and 2.25 are two different rungs.
+        let rounds = 6u32;
+        let started = std::time::Instant::now();
+        for step in 0..rounds {
+            let zoom = if step % 2 == 0 { 2.25 } else { 1.0 };
+            page.set_zoom(zoom);
+        }
+        let elapsed = started.elapsed() / rounds;
+
+        eprintln!(
+            "  {count:>5} strokes, one rung            {elapsed:>9.1?}   ({} vertices at 1:1)",
+            at_one / 2
+        );
+    }
+
+    // ── What a *frame* now pays for that rung ────────────────────────────
+    //
+    // The request is what `render` does; the build is what the pump does. The first must be free — it
+    // is a comparison and a store — and the second is the whole of the 23.7 ms above. That split is
+    // the fix, so it is measured rather than asserted about.
+    let mut page = written_page(8_182);
+    let rounds = 20u32;
+    let started = std::time::Instant::now();
+    for step in 0..rounds {
+        let zoom = if step % 2 == 0 { 2.25 } else { 1.0 };
+        std::hint::black_box(page.request_detail(zoom));
+    }
+    let requested = started.elapsed() / rounds;
+
+    eprintln!("  ...what a frame pays (the request)   {requested:>9.1?}");
+    eprintln!("───────────────────────────────────────────────────────────────\n");
+
+    assert!(
+        requested.as_micros() < 1_000 || cfg!(debug_assertions),
+        "asking for a rung took {requested:?}, which is not free"
+    );
+}
+
+/// A zoom's new detail is asked for by the frame and built by the pump, and the page keeps drawing the
+/// detail it has until then.
+///
+/// This is the whole of why a pinch on a long page is smooth: the frame that crosses a rung used to
+/// rebuild every stroke inside itself — 23.7 ms on a page of 8,182 — and now it records the ask.
+#[test]
+fn a_zoom_asks_for_a_rung_and_the_pump_builds_it() {
+    let mut page = written_page(40);
+    let at_one = page.finished()[0].outline.len();
+
+    // A page the pen wrote and nothing has drawn yet: its strokes were closed at 1:1 (see `Stroke::close`)
+    // but the page has never been *detailed*, so the first ask is real work.
+    assert_eq!(page.detail().0, None, "nothing has detailed this page yet");
+
+    // The frame asks, and pays nothing but the ask: the page is still drawn at the detail it had.
+    assert!(page.request_detail(8.0), "8x is a new rung");
+    assert_eq!(
+        page.finished()[0].outline.len(),
+        at_one,
+        "the frame that asked must not have rebuilt anything"
+    );
+    assert_eq!(
+        page.detail(),
+        (None, Some(detail_zoom(8.0))),
+        "not detailed yet, and asked for 8x"
+    );
+
+    // Asking again for the same rung is free: a pinch that stays inside a rung owes nothing.
+    assert!(!page.request_detail(8.2), "the same rung is not a new ask");
+
+    // The pump builds it, and the page is now drawn for what was asked.
+    assert!(page.build_detail(), "the ask was owed");
+    assert_eq!(
+        page.detail(),
+        (Some(detail_zoom(8.0)), Some(detail_zoom(8.0))),
+        "drawn at the rung asked for"
+    );
+
+    // And nothing is owed any more, so a still page asks the pump for nothing.
+    assert!(!page.build_detail(), "there is nothing left to build");
+
+    // A second zoom to a different rung is the case that matters for a pinch: the page keeps drawing
+    // 8x while 1:1 is asked for, which is the whole point of not building in the frame.
+    let at_eight = page.finished()[0].outline.len();
+    assert!(page.request_detail(1.0), "1:1 is another rung");
+    assert_eq!(
+        page.finished()[0].outline.len(),
+        at_eight,
+        "still drawn at 8x while 1:1 is built"
+    );
+    assert_eq!(
+        page.detail(),
+        (Some(detail_zoom(8.0)), Some(detail_zoom(1.0))),
+        "drawn at one rung, asked for another"
+    );
+}
+
 /// A straight stroke written from one point to another, as one batch.
 ///
 /// Laid down with the pen, so the tests below start from a page of ordinary writing: the lasso's job is

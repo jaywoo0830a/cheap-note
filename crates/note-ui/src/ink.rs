@@ -471,6 +471,12 @@ pub struct InkDocument {
     /// rounded up to a rung first, and a frame whose zoom falls in the rung the page is already drawn
     /// for pays nothing at all. `None` until something has asked (see [`Self::set_zoom`]).
     detailed_at: Option<f32>,
+    /// The detail a frame has asked for, which `detailed_at` becomes once the build is given time.
+    ///
+    /// Separate from `detailed_at` because the two are different questions: a page drawn for one rung
+    /// while it has been asked for another is the *whole point* of the split — the drawing is what the
+    /// reader sees now, and the build is what the pump owes it (see [`Self::request_detail`]).
+    wanted_at: Option<f32>,
     /// What the model has done since the app started.
     stats: InkStats,
     /// Which strokes are in hand, one flag per stroke in [`Self::finished`], in the same order.
@@ -507,6 +513,7 @@ impl Default for InkDocument {
             last_sample: None,
             last_erase: None,
             detailed_at: None,
+            wanted_at: None,
             stats: InkStats::default(),
             selected: Arc::new(Vec::new()),
             lasso: None,
@@ -762,30 +769,66 @@ impl InkDocument {
             // refines them, and the frame that draws it is what knows how large that is: see
             // [`Self::set_zoom`].
             detailed_at: Some(detail_zoom(1.0)),
+            wanted_at: Some(detail_zoom(1.0)),
             ..InkDocument::default()
         }
     }
 
-    /// Rebuilds the derived geometry of the page for a sheet drawn at `zoom`, returning whether
-    /// anything was rebuilt.
+    /// The detail this page is drawn for, and the detail it has been asked for.
     ///
-    /// The detail a page is built for is [`detail_of`]'s, from the rung the zoom falls in.
+    /// The pair is what tells "drawn at the rung the zoom wants" from "drawn at the rung it had while
+    /// the pump is told what to build" — see [`Self::request_detail`].
+    ///
+    /// Read by this module's tests, which is why the library build sees it as unused.
+    #[allow(dead_code)]
+    pub fn detail(&self) -> (Option<f32>, Option<f32>) {
+        (self.detailed_at, self.wanted_at)
+    }
+
+    /// Asks for the derived geometry to be rebuilt for a sheet drawn at `zoom`, returning whether that
+    /// is a rebuild the page does not already have.
+    ///
+    /// The detail a page is built for is [`detail_zoom`]'s, from the rung the zoom falls in.
     ///
     /// A stroke's outline depends on the zoom it is being drawn at: not its *shape*, which depends on
     /// its points alone, but how finely the curves in it are cut (see [`FACET`]). A page of ink is far
     /// too much to re-derive per frame — and a zoom *is* per frame, while a pinch is on — so what is
-    /// tracked is the detail rather than the zoom: it moves in rungs (see [`detail_zoom`]), so a
-    /// gesture across the whole range costs a handful of rebuilds, and each one happens on the frame
-    /// the rung changes rather than on every frame in between.
+    /// tracked is the detail rather than the zoom: it moves in rungs, and a gesture across the whole
+    /// range asks for a handful of rebuilds.
+    ///
+    /// **Nothing is rebuilt here** — that is [`Self::build_detail`], and the split is what keeps a
+    /// pinch smooth. Crossing a rung costs 23.7 ms on a page of 8,182 strokes (measured, `cargo test
+    /// --release -- --nocapture measures_the_rung_costs`), which is three and a half frames at 144 Hz:
+    /// done here, in the frame that renders, it is a hitch every rung. Done after, the page keeps the
+    /// rung it has until the pump can afford the new one, and the only thing that changes in between
+    /// is how finely a curve is cut — under a quarter of a pixel, by [`FACET`]'s arithmetic.
     ///
     /// What it does not touch is the ink. The points, the colours, and what the eraser hit-tests are
-    /// exactly what was written; the outline and the bounds are derived from them, and derived again
-    /// whenever the detail they were built for stops being the one on screen.
+    /// exactly what was written; the outline and the bounds are derived from them.
     ///
     /// The stroke under the nib is not this page's business: a frame closes the stroke it is drawing
     /// itself, at the zoom it is drawing (see [`Stroke::close_live`]).
-    pub fn set_zoom(&mut self, zoom: f32) -> bool {
+    pub fn request_detail(&mut self, zoom: f32) -> bool {
         let detail = detail_zoom(zoom);
+
+        if self.wanted_at == Some(detail) {
+            return false;
+        }
+
+        self.wanted_at = Some(detail);
+        self.detailed_at != Some(detail)
+    }
+
+    /// Rebuilds the derived geometry for the detail [`Self::request_detail`] asked for, returning
+    /// whether anything was rebuilt.
+    ///
+    /// The expensive half, and deliberately not called from a frame: its caller is the housekeeping
+    /// pump, which spends a window rather than a frame budget.
+    pub fn build_detail(&mut self) -> bool {
+        let Some(detail) = self.wanted_at else {
+            return false;
+        };
+
         if self.detailed_at == Some(detail) {
             return false;
         }
@@ -796,6 +839,14 @@ impl InkDocument {
 
         self.detailed_at = Some(detail);
         true
+    }
+
+    /// Rebuilds for `zoom` at once, which is what a page read or turned to does before anything draws
+    /// it: there is no pinch to keep smooth, and a page nobody has seen yet has no earlier detail worth
+    /// keeping.
+    pub fn set_zoom(&mut self, zoom: f32) -> bool {
+        self.request_detail(zoom);
+        self.build_detail()
     }
 
     /// Feeds a batch of pen readings to the model.
@@ -1647,9 +1698,32 @@ impl Notes {
     /// whether a frame is worth scheduling. The detail moves in rungs (see
     /// [`InkDocument::set_zoom`]), so a pinch or a wheel across the whole zoom range costs a handful
     /// of rebuilds rather than one per frame — and none at all while the zoom stays in one rung.
+    /// Asks for the page to be detailed for `zoom`, and says whether that asked for a rebuild it has
+    /// not done yet.
+    ///
+    /// **The rebuild is not done here.** Detail is a rung (see [`detail_zoom`]), and crossing one means
+    /// re-deriving every stroke on the page: measured at 23.7 ms on a page of 8,182 strokes, which is
+    /// three and a half 144 Hz frames. This is called from `render`, so doing the work here put all of
+    /// it inside one frame — the frame that crossed the rung — and that is the hitch a pinch shows: the
+    /// zoom itself is continuous, and the *detail* steps. The page is drawn at the detail it already has
+    /// until [`Self::build_detail`] is given the time, which is at most one rung's worth of slightly
+    /// coarser or finer pieces and never visible as a pause.
+    ///
+    /// `true` means the page is now drawn for a rung other than the one asked for and wants
+    /// [`Self::build_detail`]. `false` means the rung did not move (or moved back to what is already
+    /// built), so there is nothing to borrow a frame for.
     pub fn set_zoom(&mut self, zoom: f32) -> bool {
         self.zoom = zoom;
-        self.current.set_zoom(zoom)
+        self.current.request_detail(zoom)
+    }
+
+    /// Builds the detail [`Self::set_zoom`] asked for, if it is not the detail the page already has.
+    ///
+    /// Returns whether anything was rebuilt. This is the expensive half, deliberately outside a frame:
+    /// the caller is the housekeeping pump, which has a window to spend and can be told to wait when
+    /// the hand is in the middle of a gesture.
+    pub fn build_detail(&mut self) -> bool {
+        self.current.build_detail()
     }
 
     /// Moves to a page, taking the ink of the page being left behind with it.

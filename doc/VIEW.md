@@ -690,7 +690,7 @@ digitizer never reports a still hand as still: the nib wanders by a fraction of 
 machine with a spinning fan shakes the whole tablet, which the pen reports as movement. Both gestures make that
 worse — a pan multiplies it by `PEN_PAN_GAIN`, and a zoom turns it into a change of the sheet's size — so a page
 held still visibly shivers and a zoom breathes. The correction is a threshold on the reading
-(`PEN_JITTER_SPAN`, 0.2 px): a reading within that distance of where the hand has settled is the tremor and
+(`PEN_JITTER_SPAN`, 0.5 px): a reading within that distance of where the hand has settled is the tremor and
 answers the settled point, and one beyond it is the hand and is answered *itself*, at once.
 
 It is deliberately **not a low-pass filter**. Averaging the last readings would smooth the tremor and lag the nib
@@ -733,7 +733,7 @@ The numbers behind that are all *derived* rather than picked:
 | a trackpad's notch | 96 px | `WHEEL_LINES_PER_NOTCH` × `WHEEL_LINE_HEIGHT` — the distance that asks for what a notch asks for. Without it the pixel path zooms three times faster per gesture than the line path, and it *was* three times too fast the first time this was written |
 | `PEN_ZOOM_TRAVEL` | 200 px | the nib's travel for a doubling, at any zoom: a little over half a finger's movement, and shorter than a wheel's 298 — a hand on a pen has finer control than a wheel being spun |
 | `PEN_PAN_GAIN` | 2.0 | how far the sheet moves per pixel the nib travels: a hand has one screen's travel in it and a page is often longer, so 1:1 would make a long page unreachable without lifting the pen |
-| `PEN_JITTER_SPAN` | 0.2 px | what a gesture treats as the hand moving: readings under it are the digitizer's own tremor (a resting hand, a spinning fan) and are ignored, so a page held still does not shiver. Far below what a hand can aim at, so nothing meant is lost, and it is a threshold rather than an average so there is no lag |
+| `PEN_JITTER_SPAN` | 0.5 px | what a gesture treats as the hand moving: readings under it are the digitizer's own tremor (a resting hand, a spinning fan) and are ignored, so a page held still does not shiver. Chosen against the hardware rather than estimated: two tenths still shivered under a spinning fan, and half a pixel is below what a hand can aim at, so nothing meant is lost. A threshold rather than an average, so there is no lag |
 | pan settle | once, at gesture end | when a pen pan is clamped inside the layout's bounds. Never mid-gesture: a clamp discards where the hand is and no later reading can recover it, because each is measured from the gesture's origin — measured at 500 px of hand travel with the paper motionless (§9). The wheel's rule is the opposite one, and rightly: a wheel accumulates steps, a nib names a place |
 
 Two notches are the step applied **twice**, not twice the step, so a fast roll zooms smoothly instead of in

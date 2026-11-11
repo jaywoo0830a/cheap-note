@@ -150,13 +150,16 @@ pub const PEN_PAN_GAIN: f32 = 2.0;
 /// shivers — and during a zoom, where the factor is an exponent of the travel, a tenth of a pixel of jitter
 /// is a tenth of a pixel of breathing in the sheet's size.
 ///
-/// **Two tenths of a pixel** is the number this was tuned to. It is far below what a hand can aim at — a nib
-/// is about a millimetre wide, and a fifth of a pixel is a tiny fraction of that on the glass — so nothing a
-/// reader means to do is lost, while the reading-to-reading noise a fan puts into a still hand sits under it.
-/// It is a *threshold on the reading*, not a dead zone on the gesture: the nib is compared with where the
-/// hand has settled rather than with the last raw reading, so a slow deliberate drift is followed exactly and
-/// only the chatter is held back (see [`PenJitter`]).
-pub const PEN_JITTER_SPAN: f32 = 0.2;
+/// **Half a pixel** is the number this was tuned to, and the tuning came from the hardware rather than from an
+/// estimate: at two tenths a fan-fed tablet still shivered through the correction, and half a pixel is nothing
+/// a hand can aim at — a nib is about a millimetre wide, and half a pixel is a speck of it on the glass — so
+/// nothing a reader means to do is lost. It is a *threshold on the reading*, not a dead zone on the gesture:
+/// the nib is compared with where the hand has settled rather than with the last raw reading, so a slow
+/// deliberate drift is followed exactly and only the chatter is held back (see [`PenJitter`]).
+///
+/// Raising it further trades fidelity for calm at a visible rate: past a pixel a deliberate slow nudge starts
+/// to feel stuck, because the distance it is held back by is one the eye can see.
+pub const PEN_JITTER_SPAN: f32 = 0.5;
 
 /// What a pen's position is reported as, with the hand's own trembling taken out.
 ///

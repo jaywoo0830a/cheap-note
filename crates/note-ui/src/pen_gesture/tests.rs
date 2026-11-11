@@ -79,16 +79,27 @@ fn a_slow_drift_is_followed_within_one_span() {
     let mut jitter = PenJitter::new();
     jitter.at((0.0, 0.0));
 
-    // Ten steps of a tenth of a pixel each: a hand moving slowly, and every step under the span.
+    // A drift of a tenth of a pixel a step, run far enough that the whole of it passes **through** the span.
+    // The settle point moves with the hand, so a creep the filter held back has to be released: if it were
+    // pinned to the gesture's origin, this hand would never move at all — every reading is under the span
+    // from the origin.
     let mut last = (0.0, 0.0);
-    for step in 1..=10 {
+    let steps = ((PEN_JITTER_SPAN * 3.0) / 0.1).ceil() as i32;
+    for step in 1..=steps {
         let at = (step as f32 * 0.1, 0.0);
         last = jitter.at(at);
     }
 
+    let creeped = steps as f32 * 0.1;
     assert!(
-        (last.0 - 1.0).abs() <= PEN_JITTER_SPAN,
-        "a drift of a pixel answered {last:?}"
+        creeped > PEN_JITTER_SPAN,
+        "the drift has to pass the span for this to test anything: {creeped}"
+    );
+
+    // Within one span of where the hand actually is — held back, but never stuck.
+    assert!(
+        (creeped - last.0) <= PEN_JITTER_SPAN,
+        "a drift of {creeped} px answered {last:?}"
     );
     assert!(last.0 > 0.0, "a slow drift was held at the start: {last:?}");
 }

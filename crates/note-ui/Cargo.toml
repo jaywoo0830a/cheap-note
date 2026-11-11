@@ -22,6 +22,19 @@ note-format = { path = "../note-format" }
 # itself. On Windows, macOS and Linux the platform crates behind it choose the backend.
 gpui-kit = "=0.9.0"
 
+# Which keys are held, asked of the operating system rather than of this window's keyboard.
+#
+# The pen's own gestures depend on a key that is down *now* — space held over a nib that is already on the
+# paper — and a window only hears the keyboard while it has focus. A modifier that the reader pressed before
+# clicking back into the app would otherwise be invisible for the first frame, which is exactly the frame a
+# stroke starts on. `DeviceState::query_keymap` answers that question directly on Windows, macOS and Linux.
+#
+# It is *held* rather than listened to: there is no event loop here, no thread, and no tap. On macOS the
+# answer comes through `macos-accessibility-client`, so a build without that permission gets an empty list
+# rather than an error — which reads as "no key is held", the behaviour this app had before there were pen
+# gestures at all.
+device_query = "4"
+
 # Serialisable state of the app's own: the index of what has been opened (see `src/recent.rs`) and
 # the bundled palette (see `src/theme.rs`). A *note*'s JSON — its page list and its settings — is
 # serialised by `note-format`, which pins the same versions.

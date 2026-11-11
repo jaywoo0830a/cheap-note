@@ -652,18 +652,22 @@ delivered as when the platform sends it as a wheel rather than as a gesture. Wit
 the sheet, which is what a two-finger drag is asking for. A pinch zooms about the point between the
 fingers, with the sheet moving the way the *view* was pushed.
 
-**The option key zooms a drag**, about the window's centre: a two-finger drag up is closer and down is
-further away. That is the same zoom as the `Ctrl` chord by a second route, so it obeys the zoom lock and
-settles into the note's setting the same way; the horizontal part of the drag is dropped rather than
-panned, because a gesture that zoomed on one axis and panned on the other would answer a diagonal drag with
-two things at once. It is on the centre and not the pointer because it is made with the hand that is not
-holding the pen, over a trackpad the pointer is nowhere near.
+**The pen's own two gestures take the nib off the paper.** With **space held**, a nib that is down moves the
+sheet instead of writing on it: the paper follows the hand exactly, and lifting either the pen or the key ends
+the gesture. With **option held**, the nib's vertical travel zooms — up is closer, down is further away —
+measured from where the nib went down, so a hand that wanders and comes back returns the sheet to the zoom it
+started at. Space wins when both are held, because a hand that is panning may rest on option without meaning to
+zoom.
 
-**Space held makes a drag a pan that stays one**, even with option down. A two-finger drag is already a
-pan, so the key adds nothing a trackpad could not do — it exists for the precedence: a reader who is
-panning can put their other hand on option without the gesture turning into a zoom under them. The three
-are decided in one place, before anything moves: the command chord first, then option with space not held,
-and a pan otherwise.
+Either key ends its gesture when it is let go, and the nib goes back to writing from wherever it is: neither
+the pen nor the key has to be lifted and pressed again. A gesture never opens a stroke, so the ink already on
+the paper is never disturbed, and a gesture that begins over the bar is not a gesture at all — the bar is where
+presses belong to controls.
+
+The keys are read from the operating system rather than from the window's keyboard (`device_query`), because
+the rule is *"this key is down while the nib is on the paper"*, and the nib is on the paper for as long as the
+hand is writing — which is not the same as this window having focus. It is a query, not a listener: no thread,
+no event loop, no system-wide tap.
 
 The numbers behind that are all *derived* rather than picked:
 
@@ -673,6 +677,7 @@ The numbers behind that are all *derived* rather than picked:
 | `WHEEL_LINES_PER_NOTCH` | 3 | GPUI scales a wheel notch by the system's "lines to scroll per notch" setting, which is three on a machine at its defaults, so a notch of a *real* wheel reaches the app as three lines. Assuming it here is what makes one notch zoom like one press of the button. A machine set differently zooms proportionally faster or slower per notch — a small, self-consistent difference, and measuring it would mean reading a system setting this app has no API for |
 | `WHEEL_LINE_HEIGHT` | 32 logical px | the platform does not say what a line is: Windows' notion is a fraction of a "page" whose size comes from the mouse settings, and 32 px lands within a few pixels of it at the defaults |
 | a trackpad's notch | 96 px | `WHEEL_LINES_PER_NOTCH` × `WHEEL_LINE_HEIGHT` — the distance that asks for what a notch asks for. Without it the pixel path zooms three times faster per gesture than the line path, and it *was* three times too fast the first time this was written |
+| `PEN_ZOOM_PER_PIXEL` | 1.0023132 | the pen's zoom rate: `2^(1/300)`, so 300 logical pixels of vertical travel is one doubling. A wheel is `1.25^(1/96)`, which is a doubling every 298 pixels — the two are close by construction, and the pen is deliberately the slower of them, because a hand moving a pen wants the sheet to follow it rather than to be flung across a page by a small correction |
 
 Two notches are the step applied **twice**, not twice the step, so a fast roll zooms smoothly instead of in
 jumps, and the result is clamped, because one enormous delta from a driver should not take the sheet from

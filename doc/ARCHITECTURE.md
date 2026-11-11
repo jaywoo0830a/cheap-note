@@ -415,6 +415,7 @@ the seam the platforms implement.
 | `ink` | readings in, strokes out: edges, pointer identity, resampling, width, the lasso's selection |
 | `history` | what an edit *is* (apply and revert), a page's history, and the bytes the note's log holds |
 | `cursor` | the ghost's shape: where the pen is, and how it leans |
+| `pen_gesture` | what a held key makes the pen do: space pans the sheet, option zooms it |
 | **What is written on** | |
 | `canvas` | the sheet: its size (physical), its colour, its ruling |
 | `view` | zoom, the two fits, and where the sheet sits in the window |

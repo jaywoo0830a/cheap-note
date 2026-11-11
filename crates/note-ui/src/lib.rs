@@ -24,6 +24,7 @@
 //! | [`input`]   | one pen reading in the app's own terms, and the queue it arrives through |
 //! | [`platform`]| the seam: what a platform lends the view                          |
 //! | `keys`      | the chords, and how this platform writes them (`Ctrl+Z`, `⌘Z`)     |
+//! | [`pen_gesture`] | what a held key makes the pen do: space pans, option zooms      |
 //! | [`ink`]     | readings to strokes: edges, resampling, width, erasing             |
 //! | [`canvas`]  | the sheet's size, colour and ruling                                |
 //! | [`ink_layer`] | the canvas *description*: what the surface is asked to paint     |
@@ -92,6 +93,7 @@ mod outline;
 mod pages;
 mod pdf;
 mod pdfium;
+mod pen_gesture;
 mod recent;
 mod settings;
 mod status_log;

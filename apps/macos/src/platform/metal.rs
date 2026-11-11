@@ -947,10 +947,17 @@ const SAMPLES: usize = 4;
 ///
 /// The ink is baked in the paper's units and placed by a transform, so scrolling is not a reason to rebuild
 /// anything — but a build leaves out the strokes that were off screen, and scrolling towards one has to
-/// bring it back. Growing the culling rectangle by this much is what bounds how far the sheet can move
-/// while the ink stays as it is: several screens of scrolling, and a rebuild that lands once in that
-/// distance is not a rebuild anybody sees.
-const CULL_SLACK: f32 = 4096.0;
+/// bring it back. Growing the culling rectangle by this much is what bounds how far the sheet can move while
+/// the ink stays as it is: a scroll of `CULL_SLACK` device pixels in any direction is answered by the ink that
+/// is already built, and only a scroll past that pays for another build.
+///
+/// **Five hundred and twelve, not four thousand.** That was the number and it was wrong by an order of
+/// magnitude: the rectangle it grew to was a hundred and thirty-nine times the area of an A4 sheet, so
+/// nothing was being culled at all. A note of two thousand strokes reported 1.95 million vertices on every
+/// frame — at 144 Hz, for a page whose visible part is one screen — and the frames that could not carry them
+/// are what a reader saw as a stutter. Half a screen's worth of slack makes a frame's scroll free (a fast
+/// flick is about 200 device pixels a frame at 144 Hz) and still leaves the rest of the page out.
+const CULL_SLACK: f32 = 512.0;
 
 /// What the finished ink's triangles were built from.
 ///
@@ -2737,5 +2744,68 @@ mod vertex_tests {
             },
         );
         assert_eq!(clamped.colour[3], 255, "alpha above one is opaque");
+    }
+}
+
+#[cfg(test)]
+mod cull_tests {
+    use super::*;
+
+    /// The culling rectangle stays near the screen, because a slack that does not is no culling at all.
+    ///
+    /// This is the test the old 4096 would have failed. The slack is a *margin* around the visible part of the
+    /// sheet — room for the scroll between builds — and the mistake here was a margin so large that every
+    /// stroke on a long page survived it. At 4096 an A4 sheet's rectangle came out a hundred and thirty-nine
+    /// times its own area: a two-thousand-stroke note drew 1.95 million vertices on every frame of a 144 Hz
+    /// panel, and the frames that could not carry them were the stutter.
+    ///
+    /// The bound is a screen's worth — a fast two-finger flick moves about 200 device pixels in one frame at
+    /// 144 Hz — times a small margin. Anything past that is ink the reader cannot see.
+    #[test]
+    fn the_culling_slack_is_a_margin_and_not_a_page() {
+        // The sheet's own extent, which the slack is a margin around. An A4 at 100% is 640x906.
+        let (width, height) = (640.0, 906.0);
+        let cull = [
+            -CULL_SLACK,
+            -CULL_SLACK,
+            width + CULL_SLACK,
+            height + CULL_SLACK,
+        ];
+        let area = (cull[2] - cull[0]) * (cull[3] - cull[1]);
+        let sheet = width * height;
+
+        assert!(
+            area < sheet * 12.0,
+            "the culling rectangle is {:.1}x the sheet, which keeps ink nobody can see",
+            area / sheet
+        );
+
+        // And large enough that a frame's scroll is free: at 144 Hz a flick moves about 200 device pixels.
+        assert!(
+            CULL_SLACK > 200.0,
+            "a frame's scroll must not ask for a rebuild: {CULL_SLACK}"
+        );
+    }
+
+    /// A stroke near the page is kept; one far from it is dropped.
+    ///
+    /// The two halves of what the slack buys: everything past the margin costs nothing, and everything inside
+    /// it is already built when the reader scrolls to it.
+    #[test]
+    fn a_slack_keeps_what_is_near_and_drops_what_is_far() {
+        let visible = [0.0, 0.0, 640.0, 906.0];
+        let cull = grow(visible, CULL_SLACK);
+
+        // A frame's scroll away is still inside.
+        assert!(
+            cull[1] < -200.0 && cull[3] > 906.0 + 200.0,
+            "a flick is free"
+        );
+
+        // Three screens down is outside, so it is not drawn.
+        assert!(
+            3.0 * 906.0 > cull[3],
+            "a stroke three screens away must not be drawn"
+        );
     }
 }

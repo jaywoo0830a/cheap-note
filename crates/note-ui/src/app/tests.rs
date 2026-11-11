@@ -5,10 +5,11 @@ use super::{
     page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face, palette_id,
     palette_in_hand, palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width,
     scroll_amount, sheet_matches, spun, touches_paper, wheel_pan, wheel_zoom_factor, zoom_text,
-    Confirmation, PaletteGeometry, PalettePart, BAR_HEIGHT, PALETTE_DISC_BOX, PALETTE_HUB,
-    PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS,
-    PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD,
-    PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH, WHEEL_LINE_HEIGHT, WHEEL_ZOOM_STEP,
+    Confirmation, PaletteGeometry, PalettePart, PenGesture, BAR_HEIGHT, PALETTE_DISC_BOX,
+    PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH,
+    PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL,
+    PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_LINES_PER_NOTCH, WHEEL_LINE_HEIGHT,
+    WHEEL_ZOOM_STEP,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
 use crate::ink::{Notes, Tool};
@@ -851,5 +852,63 @@ fn the_frame_cap_holds_only_a_frame_that_arrived_early() {
     assert!(
         held_by_cap(FrameCap::Hz240, Some(early)),
         "and under 240 Hz's 4.17 ms as well: the tighter cap holds what the looser one does too"
+    );
+}
+/// A pen pan asks for the whole distance the hand travelled, and the view decides what can be shown.
+///
+/// This is the split that fixed the sheet sitting still: the gesture's job is to report where the hand is, and
+/// the clamp belongs to the drawing. Holding the pan inside its bounds mid-gesture — which the app used to do on
+/// every reading — threw away travel that no later reading could recover, because each one is measured from the
+/// gesture's origin. The result was up to 500 px of hand movement with the paper motionless, then a jump.
+#[test]
+fn a_pen_pan_asks_for_the_whole_distance_out_of_range_included() {
+    let gesture = PenGesture {
+        mode: crate::pen_gesture::Gesture::Pan,
+        origin: (500.0, 400.0),
+        zoom: 1.0,
+        pan: (0.0, 0.0),
+    };
+
+    // The nib has not moved: the pan it began with, unchanged.
+    assert_eq!(gesture.panned_to((500.0, 400.0)), (0.0, 0.0));
+
+    // Far past any page edge, in both directions: the answer is the hand's own number, not a clamped one.
+    let far = gesture.panned_to((500.0, 400.0 - 1.0e4));
+    assert!(
+        far.1 < -1.0e4,
+        "the gesture clamped the pan instead of reporting where the hand is: {far:?}"
+    );
+
+    // And it is the gain times the distance, so the number is not simply the pixel travel.
+    let near = gesture.panned_to((520.0, 380.0));
+    let gain = crate::pen_gesture::PEN_PAN_GAIN;
+    assert!((near.0 - 20.0 * gain).abs() < 1.0e-4, "{near:?}");
+    assert!((near.1 - -20.0 * gain).abs() < 1.0e-4, "{near:?}");
+}
+
+/// Coming back towards the origin asks for the same pan it started from, however far out it had gone.
+///
+/// The property that makes a gesture absolute: each reading is asked about against the origin, never against the
+/// previous reading, so a hand that overshoots and returns leaves the sheet exactly where it began.
+#[test]
+fn a_pen_pan_that_returns_asks_for_where_it_started() {
+    let gesture = PenGesture {
+        mode: crate::pen_gesture::Gesture::Pan,
+        origin: (300.0, 300.0),
+        zoom: 1.0,
+        pan: (12.0, -34.0),
+    };
+
+    let overshot = gesture.panned_to((300.0, -5000.0));
+    assert!(
+        overshot.1 < -5000.0,
+        "it should have gone out: {overshot:?}"
+    );
+
+    let back = gesture.panned_to((300.0, 300.0));
+    assert_eq!(
+        back,
+        (12.0, -34.0),
+        "a hand that came back must ask for the pan it began at"
     );
 }

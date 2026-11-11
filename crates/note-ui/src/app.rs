@@ -733,6 +733,28 @@ struct PenGesture {
     pan: (f32, f32),
 }
 
+impl PenGesture {
+    /// The pan this gesture asks for while the nib is at `at`, in window logical pixels.
+    ///
+    /// The gain is applied because a hand only has one screen's travel in it and a page is often longer than
+    /// that (see [`crate::pen_gesture::PEN_PAN_GAIN`]).
+    ///
+    /// **Out of range included, deliberately.** The answer is what the hand asked for, not what the layout can
+    /// show: the clamp belongs to [`Viewport::origin`], which applies it when it draws. Clamping here as well
+    /// throws away where the hand actually is, and no later reading can bring it back — each one is measured
+    /// from the gesture's origin rather than from the stored value — so a hand that took the sheet past its
+    /// edge and came back would watch the paper sit still through the whole return and then jump. A pure
+    /// function so that this is testable without a window: the gesture path itself needs one.
+    fn panned_to(&self, at: (f32, f32)) -> (f32, f32) {
+        let delta = (at.0 - self.origin.0, at.1 - self.origin.1);
+
+        (
+            self.pan.0 + delta.0 * crate::pen_gesture::PEN_PAN_GAIN,
+            self.pan.1 + delta.1 * crate::pen_gesture::PEN_PAN_GAIN,
+        )
+    }
+}
+
 /// The application view.
 pub struct NoteApp {
     /// Everything the note in hand remembers: its paper, its pen, its switches, and how it feels.
@@ -1613,15 +1635,41 @@ impl NoteApp {
     /// A pan is already written down: it *is* the view's own pan, which the note's settings do not hold. A
     /// zoom is a setting, and the gesture has been *showing* it without writing it (see [`Self::step_zoom`]) —
     /// so this is where the note learns it, once, however many readings it took to get there.
+    ///
+    /// A pan gesture also settles its stored pan back inside the layout's bounds here, once, at the end. During
+    /// the gesture the pan is kept exactly where the hand put it, because that is what lets the sheet come back
+    /// the moment the hand does (see [`Self::pan_by_pen`]); but a pan left far outside its bounds would mean a
+    /// later wheel — or the next gesture's own start — unwinding travel nobody can see. Settling at the end
+    /// keeps both: the sheet follows the hand while the hand is moving, and the end of a sheet is an end once
+    /// it stops.
     fn end_pen_gesture(&mut self, cx: &mut Context<Self>) {
-        let zoomed = self
-            .pen_mode
-            .is_some_and(|mode| mode.mode == crate::pen_gesture::Gesture::Zoom);
+        let mode = self.pen_mode;
+        let zoomed = mode.is_some_and(|mode| mode.mode == crate::pen_gesture::Gesture::Zoom);
 
         self.pen_mode = None;
 
         if zoomed {
             self.finish_zoom(cx);
+        }
+
+        if mode.is_some_and(|mode| mode.mode == crate::pen_gesture::Gesture::Pan) {
+            self.settle_pan();
+        }
+    }
+
+    /// Puts the stored pan back inside the bounds the layout draws it in, once, and shows the result.
+    ///
+    /// The end of a pan gesture, and the only place a pan is held now that [`Self::pan_by_pen`] keeps the hand's
+    /// own number. Nothing to do on a sheet that fits — there is no pan on that axis — and `hold_pan` already
+    /// answers `false` when nothing moved.
+    fn settle_pan(&mut self) {
+        let sheet = self.sheet;
+        if sheet.window.0 <= 0.0 || sheet.window.1 <= 0.0 {
+            return;
+        }
+
+        if self.view.hold_pan(sheet.paper, sheet.window, PAGE_MARGIN) {
+            self.settle_view();
         }
     }
 
@@ -2253,24 +2301,24 @@ impl NoteApp {
     /// the whole distance from the origin would add the same travel again and again — a hand moving at a steady
     /// pace would drag the page faster and faster, and a nib held still would keep going. Measured from the
     /// origin and *set*, the paper follows the hand exactly, and a nib that comes back leaves the sheet there.
+    ///
+    /// **The pan is stored as the hand asked it, out of range included**, and clamped only where it is drawn
+    /// ([`Viewport::origin`]). Holding it inside its bounds here as well looks harmless and is not: a clamp
+    /// throws away where the hand actually is, and no later reading can bring it back, because each one is
+    /// measured from the gesture's origin rather than from the stored value. The sheet then sits still while
+    /// the hand travels back through the distance it was clamped by — measured at 500 px of nothing moving, on
+    /// a sheet drawn twice the window's height — and then jumps past it. Keeping the number whole is what makes
+    /// the paper come back with the hand; the end of the gesture settles it once ([`Self::settle_pan`]).
     fn pan_by_pen(&mut self, mode: PenGesture, at: (f32, f32), _cx: &mut Context<Self>) {
-        let delta = (at.0 - mode.origin.0, at.1 - mode.origin.1);
+        // Where the sheet belongs: the pan the gesture began at, moved by the whole distance so far. Out of
+        // range included — see [`PenGesture::panned_to`] for why that is not an oversight, and what a clamp
+        // here cost (500 px of hand travel with the paper sitting still, then a jump).
+        let wanted = mode.panned_to(at);
 
-        let sheet = self.sheet;
-
-        // Where the sheet belongs: the pan the gesture began at, moved by the whole distance so far — times
-        // the gain, because a hand only has one screen's travel in it and a page is often longer than that
-        // (see [`crate::pen_gesture::PEN_PAN_GAIN`]).
-        let wanted = (
-            mode.pan.0 + delta.0 * crate::pen_gesture::PEN_PAN_GAIN,
-            mode.pan.1 + delta.1 * crate::pen_gesture::PEN_PAN_GAIN,
-        );
+        // Stored as it is, out of range included: the clamp belongs to [`Viewport::origin`], which applies it
+        // when it draws. See [`PenGesture::panned_to`].
         if !self.view.set_pan(wanted) {
             return;
-        }
-
-        if sheet.window.0 > 0.0 && sheet.window.1 > 0.0 {
-            self.view.hold_pan(sheet.paper, sheet.window, PAGE_MARGIN);
         }
 
         // The canvas draws itself on this wake, from `self.sheet`, which is only rebuilt by a frame — so the

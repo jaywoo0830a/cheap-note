@@ -35,6 +35,79 @@ fn a_pan_held_at_the_end_of_the_sheet_owes_nothing_back() {
     );
 }
 
+/// A pen drag past the end and back moves the paper the whole way, because a gesture clamps only at its end.
+///
+/// This is the rule the wheel test above states the opposite half of, and they are not in conflict: a wheel is
+/// a *sequence of steps*, so each step must start from where the last left the sheet or a scroll past the end
+/// builds a debt. A pen is an *absolute position* — every reading is measured from the gesture's origin — so
+/// holding the stored pan mid-gesture throws away where the hand is, and there is no later reading that can
+/// recover it. Measured before the split: 500 px of hand travel with the paper sitting still, then a jump.
+#[test]
+fn a_pen_drag_past_the_end_and_back_moves_the_paper_the_whole_way() {
+    // A sheet that pans on the vertical axis but runs out of room quickly: A4 drawn 1.2x is 1222 px in a 900 px
+    // window, so the pan's whole range is 900 - 1222 - 48 = -370 and a 500 px drag goes well past the end.
+    let sheet = SHEET;
+    let mut view = Viewport::new(1.2);
+
+    let drawn = view.drawn(sheet);
+    let floor = WINDOW.1 - drawn.1 - MARGIN;
+    assert!(
+        floor < -100.0 && drawn.1 > WINDOW.1,
+        "the sheet has to overflow the window but run out of pan room inside 500 px: drawn {drawn:?}, floor {floor}"
+    );
+
+    let start = view.pan();
+    // Well past the far edge: the stored pan goes out of range, as the hand did.
+    let beyond = (start.0, start.1 - 500.0);
+    view.set_pan(beyond);
+
+    assert_eq!(
+        view.pan(),
+        beyond,
+        "a gesture keeps the hand's own number, out of range included"
+    );
+
+    // `origin` is where the sheet is *drawn*: `(margin + offset)` clamped into the layout's bounds, so the place
+    // the pan runs out of room is `floor` itself and not `floor + MARGIN`.
+    let dragged_floor = floor;
+
+    // The view still refuses to show past the edge: the clamp is where it is drawn.
+    let at_edge = view.origin(sheet, WINDOW, MARGIN);
+    assert!(
+        (at_edge.1 - dragged_floor).abs() < 0.5,
+        "the sheet should be drawn at its lowest allowed place, {at_edge:?} against {dragged_floor}"
+    );
+
+    // The hand comes back part of the way. The paper must follow it now, not after an invisible debt.
+    view.set_pan((start.0, start.1 - 100.0));
+    let back = view.origin(sheet, WINDOW, MARGIN);
+    let moved = back.1 - at_edge.1;
+
+    assert!(
+        back.1 > at_edge.1,
+        "the paper stayed still while the hand came back: {at_edge:?} → {back:?}"
+    );
+    // `origin` is `margin + offset` before clamping, so coming back to an offset of -100 puts the sheet at
+    // `margin - 100`. That is the distance the paper has to travel from the edge.
+    let expected = MARGIN - 100.0 - dragged_floor;
+    assert!(
+        (moved - expected).abs() < 1.0,
+        "the hand came back to an offset of -100 from a floor of {dragged_floor}, so the paper should have moved {expected} px, not {moved}"
+    );
+
+    // And once the gesture ends, the pan settles inside its bounds — the wheel's own debt rule still holds.
+    // `hold_pan` works in `margin + offset` space and takes the margin back off, so its lower bound is
+    // `floor - MARGIN`, one margin further out than the place the sheet is drawn at.
+    view.set_pan(beyond);
+    assert!(view.hold_pan(sheet, WINDOW, MARGIN));
+    let settled = view.pan();
+
+    assert!(
+        settled.1 >= floor - MARGIN - 0.5,
+        "the stored pan was left outside its bounds after the gesture: {settled:?}, floor {floor}"
+    );
+}
+
 /// A sheet that fits is centred, so there is no pan to hold — and no offset kept either.
 #[test]
 fn a_sheet_that_fits_has_no_pan_to_hold() {

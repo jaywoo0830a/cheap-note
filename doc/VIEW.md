@@ -670,6 +670,21 @@ travel in it, and the sheet is often longer than that; a 1:1 pan would make a lo
 lifting the pen and placing it again. The direction is unchanged — the paper follows the hand, so a nib going
 right still shows what is further left.
 
+**The pan is the hand's number, and the clamp is the drawing's.** A gesture stores where the hand put the
+sheet, out of range included; `Viewport::origin` is what refuses to draw past the layout's edge. Holding the
+stored pan inside its bounds on every reading instead — which the app did — looks harmless and is not: a clamp
+throws away where the hand is, and no later reading can bring it back, because each one is measured from the
+gesture's origin rather than from the stored value. A hand that took the sheet past its edge and came back would
+watch the paper sit still through the whole return and then jump; measured at **500 px of travel with nothing
+moving**, on a sheet drawn twice the window's height. The gesture settles its pan inside the bounds **once, at
+the end** (`NoteApp::settle_pan`), so the wheel's rule still holds — the end of a sheet is an end — without the
+paper detaching from the hand while it is moving.
+
+That is not the same rule as the wheel's, and the two must not be confused. A wheel is a *sequence of steps*, so
+each step starts from where the last left the sheet, and a scroll past the end would otherwise build an invisible
+debt (`Viewport::hold_pan`). A nib is an *absolute position*, so there is no step to unwind: the fix for the wheel
+is exactly the bug for the pen.
+
 **The zoom's rate does not depend on the zoom.** A doubling takes `PEN_ZOOM_TRAVEL` — 200 logical pixels of
 vertical travel — whether the sheet is at 25% or at 800%. That is the rule a reader has to learn, and it is one
 sentence: this much travel is this much zoom. A wheel scales its step with the zoom because a wheel *is* a
@@ -701,6 +716,7 @@ The numbers behind that are all *derived* rather than picked:
 | a trackpad's notch | 96 px | `WHEEL_LINES_PER_NOTCH` × `WHEEL_LINE_HEIGHT` — the distance that asks for what a notch asks for. Without it the pixel path zooms three times faster per gesture than the line path, and it *was* three times too fast the first time this was written |
 | `PEN_ZOOM_TRAVEL` | 200 px | the nib's travel for a doubling, at any zoom: a little over half a finger's movement, and shorter than a wheel's 298 — a hand on a pen has finer control than a wheel being spun |
 | `PEN_PAN_GAIN` | 2.0 | how far the sheet moves per pixel the nib travels: a hand has one screen's travel in it and a page is often longer, so 1:1 would make a long page unreachable without lifting the pen |
+| pan settle | once, at gesture end | when a pen pan is clamped inside the layout's bounds. Never mid-gesture: a clamp discards where the hand is and no later reading can recover it, because each is measured from the gesture's origin — measured at 500 px of hand travel with the paper motionless (§9). The wheel's rule is the opposite one, and rightly: a wheel accumulates steps, a nib names a place |
 
 Two notches are the step applied **twice**, not twice the step, so a fast roll zooms smoothly instead of in
 jumps, and the result is clamped, because one enormous delta from a driver should not take the sheet from

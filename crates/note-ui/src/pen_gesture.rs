@@ -128,6 +128,20 @@ pub fn pen_zoom_factor(rise: f32) -> f32 {
 /// pen should reward that rather than make the reader spin.
 pub const PEN_ZOOM_TRAVEL: f32 = 200.0;
 
+/// How far the sheet moves for each pixel the nib travels while a pan is in play.
+///
+/// **Two**, so the paper moves twice as far as the hand. A pen can only travel as far as the screen allows —
+/// a hand that starts near the bottom of a tablet and pushes up has one screen's height to work with, and the
+/// sheet it is dragging is often taller than that. A gain of one makes a long page unreachable without lifting
+/// and re-placing the pen, which is a gesture a reader should never have to make; two lets one comfortable
+/// sweep cover twice the page.
+///
+/// It is a *gain*, not a scale on a unit — the nib's own distance is already in the same logical pixels the
+/// sheet is placed in, so one would be an exact 1:1 and this simply asks for more than the hand gave. Which
+/// way the paper moves is unchanged: the nib going right still shows what is further left, exactly as a
+/// two-finger drag does, because the paper follows the hand rather than the hand following the paper.
+pub const PEN_PAN_GAIN: f32 = 2.0;
+
 /// Where a gesture's keys are read from, for as long as the app is running.
 ///
 /// `None` is a machine where the state could not be created at all, which is the same as "no key is held":

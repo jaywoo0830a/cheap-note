@@ -2007,8 +2007,13 @@ impl NoteApp {
         let sheet = self.sheet;
         let was = self.view.pan();
 
-        // Where the sheet belongs: the pan the gesture began at, moved by the whole distance so far.
-        let wanted = (mode.pan.0 + delta.0, mode.pan.1 + delta.1);
+        // Where the sheet belongs: the pan the gesture began at, moved by the whole distance so far — times
+        // the gain, because a hand only has one screen's travel in it and a page is often longer than that
+        // (see [`crate::pen_gesture::PEN_PAN_GAIN`]).
+        let wanted = (
+            mode.pan.0 + delta.0 * crate::pen_gesture::PEN_PAN_GAIN,
+            mode.pan.1 + delta.1 * crate::pen_gesture::PEN_PAN_GAIN,
+        );
         if !self.view.set_pan(wanted) {
             return;
         }

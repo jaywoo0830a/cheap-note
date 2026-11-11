@@ -665,6 +665,11 @@ from the zoom it began at. The view accumulates (`Viewport::pan_by`, `Viewport::
 travel on every reading would add it again and again — a page that accelerates under a steady hand and drifts
 while the nib is still. Set, the page follows the hand exactly and comes back when the hand does.
 
+**A nib that moves the sheet moves it twice as far** (`PEN_PAN_GAIN`, 2.0). A hand has only one screen's
+travel in it, and the sheet is often longer than that; a 1:1 pan would make a long page unreachable without
+lifting the pen and placing it again. The direction is unchanged — the paper follows the hand, so a nib going
+right still shows what is further left.
+
 **The zoom's rate does not depend on the zoom.** A doubling takes `PEN_ZOOM_TRAVEL` — 200 logical pixels of
 vertical travel — whether the sheet is at 25% or at 800%. That is the rule a reader has to learn, and it is one
 sentence: this much travel is this much zoom. A wheel scales its step with the zoom because a wheel *is* a
@@ -695,6 +700,7 @@ The numbers behind that are all *derived* rather than picked:
 | `WHEEL_LINE_HEIGHT` | 32 logical px | the platform does not say what a line is: Windows' notion is a fraction of a "page" whose size comes from the mouse settings, and 32 px lands within a few pixels of it at the defaults |
 | a trackpad's notch | 96 px | `WHEEL_LINES_PER_NOTCH` × `WHEEL_LINE_HEIGHT` — the distance that asks for what a notch asks for. Without it the pixel path zooms three times faster per gesture than the line path, and it *was* three times too fast the first time this was written |
 | `PEN_ZOOM_TRAVEL` | 200 px | the nib's travel for a doubling, at any zoom: a little over half a finger's movement, and shorter than a wheel's 298 — a hand on a pen has finer control than a wheel being spun |
+| `PEN_PAN_GAIN` | 2.0 | how far the sheet moves per pixel the nib travels: a hand has one screen's travel in it and a page is often longer, so 1:1 would make a long page unreachable without lifting the pen |
 
 Two notches are the step applied **twice**, not twice the step, so a fast roll zooms smoothly instead of in
 jumps, and the result is clamped, because one enormous delta from a driver should not take the sheet from

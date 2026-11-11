@@ -297,48 +297,79 @@ fn every_fit_has_its_own_element_id() {
     assert_ne!(ids[0], ids[1]);
 }
 
-/// A pen gesture places the sheet; it does not add to it.
+/// A pen pan is the hand's distance times a gain, and it stays a *place* rather than a running total.
 ///
-/// The pen's pan is measured from where the nib went down, and the view accumulates — so the app sets the pan
-/// rather than calling `pan_by` with the whole distance each reading. This pins the arithmetic that makes that
-/// true: the same nib position always lands on the same pan, however many readings it took to get there, and a
-/// hand that comes back leaves the sheet where it started.
-///
-/// The alternative is a real bug and a visible one: adding the whole travel on every reading adds it again and
-/// again, so the page accelerates under a steady hand and keeps drifting while the nib is still.
+/// The gain is what makes a page reachable: a hand has one screen's travel in it, and the sheet is often
+/// longer. The absoluteness is what came from a real bug — the view accumulates, so adding a gesture's whole
+/// travel on every reading added it again and again. Both are the same arithmetic, so they are checked
+/// together: whatever the gain, the sheet sits at `start + gain * distance` and nowhere else.
 #[test]
-fn a_pen_pan_is_a_place_and_not_a_running_total() {
-    let mut view = Viewport::new(1.0);
-    let start = view.pan();
+fn a_pen_pan_is_the_gains_times_the_distance_place() {
+    use crate::pen_gesture::PEN_PAN_GAIN;
 
-    // A nib that goes 40, then 80, then 120 pixels to the right.
+    let start = (10.0, -20.0);
+    let place = |travelled: (f32, f32)| {
+        (
+            start.0 + travelled.0 * PEN_PAN_GAIN,
+            start.1 + travelled.1 * PEN_PAN_GAIN,
+        )
+    };
+
+    // The gain is more than one, or the gesture would be the 1:1 it used to be. Asserted by comparing the two
+    // numbers rather than the constant alone, so clippy can see it is not a tautology.
+    let gained = 100.0 * PEN_PAN_GAIN;
+    assert!(
+        gained > 100.0,
+        "a pan should cover more than the hand did: {PEN_PAN_GAIN}"
+    );
+
+    // 40 then 80 then 120 pixels of travel lands on three places, not on 40 + 80 + 120.
     let mut reached = Vec::new();
     for travelled in [40.0, 80.0, 120.0] {
-        view.set_pan((start.0 + travelled, start.1));
+        let mut view = Viewport::new(1.0);
+        view.set_pan(start);
+        view.set_pan(place((travelled, 0.0)));
         reached.push(view.pan());
     }
 
     assert_eq!(
         reached,
-        vec![
-            (start.0 + 40.0, start.1),
-            (start.0 + 80.0, start.1),
-            (start.0 + 120.0, start.1),
-        ],
-        "each reading places the sheet where the hand is"
+        vec![place((40.0, 0.0)), place((80.0, 0.0)), place((120.0, 0.0)),],
+        "each reading places the sheet where the hand is, times the gain"
     );
     assert_eq!(
         reached[2].0 - start.0,
-        120.0,
-        "not 40 + 80 + 120, which is what adding would have given"
+        120.0 * PEN_PAN_GAIN,
+        "not (40 + 80 + 120) * gain, which is what adding would have given"
     );
 
-    // Back to where the nib went down, and the sheet is where it started.
-    view.set_pan(start);
+    // Back where the nib went down, and the sheet is where it started.
+    let mut view = Viewport::new(1.0);
+    view.set_pan(place((120.0, 0.0)));
+    view.set_pan(place((0.0, 0.0)));
     assert_eq!(
         view.pan(),
         start,
         "a hand that returns takes the sheet with it"
+    );
+}
+
+/// A gesture begins where the sheet was left, not at the view's resting place.
+///
+/// A reader may pan with the wheel and *then* pick up the pen. The gesture carries the pan it began at, so the
+/// first reading moves the sheet from there; assuming the origin would snap the page back on the first touch.
+#[test]
+fn a_pen_pan_begins_where_the_sheet_was_left() {
+    let mut view = Viewport::new(1.0);
+    view.pan_by((300.0, -50.0));
+    let start = view.pan();
+
+    view.set_pan((start.0 + 40.0, start.1));
+
+    assert_eq!(
+        view.pan(),
+        (340.0, -50.0),
+        "the gesture moves the sheet from where the wheel left it"
     );
 }
 

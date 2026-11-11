@@ -235,6 +235,13 @@ leaves `origin`, `zoom` and `scale` out. The one thing that can move while the i
 far. Both buffers are reused across frames in a ring of three, so the CPU never overwrites one the GPU is
 still reading; the finished ink is uploaded again only when the ink changes, not every frame.
 
+That last clause is a property of `refresh_ink`'s *return value*, and it is worth naming because it was
+wrong: the slot invalidation used to belong to the caller, which ran it on every frame whether the ink was
+rebuilt or not. A pan rebuilds nothing — a scroll is a `Transform` — so each of the three buffers was
+refilled with the whole page's geometry every frame, once the ring had rotated through them. The
+invalidation is now part of the build (`refresh_ink` returns `true` and clears the slots itself), so a
+reused ink uploads nothing and a page that is only being panned costs one drawable and three small quads.
+
 The same rule applies above the seam: `note-ui` collects a frame's worth of scroll readings and spends
 them once (`NoteApp::spend_scroll`), and holds the pan inside the layout's bounds (`Viewport::hold_pan`),
 so a wheel turned past the end of a sheet leaves no invisible offset for the next turn to pay off.

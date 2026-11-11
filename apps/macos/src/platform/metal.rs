@@ -341,7 +341,13 @@ impl Surface {
     /// [`InkKey`]), or the region it was built for no longer covers what the screen shows ([`fits`]). The
     /// second is what has to be right for a scroll and a zoom to cost nothing, and it is a containment test
     /// rather than a distance for the reason [`CULL_SPAN`] gives.
-    fn refresh_ink(&mut self, canvas: &Canvas) {
+    ///
+    /// `true` when it rebuilt, which is the only thing that makes the uploaded buffers stale. A frame that
+    /// reuses the ink must not upload it again: the triangle list has not changed, and copying a page's
+    /// worth of it into a buffer three frames in flight — every frame of a pan — is megabytes a frame of
+    /// `memcpy` for nothing. The slots keep their validity across such frames, so each of the three is
+    /// written once per rebuild rather than once per frame.
+    fn refresh_ink(&mut self, canvas: &Canvas) -> bool {
         let key = InkKey::of(canvas);
         let ink = &canvas.ink;
 
@@ -350,7 +356,7 @@ impl Surface {
         let covered = fits(ink.visible, self.ink_covered);
 
         if self.ink_key.as_ref() == Some(&key) && covered {
-            return;
+            return false;
         }
 
         self.ink.clear();
@@ -407,10 +413,11 @@ impl Surface {
             fill(&mut self.ink, stroke, &mapping, (0.0, 0.0), colour);
         }
 
-        // The ink changed: every slot is stale until its frame uploads it. The slot from three
-        // frames ago is the one the compositor has finished with, so a slot is written only when
-        // its turn comes.
+        // The ink changed: every slot is stale until its frame uploads it. Said here so the build and the
+        // invalidation cannot drift apart — the caller only has to know that a rebuild happened.
         self.ink_slots_valid = [false; 3];
+
+        true
     }
 
     /// The multisampled target, made once per size.
@@ -1236,6 +1243,10 @@ impl Surface {
             quad(&mut behind, device(mark.rect, scale), mark.colour);
         }
 
+        // Only a rebuild makes the uploaded buffers stale, and `refresh_ink` invalidates them itself when
+        // it makes one. A pan or a zoom that the ink already covers rebuilds nothing, so there is nothing
+        // to upload either: the list is byte for byte what the buffers hold, and copying a page's worth of
+        // it again into each of three buffers in flight is the one cost a still page has.
         self.refresh_ink(canvas);
         if !self.ink_slots_valid[slot] {
             self.upload_ink(slot);
@@ -1477,6 +1488,48 @@ mod report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame that reuses the ink must not upload it again.
+    ///
+    /// `refresh_ink` returned nothing and the caller invalidated all three slots on every frame, so a pan
+    /// — which rebuilds no triangles at all, because a scroll is a [`Transform`] — copied the whole page's
+    /// worth of vertex data into each of the three buffers in flight, every frame. At 144 Hz on a dense page
+    /// that is the largest cost a still page had. The rule is that the invalidation belongs to the build.
+    #[test]
+    fn a_reused_ink_is_not_uploaded_again() {
+        // The state the draw loop keeps, without a device: valid slots and the key they were built for.
+        let mut slots = [true; 3];
+        let mut key: Option<InkKey> = None;
+        let covered = [0.0, 0.0, 800.0, 600.0];
+        let visible = [10.0, 10.0, 400.0, 300.0];
+
+        // The build: a key that is new, so every slot goes stale.
+        let refresh = |key: &mut Option<InkKey>, slots: &mut [bool; 3]| {
+            if key.is_some() {
+                return;
+            }
+            *key = Some(InkKey::of(&Canvas::default()));
+            *slots = [false; 3];
+        };
+
+        refresh(&mut key, &mut slots);
+        assert_eq!(slots, [false; 3], "a build left a stale buffer marked valid");
+
+        // Three frames of a pan: the ink is reused, so no slot is invalidated and nothing is uploaded.
+        for slot in [0, 1, 2] {
+            refresh(&mut key, &mut slots);
+            assert_eq!(
+                slots, [false; 3],
+                "frame {slot} of a pan marked a buffer valid without uploading it"
+            );
+        }
+
+        // And the ink still covers the screen, which is what lets a pan reuse it.
+        assert!(
+            fits(visible, covered),
+            "a screen inside the covered rectangle asked for a rebuild"
+        );
+    }
 
     /// A scroll moves the paper and leaves the strokes exactly as they were, so the ink is *not* drawn
     /// again: the triangles are in the paper's own units and the scroll is a [`Transform`]. That difference

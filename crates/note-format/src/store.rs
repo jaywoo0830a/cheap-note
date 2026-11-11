@@ -1401,16 +1401,16 @@ fn row_value<T>(
 
     parse(&text).ok_or_else(|| {
         Error::Note(format!(
-            "the note's {key} is not something this build knows: {text}"
+            "the note's {key} holds \"{text}\", which this build cannot read"
         ))
     })
 }
 
 /// A row's value, or `None` when the note has no such row: for the facts that have no default.
 ///
-/// The same two cases as [`row_value`], with "no row" answered by `None` rather than by a fallback —
-/// which is what a *fact* wants, because there is no shipped answer for the file a note was placed
-/// from. `None` says the note does not remember it; a row that will not parse is still an error.
+/// The same two cases as [`row_value`], with "no row" answered by `None` rather than by a fallback — which
+/// is what a *fact* wants, because there is no shipped answer for the file a note was placed from. `None`
+/// says the note does not remember it; a row that will not parse is still an error.
 fn row_maybe<T>(
     conn: &Connection,
     key: &str,
@@ -1422,7 +1422,7 @@ fn row_maybe<T>(
 
     parse(&text).map(Some).ok_or_else(|| {
         Error::Note(format!(
-            "the note's {key} is not something this build knows: {text}"
+            "the note's {key} holds \"{text}\", which this build cannot read"
         ))
     })
 }
@@ -1470,11 +1470,21 @@ fn colour_of(text: &str) -> Option<u32> {
     text.parse().ok()
 }
 
-/// The flag a row holds: `true` or `false`, spelled out.
+/// The flag a row holds: `true` or `false`, spelled out — or the `1` and `0` a person writes.
+///
+/// The app writes `true`/`false` and nothing else (see [`put_flag`]), so `1` reaching this means somebody
+/// edited the note by hand or a script wrote it. That is worth *reading* rather than refusing: `1` and `0`
+/// are what the three shell tools and most databases call a boolean, and a note that will not open because a
+/// row was spelled the other way is a note its owner cannot get back into. The words are still the only
+/// thing written out, so a round trip returns the spelling every note already uses.
+///
+/// Case is folded for the same reason: `True` is a person typing a boolean, not a different value. Anything
+/// else — `yes`, `on`, a blank — is still refused, because guessing at those is how a setting quietly changes
+/// meaning.
 fn flag_of(text: &str) -> Option<bool> {
-    match text {
-        "true" => Some(true),
-        "false" => Some(false),
+    match text.trim() {
+        "true" | "True" | "TRUE" | "1" => Some(true),
+        "false" | "False" | "FALSE" | "0" => Some(false),
         _ => None,
     }
 }
@@ -2383,7 +2393,68 @@ mod tests {
     /// somebody added a row to by hand, keeps them. Nothing here writes a row it does not read and
     /// nothing deletes one, so a newer build's answers survive a note passing through this one.
     #[test]
+    /// A flag written as `1` or `0` is read rather than refused — the note this app could not open.
+    ///
+    /// The app writes `true`/`false` and nothing else, so a `1` in the row came from a person editing the file
+    /// or from a script, and both mean what `1` means everywhere. Refusing it locked two real notes out of
+    /// their own app: `the note's vsync is not something this build knows: 1`, with no way in but a SQLite
+    /// client. Case is folded for the same reason — `True` is somebody typing a boolean.
+    #[test]
+    fn a_flag_written_as_one_or_zero_is_read() {
+        for (written, wanted) in [
+            ("true", true),
+            ("True", true),
+            ("TRUE", true),
+            ("1", true),
+            ("false", false),
+            ("False", false),
+            ("0", false),
+            (" 1 ", true),
+        ] {
+            assert_eq!(flag_of(written), Some(wanted), "{written:?} was refused");
+        }
+
+        // Still refused: values that are not a boolean by any convention, where guessing is how a setting
+        // quietly changes meaning.
+        for nonsense in ["", "yes", "on", "maybe", "2", "-1"] {
+            assert_eq!(flag_of(nonsense), None, "{nonsense:?} was believed");
+        }
+    }
+
+    /// A note holding `1` for a switch opens, and is written back in the spelling every note uses.
+    ///
+    /// The round trip matters as much as the read: a note that opens but is never written keeps its `1`, and
+    /// the next build to look at it would have to be trusted with it again.
+    #[test]
+    fn a_note_whose_switch_says_one_opens() {
+        let (mut store, path) = store_for("row-flag-one");
+
+        put_row(&store.conn, "vsync", "1").expect("a row");
+        put_row(&store.conn, "pressure_fades", "0").expect("a row");
+
+        let mut read = Settings::default();
+        store.read_settings(&mut read).expect("the note opens");
+        assert!(read.vsync, "1 is on");
+        assert!(!read.pressure_fades, "0 is off");
+
+        // Written back as a word, so the note no longer needs this reading to open.
+        store.set_settings(&read).expect("settings");
+        assert_eq!(
+            row_text(&store.conn, "vsync").expect("a row").as_deref(),
+            Some("true")
+        );
+
+        cleanup(&path);
+    }
+
+    /// A row this build does not know is left exactly as it was found.
+    ///
+    /// The whole point of one row per setting: a note written by a build that knew more settings, or one
+    /// somebody added a row to by hand, keeps them. Nothing here writes a row it does not read and
+    /// nothing deletes one, so a newer build's answers survive a note passing through this one.
+    #[test]
     fn a_row_this_build_does_not_know_is_left_alone() {
+
         let (mut store, path) = store_for("row-unknown");
 
         put_row(&store.conn, "brushes_from_the_future", "42").expect("a row");

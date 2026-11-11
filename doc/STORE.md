@@ -224,6 +224,15 @@ migrated — and the three ways a row can fail to be there are three different a
 * **a row that is there and cannot be understood *is* a failure**, reported to the person — something
   wrote it, and quietly replacing an answer is how a setting disappears without a word.
 
+**A flag is read as a boolean, however it was spelled.** The app writes `true` and `false` and nothing
+else, but `1` and `0` are read too (and `True`, `TRUE`, and either spelling with spaces around it),
+because a note is a file a person can open and edit and both conventions mean one thing. This is not the
+same as being lenient about what a value *means*: `yes`, `on` and a blank are still a failure, because there
+the guess would be about the answer rather than about its spelling. The narrowing is worth naming because
+leaving it out locked two real notes out of the app that wrote them — `vsync` held `1`, `flag_of` refused
+it, and the note would not open at all. A note read this way is written back as `true`/`false` on its next
+save, so the exception is only ever needed once.
+
 Every setting a person can change is a row here — the paper, the ruling, the colours, the pen and its
 weight, the zoom, the zoom lock, whether the bar and the status line are shown, and how the pen *feels* in
 the hand — and nothing about a note is remembered anywhere but in the note. The pen is in two kinds of row

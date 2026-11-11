@@ -5586,12 +5586,6 @@ impl Render for NoteApp {
             let rules = self.ruling.rules(
                 RulingSheet {
                     paper: paper_bounds,
-                    drawn: Rect {
-                        x: sheet.origin.0,
-                        y: sheet.origin.1,
-                        width: page_size.0,
-                        height: page_size.1,
-                    },
                     turns: sheet.rotation,
                 },
                 self.settings.canvas_style,
@@ -5620,8 +5614,11 @@ impl Render for NoteApp {
         {
             describe_canvas(&mut self.canvas, &sheet, self.scale, page_color, background);
 
-            for rule in rules.iter().flat_map(|rules| rules.iter()) {
-                self.canvas.rule(*rule);
+            for rule in rules
+                .iter()
+                .flat_map(|rules| Ruling::rules_at(rules, sheet.origin))
+            {
+                self.canvas.rule(rule);
             }
 
             self.canvas.page = page.as_ref().map(|page| Page {

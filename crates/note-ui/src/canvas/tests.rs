@@ -44,19 +44,9 @@ fn sheet(width: f32, height: f32) -> Bounds<Pixels> {
     }
 }
 
-/// A ruling request for a sheet the right way up: the paper and the rectangle it is drawn in are the
-/// same shape, which is what a page nobody has turned is.
+/// A ruling request for a sheet nobody has turned.
 fn upright(paper: Bounds<Pixels>) -> RulingSheet {
-    RulingSheet {
-        drawn: Rect {
-            x: 24.0,
-            y: 24.0,
-            width: f32::from(paper.size.width),
-            height: f32::from(paper.size.height),
-        },
-        paper,
-        turns: 0,
-    }
+    RulingSheet { paper, turns: 0 }
 }
 
 /// The rectangle of a ruling mark, as plain floats.
@@ -214,9 +204,13 @@ fn the_ruling_turns_with_the_page() {
         rgb(0x00_00_00).into(),
     )];
 
-    // The rectangle the sheet is drawn in, for a page at `turns`: the paper's shape, or that shape on
-    // its side. Written out per turn because it is part of the input and not something the mapping
-    // can be asked to guess — a page and its drawn rectangle always agree about their shape.
+    // The corner the sheet is drawn at. The ruling is placed relative to it, so this is the whole of the
+    // placement's input: the pen's own pan is added later, when the marks are drawn.
+    let at = (10.0, 20.0);
+
+    // The shape the paper is drawn in, for a page at `turns`: the paper's shape, or that shape on its side.
+    // Written out per turn because it is part of the input and not something the mapping can guess — a page
+    // and its drawn shape always agree.
     let drawn = |turns: u8| Rect {
         x: 10.0,
         y: 20.0,
@@ -224,29 +218,18 @@ fn the_ruling_turns_with_the_page() {
         height: if turns % 2 == 1 { 720.0 } else { 1018.0 },
     };
 
-    let once = place(
-        rule.clone(),
-        RulingSheet {
-            paper,
-            drawn: drawn(1),
-            turns: 1,
-        },
-    );
+    let once = place(rule.clone(), RulingSheet { paper, turns: 1 }, at);
     assert_eq!(
         fill_bounds(&once[0]),
         (986.0, 50.0, 2.0, 200.0),
         "the rule lies the other way, inside the drawn rectangle"
     );
 
-    // Every turn places the mark inside the sheet that is drawn, which is the whole of what the
-    // mapping has to get right: a ruling outside its paper is a grid on the desk instead.
+    // Every turn places the mark inside the sheet that is drawn, which is the whole of what the mapping has
+    // to get right: a ruling outside its paper is a grid on the desk instead.
     for turns in 0..4u8 {
-        let at = RulingSheet {
-            paper,
-            drawn: drawn(turns),
-            turns,
-        };
-        let (x, y, width, height) = fill_bounds(&place(rule.clone(), at)[0]);
+        let placed = place(rule.clone(), RulingSheet { paper, turns }, at);
+        let (x, y, width, height) = fill_bounds(&placed[0]);
         let rect = drawn(turns);
 
         assert!(
@@ -259,19 +242,53 @@ fn the_ruling_turns_with_the_page() {
     }
 
     // And the whole way round is where it started.
-    let round = place(
-        rule.clone(),
-        RulingSheet {
-            paper,
-            drawn: drawn(4),
-            turns: 4,
-        },
-    );
+    let round = place(rule.clone(), RulingSheet { paper, turns: 4 }, at);
     assert_eq!(
         fill_bounds(&round[0]),
         (40.0, 60.0, 200.0, 2.0),
         "four turns is the page it was"
     );
+}
+
+/// A pan does not rebuild the ruling: the marks move by the pan and nothing else is recomputed.
+///
+/// This is the frame cost a pan used to pay. The pan was part of the cache key, so every frame of every pan
+/// missed and rebuilt the grid — a few hundred marks re-laid, per frame, on a 144 Hz panel where a frame is
+/// 6.9 ms. The key is now the paper and its turns, which a pan does not touch, and the pan is one offset
+/// applied as the marks are drawn. The test is the shape of that: the same request twice is one build, and a
+/// second origin moves the same marks without another.
+#[test]
+fn a_pan_does_not_rebuild_the_ruling() {
+    let paper = sheet(720.0, 1018.0);
+    let at = upright(paper);
+
+    let mut ruling = Ruling::default();
+    let first = ruling.rules(at, CanvasStyle::Grid, 0xF5_F0_E6, 1.0);
+    let builds = ruling.rebuilds();
+
+    let again = ruling.rules(at, CanvasStyle::Grid, 0xF5_F0_E6, 1.0);
+    assert_eq!(ruling.rebuilds(), builds, "the same sheet is one build");
+    assert!(
+        Arc::ptr_eq(&first, &again),
+        "and the same geometry is handed back"
+    );
+
+    // The pan: the same cached marks, moved by the offset, with no rebuild.
+    let panned: Vec<Fill> = Ruling::rules_at(&first, (37.0, -12.0)).collect();
+    assert_eq!(ruling.rebuilds(), builds, "a pan never misses the cache");
+    assert_eq!(
+        panned.len(),
+        first.len(),
+        "the pan moves the marks rather than making more"
+    );
+
+    for (moved, still) in panned.iter().zip(first.iter()) {
+        assert!(
+            (moved.rect.x - still.rect.x - 37.0).abs() < 1e-4
+                && (moved.rect.y - still.rect.y + 12.0).abs() < 1e-4,
+            "every mark moved by exactly the pan"
+        );
+    }
 }
 
 /// A rule has to be visible on every sheet the toolbar offers, including the dark ones.

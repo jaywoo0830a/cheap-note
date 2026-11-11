@@ -260,20 +260,20 @@ struct RulingKey {
     zoom: f32,
 }
 
-/// Where a sheet's ruling goes: the paper's own rectangle, the rectangle it is drawn in, and which way
-/// up the page is.
+/// Where a sheet's ruling goes: the paper's own rectangle, and which way up the page is.
 ///
-/// Two rectangles because the ruling is *printed on the paper*. It is built on the paper's rectangle,
-/// where a rule's spacing and its length mean what they mean on paper, and then placed in the drawn
-/// one — turned with the page, so a page on its side has its ruling running the other way. Building it
-/// in the drawn rectangle instead would give a turned page a ruling that is the wrong way round, which
-/// is the difference between paper that was turned and a grid an interface painted over it.
+/// **Not** the rectangle it is drawn in. The ruling is *printed on the paper*: turning the page turns its
+/// ruling, so the turns are part of what is built, but where the paper happens to sit in the window is not —
+/// a pan moves every mark by the same distance, and re-placing a few hundred of them on each frame of a pan is
+/// work whose answer never differs from the last one by more than that offset. So the geometry is built and
+/// placed at the paper's own corner, and the pan is added when it is drawn (see [`Ruling::rules`]).
+///
+/// Building it in the drawn rectangle instead would give a turned page a ruling that is the wrong way round,
+/// which is the difference between paper that was turned and a grid an interface painted over it.
 #[derive(Clone, Copy, PartialEq)]
 pub struct RulingSheet {
     /// The paper's own rectangle, in logical pixels at the *drawn* zoom: the un-turned shape.
     pub paper: Bounds<Pixels>,
-    /// The rectangle the sheet is drawn in, in logical window pixels.
-    pub drawn: Rect,
     /// How far the page has been turned, in quarter turns clockwise.
     pub turns: Quarters,
 }
@@ -322,12 +322,31 @@ impl Ruling {
 
         if self.built_for != Some(key) {
             let rules = build_ruling(at.paper, style, rgb(rule_color(paper)).into(), zoom);
-            self.rules = Arc::new(place(rules, at));
+            // Placed at the paper's *own* corner, which is where the rectangle it was built on starts. The
+            // pan is added by whoever draws it, so moving the sheet never rebuilds this.
+            self.rules = Arc::new(place(rules, at, (0.0, 0.0)));
             self.built_for = Some(key);
             self.rebuilds += 1;
         }
 
         Arc::clone(&self.rules)
+    }
+
+    /// The ruling shifted by where the sheet is drawn, for a caller that is about to draw it.
+    ///
+    /// A pan is one offset applied to every mark, and applying it *here* — once per frame, over a vector that
+    /// is already built — is what keeps a pan cheap: the geometry a few hundred marks long is placed once, and
+    /// the frame that follows only adds the pan to each of them. Doing it in [`Self::rules`] instead made the
+    /// cache key include the pan, so every frame of every pan missed and rebuilt the whole grid.
+    ///
+    /// Nothing is allocated: the caller draws straight from this.
+    pub fn rules_at(rules: &[Fill], origin: (f32, f32)) -> impl Iterator<Item = Fill> + '_ {
+        rules.iter().map(move |fill| {
+            let mut moved = *fill;
+            moved.rect.x += origin.0;
+            moved.rect.y += origin.1;
+            moved
+        })
     }
 }
 
@@ -401,8 +420,8 @@ fn build_ruling(sheet: Bounds<Pixels>, style: CanvasStyle, color: Hsla, zoom: f3
 /// A quarter turn takes an axis-aligned rectangle to another one, so each mark is still one fill — and
 /// the mapping is [`crate::ink::drawn_of_paper`]'s, applied to whole rectangles, which is what keeps the
 /// ruling and the ink agreeing about which way up the page is.
-fn place(rules: Vec<Fill>, at: RulingSheet) -> Vec<Fill> {
-    let (x, y) = (at.drawn.x, at.drawn.y);
+fn place(rules: Vec<Fill>, at: RulingSheet, origin: (f32, f32)) -> Vec<Fill> {
+    let (x, y) = origin;
     let (width, height) = (
         f32::from(at.paper.size.width),
         f32::from(at.paper.size.height),

@@ -4,7 +4,107 @@
 //! of held keys asks for, and how far a given travel zooms — rather than the reading of a keyboard, which is
 //! `device_query`'s business and not this crate's.
 
-use crate::pen_gesture::{is_option, pen_zoom_factor, Gesture, Held, PEN_ZOOM_TRAVEL};
+use crate::pen_gesture::{
+    is_option, pen_zoom_factor, Gesture, Held, PenJitter, PEN_JITTER_SPAN, PEN_ZOOM_TRAVEL,
+};
+
+/// The first reading is the hand: there is no tremor to weigh it against, and a gesture's origin is where
+/// the nib went down.
+#[test]
+fn the_first_reading_settles_the_hand() {
+    let mut jitter = PenJitter::new();
+
+    assert_eq!(jitter.at((100.0, 200.0)), (100.0, 200.0));
+}
+
+/// A hand that is still stays still, however many readings wander under the span.
+///
+/// This is the whole of what the filter is for: a fan shaking the tablet, or a hand resting on it, reports the
+/// nib a fraction of a pixel away from itself on every reading. A gesture that followed that would move the
+/// sheet by it — twice over, for a pan.
+#[test]
+fn a_still_hand_does_not_move() {
+    let mut jitter = PenJitter::new();
+    let settled = jitter.at((500.0, 500.0));
+
+    // A wander that stays inside the span, in both axes and in every direction.
+    let wandering = [
+        (500.1, 500.0),
+        (500.0, 500.1),
+        (499.9, 499.95),
+        (500.05, 500.05),
+        (500.15, 499.9),
+    ];
+
+    for at in wandering {
+        assert_eq!(
+            jitter.at(at),
+            settled,
+            "a reading {at:?} under the span moved the hand"
+        );
+    }
+}
+
+/// A hand that means to move is followed at once, and by the whole distance.
+///
+/// The filter must not lag: a nib that trails the hand is the one thing a pen cannot be. So a reading beyond
+/// the span answers *itself*, not the settled point and not a point part of the way there.
+#[test]
+fn a_hand_that_moves_is_followed_at_once() {
+    let mut jitter = PenJitter::new();
+    jitter.at((0.0, 0.0));
+
+    let moved = (10.0, 0.0);
+    assert_eq!(jitter.at(moved), moved, "the hand was held back");
+}
+
+/// A reading exactly on the span is the hand: the threshold is \"beyond it\", not \"at or beyond it\".
+#[test]
+fn the_span_itself_is_a_move() {
+    let mut jitter = PenJitter::new();
+    jitter.at((0.0, 0.0));
+
+    let at = (PEN_JITTER_SPAN, 0.0);
+    assert_eq!(jitter.at(at), at);
+}
+
+/// A hand creeping in steps below the span still gets where it is going.
+///
+/// The one failure this kind of filter has: if the settle point were the *gesture's* origin rather than the
+/// last place the hand was believed to be, a slow drift would be held forever — every reading is under the
+/// span from the origin, so nothing ever settles. The settle point moves with the hand, so the drift is
+/// followed within one span of it, which is below what anyone can see.
+#[test]
+fn a_slow_drift_is_followed_within_one_span() {
+    let mut jitter = PenJitter::new();
+    jitter.at((0.0, 0.0));
+
+    // Ten steps of a tenth of a pixel each: a hand moving slowly, and every step under the span.
+    let mut last = (0.0, 0.0);
+    for step in 1..=10 {
+        let at = (step as f32 * 0.1, 0.0);
+        last = jitter.at(at);
+    }
+
+    assert!(
+        (last.0 - 1.0).abs() <= PEN_JITTER_SPAN,
+        "a drift of a pixel answered {last:?}"
+    );
+    assert!(last.0 > 0.0, "a slow drift was held at the start: {last:?}");
+}
+
+/// A reading that is not a number cannot poison the rest of the gesture.
+#[test]
+fn a_wild_reading_is_not_believed() {
+    let mut jitter = PenJitter::new();
+    let settled = jitter.at((10.0, 10.0));
+
+    assert_eq!(jitter.at((f32::NAN, 10.0)), settled);
+    assert_eq!(jitter.at((10.0, f32::INFINITY)), settled);
+
+    // And the hand is still followed afterwards.
+    assert_eq!(jitter.at((20.0, 10.0)), (20.0, 10.0));
+}
 
 /// Nothing held is writing, so the pen is a pen.
 #[test]

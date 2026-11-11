@@ -37,6 +37,7 @@
 //! | `grayscale_pages` | a flag |
 //! | `frame_cap` | a name: `60 Hz`, `144 Hz`, `180 Hz`, `240 Hz`, `360 Hz`, `Unlimited` |
 //! | `vsync` | a flag |
+//! | `pen_jitter` | a flag |
 //! | `pressure_fades` | a flag |
 //! | `zoom` | a number, where `1.0` is the size the paper asks for |
 //! | `show_toolbar`, `show_status` | flags |
@@ -311,6 +312,23 @@ pub struct Settings {
     /// would have to be said if it ever mattered.
     pub vsync: bool,
 
+    /// Whether a pen gesture sets aside the hand's own trembling as it moves the sheet.
+    ///
+    /// The digitizer never reports a still hand as still: the nib wanders by a fraction of a pixel between
+    /// readings, and a machine with a spinning fan shakes the whole tablet, which the pen reports as movement.
+    /// A pan multiplies that by its gain, so a page held still visibly shivers; a zoom turns it into a
+    /// change of the sheet's size, which is the most visible thing on the screen.
+    ///
+    /// **On by default**, because it is a correction and not a preference: the tremor is not something a
+    /// reader put there or wants to see, and a gesture that showed it was showing the hardware rather than
+    /// the hand. Off is for a reader whose digitizer is clean and who would rather have the extra tenth of a
+    /// pixel of fidelity than the steadiness — and for anyone measuring what the filter costs.
+    ///
+    /// **It only ever touches a gesture.** Writing is not filtered at all: the ink follows the nib exactly,
+    /// because the tremor is the price of the hardware and a stroke is the reader's own line. Only the two
+    /// gestures — the sheet moving under a held modifier — are corrected.
+    pub pen_jitter: bool,
+
     /// Whether a light touch lays a *pale* line as well as a thin one — the pencil's other half.
     ///
     /// A pencil pressed lightly does not only draw thinner, it draws greyer: less graphite reaches the page. Width
@@ -419,6 +437,9 @@ impl Default for Settings {
             grayscale_pages: false,
             frame_cap: FrameCap::Unlimited,
             vsync: true,
+            // On: the tremor is the hardware's, not the reader's, and a gesture that showed it was showing
+            // the hardware. See [`Settings::pen_jitter`].
+            pen_jitter: true,
             // A light touch writes pale as well as thin: the pencil every hand already knows. See
             // [`Settings::pressure_fades`] for why it is a switch at all.
             pressure_fades: true,

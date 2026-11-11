@@ -685,6 +685,23 @@ each step starts from where the last left the sheet, and a scroll past the end w
 debt (`Viewport::hold_pan`). A nib is an *absolute position*, so there is no step to unwind: the fix for the wheel
 is exactly the bug for the pen.
 
+**Both gestures are taken from the hand's settled position, not from the raw reading** (`PenJitter`). A pen's
+digitizer never reports a still hand as still: the nib wanders by a fraction of a pixel between readings, and a
+machine with a spinning fan shakes the whole tablet, which the pen reports as movement. Both gestures make that
+worse — a pan multiplies it by `PEN_PAN_GAIN`, and a zoom turns it into a change of the sheet's size — so a page
+held still visibly shivers and a zoom breathes. The correction is a threshold on the reading
+(`PEN_JITTER_SPAN`, 0.2 px): a reading within that distance of where the hand has settled is the tremor and
+answers the settled point, and one beyond it is the hand and is answered *itself*, at once.
+
+It is deliberately **not a low-pass filter**. Averaging the last readings would smooth the tremor and lag the nib
+by however many were averaged, and a nib that trails the hand is the one thing a pen cannot be; the threshold
+costs no latency on the readings that mean something. The settle point moves with the hand rather than staying at
+the gesture's origin, so a slow drift measured in sub-span steps is still followed within one span of it — a
+filter that kept the origin would hold a creeping hand forever. It touches **gestures only**: writing is not
+filtered at all, because a stroke is the reader's own line and the tremor is the hardware's. `Settings::pen_jitter`
+is **on by default** — the noise is not something a reader put there — and is read when the nib goes down, so
+throwing the switch mid-gesture cannot jump the sheet.
+
 **The zoom's rate does not depend on the zoom.** A doubling takes `PEN_ZOOM_TRAVEL` — 200 logical pixels of
 vertical travel — whether the sheet is at 25% or at 800%. That is the rule a reader has to learn, and it is one
 sentence: this much travel is this much zoom. A wheel scales its step with the zoom because a wheel *is* a
@@ -716,6 +733,7 @@ The numbers behind that are all *derived* rather than picked:
 | a trackpad's notch | 96 px | `WHEEL_LINES_PER_NOTCH` × `WHEEL_LINE_HEIGHT` — the distance that asks for what a notch asks for. Without it the pixel path zooms three times faster per gesture than the line path, and it *was* three times too fast the first time this was written |
 | `PEN_ZOOM_TRAVEL` | 200 px | the nib's travel for a doubling, at any zoom: a little over half a finger's movement, and shorter than a wheel's 298 — a hand on a pen has finer control than a wheel being spun |
 | `PEN_PAN_GAIN` | 2.0 | how far the sheet moves per pixel the nib travels: a hand has one screen's travel in it and a page is often longer, so 1:1 would make a long page unreachable without lifting the pen |
+| `PEN_JITTER_SPAN` | 0.2 px | what a gesture treats as the hand moving: readings under it are the digitizer's own tremor (a resting hand, a spinning fan) and are ignored, so a page held still does not shiver. Far below what a hand can aim at, so nothing meant is lost, and it is a threshold rather than an average so there is no lag |
 | pan settle | once, at gesture end | when a pen pan is clamped inside the layout's bounds. Never mid-gesture: a clamp discards where the hand is and no later reading can recover it, because each is measured from the gesture's origin — measured at 500 px of hand travel with the paper motionless (§9). The wheel's rule is the opposite one, and rightly: a wheel accumulates steps, a nib names a place |
 
 Two notches are the step applied **twice**, not twice the step, so a fast roll zooms smoothly instead of in

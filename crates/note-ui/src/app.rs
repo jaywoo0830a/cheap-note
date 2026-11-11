@@ -731,6 +731,18 @@ struct PenGesture {
     /// travels 50 pixels would otherwise be added to the sheet on every reading, so a hand moving at a steady
     /// pace would drag the page faster and faster (see [`NoteApp::pan_by_pen`]).
     pan: (f32, f32),
+    /// Where the hand is taken to be, with the digitizer's own trembling set aside.
+    ///
+    /// The gesture is measured from the nib's *settled* position rather than from the raw readings, so a
+    /// fan shaking the tablet does not show up as the sheet shivering. See [`crate::pen_gesture::PenJitter`],
+    /// and [`Settings::pen_jitter`] for the switch that turns it off.
+    jitter: crate::pen_gesture::PenJitter,
+    /// Whether this gesture sets the tremor aside at all — the note's answer when the nib went down.
+    ///
+    /// Read once rather than per reading so that flipping the switch mid-gesture cannot move the sheet under
+    /// a hand that has not: the filter's settle point is a *state*, and changing whether it is consulted
+    /// halfway through would jump the pan by however far the tremor had been held back.
+    smoothed: bool,
 }
 
 impl PenGesture {
@@ -752,6 +764,19 @@ impl PenGesture {
             self.pan.0 + delta.0 * crate::pen_gesture::PEN_PAN_GAIN,
             self.pan.1 + delta.1 * crate::pen_gesture::PEN_PAN_GAIN,
         )
+    }
+
+    /// Where the hand is, given the reading at `at`, with the digitizer's trembling set aside.
+    ///
+    /// This is the one place a gesture's readings pass through the filter, so both of them see the same
+    /// position: a pan measures from it and a zoom measures the rise from it. Off ([`Self::smoothed`] false)
+    /// the reading is the hand, exactly as it was before the filter existed.
+    fn settled_at(&mut self, at: (f32, f32)) -> (f32, f32) {
+        if !self.smoothed {
+            return at;
+        }
+
+        self.jitter.at(at)
     }
 }
 
@@ -1736,11 +1761,22 @@ impl NoteApp {
             return false;
         }
 
+        let smoothed = self.settings.pen_jitter;
         let mode = *self.pen_mode.get_or_insert(PenGesture {
             mode: gesture,
             origin: at,
             zoom: self.view.zoom(),
             pan: self.view.pan(),
+            // Seeded with where the nib went down, so the first reading after it is weighed against the
+            // place the gesture started rather than against nothing.
+            jitter: {
+                let mut jitter = crate::pen_gesture::PenJitter::new();
+                if smoothed {
+                    jitter.at(at);
+                }
+                jitter
+            },
+            smoothed,
         });
 
         if ended {
@@ -1749,8 +1785,16 @@ impl NoteApp {
         }
 
         match gesture {
-            Gesture::Pan => self.pan_by_pen(mode, at, cx),
-            Gesture::Zoom => self.zoom_by_pen(mode, at, cx),
+            Gesture::Pan => {
+                self.pan_by_pen(mode, at, cx);
+                // The reading moved the filter's settle point, and it has to outlive this reading: the next
+                // one is weighed against it, which is what makes the tremor a tremor rather than a drift.
+                self.pen_mode = Some(mode);
+            }
+            Gesture::Zoom => {
+                self.zoom_by_pen(mode, at, cx);
+                self.pen_mode = Some(mode);
+            }
             Gesture::Ink => unreachable!("handled above"),
         }
 
@@ -2017,6 +2061,16 @@ impl NoteApp {
         if let Some(ink) = self.ink_layer.as_mut() {
             ink.set_vsync(self.settings.vsync);
         }
+    }
+
+    /// Turns the pen gesture's own tremor correction on or off. See [`Settings::pen_jitter`].
+    ///
+    /// Nothing is redrawn and no gesture in flight is disturbed: the answer is read when the nib goes down,
+    /// so what this changes is the *next* gesture. A settle point that moved halfway through one would jump
+    /// the sheet by however far the tremor had been held back.
+    fn set_pen_jitter(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.pen_jitter = on;
+        self.finish_setting(cx);
     }
 
     /// Renders PDF pages in grayscale, or back in colour.
@@ -2315,7 +2369,12 @@ impl NoteApp {
     /// the hand travels back through the distance it was clamped by — measured at 500 px of nothing moving, on
     /// a sheet drawn twice the window's height — and then jumps past it. Keeping the number whole is what makes
     /// the paper come back with the hand; the end of the gesture settles it once ([`Self::settle_pan`]).
-    fn pan_by_pen(&mut self, mode: PenGesture, at: (f32, f32), _cx: &mut Context<Self>) {
+    fn pan_by_pen(&mut self, mut mode: PenGesture, at: (f32, f32), _cx: &mut Context<Self>) {
+        // The hand's position with the digitizer's own trembling set aside (see [`PenGesture::settled_at`]).
+        // Measured here rather than on the raw reading, because a pan multiplies whatever it is given by two
+        // and a fan shaking the tablet would otherwise be two pixels of shiver on the sheet.
+        let at = mode.settled_at(at);
+
         // Where the sheet belongs: the pan the gesture began at, moved by the whole distance so far. Out of
         // range included — see [`PenGesture::panned_to`] for why that is not an oversight, and what a clamp
         // here cost (500 px of hand travel with the paper sitting still, then a jump).
@@ -2338,7 +2397,10 @@ impl NoteApp {
     /// went down, and applied to the zoom the gesture started from. Multiplying a factor per reading — which
     /// is what a wheel does, correctly, because a wheel *is* a sequence of steps — would compound a hand's
     /// slow drag into a runaway zoom and leave nothing to come back to.
-    fn zoom_by_pen(&mut self, mode: PenGesture, at: (f32, f32), _cx: &mut Context<Self>) {
+    fn zoom_by_pen(&mut self, mut mode: PenGesture, at: (f32, f32), _cx: &mut Context<Self>) {
+        // The rise is measured to the hand's settled position, for the same reason a pan is: the zoom's factor
+        // is an exponent of the travel, so a reading's worth of tremor would be a visible change of size.
+        let at = mode.settled_at(at);
         let rise = mode.origin.1 - at.1;
         let wanted = mode.zoom * crate::pen_gesture::pen_zoom_factor(rise);
 
@@ -5141,6 +5203,18 @@ impl NoteApp {
                 self.settings.vsync,
                 cx,
                 |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| app.set_vsync(on, cx),
+            ))
+            .child(toolbar_divider(hairline))
+            // The pen's own steadiness, beside the two things that pace a frame: what it corrects is the
+            // gesture that moves the sheet, and it is the one setting here that is about the *hardware*.
+            .child(visibility_switch(
+                "pen-jitter",
+                "Steady pen",
+                self.settings.pen_jitter,
+                cx,
+                |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
+                    app.set_pen_jitter(on, cx)
+                },
             ))
             .child(toolbar_divider(hairline))
             // A render option for the *page*, next to the colours it overrides: this row wraps, so

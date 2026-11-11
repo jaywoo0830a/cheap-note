@@ -1184,6 +1184,7 @@ impl NoteStore {
         into.grayscale_pages = row_value(conn, "grayscale_pages", into.grayscale_pages, flag_of)?;
         into.frame_cap = row_value(conn, "frame_cap", into.frame_cap, FrameCap::from_label)?;
         into.vsync = row_value(conn, "vsync", into.vsync, flag_of)?;
+        into.pen_jitter = row_value(conn, "pen_jitter", into.pen_jitter, flag_of)?;
         into.pressure_fades = row_value(conn, "pressure_fades", into.pressure_fades, flag_of)?;
         into.canvas_size = row_value(
             conn,
@@ -1246,6 +1247,7 @@ impl NoteStore {
         put_flag(&tx, "grayscale_pages", settings.grayscale_pages)?;
         put_row(&tx, "frame_cap", settings.frame_cap.label())?;
         put_flag(&tx, "vsync", settings.vsync)?;
+        put_flag(&tx, "pen_jitter", settings.pen_jitter)?;
         put_flag(&tx, "pressure_fades", settings.pressure_fades)?;
         put_row(&tx, "canvas_size", settings.canvas_size.label())?;
         put_row(&tx, "canvas_style", settings.canvas_style.label())?;
@@ -2307,6 +2309,7 @@ mod tests {
             grayscale_pages: true,
             frame_cap: FrameCap::Hz60,
             vsync: false,
+            pen_jitter: false,
             pressure_fades: false,
             canvas_size: CanvasSize::A5,
             canvas_style: CanvasStyle::Ruled,
@@ -2331,6 +2334,7 @@ mod tests {
             grayscale_pages: false,
             frame_cap: FrameCap::Hz240,
             vsync: true,
+            pen_jitter: true,
             pressure_fades: true,
             canvas_size: CanvasSize::Square,
             canvas_style: CanvasStyle::Grid,

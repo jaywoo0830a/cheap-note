@@ -142,6 +142,86 @@ pub const PEN_ZOOM_TRAVEL: f32 = 200.0;
 /// two-finger drag does, because the paper follows the hand rather than the hand following the paper.
 pub const PEN_PAN_GAIN: f32 = 2.0;
 
+/// The smallest movement of the nib, in logical pixels, that a gesture treats as the hand's.
+///
+/// A hand resting on a tablet is not still: the digitizer reports the nib wandering by a fraction of a pixel
+/// from one reading to the next, and a machine with a spinning fan reports rather more of it. During a pan
+/// that wandering is multiplied by [`PEN_PAN_GAIN`] and lands on the sheet, so a page being held still visibly
+/// shivers — and during a zoom, where the factor is an exponent of the travel, a tenth of a pixel of jitter
+/// is a tenth of a pixel of breathing in the sheet's size.
+///
+/// **Two tenths of a pixel** is the number this was tuned to. It is far below what a hand can aim at — a nib
+/// is about a millimetre wide, and a fifth of a pixel is a tiny fraction of that on the glass — so nothing a
+/// reader means to do is lost, while the reading-to-reading noise a fan puts into a still hand sits under it.
+/// It is a *threshold on the reading*, not a dead zone on the gesture: the nib is compared with where the
+/// hand has settled rather than with the last raw reading, so a slow deliberate drift is followed exactly and
+/// only the chatter is held back (see [`PenJitter`]).
+pub const PEN_JITTER_SPAN: f32 = 0.2;
+
+/// What a pen's position is reported as, with the hand's own trembling taken out.
+///
+/// The digitizer's readings carry noise — the hand is never perfectly still, and a spinning fan shakes the
+/// whole tablet — and a gesture that follows every one of them shows the noise as movement. The two gestures
+/// make that worse in different ways: a pan multiplies it by [`PEN_PAN_GAIN`], and a zoom turns it into a
+/// change of the sheet's size, which is the most visible thing on the screen.
+///
+/// ## Why this is not a low-pass filter
+///
+/// A filter that averaged the last few readings would smooth the tremor, and it would also **lag**: the nib
+/// would trail the hand by however many readings were averaged. A pen is the one input where that is
+/// unacceptable — the whole point of writing on a screen is that the ink is under the nib — and a gesture is
+/// judged by the same rule. So this holds the hand's *settled* position instead: readings within
+/// [`PEN_JITTER_SPAN`] of it are the tremor and are ignored, and a reading beyond that is the hand moving and
+/// is followed at once. The output is a staircase rather than a ramp, which is exactly what a step of the
+/// hand should look like — and it costs no latency on the readings that mean something.
+///
+/// The one thing it must not do is *accumulate*: a hand creeping steadily in steps below the span would be
+/// held at the settled point forever. So the settle point moves with the reading once a reading has been
+/// beyond the span (see [`Self::at`]), and the hand's slow drift is followed within one span of it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PenJitter {
+    /// Where the hand is taken to be, once the tremor is set aside.
+    settled: Option<(f32, f32)>,
+}
+
+impl PenJitter {
+    /// A filter with nothing in it yet: the first reading it is given is where the hand is.
+    pub fn new() -> Self {
+        Self { settled: None }
+    }
+
+    /// Where the nib is, as far as the gesture is concerned, given a reading at `at`.
+    ///
+    /// The first reading settles immediately — there is no tremor to weigh it against yet, and a gesture's
+    /// origin is where the nib went down. After that a reading within [`PEN_JITTER_SPAN`] of the settled
+    /// point is the tremor and answers the settled point; one beyond it is the hand and settles there.
+    ///
+    /// The distance is measured the way the gestures measure it, in logical window pixels, so the span means
+    /// the same thing to a pan and to a zoom.
+    ///
+    /// A reading that is not a number settles where it is rather than poisoning every answer after it: a
+    /// driver that reported one `NaN` would otherwise hold the filter for the rest of the gesture.
+    pub fn at(&mut self, at: (f32, f32)) -> (f32, f32) {
+        let Some(settled) = self.settled else {
+            self.settled = Some(at);
+            return at;
+        };
+
+        if !at.0.is_finite() || !at.1.is_finite() {
+            return settled;
+        }
+
+        let (dx, dy) = (at.0 - settled.0, at.1 - settled.1);
+
+        if dx.hypot(dy) >= PEN_JITTER_SPAN {
+            self.settled = Some(at);
+            return at;
+        }
+
+        settled
+    }
+}
+
 /// Where a gesture's keys are read from, for as long as the app is running.
 ///
 /// `None` is a machine where the state could not be created at all, which is the same as "no key is held":

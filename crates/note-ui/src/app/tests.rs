@@ -867,6 +867,10 @@ fn a_pen_pan_asks_for_the_whole_distance_out_of_range_included() {
         origin: (500.0, 400.0),
         zoom: 1.0,
         pan: (0.0, 0.0),
+        // The arithmetic of `panned_to`, which is what this is about: the tremor is a step in front of it
+        // (see [`crate::pen_gesture::PenJitter`]) and is tested where it lives.
+        jitter: crate::pen_gesture::PenJitter::new(),
+        smoothed: false,
     };
 
     // The nib has not moved: the pan it began with, unchanged.
@@ -897,6 +901,8 @@ fn a_pen_pan_that_returns_asks_for_where_it_started() {
         origin: (300.0, 300.0),
         zoom: 1.0,
         pan: (12.0, -34.0),
+        jitter: crate::pen_gesture::PenJitter::new(),
+        smoothed: false,
     };
 
     let overshot = gesture.panned_to((300.0, -5000.0));

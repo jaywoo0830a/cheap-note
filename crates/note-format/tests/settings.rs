@@ -66,6 +66,19 @@ fn vertical_sync_is_on_by_default() {
     );
 }
 
+/// The tremor correction is on by default, because it is a correction rather than a preference.
+///
+/// The noise it takes out is the hardware's — a resting hand and a spinning fan — not something a reader put
+/// there or wants to see. A gesture that showed it was showing the digitizer, so the honest default is the one
+/// that hides it; the switch is for a clean digitizer and for measuring what the filter costs.
+#[test]
+fn the_pen_tremor_correction_is_on_by_default() {
+    assert!(
+        Settings::default().pen_jitter,
+        "a fresh note should not show the tablet shivering before anyone asks it to"
+    );
+}
+
 /// A frame cap is named by its own label and by nothing else, and every one has an interval that says
 /// what it is called.
 ///

@@ -99,57 +99,33 @@ impl Gesture {
 
 /// The zoom a pen's vertical travel asks for, as a factor to multiply the sheet's zoom by.
 ///
-/// `rise` is how far up the nib has moved since the gesture began, in logical pixels, and `from` is the zoom
-/// the gesture started at: up is closer, so a positive rise is a factor above one. It is an *exponent* rather
-/// than a ratio — the same rule the wheel and the pinch follow — so a gesture that goes a long way zooms
-/// smoothly instead of in jumps.
+/// `rise` is how far up the nib has moved since the gesture began, in logical pixels: up is closer, so a
+/// positive rise is a factor above one. The rate is one number, `PEN_ZOOM_TRAVEL`, and it does not depend on
+/// the zoom: a nib that travels 200 pixels doubles the sheet whether the sheet is at 25% or at 800%.
 ///
-/// **The travel a doubling takes grows with the zoom.** At 100% the hand crosses `PEN_ZOOM_TRAVEL` pixels to
-/// double the sheet; at 400% it must cross twice that. That looks backwards until the screen is considered:
-/// a gesture is a distance in *window* pixels, and at 400% a window pixel is a quarter of a sheet pixel, so
-/// the same finger travel is already four times as much of the page. Without the correction, a zoom held at
-/// 400% would fly off the page on the same stroke that felt right at 100% — which is exactly what a reader
-/// described as having to "barely touch" the sheet to make it move.
+/// That is deliberate, and it is the simpler of the two rules. The scroll wheel scales its own step with the
+/// zoom, which is right for a wheel — a wheel *is* a series of detents, and there is no way to spin one by a
+/// distance. A nib is not: the hand knows exactly how far it moved, and the only thing a reader has to learn is
+/// "this much travel is this much zoom". Scaling that by the current zoom means the same gesture is a different
+/// size depending on where you are, which is a rule nobody can hold in their head — and the two corrections
+/// that were tried here (the square root, the fourth root) were each a guess about which way to bend it.
 ///
-/// The correction is the *fourth root* of the zoom rather than the zoom itself, or its square root. Full
-/// proportionality would make a high zoom almost immune to the hand; no correction at all would make the same
-/// stroke fly four times as far at 400% as at 100%. In between there are two candidates, and the measurements
-/// decide it: 50 pixels of travel at a fixed rate moved the sheet by `1.19` at every zoom, which is the
-/// target shape; the square root gave `1.41` at 25% and only `1.06` at 800% — gentler than the fixed rate it
-/// replaced, which is the opposite of the complaint. The fourth root gives `1.28` at 25% and `1.11` at 800%:
-/// always at least as responsive as before, and calmer as the sheet gets larger.
-///
-/// So a doubling takes 200 pixels at 100%, 283 at 400%, 336 at 800% and 141 at 25% — every one a comfortable
-/// travel for a wrist, and none of them a twitch.
-///
-/// The result is clamped like every other zoom: a stray reading from a driver, or a hand that left the
-/// surface and came back, should not take the sheet from nothing to everything in one step.
-pub fn pen_zoom_factor(rise: f32, from: f32) -> f32 {
-    if !rise.is_finite() || !from.is_finite() || from <= 0.0 {
+/// The gesture is still absolute: it is measured from where the nib went down, so a hand that goes up and comes
+/// back returns the sheet to the zoom it started at. The clamp is the one guard, for a stray reading or a hand
+/// that left the surface and came back.
+pub fn pen_zoom_factor(rise: f32) -> f32 {
+    if !rise.is_finite() {
         return 1.0;
     }
 
-    // How many window pixels this zoom needs for a doubling, and the per-pixel rate that follows from it.
-    let travel = PEN_ZOOM_TRAVEL * from.max(0.0625).powf(PEN_ZOOM_CORRECTION);
-    let per_pixel = 2.0_f32.powf(1.0 / travel);
-
-    (per_pixel.powf(rise)).clamp(0.2, 5.0)
+    (2.0_f32.powf(rise / PEN_ZOOM_TRAVEL)).clamp(0.2, 5.0)
 }
 
-/// How strongly the travel grows with the zoom: `travel = PEN_ZOOM_TRAVEL * zoom^this`.
+/// How far the nib travels, in logical pixels, to double the sheet — at any zoom.
 ///
-/// The fourth root, and the numbers behind it are in [`pen_zoom_factor`]'s own note. Zero would be a fixed
-/// rate, which is too quick at a high zoom; a half is the square root, which is too slow there; and a quarter
-/// is the one that stays responsive without flying.
-pub const PEN_ZOOM_CORRECTION: f32 = 0.25;
-
-/// How far the nib crosses, in window logical pixels, to double the sheet when the sheet is at its own size.
-///
-/// Two hundred pixels is about a hand's width on a laptop trackpad, and a little over half a finger's travel
-/// on a tablet: a stroke that is a deliberate gesture rather than a twitch, and short enough that a reader
-/// need not lift their hand to find out what happened. A wheel's own rate is a doubling every 298 pixels, so
-/// the pen is the quicker of the two — deliberately, because a hand moving a pen has far finer control than a
-/// wheel being spun, and the earlier 300 sat closer to the wheel than to the hand.
+/// Two hundred pixels is a little over half a finger's movement on a tablet. That is shorter than a wheel's
+/// doubling (298 pixels), deliberately: a hand on a pen has far more control than a wheel being spun, and the
+/// pen should reward that rather than make the reader spin.
 pub const PEN_ZOOM_TRAVEL: f32 = 200.0;
 
 /// Where a gesture's keys are read from, for as long as the app is running.

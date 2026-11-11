@@ -2030,7 +2030,7 @@ impl NoteApp {
     /// slow drag into a runaway zoom and leave nothing to come back to.
     fn zoom_by_pen(&mut self, mode: PenGesture, at: (f32, f32), cx: &mut Context<Self>) {
         let rise = mode.origin.1 - at.1;
-        let wanted = mode.zoom * crate::pen_gesture::pen_zoom_factor(rise, mode.zoom);
+        let wanted = mode.zoom * crate::pen_gesture::pen_zoom_factor(rise);
 
         if self.view.set_zoom(wanted) {
             self.finish_zoom(cx);

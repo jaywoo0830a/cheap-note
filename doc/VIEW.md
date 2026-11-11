@@ -665,11 +665,11 @@ from the zoom it began at. The view accumulates (`Viewport::pan_by`, `Viewport::
 travel on every reading would add it again and again — a page that accelerates under a steady hand and drifts
 while the nib is still. Set, the page follows the hand exactly and comes back when the hand does.
 
-**The zoom's rate is scaled by the zoom.** A gesture is measured in window pixels, and at 400% a window pixel
-is a quarter of a sheet pixel, so the same hand movement is already four times as much of the page. A doubling
-therefore takes `PEN_ZOOM_TRAVEL * zoom^0.25` pixels — 200 at 100%, 283 at 400%, 141 at 25% — which keeps the
-gesture the same size in the hand as the sheet grows, without making a high zoom immune to it. The note in
-`pen_zoom_factor` carries the measurements behind the quarter.
+**The zoom's rate does not depend on the zoom.** A doubling takes `PEN_ZOOM_TRAVEL` — 200 logical pixels of
+vertical travel — whether the sheet is at 25% or at 800%. That is the rule a reader has to learn, and it is one
+sentence: this much travel is this much zoom. A wheel scales its step with the zoom because a wheel *is* a
+series of detents and there is no way to spin one by a distance; a nib is not, because the hand knows exactly
+how far it moved.
 
 **A nib in the air is not a nib on the paper.** A digitizer reports a hovering pen, and hovering is where the
 ghost cursor is drawn and nothing else: with a key held, a hand resting over the display does not move the
@@ -694,8 +694,7 @@ The numbers behind that are all *derived* rather than picked:
 | `WHEEL_LINES_PER_NOTCH` | 3 | GPUI scales a wheel notch by the system's "lines to scroll per notch" setting, which is three on a machine at its defaults, so a notch of a *real* wheel reaches the app as three lines. Assuming it here is what makes one notch zoom like one press of the button. A machine set differently zooms proportionally faster or slower per notch — a small, self-consistent difference, and measuring it would mean reading a system setting this app has no API for |
 | `WHEEL_LINE_HEIGHT` | 32 logical px | the platform does not say what a line is: Windows' notion is a fraction of a "page" whose size comes from the mouse settings, and 32 px lands within a few pixels of it at the defaults |
 | a trackpad's notch | 96 px | `WHEEL_LINES_PER_NOTCH` × `WHEEL_LINE_HEIGHT` — the distance that asks for what a notch asks for. Without it the pixel path zooms three times faster per gesture than the line path, and it *was* three times too fast the first time this was written |
-| `PEN_ZOOM_TRAVEL` | 200 px | the nib's travel for a doubling at 100%: a little over half a finger's movement, and shorter than a wheel's 298 — a hand on a pen has finer control than a wheel being spun |
-| `PEN_ZOOM_CORRECTION` | 0.25 | how strongly that travel grows with the zoom (`travel = 200 * zoom^0.25`): 283 px at 400%, 336 at 800%, 141 at 25%. Zero (a fixed rate) is too quick at a high zoom and a half (the square root) is too slow there; the numbers behind the quarter are in `pen_zoom_factor`'s own note |
+| `PEN_ZOOM_TRAVEL` | 200 px | the nib's travel for a doubling, at any zoom: a little over half a finger's movement, and shorter than a wheel's 298 — a hand on a pen has finer control than a wheel being spun |
 
 Two notches are the step applied **twice**, not twice the step, so a fast roll zooms smoothly instead of in
 jumps, and the result is clamped, because one enormous delta from a driver should not take the sheet from

@@ -66,6 +66,30 @@ const PDF_RENDER_SCALE: f32 = 2.0;
 /// The ladder of bitmap widths a page may be rendered at.
 const PDF_PIXEL_WIDTHS: [u32; 4] = [1_024, 1_536, 2_304, 3_456];
 
+/// How far in from a window's side edge a horizontally-swiped trackpad gesture still counts as an edge swipe.
+///
+/// A trackpad reports where a gesture *began*, so this band is measured once per gesture rather than per frame.
+/// A hundred and twenty logical pixels is wide enough to catch a swipe that starts at the rim without asking a
+/// hand to aim, and narrow enough that a scroll started over the page is never mistaken for one — the paper fills
+/// the window, so a start further in than this is a reader panning what they are reading.
+const EDGE_SWIPE_BAND: f32 = 120.0;
+
+/// How far sideways an edge gesture must travel before it turns the page.
+///
+/// A trackpad sends a gesture as many small deltas, and the first of them is noise as often as intent: a hand
+/// resting near the edge drifts a few pixels. Eighty is about two centimetres, which is more than a resting hand
+/// drifts and less than a deliberate swipe. The travel is signed and accumulated, so a swipe that goes out and
+/// comes back does not add up to one, and only the axis that was meant counts.
+const EDGE_SWIPE_TRAVEL: f32 = 80.0;
+
+/// How much more sideways than vertical an edge gesture has to be before it is taken for a swipe.
+///
+/// A reader scrolling down the page with a thumb near the window's edge is the case this rules out: that gesture
+/// is mostly vertical with a little sideways drift, and a page turn from it would be a page turn nobody asked
+/// for. Two-to-one is a generous margin — a diagonal flick still counts — and it is checked against the same
+/// accumulated travel the threshold uses.
+const EDGE_SWIPE_SLOPE: f32 = 2.0;
+
 /// The margin, in logical pixels, between a sheet and the window's edges.
 const PAGE_MARGIN: f32 = 24.0;
 
@@ -872,6 +896,17 @@ pub struct NoteApp {
     scroll_waiting: (f32, f32),
     /// Whether a frame has been asked for to spend [`Self::scroll_waiting`].
     scroll_asked: bool,
+    /// The edge swipe in flight, or `None` when no gesture is being read as one.
+    ///
+    /// A page turn is a *gesture*, not a reading, so it needs somewhere to keep the gesture's own state between
+    /// events: where it began, how far it has travelled, and whether it has already turned a page. See
+    /// [`EdgeSwipe`] for the rules, and [`Self::on_scroll`] for the one place it is fed.
+    edge_swipe: Option<EdgeSwipe>,
+    /// When the last scroll reading arrived, which is the only end an edge swipe has.
+    ///
+    /// The platform says where a gesture is, never when it stopped, so the end is a gap in the readings — the
+    /// same gap [`GESTURE_SETTLE_INTERVAL`] measures for a pinch, and the pump reads both.
+    scrolled_at: Option<Instant>,
     /// Whether the sheet was moved since the last frame, by a gesture rather than by ink.
     ///
     /// The canvas draws itself on the pen's own wake, so a stroke needs no frame; a *pan* does, because the
@@ -1140,6 +1175,8 @@ impl NoteApp {
             desk: cx.theme().background,
             scroll_waiting: (0.0, 0.0),
             scroll_asked: false,
+            edge_swipe: None,
+            scrolled_at: None,
             view_moved: false,
             detail_owed: false,
             zoom_settles_at: None,
@@ -1638,6 +1675,17 @@ impl NoteApp {
                 }) {
                     app.zoom_settles_at = None;
                     app.finish_zoom(cx);
+                }
+
+                // An edge swipe that has stopped talking is over, whether or not it turned a page: its state is
+                // only meaningful within one gesture, and a gesture nobody is still making must not be resumed by
+                // the next scroll — a swipe that turned a page and a scroll a minute later are not one motion.
+                if app.edge_swipe.is_some()
+                    && app.scrolled_at.is_none_or(|last| {
+                        now.saturating_duration_since(last) >= GESTURE_SETTLE_INTERVAL
+                    })
+                {
+                    app.end_edge_swipe();
                 }
 
                 // The counters are the one part of the line that moves on its own. Rebuild it
@@ -2318,7 +2366,7 @@ impl NoteApp {
         });
     }
 
-    /// Pans with a trackpad's two-finger scroll.
+    /// Pans with a trackpad's two-finger scroll, and turns the page from a swipe at either side.
     ///
     /// The trackpad is the only pointer this app takes a scroll from: a mouse wheel is not read at all, so
     /// there is no notch to convert, no line height to guess at, and no `⌘`-wheel zoom competing with the
@@ -2327,6 +2375,11 @@ impl NoteApp {
     ///
     /// Zooming is the pinch ([`Self::on_pinch`]) and only the pinch. A two-finger scroll pans, always, and
     /// the modifier keys do not turn it into something else.
+    ///
+    /// A swipe that *began* at a window's side is the exception, and it is the pane turn: rightwards from the
+    /// left edge is the previous page, leftwards from the right edge is the next one. The gesture is followed
+    /// across readings by [`EdgeSwipe`] rather than decided on one, and while it is in flight it does not pan —
+    /// a page turn that dragged the sheet sideways first would be two motions for one intention.
     fn on_scroll(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ScrollDelta::Pixels(delta) = event.delta else {
             // A line-based delta is a wheel's, and a wheel is not read (see this method's docs). Ignoring
@@ -2338,6 +2391,37 @@ impl NoteApp {
         let distance = (f32::from(delta.x), f32::from(delta.y));
 
         if !distance.0.is_finite() || !distance.1.is_finite() {
+            return;
+        }
+
+        // An edge swipe is begun from where the gesture *started*, which the platform reports alongside every
+        // reading of it, so the band is answered for the whole gesture from one position.
+        if self.edge_swipe.is_none() {
+            self.scrolled_at = Some(Instant::now());
+            if let Some(edge) = Edge::at(f32::from(event.position.x), self.sheet.window.0) {
+                self.edge_swipe = Some(EdgeSwipe::new(edge));
+            }
+        }
+
+        if let Some(swipe) = self.edge_swipe.as_mut() {
+            swipe.moved(distance);
+            self.scrolled_at = Some(Instant::now());
+
+            if let Swipe::Turn(turn) = swipe.decided() {
+                swipe.turned();
+                match turn {
+                    Turn::Previous => self.previous_page(cx),
+                    Turn::Next => self.next_page(cx),
+                }
+                // The pan the swipe had accumulated is dropped rather than spent: the gesture was a page turn,
+                // and moving the sheet as well would leave the new page scrolled by a swipe that never meant to
+                // scroll.
+                self.scroll_waiting = (0.0, 0.0);
+                return;
+            }
+
+            // A gesture that has not decided neither pans nor ends here: it is followed until a reading says it
+            // has stopped (see [`Self::end_edge_swipe`], which the pump calls on the same quiet gap a zoom uses).
             return;
         }
 
@@ -2353,6 +2437,17 @@ impl NoteApp {
             self.scroll_asked = true;
             cx.on_next_frame(window, |app, window, cx| app.spend_scroll(window, cx));
         }
+    }
+
+    /// Ends an edge swipe the readings have stopped arriving for.
+    ///
+    /// The platform reports where a gesture is, not when it stopped, so the end is a gap — the same gap
+    /// [`GESTURE_SETTLE_INTERVAL`] measures for a pinch, read by the same pump. A gesture that has ended without
+    /// turning a page is simply forgotten: it was a pan near the edge, and it panned nothing because a swipe in
+    /// flight is not spent as one.
+    fn end_edge_swipe(&mut self) {
+        self.edge_swipe = None;
+        self.scrolled_at = None;
     }
 
     /// Pans the sheet by everything the trackpad has left, once, in the frame that shows it.
@@ -6482,6 +6577,129 @@ fn touches_paper(phase: crate::input::Phase) -> bool {
     use crate::input::Phase;
 
     matches!(phase, Phase::Down | Phase::Move)
+}
+
+/// An edge swipe in flight: a two-finger gesture that began at a window's side and may turn the page.
+///
+/// The gesture is the unit, not the reading. A trackpad delivers a swipe as dozens of small deltas, so the
+/// decision cannot be made on any one of them — a single delta is thirty pixels at most and says nothing about
+/// where the hand is going. What this accumulates instead is the total travel, signed, and it answers one
+/// question when enough has built up: was this a sideways swipe that began at the edge it is moving away from?
+///
+/// The two rules that keep it from firing by accident are the band (where the gesture *began*) and the slope
+/// (that it is more sideways than vertical). A reader panning the page with a thumb near the edge begins outside
+/// the band; a reader scrolling down the page from inside it is largely vertical. See [`EDGE_SWIPE_BAND`],
+/// [`EDGE_SWIPE_TRAVEL`] and [`EDGE_SWIPE_SLOPE`].
+///
+/// **It fires once.** A swipe that keeps going — a fast flick, or a hand that carries on after the page turns —
+/// is still one gesture, and turning four pages from it would be the gesture misread as four. `turned` is what
+/// says the page has already been turned, and it is never cleared while the gesture lasts.
+#[derive(Debug, Clone, Copy)]
+struct EdgeSwipe {
+    /// Which side the gesture began at.
+    edge: Edge,
+    /// How far the gesture has moved sideways since it began, signed: positive is rightwards.
+    travel: f32,
+    /// The same for the vertical axis, so a scroll can be told from a swipe. Only its magnitude is ever read.
+    rise: f32,
+    /// Whether this gesture has already turned a page.
+    turned: bool,
+}
+
+/// Which window edge an [`EdgeSwipe`] began at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    /// The window's left side, where a rightward swipe is the previous page.
+    Left,
+    /// The window's right side, where a leftward swipe is the next page.
+    Right,
+}
+
+/// What an edge gesture has come to, once it has travelled far enough to mean something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Swipe {
+    /// The gesture is not a page turn: too short, too vertical, or pointing back into the sheet.
+    None,
+    /// It is a turn, the way this names.
+    Turn(Turn),
+}
+
+/// Which way an edge swipe turns the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Turn {
+    Previous,
+    Next,
+}
+
+impl Edge {
+    /// The edge a gesture began at, if `x` is inside [`EDGE_SWIPE_BAND`] of either side of a window `width`.
+    ///
+    /// `None` is a gesture that began over the page, which is the common case and is never a page turn: the paper
+    /// fills the window, so anything further in than the band is a reader moving the page they are reading.
+    fn at(x: f32, width: f32) -> Option<Self> {
+        if !(width > 0.0) || !x.is_finite() {
+            return None;
+        }
+
+        if x < EDGE_SWIPE_BAND {
+            Some(Edge::Left)
+        } else if x > width - EDGE_SWIPE_BAND {
+            Some(Edge::Right)
+        } else {
+            None
+        }
+    }
+}
+
+impl EdgeSwipe {
+    /// Begins a gesture that started at `edge`.
+    fn new(edge: Edge) -> Self {
+        Self {
+            edge,
+            travel: 0.0,
+            rise: 0.0,
+            turned: false,
+        }
+    }
+
+    /// Adds one reading's worth of movement.
+    fn moved(&mut self, delta: (f32, f32)) {
+        self.travel += delta.0;
+        self.rise += delta.1;
+    }
+
+    /// What the gesture has come to.
+    ///
+    /// A swipe turns the page once it has travelled [`EDGE_SWIPE_TRAVEL`] *away from* the edge it began at, and
+    /// only if it is [`EDGE_SWIPE_SLOPE`] times more sideways than vertical. Both are read from the accumulated
+    /// travel, so a gesture that drifts out and back is not a swipe, and a swipe that has already turned one page
+    /// reports `None` ever after — see [`EdgeSwipe`] on why it fires once.
+    fn decided(&self) -> Swipe {
+        if self.turned {
+            return Swipe::None;
+        }
+
+        // Away from the edge, which is the direction each side turns. A swipe that pushes *into* the page from
+        // the rim is a pan, and the sign is what says so.
+        let away = match self.edge {
+            Edge::Left => self.travel,
+            Edge::Right => -self.travel,
+        };
+
+        if away < EDGE_SWIPE_TRAVEL || away < self.rise.abs() * EDGE_SWIPE_SLOPE {
+            return Swipe::None;
+        }
+
+        Swipe::Turn(match self.edge {
+            Edge::Left => Turn::Previous,
+            Edge::Right => Turn::Next,
+        })
+    }
+
+    /// Marks the page as turned, so the rest of this gesture cannot turn another.
+    fn turned(&mut self) {
+        self.turned = true;
+    }
 }
 
 /// How much a pinch zooms, as a factor to multiply the current zoom by.

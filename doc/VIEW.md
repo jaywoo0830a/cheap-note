@@ -658,6 +658,27 @@ Ignoring the wheel is a deliberate loss of support rather than an oversight: a l
 `NoteApp::on_scroll`, so a plugged-in mouse pans nothing and zooms nothing. The advantage is that there is one
 zoom gesture and one pan gesture, with no chord that turns one into the other.
 
+**A swipe that began at either side turns the page.** Rightwards from the left edge is the previous page,
+leftwards from the right edge is the next, which is the direction a page of a book moves when it is turned. The
+gesture is followed across readings rather than decided on one (`EdgeSwipe`), because a trackpad sends a swipe as
+dozens of small deltas and none of them alone says where the hand is going. Three rules keep it from firing by
+accident:
+
+- **The band is where the gesture began** (`EDGE_SWIPE_BAND`, 120 logical px). A trackpad reports the position a
+  gesture *started* at with every reading of it, so the band is answered once per gesture. A scroll begun over the
+  page begins outside it, and the paper fills the window.
+- **The travel is signed and accumulated** (`EDGE_SWIPE_TRAVEL`, 80 logical px), and it has to be *away from* the
+  edge that began it. A gesture that drifts out and comes back adds up to nothing, and a swipe pushing into the
+  page from the rim is a pan, because the sign says so.
+- **It must be more sideways than vertical** (`EDGE_SWIPE_SLOPE`, two to one). A reader scrolling down the page
+  with a thumb near the edge is mostly vertical with a little sideways drift; a diagonal flick still counts.
+
+While a swipe is in flight it does **not** pan — a page turn that dragged the sheet sideways first would be two
+motions for one intention — and it turns **one** page. `turned` is never cleared while the gesture lasts, so a fast
+flick that keeps sending readings after the page turns does not run through four pages. The gesture ends on the
+same quiet gap a pinch ends on (`GESTURE_SETTLE_INTERVAL`, read by the pump), and a swipe that ended without
+turning anything is simply forgotten.
+
 **The pen's own two gestures take the nib off the paper.** With **space held**, a nib that is down moves the
 sheet instead of writing on it: the paper follows the hand exactly, and either the pen or the key may end the
 gesture. With **option held** (`⌥` on macOS, `Alt` elsewhere), the nib's vertical travel zooms — up is closer,
@@ -733,6 +754,9 @@ The numbers behind that are all *derived* rather than picked:
 
 | Number | Value | Where it comes from |
 |---|---|---|
+| `EDGE_SWIPE_BAND` | 120 logical px | how far in from a side a gesture may have begun and still count as an edge swipe. Wide enough to catch a swipe from the rim without aiming, narrow enough that a scroll begun over the page never lands in it |
+| `EDGE_SWIPE_TRAVEL` | 80 logical px | the sideways travel a swipe needs, about two centimetres: more than a resting hand drifts and less than a deliberate swipe. Signed and accumulated, so out-and-back is not one |
+| `EDGE_SWIPE_SLOPE` | 2.0 | how much more sideways than vertical a gesture must be. A thumb scrolling near the edge is mostly vertical; a diagonal flick still counts |
 | `PEN_ZOOM_TRAVEL` | 200 px | the nib's travel for a doubling, at any zoom: a little over half a finger's movement, and shorter than a pair of fingers needs to pinch — a hand on a pen has finer control than two fingers |
 | `PEN_PAN_GAIN` | 2.0 | how far the sheet moves per pixel the nib travels: a hand has one screen's travel in it and a page is often longer, so 1:1 would make a long page unreachable without lifting the pen |
 | `PEN_JITTER_SPAN` | 0.5 px | what a gesture treats as the hand moving: readings under it are the digitizer's own tremor (a resting hand, a spinning fan) and are ignored, so a page held still does not shiver. Chosen against the hardware rather than estimated: two tenths still shivered under a spinning fan, and half a pixel is below what a hand can aim at, so nothing meant is lost. A threshold rather than an average, so there is no lag |

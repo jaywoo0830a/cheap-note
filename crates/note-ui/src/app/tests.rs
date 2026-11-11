@@ -4,10 +4,11 @@ use super::{
     bar_line, confirmed, file_label, file_stem, held_by_cap, page_of_write, page_owes_a_rewrite,
     palette_at, palette_centre, palette_colours, palette_face, palette_id, palette_in_hand,
     palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width, sheet_matches,
-    spun, touches_paper, zoom_text, Confirmation, PaletteGeometry, PalettePart, PenGesture,
-    BAR_HEIGHT, PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS,
-    PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS,
-    PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL,
+    spun, touches_paper, zoom_text, Confirmation, Edge, EdgeSwipe, PaletteGeometry, PalettePart,
+    PenGesture, Swipe, Turn, BAR_HEIGHT, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX,
+    PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH,
+    PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL,
+    PALETTE_WELL_PAD, PDF_QUIET_INTERVAL,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
 use crate::ink::{Notes, Tool};
@@ -90,6 +91,111 @@ fn the_zoom_field_shows_a_whole_percentage() {
             "{zoom} came back as something else from {shown}"
         );
     }
+}
+
+/// The band is where a gesture *began*, and a gesture that began over the page is never a page turn.
+#[test]
+fn an_edge_is_a_side_of_the_window() {
+    let wide = 1_600.0;
+
+    assert_eq!(Edge::at(0.0, wide), Some(Edge::Left), "the very rim");
+    assert_eq!(
+        Edge::at(EDGE_SWIPE_BAND - 1.0, wide),
+        Some(Edge::Left),
+        "just inside the band"
+    );
+    assert_eq!(
+        Edge::at(EDGE_SWIPE_BAND, wide),
+        None,
+        "the band is open at its inner edge: a gesture that began here is a pan"
+    );
+    assert_eq!(Edge::at(wide / 2.0, wide), None, "the middle of the page");
+    assert_eq!(
+        Edge::at(wide - EDGE_SWIPE_BAND + 1.0, wide),
+        Some(Edge::Right),
+        "the right band"
+    );
+    assert_eq!(Edge::at(wide, wide), Some(Edge::Right), "the very rim");
+
+    // A window with no width has no sides, and a position that is not a number is not on one.
+    assert_eq!(Edge::at(0.0, 0.0), None);
+    assert_eq!(Edge::at(f32::NAN, wide), None);
+}
+
+/// The two gestures the app is built around: rightwards from the left edge is back, leftwards from the right
+/// edge is forward.
+#[test]
+fn a_swipe_away_from_its_edge_turns_the_way_it_points() {
+    let mut back = EdgeSwipe::new(Edge::Left);
+    back.moved((EDGE_SWIPE_TRAVEL, 0.0));
+    assert_eq!(back.decided(), Swipe::Turn(Turn::Previous));
+
+    let mut forward = EdgeSwipe::new(Edge::Right);
+    forward.moved((-EDGE_SWIPE_TRAVEL, 0.0));
+    assert_eq!(forward.decided(), Swipe::Turn(Turn::Next));
+}
+
+/// A swipe that pushes *into* the page from the rim is a pan, and the sign is what says so.
+#[test]
+fn a_swipe_back_towards_its_edge_is_no_turn() {
+    let mut pressed = EdgeSwipe::new(Edge::Left);
+    pressed.moved((-EDGE_SWIPE_TRAVEL * 2.0, 0.0));
+    assert_eq!(pressed.decided(), Swipe::None, "left, from the left edge");
+
+    let mut pressed = EdgeSwipe::new(Edge::Right);
+    pressed.moved((EDGE_SWIPE_TRAVEL * 2.0, 0.0));
+    assert_eq!(pressed.decided(), Swipe::None, "right, from the right edge");
+}
+
+/// The travel is accumulated across readings, and a gesture that goes out and comes back does not add up to one.
+#[test]
+fn a_swipe_is_the_travel_of_the_whole_gesture() {
+    // A trackpad sends a swipe as many small deltas; none of them alone is a swipe.
+    let mut swipe = EdgeSwipe::new(Edge::Left);
+    let steps = (EDGE_SWIPE_TRAVEL as i32 / 5) - 1;
+    for _ in 0..steps {
+        swipe.moved((5.0, 0.0));
+        assert_eq!(swipe.decided(), Swipe::None, "not yet");
+    }
+    swipe.moved((EDGE_SWIPE_TRAVEL - 5.0 * steps as f32, 0.0));
+    assert_eq!(swipe.decided(), Swipe::Turn(Turn::Previous), "and now it is");
+
+    // Out and back is not a swipe: the signed travel comes back to nothing.
+    let mut wandered = EdgeSwipe::new(Edge::Left);
+    wandered.moved((EDGE_SWIPE_TRAVEL, 0.0));
+    wandered.moved((-EDGE_SWIPE_TRAVEL, 0.0));
+    assert_eq!(wandered.decided(), Swipe::None, "it ended where it began");
+}
+
+/// A reader scrolling down the page with a thumb near the edge is the accident the slope rules out.
+#[test]
+fn a_mostly_vertical_gesture_is_a_scroll_and_not_a_swipe() {
+    let mut scroll = EdgeSwipe::new(Edge::Left);
+
+    // Sideways enough to pass the travel, but twice as much of it downwards.
+    scroll.moved((EDGE_SWIPE_TRAVEL, -EDGE_SWIPE_TRAVEL));
+    assert_eq!(scroll.decided(), Swipe::None, "two to one is not a swipe");
+
+    // And a diagonally-flicked swipe still counts: three to one is.
+    let mut flick = EdgeSwipe::new(Edge::Left);
+    flick.moved((EDGE_SWIPE_TRAVEL * 3.0, -EDGE_SWIPE_TRAVEL));
+    assert_eq!(flick.decided(), Swipe::Turn(Turn::Previous));
+}
+
+/// One gesture turns one page. A fast flick keeps sending readings after the page has turned, and following
+/// them would run through four pages on one swipe.
+#[test]
+fn a_swipe_that_has_turned_a_page_turns_no_more() {
+    let mut swipe = EdgeSwipe::new(Edge::Left);
+    swipe.moved((EDGE_SWIPE_TRAVEL, 0.0));
+    assert_eq!(swipe.decided(), Swipe::Turn(Turn::Previous));
+
+    swipe.turned();
+    assert_eq!(swipe.decided(), Swipe::None, "the same gesture, again");
+
+    // However much further the hand carries on.
+    swipe.moved((EDGE_SWIPE_TRAVEL * 4.0, 0.0));
+    assert_eq!(swipe.decided(), Swipe::None, "no matter how far it goes");
 }
 
 /// A pinch reports a fraction of the current size, and a nonsense one is refused.

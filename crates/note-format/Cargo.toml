@@ -19,9 +19,9 @@ serde_json = "1"
 # amalgamation with `cc`, so the user never installs anything.
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 # Chunk codec: a page's strokes as a structure-of-arrays blob, compressed and sealed with a CRC32.
-zstd = "=0.14.0"
+zstd = "=0.14.3"
 lz4_flex = "=0.14.0"
-crc32fast = "=1.5.2"
+crc32fast = "=1.5.5"
 # Chunks are decompressed in parallel: a page is a handful of independent 64-256 KB blobs.
 rayon = "=1.12.0"
 # The note container: a zip holding the note's SQLite file, the original PDF and its attachments.

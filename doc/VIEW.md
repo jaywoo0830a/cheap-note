@@ -658,6 +658,12 @@ Ignoring the wheel is a deliberate loss of support rather than an oversight: a l
 `NoteApp::on_scroll`, so a plugged-in mouse pans nothing and zooms nothing. The advantage is that there is one
 zoom gesture and one pan gesture, with no chord that turns one into the other.
 
+That trade was made on a Mac, where a trackpad is part of the machine, and it reads differently on Windows,
+where a desktop usually has a wheel and no precision trackpad — so the same rule means "no scrolling with the
+mouse at all" there. It is left as it is knowingly rather than overlooked; [WINDOWS.md §3.2](WINDOWS.md#32-a-mouse-wheel-pans-nothing)
+sets out the three ways it could be revisited and what each costs.
+
+
 **A swipe that began at either side turns the page.** Rightwards from the left edge is the previous page,
 leftwards from the right edge is the next, which is the direction a page of a book moves when it is turned. The
 gesture is followed across readings rather than decided on one (`EdgeSwipe`), because a trackpad sends a swipe as
@@ -666,7 +672,9 @@ accident:
 
 - **The band is where the gesture began** (`EDGE_SWIPE_BAND`, 120 logical px). A trackpad reports the position a
   gesture *started* at with every reading of it, so the band is answered once per gesture. A scroll begun over the
-  page begins outside it, and the paper fills the window.
+  page begins outside it, and the paper fills the window. (That parenthetical is macOS' behaviour, not every
+  platform's: Windows reports the *live cursor* per reading, which is why this gesture is not reliable there —
+  see [WINDOWS.md §3.1](WINDOWS.md#31-an-edge-swipe-never-turns-a-page).)
 - **The travel is signed and accumulated** (`EDGE_SWIPE_TRAVEL`, 80 logical px), and it has to be *away from* the
   edge that began it. A gesture that drifts out and comes back adds up to nothing, and a swipe pushing into the
   page from the rim is a pan, because the sign says so.
@@ -993,7 +1001,9 @@ is not a substitute for the other, and a cap above the display's rate does not m
 just hides it.
 
 Windows has no choice to make at all: it presents at a sync interval of zero always, for reasons `device.rs`
-records, so its `set_vsync` is empty and the setting is carried with the note regardless.
+records, so its `set_vsync` is empty and the setting is carried with the note regardless. The switch is still
+on the bar there, which is a small lie in the interface rather than in the mechanism —
+[WINDOWS.md §3.3](WINDOWS.md#33-the-v-sync-switch-does-nothing) has the two ways to stop telling it.
 
 ## 12. The numbers, in one table
 

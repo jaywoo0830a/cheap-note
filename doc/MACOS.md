@@ -3,7 +3,9 @@
 This is the macOS build's own document. The port is **done** — `apps/macos` is a full workspace member
 that builds and runs on a Mac — so this document says what it *is*, how each platform service is
 implemented, and what only a Mac can do. It is the companion to
-[ARCHITECTURE.md](ARCHITECTURE.md) (what runs where), read for the one platform that is not Windows.
+[ARCHITECTURE.md](ARCHITECTURE.md) (what runs where), read for the one platform that is not Windows. Its
+mirror image is [WINDOWS.md](WINDOWS.md): what the Windows build gained from the work recorded here, and
+the three places where a Mac-shaped assumption about the platform did not carry over.
 
 If you have just cloned this on a Mac, [§2](#2-build-and-run-on-the-mac) is the whole of what you need.
 If you are changing a platform service, [§4](#4-the-platform-services-one-each) is the map.

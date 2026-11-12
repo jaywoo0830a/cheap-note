@@ -63,6 +63,7 @@ platform adds its own (10 in `apps/macos`, 5 in `pen-macos`, 29 in `apps/windows
 | [`doc/VIEW.md`](doc/VIEW.md) | why the view is the way it is: the frame loop, the bar, the sheet, the gestures, the pen's rules |
 | [`doc/STORE.md`](doc/STORE.md) | one stroke's journey to the disk and back — which is the format crate's story |
 | [`doc/MACOS.md`](doc/MACOS.md) | the macOS build: what the seam gives you, how each platform service is implemented, and what only a Mac can do |
+| [`doc/WINDOWS.md`](doc/WINDOWS.md) | the Windows build's counterpart: which tuning reached it, which platform behaviours still differ (and silently break a gesture), and what is worth optimising here only |
 
 Every module in the `src/` trees opens with the same kind of short account of
 itself — the *why* at the point of use — and those are the place to look before changing something

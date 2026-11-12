@@ -265,22 +265,33 @@ fn the_body_arrives_as_its_lean_grows() {
 
 /// The soft layers are wider and fainter than what they sit under, and the nib mark stays the
 /// strongest thing drawn: this is what keeps the cursor a hint rather than a blot.
+///
+/// Asserted against local bindings rather than against the constants directly, because these are
+/// *constants*: `assert!(NIB_BLOOM_SPREAD > 0.0)` is a comparison the compiler folds before clippy ever
+/// sees it, and a fold that came out false would stop the crate compiling rather than fail a test. Reading
+/// them into `let`s keeps the relations as checks on values a test can actually be run over — and it is
+/// the relations that matter, not the numbers.
 #[test]
 fn the_soft_layers_are_fainter_than_what_they_sit_under() {
-    assert!(NIB_BLOOM_SPREAD > 0.0, "the bloom reaches past the mark");
-    assert!(NIB_BLOOM_ALPHA < NIB_ALPHA, "and is the fainter copy");
-    assert!(BODY_HALO_GROW > 0.0, "the body's edge reaches outward");
-    assert!(BODY_HALO_ALPHA < BODY_ALPHA, "and is fainter than the body");
+    let (bloom_spread, bloom_alpha) = (NIB_BLOOM_SPREAD, NIB_BLOOM_ALPHA);
+    let (halo_grow, halo_alpha) = (BODY_HALO_GROW, BODY_HALO_ALPHA);
+    let (nib_alpha, body_alpha) = (NIB_ALPHA, BODY_ALPHA);
+    let (radius_min, radius_max) = (NIB_RADIUS_MIN, NIB_RADIUS_MAX);
+
+    assert!(bloom_spread > 0.0, "the bloom reaches past the mark");
+    assert!(bloom_alpha < nib_alpha, "and is the fainter copy");
+    assert!(halo_grow > 0.0, "the body's edge reaches outward");
+    assert!(halo_alpha < body_alpha, "and is fainter than the body");
     assert!(
-        BODY_ALPHA < NIB_ALPHA,
+        body_alpha < nib_alpha,
         "the body never competes with the nib"
     );
     assert!(
-        NIB_RADIUS_MIN < NIB_RADIUS_MAX,
+        radius_min < radius_max,
         "the mark has a range of sizes to move in"
     );
 
-    for alpha in [NIB_ALPHA, NIB_BLOOM_ALPHA, BODY_ALPHA, BODY_HALO_ALPHA] {
+    for alpha in [nib_alpha, bloom_alpha, body_alpha, halo_alpha] {
         assert!(
             (0.0..1.0).contains(&alpha),
             "{alpha} is not an opacity a shape can be painted with"

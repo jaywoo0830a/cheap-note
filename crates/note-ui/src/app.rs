@@ -5465,9 +5465,7 @@ impl NoteApp {
                 "Steady move",
                 self.settings.pen_jitter,
                 cx,
-                |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
-                    app.set_pen_jitter(on, cx)
-                },
+                |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| app.set_pen_jitter(on, cx),
             ))
             .child(toolbar_divider(hairline))
             // A render option for the *page*, next to the colours it overrides: this row wraps, so
@@ -6133,35 +6131,36 @@ impl Render for NoteApp {
             self.bar_handle(cx).into_any_element()
         };
 
-        let mut screen = div()
-            .relative()
-            .size_full()
-            .bg(desk)
-            .text_color(foreground)
-            // A trackpad's two-finger scroll pans. A pinch arrives on its own event (`on_pinch` below).
-            .on_scroll(
-                cx.listener(|app, event: &ScrollEvent, window, cx| app.on_scroll(event, window, cx)),
-            )
-            .on_pinch(cx.listener(|app, event: &PinchEvent, _, cx| app.on_pinch(event, cx)))
-            // The note's keyboard: Esc for the home screen, the two arrows for the page, and the three
-            // commands a person reaches without letting go of the pen. A listener and not a binding,
-            // because a *list* of rows wants the same keys (see [`crate::home`]); it is heard because this
-            // element is the sheet's, and the sheet holds the keyboard whenever it is the screen in front
-            // (see [`Self::claim_sheet_keyboard`]).
-            .on_key_down(cx.listener(|app, event: &KeyDownEvent, window, cx| {
-                app.note_key_down(event, window, cx)
-            }))
-            // A name field that has just closed leaves the focus on a handle that is no longer drawn, which
-            // is what [`Self::claim_sheet_keyboard`] fixes on the next frame: the handle is tracked here so
-            // the focus has somewhere in this element to land.
-            .track_focus(&self.sheet_focus)
-            // The canvas is not drawn here: it has a surface of its own *behind* this element, and what
-            // this element paints is nothing — which is what keeps the desk, the sheet and the ink out of
-            // the frame (see [`crate::ink_layer`]).
-            .child(bar)
-            // The desk's own row: the page in the middle, the counters at the edge. Last, so it
-            // paints over the sheet — a page pill *under* the paper would be no pill at all.
-            .child(self.bottom_row(cx));
+        let mut screen =
+            div()
+                .relative()
+                .size_full()
+                .bg(desk)
+                .text_color(foreground)
+                // A trackpad's two-finger scroll pans. A pinch arrives on its own event (`on_pinch` below).
+                .on_scroll(cx.listener(|app, event: &ScrollEvent, window, cx| {
+                    app.on_scroll(event, window, cx)
+                }))
+                .on_pinch(cx.listener(|app, event: &PinchEvent, _, cx| app.on_pinch(event, cx)))
+                // The note's keyboard: Esc for the home screen, the two arrows for the page, and the three
+                // commands a person reaches without letting go of the pen. A listener and not a binding,
+                // because a *list* of rows wants the same keys (see [`crate::home`]); it is heard because this
+                // element is the sheet's, and the sheet holds the keyboard whenever it is the screen in front
+                // (see [`Self::claim_sheet_keyboard`]).
+                .on_key_down(cx.listener(|app, event: &KeyDownEvent, window, cx| {
+                    app.note_key_down(event, window, cx)
+                }))
+                // A name field that has just closed leaves the focus on a handle that is no longer drawn, which
+                // is what [`Self::claim_sheet_keyboard`] fixes on the next frame: the handle is tracked here so
+                // the focus has somewhere in this element to land.
+                .track_focus(&self.sheet_focus)
+                // The canvas is not drawn here: it has a surface of its own *behind* this element, and what
+                // this element paints is nothing — which is what keeps the desk, the sheet and the ink out of
+                // the frame (see [`crate::ink_layer`]).
+                .child(bar)
+                // The desk's own row: the page in the middle, the counters at the edge. Last, so it
+                // paints over the sheet — a page pill *under* the paper would be no pill at all.
+                .child(self.bottom_row(cx));
 
         // The palette at the pen, over the sheet: what the hand is reaching for is drawn in front of
         // what it is writing on, and under the question below, which is about the page (see
@@ -6707,7 +6706,10 @@ impl Edge {
     /// `None` is a gesture that began over the page, which is the common case and is never a page turn: the paper
     /// fills the window, so anything further in than the band is a reader moving the page they are reading.
     fn at(x: f32, width: f32) -> Option<Self> {
-        if !(width > 0.0) || !x.is_finite() {
+        // Written as an explicit `is_nan` rather than as `!(width > 0.0)`: the negation is how a `NaN`
+        // width is caught (every comparison against a `NaN` is false), but a reader has to know that to
+        // see it, and clippy cannot tell this from a comparison written the wrong way round.
+        if width.is_nan() || width <= 0.0 || !x.is_finite() {
             return None;
         }
 

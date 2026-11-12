@@ -470,7 +470,10 @@ fn place(rules: Vec<Fill>, at: RulingSheet, origin: (f32, f32)) -> Vec<Fill> {
 /// centred on the edge would be clipped in half. Counting from one spacing in keeps the entire
 /// ruling inside the sheet, so nothing has to be clipped when it is drawn.
 fn rules_that_fit(extent: f32, spacing: f32) -> usize {
-    if !(spacing > 0.0) || extent <= spacing {
+    // `is_nan` spelled out rather than relying on `!(spacing > 0.0)`: a `NaN` spacing is the case this
+    // has to refuse, and a reader should not have to know that every comparison against a `NaN` is false
+    // to see that it does.
+    if spacing.is_nan() || spacing <= 0.0 || extent <= spacing {
         return 0;
     }
 

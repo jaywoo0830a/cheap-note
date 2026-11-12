@@ -47,15 +47,19 @@ impl ProcessStats {
     ///
     /// `Option` rather than a `Result`: a build that cannot number its own process is a status line
     /// without a hardware clause, and there is nothing a person could do about it.
+    ///
+    /// `System::new_with_specifics` answers a `Result` since `sysinfo` 0.40, and `RefreshKind::new` was
+    /// renamed to `nothing` — the same handful of changes the macOS half of this service took.
     pub fn install() -> Option<Self> {
         let pid = get_current_pid().ok()?;
 
         let system = System::new_with_specifics(
-            RefreshKind::new()
+            RefreshKind::nothing()
                 .with_memory(MemoryRefreshKind::everything())
-                .with_cpu(CpuRefreshKind::new().with_cpu_usage())
-                .with_processes(ProcessRefreshKind::new().with_cpu().with_memory()),
-        );
+                .with_cpu(CpuRefreshKind::nothing().with_usage())
+                .with_processes(ProcessRefreshKind::nothing().with_cpu().with_memory()),
+        )
+        .ok()?;
 
         Some(ProcessStats {
             system,
@@ -69,8 +73,12 @@ impl SystemStats for ProcessStats {
     fn vitals(&mut self) -> Option<Vitals> {
         // One process, not the table: `Some(&[pid])` is what stops this from walking every process on
         // the machine once a second, which would be a status line that costs more than it reports.
+        //
+        // The `false` is `remove_dead_processes`, which 0.40 made explicit. This asks about one process
+        // that is this one, so there is never a dead one to drop — and a `true` would clear the entry it
+        // is about to read.
         self.system
-            .refresh_processes(ProcessesToUpdate::Some(&[self.pid]));
+            .refresh_processes(ProcessesToUpdate::Some(&[self.pid]), false);
 
         let Some(process) = self.system.process(self.pid) else {
             return self.last;

@@ -638,9 +638,7 @@ impl PdfDocumentView {
     /// turn, added — and reading the page's own is a Pdfium call: cheap, but not free, and it does not
     /// change under the app's feet, so it is read once per page and remembered.
     fn key_for(&mut self, request: PageRequest) -> Option<PageKey> {
-        if self.document.is_none() {
-            return None;
-        }
+        self.document.as_ref()?;
 
         Some(PageKey {
             document: self.document_id,

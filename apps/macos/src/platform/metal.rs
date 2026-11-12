@@ -757,7 +757,9 @@ fn tessellate(vertices: &mut Vec<Vertex>, polygon: &[(f32, f32)], colour: gpui_k
     for band in bands.windows(2) {
         let (bottom, top) = (band[0], band[1]);
 
-        if top - bottom < f32::EPSILON {
+        // `bands` is sorted, so `top >= bottom` already — the `.abs()` states that a band of no height is
+        // what is being skipped, rather than a band that happens to be upside down.
+        if (top - bottom).abs() < f32::EPSILON {
             continue;
         }
 
@@ -1513,7 +1515,10 @@ mod tests {
         };
 
         refresh(&mut key, &mut slots);
-        assert_eq!(slots, [false; 3], "a build left a stale buffer marked valid");
+        assert_eq!(
+            slots, [false; 3],
+            "a build left a stale buffer marked valid"
+        );
 
         // Three frames of a pan: the ink is reused, so no slot is invalidated and nothing is uploaded.
         for slot in [0, 1, 2] {
@@ -1608,8 +1613,13 @@ mod tests {
     /// were in device pixels. Baking them in the paper's units must not move anything.
     #[test]
     fn the_transform_lands_the_paper_where_the_mapping_did() {
-        let mut canvas = Canvas::default();
-        canvas.scale = 2.0;
+        // Built in the initializer rather than field by field: `Canvas`'s `Default` is what a frame starts
+        // from, and everything this needs is `scale`, a paper, a zoom and an origin — the rest staying at
+        // their defaults is the point, since a transform that depended on them would be a bug.
+        let mut canvas = Canvas {
+            scale: 2.0,
+            ..Canvas::default()
+        };
         canvas.ink.paper = (720.0, 1018.0);
         canvas.ink.zoom = 1.5;
         canvas.ink.origin = (24.0, -120.0);
@@ -1816,7 +1826,9 @@ mod fill_tests {
     /// The area of the triangles a fill produced: half a cross product each, summed.
     fn area(vertices: &[Vertex]) -> f32 {
         vertices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|triangle| {
                 let (a, b, c) = (triangle[0], triangle[1], triangle[2]);
                 ((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)).abs() * 0.5
@@ -2103,7 +2115,9 @@ mod fill_tests {
                 let py = y - half + 2.0 * half * (row as f32 + 0.5) / STEPS as f32;
 
                 if vertices
-                    .chunks_exact(3)
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
                     .any(|t| inside_triangle((px, py), t))
                 {
                     covered += 1;
@@ -2413,7 +2427,9 @@ mod fill_tests {
                 );
                 let said = model.is_ink(at.0, at.1);
                 let drawn = vertices
-                    .chunks_exact(3)
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
                     .any(|triangle| inside_triangle(at, triangle));
 
                 if said != drawn {
@@ -2686,7 +2702,7 @@ mod fill_tests {
         for band in bands.windows(2) {
             let (bottom, top) = (band[0], band[1]);
 
-            if top - bottom < f32::EPSILON {
+            if (top - bottom).abs() < f32::EPSILON {
                 continue;
             }
 

@@ -401,10 +401,16 @@ fn unpack(source: &Path, dir: &Path) -> Result<()> {
         // `enclosed_name` is the zip-slip check: an entry called `..\..\somewhere` is refused rather
         // than written, which is the one way a note from someone else can write outside its folder.
         let Some(name) = entry.enclosed_name().map(|name| name.to_path_buf()) else {
+            // `name()` answers a `Result` since zip 9 — an entry whose name cannot be decoded has no
+            // name to print — so a failure here is described by what is known instead: the index it
+            // sits at, and that its name is the reason the entry was refused.
+            let name = entry
+                .name()
+                .map(|name| name.into_owned())
+                .unwrap_or_else(|_| format!("entry #{index}, whose name cannot be read"));
             return Err(Error::Note(format!(
-                "{} holds an entry that points outside the note: {}",
+                "{} holds an entry that points outside the note: {name}",
                 source.display(),
-                entry.name()
             )));
         };
 

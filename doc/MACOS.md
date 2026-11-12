@@ -109,7 +109,7 @@ These are the things the Windows side settled, and the Mac build inherits unchan
   aarch64-apple-darwin` still prints `windows-sys`/`windows-link`, but those are reached only through a
   **proc-macro** graph (gpui-kit's `rust-embed`/`rust-i18n` and their `dirs`/`ignore`), which builds for
   the *host*; on a Mac they are not in the graph at all. Nothing the view depends on names a Windows API.
-* **The toolkit has a mac backend.** `gpui-kit` `0.9.0` → `gpui-pre-platform` (gpui-pre 0.3.11), which selects
+* **The toolkit has a mac backend.** `gpui-kit` `0.9.1` → `gpui-pre-platform` (gpui-pre 0.3.12), which selects
   `gpui-pre-macos` + `gpui-pre-apple` for macOS (both published, 0.3.x).
 * **The chords are the platform's.** Bindings are `secondary-z`/`secondary-shift-c`/… and handlers ask
   `keys::is_primary`, which calls `Modifiers::secondary(cx)` — gpui resolves it per target: `⌘` on macOS,

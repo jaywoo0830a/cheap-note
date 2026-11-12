@@ -20,7 +20,7 @@ note-format = { path = "../note-format" }
 
 # UI framework. GPUI Kit 0.9.0 pulls in GPUI + gpui-base + gpui-component; the view never lists GPUI
 # itself. On Windows, macOS and Linux the platform crates behind it choose the backend.
-gpui-kit = "=0.9.0"
+gpui-kit = "=0.9.1"
 
 # Which keys are held, asked of the operating system rather than of this window's keyboard.
 #

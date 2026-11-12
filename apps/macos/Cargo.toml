@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 note-ui = { path = "../../crates/note-ui" }
 note-format = { path = "../../crates/note-format" }
-gpui-kit = "=0.9.0"
+gpui-kit = "=0.9.1"
 
 # The pen: `NSEvent`'s tablet fields, read on the thread that draws (see its own docs).
 pen-macos = { path = "pen-macos" }
@@ -30,7 +30,7 @@ raw-window-handle = "0.6"
 # still listed here rather than in `note-ui`: it declares `[target.…]` dependencies, and the view may not
 # sit on a dependency edge that does (`doc/MACOS.md` §6). The same crate and the same pin as the Windows
 # build, so the two platforms measure themselves the same way.
-sysinfo = "=0.31.4"
+sysinfo = "=0.40.3"
 
 # `proc_pidinfo(PROC_PIDTASKINFO)`: the one counter `sysinfo` cannot give on this platform. It reports a
 # process's thread count, and `sysinfo`'s equivalent (`Process::tasks`) is Linux-only — it answers `None`
@@ -66,4 +66,4 @@ objc2-metal = { version = "0.3", features = [
 objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSProcessInfo", "NSString"] }
 foreign-types-shared = "0.3"
 # The canvas itself: geometry on the GPU, drawn by `metal.rs`.
-core-graphics = { version = "0.24", features = ["highsierra"] }
+core-graphics = { version = "0.25", features = ["highsierra"] }

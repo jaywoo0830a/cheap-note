@@ -158,7 +158,11 @@ fn a_swipe_is_the_travel_of_the_whole_gesture() {
         assert_eq!(swipe.decided(), Swipe::None, "not yet");
     }
     swipe.moved((EDGE_SWIPE_TRAVEL - 5.0 * steps as f32, 0.0));
-    assert_eq!(swipe.decided(), Swipe::Turn(Turn::Previous), "and now it is");
+    assert_eq!(
+        swipe.decided(),
+        Swipe::Turn(Turn::Previous),
+        "and now it is"
+    );
 
     // Out and back is not a swipe: the signed travel comes back to nothing.
     let mut wandered = EdgeSwipe::new(Edge::Left);
@@ -990,4 +994,3 @@ fn the_counters_are_read_only_while_the_line_is_shown() {
         "and a hidden one costs the platform nothing"
     );
 }
-

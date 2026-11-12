@@ -1145,9 +1145,7 @@ impl InkDocument {
             add_point(
                 stroke,
                 &mut self.stats,
-                alpha,
-                x,
-                y,
+                Landing { alpha, x, y },
                 sample,
                 settings,
                 force,
@@ -1349,9 +1347,7 @@ impl InkDocument {
                 add_point(
                     loop_stroke,
                     &mut self.stats,
-                    alpha,
-                    x,
-                    y,
+                    Landing { alpha, x, y },
                     sample,
                     settings,
                     false,
@@ -1378,9 +1374,7 @@ impl InkDocument {
                     add_point(
                         &mut loop_stroke,
                         &mut self.stats,
-                        alpha,
-                        x,
-                        y,
+                        Landing { alpha, x, y },
                         sample,
                         settings,
                         true,
@@ -1433,6 +1427,23 @@ impl InkDocument {
     }
 }
 
+/// Where one reading put the nib: the smoothed position, and how much of the way there the pen has come.
+///
+/// The three travel together and are meaningless apart — `alpha` is the weight the smoother gave *this*
+/// position, so a caller that passed one without the other two would be describing a place it is not
+/// drawing at. Grouping them is also what keeps [`add_point`] to a readable number of arguments.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Landing {
+    /// How far the nib moved toward the reading, `0.0`–`1.0`: `1.0` is a raw reading.
+    ///
+    /// Below one, the point is partway between the last drawn point and where the hand now is (see
+    /// [`InkDocument::alpha`]), which is what smooths a jittery digitizer without lagging the nib.
+    alpha: f32,
+    /// The reading's position, in the paper's units.
+    x: f32,
+    y: f32,
+}
+
 /// Adds a point to a stroke being drawn, after smoothing and resampling.
 ///
 /// A free function rather than a method, because two strokes are drawn this way: the line under the pen and
@@ -1448,13 +1459,13 @@ impl InkDocument {
 fn add_point(
     stroke: &mut Stroke,
     stats: &mut InkStats,
-    alpha: f32,
-    x: f32,
-    y: f32,
+    landing: Landing,
     sample: &Reading,
     settings: &Settings,
     force: bool,
 ) {
+    let Landing { alpha, x, y } = landing;
+
     let (target_x, target_y) = match (stroke.points.last(), alpha < 1.0) {
         (Some(last), true) => (last.x + (x - last.x) * alpha, last.y + (y - last.y) * alpha),
         _ => (x, y),
@@ -1470,7 +1481,6 @@ fn add_point(
             }
         }
     }
-
     // The lift reports no applied force (`applied_pressure()` is `None` off the surface), so an existing
     // point's width is reused rather than letting the stroke change width in its last pixel.
     //

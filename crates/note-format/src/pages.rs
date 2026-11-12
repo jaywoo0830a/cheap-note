@@ -209,6 +209,15 @@ impl Pages {
         self.pages.len()
     }
 
+    /// Whether the document has no pages at all.
+    ///
+    /// A note always has at least one, so this is `false` in every state a reader can reach — it exists
+    /// because a `len` on a collection is read beside its `is_empty` and a caller that has one will want
+    /// the other. Clippy asks for the pair; the honest answer here is that the pair is never both true.
+    pub fn is_empty(&self) -> bool {
+        self.pages.is_empty()
+    }
+
     /// The document page shown at `index`, when that page shows one.
     pub fn document_page(&self, index: usize) -> Option<usize> {
         match self.pages.get(index).map(|page| page.show) {

@@ -598,14 +598,13 @@ impl NoteStore {
     /// How many edits a page's history holds, for the tests that check the depth is a depth.
     #[cfg(test)]
     pub fn history_rows(&self, page: u64) -> Result<i64> {
-        Ok(self
-            .conn
+        self.conn
             .query_row(
                 "SELECT COUNT(*) FROM edits WHERE page_id = (SELECT id FROM pages WHERE ord = ?1)",
                 params![page as i64],
                 |row| row.get(0),
             )
-            .map_err(sql)?)
+            .map_err(sql)
     }
 
     /// A page's row and its cursor, when its history is one this build can trust.
@@ -2387,12 +2386,6 @@ mod tests {
         cleanup(&grid_path);
     }
 
-    /// A row this build does not know is left exactly as it was found.
-    ///
-    /// The whole point of one row per setting: a note written by a build that knew more settings, or one
-    /// somebody added a row to by hand, keeps them. Nothing here writes a row it does not read and
-    /// nothing deletes one, so a newer build's answers survive a note passing through this one.
-    #[test]
     /// A flag written as `1` or `0` is read rather than refused — the note this app could not open.
     ///
     /// The app writes `true`/`false` and nothing else, so a `1` in the row came from a person editing the file
@@ -2454,7 +2447,6 @@ mod tests {
     /// nothing deletes one, so a newer build's answers survive a note passing through this one.
     #[test]
     fn a_row_this_build_does_not_know_is_left_alone() {
-
         let (mut store, path) = store_for("row-unknown");
 
         put_row(&store.conn, "brushes_from_the_future", "42").expect("a row");

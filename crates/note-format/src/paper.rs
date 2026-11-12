@@ -431,4 +431,32 @@ mod tests {
 
         assert_eq!(MemoryMode::from_label("Room "), None, "no trimming, no guessing");
     }
+
+    /// The default a note starts from is `Room`, and it is the first in the list.
+    ///
+    /// Two facts that have to agree: what a fresh note gets, and what the toolbar's chooser shows before
+    /// anyone has touched it. A list that started at `Lean` would put a mode the note is not in under the
+    /// reader's cursor, and a default of `Lean` would spend the reader's memory to save it without being
+    /// asked — which is the one thing a memory mode must never do.
+    #[test]
+    fn room_is_the_default_and_the_first_choice() {
+        assert_eq!(
+            note_format_default_mode(),
+            MemoryMode::Room,
+            "a fresh note spends what the sheet is worth"
+        );
+
+        assert_eq!(
+            MemoryMode::ALL.first().copied(),
+            Some(MemoryMode::Room),
+            "and the chooser opens on the mode the note is in"
+        );
+    }
+
+    /// The mode a note that has never been told anything gets, read through the settings' own default.
+    ///
+    /// Pinned here as well as in `settings`, because the two have to agree for the reason above.
+    fn note_format_default_mode() -> MemoryMode {
+        crate::settings::Settings::default().memory_mode
+    }
 }

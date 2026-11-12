@@ -1027,6 +1027,12 @@ pub struct NoteApp {
     /// Not a display mode — see [`FrameCap`] — so it sits with the render options rather than with the
     /// paper: what it caps is the canvas's own work.
     frame_select: Entity<SelectState<Vec<String>>>,
+    /// The bar's memory-mode chooser: whether a document may spend memory freely or has to be lean.
+    ///
+    /// Beside the frame cap because it is the same kind of answer — an allocation the reader is choosing
+    /// how much of to spend — and a chooser rather than a switch because there are two named modes with
+    /// different costs, not one thing that is on or off. See [`MemoryMode`].
+    memory_select: Entity<SelectState<Vec<String>>>,
     /// Whether one of the bar's choosers has its list open.
     ///
     /// The list is a popup that hangs *below* the box, over the page — so the place the reader is aiming
@@ -1135,6 +1141,20 @@ impl NoteApp {
             cx,
         );
 
+        // The memory mode's labels are its own names — `Room` and `Lean` — and the list order is
+        // `MemoryMode::ALL`, which starts at `Room` because that is the default a fresh note gets.
+        let memory_select = choice_of(
+            MemoryMode::ALL
+                .iter()
+                .map(|mode| mode.label().to_string())
+                .collect(),
+            MemoryMode::ALL
+                .iter()
+                .position(|mode| *mode == settings.memory_mode),
+            window,
+            cx,
+        );
+
         // The field a note's name is typed into on the sheet, and the two things the field can say:
         // Enter keeps the name, and losing focus — clicking anywhere else — leaves it as it was.
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("A name"));
@@ -1231,6 +1251,7 @@ impl NoteApp {
             rule_select,
             pen_select,
             frame_select,
+            memory_select,
             chooser_open: false,
             home: Home::open(window, cx),
         };
@@ -1301,6 +1322,22 @@ impl NoteApp {
                 if let SelectEvent::Confirm(Some(label)) = event {
                     if let Some(cap) = FrameCap::from_label(label) {
                         app.set_frame_cap(cap, cx);
+                    }
+                }
+            },
+        )
+        .detach();
+
+        cx.subscribe(
+            &app.memory_select,
+            |app, _, event: &SelectEvent<Vec<String>>, cx| {
+                app.chooser_toggled(false, cx);
+
+                // A label with no mode behind it — the box has been cleaned — is not a choice, and is
+                // ignored: a note always has a memory mode, as it always has a paper size.
+                if let SelectEvent::Confirm(Some(label)) = event {
+                    if let Some(mode) = MemoryMode::from_label(label) {
+                        app.set_memory_mode(mode, cx);
                     }
                 }
             },
@@ -5539,22 +5576,13 @@ impl NoteApp {
                     app.set_pdf_grayscale(on, cx)
                 },
             ))
-            // The memory switch, beside the page's other render option because it is the same kind of
-            // thing: an answer about *this document's* pictures rather than about the pen. On is a page
-            // at a quarter of the bytes and a cache a quarter of the size — see [`MemoryMode`], which is
-            // where the figures and the trade are written down.
-            .child(visibility_switch(
-                "lean-memory",
-                "Lean",
-                self.settings.memory_mode.is_lean(),
-                cx,
-                |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
-                    app.set_memory_mode(
-                        if on { MemoryMode::Lean } else { MemoryMode::Room },
-                        cx,
-                    )
-                },
-            ))
+            // The memory mode, beside the page's other render option because it is the same kind of
+            // thing: an answer about *this document's* pictures rather than about the pen. A chooser
+            // rather than a switch because both answers have a name and a cost — `Room` spends what the
+            // sheet is worth, `Lean` a quarter of it (see [`MemoryMode`]).
+            .child(toolbar_divider(hairline))
+            .child(control_label("Memory", muted))
+            .child(self.chooser("chooser-memory", &self.memory_select, cx))
             // The pen's own half of that row: a light hand writes pale as well as thin. Beside the weights it
             // belongs to, and after the page's options so that the pen's controls stay together at the end.
             .child(visibility_switch(
@@ -5621,6 +5649,10 @@ impl NoteApp {
             (
                 self.frame_select.clone(),
                 chosen_index(&FrameCap::ALL, self.settings.frame_cap),
+            ),
+            (
+                self.memory_select.clone(),
+                chosen_index(&MemoryMode::ALL, self.settings.memory_mode),
             ),
         ];
 

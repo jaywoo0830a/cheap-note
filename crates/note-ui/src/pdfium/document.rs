@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use super::api::{api, FpdfAction, FpdfBookmark, FpdfDest, FpdfDocument, FpdfPage, SizeF};
 use crate::error::{AppError, Result};
+use note_format::mapped::MappedBytes;
 
 /// Pdfium's `PDFACTION_GOTO`: an action that jumps to a destination in this document.
 ///
@@ -96,7 +97,10 @@ pub(super) struct DocumentInner {
     /// Underscored because nothing in this crate *reads* it: it is not a cache, it is the storage
     /// Pdfium reads from in place. Dropping it while the document is open would leave Pdfium
     /// reading freed memory, which is why it is a field of the inner state rather than a local.
-    _buffer: Vec<u8>,
+    ///
+    /// A mapping rather than a `Vec` when it came from a note — see [`MappedBytes`], which is where
+    /// the reason for that lives.
+    _buffer: MappedBytes,
     /// Pdfium is not thread-safe, and a handle is only meaningful on the thread that made it.
     ///
     /// A raw pointer would already make this type `!Send` and `!Sync`; the marker states the
@@ -115,9 +119,11 @@ impl Drop for DocumentInner {
 impl Document {
     /// Opens a document from bytes read elsewhere.
     ///
-    /// The bytes are moved into the document rather than copied: Pdfium reads them in place for as
-    /// long as the handle is open, and the app already has exactly one owned copy.
-    pub fn open(name: String, bytes: Vec<u8>) -> Result<Self> {
+    /// The bytes are moved into the document rather than copied: Pdfium reads them in place for as long
+    /// as the handle is open, and the app already has exactly one owned copy. Coming from a note they
+    /// are a **mapping** rather than a heap buffer (see [`MappedBytes`]), which is what lets closing the
+    /// note give the memory back to the machine.
+    pub fn open(name: String, bytes: MappedBytes) -> Result<Self> {
         let api = api()?;
 
         if bytes.is_empty() {

@@ -31,6 +31,8 @@ use gpui_kit::RenderImage;
 use crate::error::{AppError, Result};
 use crate::pages::{swaps_axes, Quarters};
 use crate::pdfium::{Document, OutlineEntry, RenderJob};
+use note_format::mapped::MappedBytes;
+use note_format::paper::MemoryMode;
 
 /// What one slice of a render did, re-exported because it is part of this module's own API.
 pub use crate::pdfium::Progress;
@@ -317,12 +319,30 @@ pub struct PdfDocumentView {
 /// four leaves room for the pen queue to be drained in the same wake.
 pub const SLICE_BUDGET: Duration = Duration::from_millis(4);
 
-/// How much of the memory budget is spent on cached page bitmaps.
+/// How much of the memory budget is spent on cached page bitmaps when the note has not chosen a mode.
 ///
-/// A 1650-pixel-wide A4 page is about 11 MB and the top rung about 44 MB, so 128 MB holds the
-/// current page at two or three qualities — which is what a zoom gesture and a page turn actually
-/// need. Beyond that the oldest bitmaps go, in use order.
-const CACHE_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
+/// ## The sizes this has to clear
+///
+/// A bitmap costs `width × height × 4`, and the ladder's top rung dominates all the others. On an A4
+/// page's aspect ratio those rungs weigh:
+///
+/// | rung | bitmap | bytes |
+/// |---|---|---|
+/// | 1 024 px | 1 024 × 1 448 | 5.7 MiB |
+/// | 1 536 px | 1 536 × 2 172 | 12.7 MiB |
+/// | 2 304 px | 2 304 × 3 258 | 28.6 MiB |
+/// | 3 456 px | 3 456 × 4 887 | **64.4 MiB** |
+///
+/// (An earlier version of this comment said the top rung was 44 MB; the arithmetic above is what it
+/// actually costs.) So the budget must clear **one** top-rung page outright, or the page being read is
+/// evicted the moment the pump builds anything else and every frame pays a rasterisation.
+///
+/// ## Where the number comes from now
+///
+/// [`MemoryMode::cache_budget_bytes`], because the answer belongs to the note's memory mode rather than
+/// to this file (see [`MemoryMode`] for both figures and what `Lean` trades away). This constant is
+/// only the default a view is built with before a note has told it otherwise.
+const CACHE_BUDGET_BYTES: u64 = MemoryMode::Room.cache_budget_bytes();
 
 impl Default for PdfDocumentView {
     fn default() -> Self {
@@ -355,9 +375,23 @@ impl PdfDocumentView {
     ///
     /// Nothing is written to a temporary file, so a note opens from anywhere the app can read, and
     /// opening one leaves nothing behind on disk.
-    pub fn open_bytes(name: String, bytes: Vec<u8>, render_pixel_width: u32) -> Result<Self> {
+    ///
+    /// The bytes are a [`MappedBytes`] rather than a `Vec`: they are Pdfium's storage for as long as the
+    /// document is open, and mapping them is what makes closing the note return the memory to the
+    /// machine rather than to the allocator's free list (see [`note_format::mapped`]).
+    ///
+    /// `budget` is the note's [`MemoryMode::cache_budget_bytes`], taken here rather than set afterwards
+    /// because the first page is rendered on the line below: a budget applied after that render would be
+    /// one the first page was never bounded by, which on a lean note is the one page that must be.
+    pub fn open_bytes(
+        name: String,
+        bytes: MappedBytes,
+        render_pixel_width: u32,
+        budget: u64,
+    ) -> Result<Self> {
         let mut view = PdfDocumentView {
             document: Some(Document::open(name, bytes)?),
+            budget,
             ..PdfDocumentView::default()
         };
 
@@ -608,6 +642,54 @@ impl PdfDocumentView {
     /// What rasterising has cost and what the cache has saved.
     pub fn stats(&self) -> PdfStats {
         self.stats
+    }
+
+    /// How many bitmaps the cache is holding.
+    ///
+    /// Read by the memory report (see [`crate::memory_report`]), which says how many pages a document
+    /// left behind after it was closed — a count of zero is the answer a clean close gives.
+    pub fn cache_len(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Sets how much memory the cache may hold, dropping bitmaps until it fits.
+    ///
+    /// Called when the note's [`MemoryMode`] changes (see [`crate::app`]). Lowering the budget has to
+    /// *drop* what is over it rather than wait for the next insert: a reader who turned the mode on to
+    /// stop their machine swapping would otherwise keep every bitmap the old budget allowed until they
+    /// happened to turn a page.
+    ///
+    /// The bitmap in use goes too, if it is over on its own — this is not [`Self::insert`], where the
+    /// page just asked for must survive. A budget that cannot hold it cannot hold it, and the honest
+    /// answer is an empty cache that renders the next page rather than one holding a page it said it
+    /// would not.
+    pub fn set_budget(&mut self, bytes: u64) {
+        self.budget = bytes;
+
+        // Oldest first, which is the order `self.order` already holds.
+        while self.stats.bytes > self.budget {
+            let Some(oldest) = self.order.first().copied() else {
+                // Nothing left to drop and still over: the byte counter is tracking something the
+                // cache does not hold, which cannot happen while the two are written together. Leave
+                // rather than spin.
+                break;
+            };
+
+            self.order.remove(0);
+            if let Some(dropped) = self.cache.remove(&oldest) {
+                self.stats.bytes = self.stats.bytes.saturating_sub(weight(&dropped));
+                self.stats.evicted += 1;
+            }
+        }
+    }
+
+    /// What the cache may hold, in bytes.
+    ///
+    /// Read by the tests that check `set_budget` took the number it was given; the app does not ask,
+    /// because the status line states the mode's own budget rather than the one a view happens to hold.
+    #[cfg(test)]
+    pub fn budget(&self) -> u64 {
+        self.budget
     }
 
     /// Counts a render the view moved on from before it was ever started.

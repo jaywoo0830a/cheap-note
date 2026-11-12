@@ -1,4 +1,5 @@
 use super::*;
+use note_format::mapped::MappedBytes;
 
 /// A one-page PDF with a real cross-reference table.
 ///
@@ -68,7 +69,7 @@ fn a_job_keeps_its_document_open() {
     }
 
     let document =
-        Document::open(String::from("one-page.pdf"), a_one_page_pdf()).expect("the fixture opens");
+        Document::open(String::from("one-page.pdf"), MappedBytes::solid(a_one_page_pdf())).expect("the fixture opens");
 
     let mut job =
         RenderJob::new(&document, 0, 100, 0, Format::Bgra, false).expect("the page loads");
@@ -102,7 +103,7 @@ fn a_slice_with_no_budget_leaves_the_page_without_pixels() {
     }
 
     let document =
-        Document::open(String::from("one-page.pdf"), a_one_page_pdf()).expect("the fixture opens");
+        Document::open(String::from("one-page.pdf"), MappedBytes::solid(a_one_page_pdf())).expect("the fixture opens");
     let mut job =
         RenderJob::new(&document, 0, 100, 0, Format::Bgra, false).expect("the page loads");
 

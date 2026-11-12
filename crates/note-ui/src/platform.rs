@@ -153,6 +153,24 @@ pub trait SystemStats {
     /// will not describe — rather than an error. A status line with no hardware clause is the correct
     /// response, and it is what a build with no implementation of this trait gets automatically.
     fn vitals(&mut self) -> Option<Vitals>;
+
+    /// How much memory this process has lent the GPU, when the platform can say.
+    ///
+    /// The one part of a process's footprint that [`Self::vitals`] cannot see: a page bitmap handed to
+    /// the compositor is copied into a GPU texture, and that copy is counted against the process without
+    /// being in its malloc space. On macOS it is `IOSurface`, and it is the largest single region this
+    /// app holds — 111 MiB with a page of a textbook on screen at full detail, against 81 MiB with the
+    /// lean memory mode on.
+    ///
+    /// `None` is *nothing to report*, the same rule [`Self::vitals`] follows: a platform that cannot
+    /// measure it leaves the figure out rather than printing a zero that looks like an empty GPU.
+    ///
+    /// Read only by the memory report (see `crate::memory_report`), which is the caller that exists to
+    /// say where the megabytes are. Nothing on the frame path asks, and a build with no implementation
+    /// answers `None` and loses one column of a table.
+    fn surface_bytes(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 /// The surface the desk, the paper and the ink are painted on: the view says what, this says how.

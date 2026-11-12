@@ -60,6 +60,7 @@ pub mod chunk;
 pub mod error;
 pub mod history;
 pub mod ink;
+pub mod mapped;
 pub mod note;
 pub mod pages;
 pub mod paper;

@@ -114,6 +114,20 @@ a *low* `cancel` count means rendering is genuinely slow, and the timings furthe
 The zoom the sheet is drawn at. `view 158% (locked)` when the zoom lock is on — the lock is the reason a
 pinch or a *Fit* did nothing, and this is where it says so rather than leaving it looking like a bug.
 
+### `memory Lean (<mib> MiB cache, <px>)`
+
+**Only when the Lean memory mode is on.** `Room` is what the app always did and naming it every second
+would be noise; `Lean` is a state a reader chose for a reason and may need reminding of.
+
+Turning it on trades detail for memory, all at once: pages render at half the scale (one bitmap pixel per
+logical pixel instead of per screen pixel), no page is rasterised above 1536 px, and the cache may hold
+32 MiB rather than 96. Measured on a 1218-page chemistry textbook, that is **484 MiB → 272 MiB** of
+resident memory, and the status line above is where those two figures are compared.
+
+The three numbers in the clause are the mode's own: what it allows the cache, and the widest bitmap it
+will ask for. They are here rather than in a settings screen because they explain the two things a
+reader notices — a page that softens as they zoom past 150%, and a `MiB` figure that stopped climbing.
+
 ### `measuring: <key> stops it`
 
 **Only while a measurement session is running.** A session is a stopwatch: it is started and stopped by hand
@@ -222,9 +236,59 @@ grep -o 'present [0-9.]* ([0-9.]*)' ~/Library/Application\ Support/cheap-note/st
 | Ink looks smoother than it should | `ink` → `resampled %` | the capture batched coarsely and the ink was smoothed |
 | Undo refuses to go further | `history` → `back` | the session's memory, not the note's log on disk |
 | A pinch or *Fit* did nothing | `view` → `(locked)` | the zoom lock is on |
+| The machine swaps while a big PDF is open | `memory` → `Lean` | the note is spending what full detail is worth; turn Lean on |
+| A page softens when zoomed past 150% | `memory` → `Lean` | the lean mode's 1536 px ceiling, working as chosen |
 | The pen draws in the wrong place | `CHEAP_NOTE_TRACE` → `lean`, `pen: <axes>` | the capture's own report; compare the lean against the ghost cursor |
 | Two cursors on screen | `CHEAP_NOTE_TRACE` → `no pointer hook` | the system pointer could not be hooked |
 | A clause you expect is missing | §1 above | absent means zero or ordinary, not broken |
+
+## 12. Measuring memory across documents
+
+The status line says what this process holds *now*. To ask what opening and closing documents
+*costs* — the question behind "it climbs when I open PDFs" — there is a separate command:
+
+```sh
+cheap-note --memory-report <note-folder> [<note-folder> ...]
+```
+
+No window opens. Each note is opened, measured, closed, and measured again, all in **one process**,
+because two processes would answer a question about the operating system rather than about the app.
+
+```
+                               RSS     delta     cache       gpu  pages
+baseline                    11 MiB         —      0 MB      0 MB      0
+open 화학-7f07d9fa            80 MiB   +69 MiB     11 MB      0 MB      1
+close 화학-7f07d9fa           63 MiB   -16 MiB      0 MB      0 MB      0
+──────────────────────────────────────────────────────────────────────
+peak 80 MiB   final 63 MiB   growth +52 MiB   ok
+```
+
+- **`RSS`** — resident memory, read from the same counters the status line uses.
+- **`delta`** — against the row above. A `close` that reads `-16 MiB` gave memory back; one that reads
+  `+0 MiB` did not.
+- **`cache`** / **`pages`** — what the page cache holds, and how many bitmaps. Both go to zero on a
+  close, which is what makes a `close` row worth reading: the cache emptied, so any resident figure
+  still standing is something else.
+- **`gpu`** — the graphics ledger (`IOSurface` on macOS), when the platform can report it.
+
+**Exit code** — `0` when the run came back within the allowance, `1` when it did not, `2` when the
+command could not run. That is what makes it usable in CI. The allowance is
+`LEAK_TOLERANCE_BYTES`, sized for the fixed cost of Pdfium's first document (30–50 MiB whatever the
+document's size) rather than for a leak.
+
+### What it found
+
+Measuring the 1 218-page chemistry textbook: memory used to grow **with the document's size** —
+130 MiB left behind for a 62 MB PDF, 63 MiB for a 14 MB one — because the document's bytes were read
+into the heap, and macOS does not return a freed large block to the system. Mapping them instead (see
+`note_format::mapped`) took the 62 MB case to 70 MiB and the 14 MB case to 35 MiB, and a document
+opened twice now costs nothing the second time.
+
+### What it cannot see
+
+A headless run renders bitmaps but never presents them, so the `gpu` column reports what the process
+allocated rather than what a compositor pooled. Read it for its direction, not its size.
+
 
 ## Where this document and the code part company
 

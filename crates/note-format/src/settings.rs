@@ -65,7 +65,7 @@
 
 use std::path::PathBuf;
 
-use crate::paper::{CanvasSize, CanvasStyle, FrameCap};
+use crate::paper::{CanvasSize, CanvasStyle, FrameCap, MemoryMode};
 
 /// How heavy the pen in hand is.
 ///
@@ -288,7 +288,22 @@ pub struct Settings {
     ///
     /// It is the note's because that is what it is *about*: one note's document is a scan to be read
     /// in grey, another's is a diagram whose colours are the point.
+    ///
+    /// **It saves no memory.** The bitmap reaches the screen as four bytes a pixel either way — grayscale
+    /// is a quality and rendering-cost choice, not a size one (see [`MemoryMode`] for that).
     pub grayscale_pages: bool,
+
+    /// Whether this note may spend memory freely, or has to make do with little.
+    ///
+    /// The switch a student with a two-hundred-page textbook turns on when the machine starts swapping
+    /// (see [`MemoryMode`], which is where the figures live). It is the note's rather than the machine's
+    /// for the same reason [`Self::frame_cap`] is: a hundred-megabyte textbook is the note worth running
+    /// lean, and a one-page sheet is not.
+    ///
+    /// Changing it drops every cached bitmap, because they were drawn at the other mode's scale — a
+    /// page rendered at 2.0 shown at 1.0 would be sharp, but a page rendered at 1.0 shown at 2.0 is
+    /// visibly soft, and a cache that mixed the two would be right for neither.
+    pub memory_mode: MemoryMode,
 
     /// The most frames a second the canvas will draw, whatever the display can show.
     ///
@@ -436,6 +451,9 @@ impl Default for Settings {
             canvas_size: CanvasSize::A4,
             canvas_style: CanvasStyle::Plain,
             grayscale_pages: false,
+            // Room, because the pen's immediacy is what the app is for and a fresh note is usually a
+            // blank sheet with no document to be thrifty about. See [`MemoryMode`].
+            memory_mode: MemoryMode::Room,
             frame_cap: FrameCap::Unlimited,
             vsync: true,
             // On: the tremor is the hardware's, not the reader's, and a gesture that showed it was showing

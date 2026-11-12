@@ -15,7 +15,12 @@ fn open_fixture(path: &std::path::Path, width: u32) -> Result<PdfDocumentView> {
         AppError::Other(format!("{} could not be read: {error}", path.display()))
     })?;
 
-    PdfDocumentView::open_bytes(name, bytes, width)
+    PdfDocumentView::open_bytes(
+        name,
+        MappedBytes::solid(bytes),
+        width,
+        CACHE_BUDGET_BYTES,
+    )
 }
 
 /// A one-page A4 PDF with a grid of black rectangles on it, built object by object.
@@ -225,8 +230,13 @@ fn a_document_opens_from_memory() {
     };
 
     let bytes = std::fs::read(&path).expect("the fixture reads");
-    let mut view = PdfDocumentView::open_bytes(String::from("from-memory.pdf"), bytes, 200)
-        .expect("the document opens from bytes");
+    let mut view = PdfDocumentView::open_bytes(
+        String::from("from-memory.pdf"),
+        MappedBytes::solid(bytes),
+        200,
+        CACHE_BUDGET_BYTES,
+    )
+    .expect("the document opens from bytes");
 
     assert_eq!(view.page_count(), 1);
     assert_eq!(view.file_name(), "from-memory.pdf");
@@ -390,6 +400,68 @@ fn the_least_recently_used_bitmap_goes_first() {
 }
 
 use super::*;
+use note_format::mapped::MappedBytes;
+
+/// Lowering the budget drops what is over it *now*, rather than at the next insert.
+///
+/// This is the half of the lean mode that has to work when a reader turns it on: the bitmaps already
+/// cached were rendered under the old budget, and keeping them until the next page turn is the mode
+/// failing at the one moment it was asked for. Note that the bitmap in use goes too — `set_budget` is
+/// not `insert`, and a budget too small for the page on screen honestly holds nothing.
+#[test]
+fn lowering_the_budget_drops_what_does_not_fit() {
+    let _pdfium = exclusive();
+
+    let Some(path) = a_one_page_pdf() else {
+        eprintln!("skipping: pdfium.dll is not available");
+        return;
+    };
+
+    let mut view = open_fixture(&path, 200).expect("the document opens");
+
+    // Three rungs, all inside the default budget.
+    let first = weight(&view.render_page(PageRequest::new(0, 200)).expect("a rung"));
+    view.render_page(PageRequest::new(0, 300))
+        .expect("a second rung");
+    view.render_page(PageRequest::new(0, 400))
+        .expect("a third rung");
+    assert!(view.stats().bytes > 0, "something is cached to drop");
+
+    // Now a budget that cannot hold even the one bitmap: everything goes, including the page in use.
+    view.set_budget(first / 2);
+
+    assert_eq!(view.stats().bytes, 0, "nothing is over the budget any more");
+    assert_eq!(view.budget(), first / 2, "the budget is the one asked for");
+    assert!(
+        view.stats().evicted >= 3,
+        "every bitmap went, and each was counted: {}",
+        view.stats().evicted
+    );
+}
+
+/// A budget large enough for everything drops nothing.
+#[test]
+fn a_budget_that_fits_drops_nothing() {
+    let _pdfium = exclusive();
+
+    let Some(path) = a_one_page_pdf() else {
+        eprintln!("skipping: pdfium.dll is not available");
+        return;
+    };
+
+    let mut view = open_fixture(&path, 200).expect("the document opens");
+    view.render_page(PageRequest::new(0, 300))
+        .expect("a second rung");
+
+    let kept = view.stats().bytes;
+    let evicted = view.stats().evicted;
+
+    view.set_budget(1024 * 1024 * 1024);
+
+    assert_eq!(view.stats().bytes, kept, "the cache is untouched");
+    assert_eq!(view.stats().evicted, evicted, "and nothing was counted as gone");
+    assert!(view.cache_len() > 0, "the bitmaps are still there");
+}
 
 /// The whole PDF path end to end: find the library, open a document through the same function
 /// the app uses, and rasterise a page.
@@ -848,9 +920,11 @@ fn the_rotation_handed_to_pdfium_is_the_readers_turn() {
         return;
     }
 
-    let document =
-        crate::pdfium::Document::open(String::from("turned.pdf"), a_page_turned_by_the_document())
-            .expect("the document opens");
+    let document = crate::pdfium::Document::open(
+        String::from("turned.pdf"),
+        MappedBytes::solid(a_page_turned_by_the_document()),
+    )
+    .expect("the document opens");
 
     assert_eq!(
         document.page_point_size(0),

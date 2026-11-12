@@ -51,6 +51,7 @@ use crate::settings::{PenWeight, Settings};
 use crate::status_log::StatusLog;
 use crate::timing::{measure, Measurement, Timings};
 use crate::view::{Fit, Viewport};
+use note_format::paper::MemoryMode;
 
 // The two commands a keyboard reaches that the bar also carries.
 //
@@ -60,10 +61,10 @@ use crate::view::{Fit, Viewport};
 // keyboard command would have no way to take a stroke back at all.
 actions!(cheap_note, [Undo, Redo]);
 
-/// The bitmap-width multiplier used when rendering a PDF page.
-const PDF_RENDER_SCALE: f32 = 2.0;
-
 /// The ladder of bitmap widths a page may be rendered at.
+///
+/// The rungs a page is quantised *to*; the ceiling of a rung is the note's [`MemoryMode`], which decides
+/// how far up this ladder the app may go (see [`MemoryMode::pixel_ceiling`]).
 const PDF_PIXEL_WIDTHS: [u32; 4] = [1_024, 1_536, 2_304, 3_456];
 
 /// How far in from a window's side edge a horizontally-swiped trackpad gesture still counts as an edge swipe.
@@ -2222,6 +2223,17 @@ impl NoteApp {
         }
     }
 
+    /// Hands the note's memory mode to the cache, which is the one part of the app that holds memory in
+    /// bulk. See [`MemoryMode`].
+    ///
+    /// Separate from [`Self::set_memory_mode`] because it runs on the *loading* path, where the choice has
+    /// not changed — it has just been read from a note — and where there is no context to notify. The
+    /// method that changes it calls this and then does the things a change needs.
+    fn apply_memory_mode(&mut self) {
+        self.pdf
+            .set_budget(self.settings.memory_mode.cache_budget_bytes());
+    }
+
     /// Turns the pen gesture's own tremor correction on or off. See [`Settings::pen_jitter`].
     ///
     /// Nothing is redrawn and no gesture in flight is disturbed: the answer is read when the nib goes down,
@@ -2235,6 +2247,35 @@ impl NoteApp {
     /// Renders PDF pages in grayscale, or back in colour.
     fn set_pdf_grayscale(&mut self, on: bool, cx: &mut Context<Self>) {
         self.settings.grayscale_pages = on;
+        self.finish_setting(cx);
+    }
+
+    /// Spends what the sheet is worth, or as little as the app can manage. See [`MemoryMode`].
+    ///
+    /// Two things happen here beyond storing the choice. The cache's budget moves with the mode, and
+    /// whatever the old budget allowed but the new one does not is **dropped now** rather than at the
+    /// next page turn — turning the mode on to stop a machine swapping and then keeping every bitmap
+    /// until the reader happens to turn a page is not the mode working.
+    ///
+    /// The bitmaps that survive are dropped too, by the page being invalidated below: they were drawn at
+    /// the old mode's scale, and a page rendered at 1.0 shown on a 2.0 screen is visibly soft. Rendering
+    /// it again is the price of the change, paid once.
+    fn set_memory_mode(&mut self, mode: MemoryMode, cx: &mut Context<Self>) {
+        if self.settings.memory_mode == mode {
+            return;
+        }
+
+        self.settings.memory_mode = mode;
+        self.apply_memory_mode();
+
+        // The rung on screen was sized for the other mode. Clearing the plan is what asks for the new
+        // one: `serve_pdf` plans whatever the current request is on its next wake, which is the same
+        // rule a zoom follows, and until it arrives the page keeps drawing at the detail it has.
+        if self.pdf.is_loaded() {
+            self.pdf.abandon();
+            self.pending_pdf = None;
+        }
+
         self.finish_setting(cx);
     }
 
@@ -3686,9 +3727,12 @@ impl NoteApp {
         let writer = NoteWriter::spawn(note.dir())?;
 
         let pdf = match note.document()? {
-            Some((name, bytes)) => {
-                PdfDocumentView::open_bytes(name, bytes, self.pdf_render_pixel_width())?
-            }
+            Some((name, bytes)) => PdfDocumentView::open_bytes(
+                name,
+                bytes,
+                self.pdf_render_pixel_width(),
+                self.settings.memory_mode.cache_budget_bytes(),
+            )?,
             // A note without a document was written on a blank sheet, and reopening it puts the app
             // back on a blank sheet: leaving whatever document happened to be open behind it would
             // be putting one sheet's writing on another's.
@@ -4433,11 +4477,20 @@ impl NoteApp {
             .unwrap_or_else(|| self.settings.canvas_size.display_size(width))
     }
     /// The bitmap width a page is rendered at, in device pixels.
+    ///
+    /// Three things decide it, in this order: the sheet's width times the zoom (what the page is drawn
+    /// at), the screen's scale (how many device pixels each logical pixel is), and the note's
+    /// [`MemoryMode`] (whether the app may spend those pixels). The mode supplies the last multiplier
+    /// rather than a constant here, because it is the one the reader chose — see [`MemoryMode::render_scale`],
+    /// which is 2.0 in `Room` and 1.0 in `Lean`.
+    ///
+    /// The result is then clamped to the mode's own ceiling ([`MemoryMode::pixel_ceiling`]), because a
+    /// zoomed-in page would otherwise ask for a bitmap the lean cache could not hold even one of.
     fn pdf_render_pixel_width(&self) -> u32 {
         let logical = self.settings.page_display_width * self.view.zoom();
-        let wanted = logical * self.scale.max(1.0) * PDF_RENDER_SCALE;
+        let wanted = logical * self.scale.max(1.0) * self.settings.memory_mode.render_scale();
 
-        quantise_width(wanted)
+        quantise_width(wanted).min(self.settings.memory_mode.pixel_ceiling())
     }
 
     /// The rendered page for the current index, when a PDF is open.
@@ -4695,6 +4748,19 @@ impl NoteApp {
                 ""
             }
         ));
+
+        // The memory mode, said only when it is the lean one: `Room` is what the app always did and
+        // naming it every second would be noise. `Lean` is a state a reader chose for a reason and may
+        // need to be reminded of — it is why a page looks soft at 200% and why `MiB` stopped climbing,
+        // and both of those are questions this line is the answer to (see [`MemoryMode`]).
+        if self.settings.memory_mode.is_lean() {
+            parts.push(format!(
+                "memory {} ({:.0} MiB cache, {} px)",
+                self.settings.memory_mode.label(),
+                self.settings.memory_mode.cache_budget_bytes() as f64 / (1024.0 * 1024.0),
+                self.settings.memory_mode.pixel_ceiling()
+            ));
+        }
 
         // The measurement session, in front of the live meters rather than instead of them: the meters are
         // what is happening now, and this is the stretch that was measured (see [`crate::timing::Session`]).
@@ -5471,6 +5537,22 @@ impl NoteApp {
                 cx,
                 |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
                     app.set_pdf_grayscale(on, cx)
+                },
+            ))
+            // The memory switch, beside the page's other render option because it is the same kind of
+            // thing: an answer about *this document's* pictures rather than about the pen. On is a page
+            // at a quarter of the bytes and a cache a quarter of the size — see [`MemoryMode`], which is
+            // where the figures and the trade are written down.
+            .child(visibility_switch(
+                "lean-memory",
+                "Lean",
+                self.settings.memory_mode.is_lean(),
+                cx,
+                |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
+                    app.set_memory_mode(
+                        if on { MemoryMode::Lean } else { MemoryMode::Room },
+                        cx,
+                    )
                 },
             ))
             // The pen's own half of that row: a light hand writes pale as well as thin. Beside the weights it

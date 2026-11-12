@@ -50,6 +50,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 use crate::error::{Error, Result};
 use crate::history::HistoryUpdate;
 use crate::ink::Stroke;
+use crate::mapped::MappedBytes;
 use crate::store::{Facts, NoteStore};
 
 /// The database inside a note folder.
@@ -296,13 +297,15 @@ impl Note {
     ///
     /// The name is the note's own record — `chapter-3.pdf`, whatever the file inside the note folder
     /// is called — so a note comes back about the document it is about, and not about `source.pdf`.
-    pub fn document(&self) -> Result<Option<(String, Vec<u8>)>> {
+    pub fn document(&self) -> Result<Option<(String, MappedBytes)>> {
         let path = self.dir.join(NOTE_PDF);
         if !path.exists() {
             return Ok(None);
         }
 
-        let bytes = std::fs::read(&path).map_err(|error| {
+        // Mapped rather than read, so that closing the note gives the bytes back: see
+        // [`crate::mapped`], where the measurement behind that choice is written down.
+        let bytes = MappedBytes::open(&path).map_err(|error| {
             Error::Note(format!("{} could not be read: {error}", path.display()))
         })?;
 

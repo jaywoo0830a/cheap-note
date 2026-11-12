@@ -101,6 +101,103 @@ impl SystemStats for ProcessStats {
         self.last = Some(vitals);
         Some(vitals)
     }
+
+    fn surface_bytes(&mut self) -> Option<u64> {
+        surface_bytes()
+    }
+}
+
+/// How much memory the GPU is holding for this process, from `task_info(TASK_VM_INFO)`.
+///
+/// ## Why this counter
+///
+/// A page bitmap handed to the compositor is copied into a texture, and that copy is charged to this
+/// process without being in its malloc space — which is why a resident figure cannot see it and why it
+/// is the largest region the app holds (111 MiB with one textbook page at full detail). `TASK_VM_INFO`
+/// reports it as `phys_footprint`, of which the GPU's share is `ledger_tag_graphics_footprint` — the
+/// ledger the kernel keeps for graphics memory. Reading that field directly is what names the region
+/// rather than leaving it in a total.
+///
+/// ## What it costs
+///
+/// One `task_info` call, the same one `vitals` makes. Nothing on the frame path asks: the memory report
+/// is the only caller, and the status line deliberately does not show it (see the module docs on
+/// `crate::memory_report` for why the column exists there instead).
+///
+/// `None` when the kernel will not describe the process, which is the same answer [`vitals`] gives and
+/// means *nothing to report* rather than a failure.
+#[cfg(target_os = "macos")]
+fn surface_bytes() -> Option<u64> {
+    // `TASK_VM_INFO` and the struct it fills are not in `libc` 0.2.191 (checked), so both are declared
+    // here against `<mach/task_info.h>`. Only the one field this reads is named; the rest is padding of
+    // the right shape, because `task_info` writes the whole struct and a short buffer is a short write.
+    #[repr(C)]
+    #[derive(Default)]
+    struct TaskVmInfo {
+        virtual_size: u64,
+        region_count: u32,
+        page_size: u32,
+        resident_size: u64,
+        resident_size_peak: u64,
+        device: u64,
+        internal: u64,
+        external: u64,
+        reusable: u64,
+        purgeable_volatile_pmap: u64,
+        purgeable_volatile_resident: u64,
+        purgeable_volatile_virtual: u64,
+        compressed: u64,
+        phys_footprint: u64,
+        min_address: u64,
+        max_address: u64,
+        ledger_tag_network_volatile: i64,
+        ledger_tag_network_nonvolatile: i64,
+        ledger_tag_network_nonvolatile_compressed: i64,
+        ledger_tag_network_volatile_compressed: i64,
+        ledger_tag_media_footprint: i64,
+        ledger_tag_media_footprint_compressed: i64,
+        ledger_tag_media_nofootprint: i64,
+        ledger_tag_media_nofootprint_compressed: i64,
+        ledger_tag_graphics_footprint: i64,
+        ledger_tag_graphics_footprint_compressed: i64,
+        ledger_tag_graphics_nofootprint: i64,
+        ledger_tag_graphics_nofootprint_compressed: i64,
+        ledger_tag_neural_footprint: i64,
+        ledger_tag_neural_footprint_compressed: i64,
+        ledger_tag_neural_nofootprint: i64,
+        ledger_tag_neural_nofootprint_compressed: i64,
+        limit_bytes_remaining: u64,
+        decompressions: u32,
+        compressed_peak: u64,
+        compressed_lifetime: u64,
+        reserved: [u64; 3],
+    }
+
+    /// `TASK_VM_INFO` from `<mach/task_info.h>`: the flavour that carries the ledger fields.
+    const TASK_VM_INFO: libc::task_flavor_t = 22;
+
+    // SAFETY: `task_info` fills the struct it is handed and reports how many words it wrote. The pointer
+    // and the count are those of the same struct, and a failure is checked before the field is read.
+    unsafe {
+        let mut info = TaskVmInfo::default();
+        let mut count = (std::mem::size_of::<TaskVmInfo>() / std::mem::size_of::<libc::natural_t>())
+            as libc::mach_msg_type_number_t;
+
+        let result = libc::task_info(
+            // Deprecated in favour of the `mach2` crate, which this build does not depend on for one
+            // call. `mach_task_self()` is a macro that reads a thread-local port: it cannot fail, and
+            // the deprecation is about the crate that should own it rather than about the call.
+            #[allow(deprecated)]
+            libc::mach_task_self(),
+            TASK_VM_INFO,
+            std::ptr::from_mut(&mut info).cast(),
+            &mut count,
+        );
+
+        // A negative ledger entry means "nothing charged here", which is a zero rather than a huge
+        // unsigned number — the field is signed for exactly this reason.
+        (result == libc::KERN_SUCCESS).then(|| info.ledger_tag_graphics_footprint.max(0) as u64)
+    }
 }
 
 /// How many threads this process has, from `proc_pidinfo(PROC_PIDTASKINFO)`.

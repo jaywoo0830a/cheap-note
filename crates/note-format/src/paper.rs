@@ -114,6 +114,116 @@ impl FrameCap {
     }
 }
 
+/// Whether the app may spend memory freely, or has to make do with little.
+///
+/// ## Why this exists
+///
+/// A student reading a textbook scans hundreds of pages at fifty megabytes each. The app's default is
+/// generous — page bitmaps at the display's full detail, a cache wide enough to hold two of them, and a
+/// GPU texture for every bitmap on screen — because that is what makes a pen feel immediate on the sheet
+/// in front of you. On a laptop with a dozen other tabs open, that generosity is the thing using the
+/// memory, and nothing about *reading* a PDF needs it: a page you are looking at, not drawing on, can be
+/// the blurrier of two pictures and no one will know.
+///
+/// So this is a **switch and not a dial**. There are two answers rather than three, because a reader who
+/// is short of memory is short of memory — a mode that saves a third of it would buy a student one more
+/// tab, and the question they are answering is not "how much may I spend" but "is this app the reason my
+/// machine is swapping". `Lean` therefore makes every memory decision the app has, all at once.
+///
+/// ## What it changes
+///
+/// Three things, and it is the combination that matters — any one alone is not worth a switch:
+///
+/// | | [`Room`](Self::Room) | [`Lean`](Self::Lean) |
+/// |---|---|---|
+/// | cache budget | 96 MiB | 32 MiB |
+/// | bitmap scale | 2.0 | 1.0 |
+/// | finest rung | 3 456 px | 1 536 px |
+/// | one page, finest | 64.4 MB | 12.7 MB |
+///
+/// The finest rung is the one that has to move: a lean budget cannot hold even one page of the top
+/// rung, so a lean mode that kept 3 456 px would be a cache that evicts the page it just rendered. At
+/// 1 536 px, 32 MiB holds two of them (25.5 MiB), and the page on screen stays put.
+///
+/// ## What it costs
+///
+/// Detail. 1 536 pixels across an A4 sheet is about 194 DPI, which is sharp at 100% and softens as a
+/// reader zooms past 150% — the trade is deliberate, and `Lean` is the mode for reading rather than for
+/// annotating a diagram at 300%. The colour is untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemoryMode {
+    /// Spend what the sheet is worth: full detail, a generous cache, and the pen's own immediacy.
+    Room,
+    /// Take as little as the app can and still be the same app.
+    Lean,
+}
+
+impl MemoryMode {
+    /// Every mode the settings offer, in the order they offer them.
+    pub const ALL: [MemoryMode; 2] = [MemoryMode::Room, MemoryMode::Lean];
+
+    /// The label on this mode's option.
+    pub fn label(self) -> &'static str {
+        match self {
+            MemoryMode::Room => "Room",
+            MemoryMode::Lean => "Lean",
+        }
+    }
+
+    /// The mode a label names, for a chooser carrying a choice back as the text that was showing.
+    ///
+    /// Looked up by name rather than by position, for the reason [`CanvasSize::from_label`] gives.
+    pub fn from_label(label: &str) -> Option<MemoryMode> {
+        MemoryMode::ALL
+            .iter()
+            .copied()
+            .find(|mode| mode.label() == label)
+    }
+
+    /// How many bytes of rendered pages the cache may hold.
+    ///
+    /// `Room` is 96 MiB because that clears the top rung plus the rung it came from (64.4 + 28.6 =
+    /// 93.0 MiB), which is the set a zoom gesture moves through. `Lean` is 32 MiB because at its own
+    /// 1 536-pixel ceiling a page is 12.7 MiB, so two fit with room to spare — the page on screen, and
+    /// the one the pump is building.
+    pub const fn cache_budget_bytes(self) -> u64 {
+        match self {
+            MemoryMode::Room => 96 * 1024 * 1024,
+            MemoryMode::Lean => 32 * 1024 * 1024,
+        }
+    }
+
+    /// The multiplier applied to a page's requested bitmap width.
+    ///
+    /// `Room` is 2.0, which on a Retina screen draws one bitmap pixel per screen pixel. `Lean` is 1.0:
+    /// half the width and half the height, a quarter of the bytes, and — the part that matters for the
+    /// figure in Activity Monitor — a GPU texture a quarter of the size, because that is a copy of the
+    /// same bitmap (see the status line's `MiB`).
+    pub fn render_scale(self) -> f32 {
+        match self {
+            MemoryMode::Room => 2.0,
+            MemoryMode::Lean => 1.0,
+        }
+    }
+
+    /// The widest bitmap this mode will ask for, in pixels.
+    ///
+    /// The ceiling the ladder is clamped to, rather than a replacement for the ladder: below it, a
+    /// reader who has not zoomed in still gets the rung their zoom asks for. See
+    /// [`crate::settings::Settings::page_display_width`] for the width that number is compared against.
+    pub fn pixel_ceiling(self) -> u32 {
+        match self {
+            MemoryMode::Room => 3_456,
+            MemoryMode::Lean => 1_536,
+        }
+    }
+
+    /// Whether this is the mode that saves memory, for a caller that wants to say so.
+    pub fn is_lean(self) -> bool {
+        matches!(self, MemoryMode::Lean)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CanvasSize {
     /// ISO A4, 210 by 297 mm: the default.
@@ -247,5 +357,78 @@ impl CanvasStyle {
             CanvasStyle::Grid => Some(28.0),
             CanvasStyle::Dots => Some(28.0),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Lean` has to hold two of its own pages, or it is a cache that evicts what it just rendered.
+    ///
+    /// The check is the same arithmetic the mode's docs claim, run against the mode's own numbers rather
+    /// than against a comment: a page at the lean ceiling is `width × height × 4`, and two of them have
+    /// to fit inside the lean budget. This is what stops someone lowering either figure later without
+    /// noticing that the pair stopped working together.
+    #[test]
+    fn lean_holds_two_of_its_own_pages() {
+        const A4_ASPECT: f32 = 297.0 / 210.0;
+
+        let mode = MemoryMode::Lean;
+        let ceiling = mode.pixel_ceiling();
+        let one_page = (ceiling as u64) * ((ceiling as f32 * A4_ASPECT) as u64) * 4;
+
+        assert!(
+            mode.cache_budget_bytes() >= one_page * 2,
+            "Lean's {} byte budget has to hold two {} byte pages at its {} px ceiling",
+            mode.cache_budget_bytes(),
+            one_page,
+            ceiling
+        );
+    }
+
+    /// `Room` has to hold the top rung plus the rung it came from, which is what a zoom moves through.
+    #[test]
+    fn room_holds_the_top_rung_and_the_one_below_it() {
+        const A4_ASPECT: f32 = 297.0 / 210.0;
+
+        let mode = MemoryMode::Room;
+        let page = |width: u32| (width as u64) * ((width as f32 * A4_ASPECT) as u64) * 4;
+
+        // The ladder's last two rungs, as `PDF_PIXEL_WIDTHS` in `note-ui` has them.
+        let top = page(3_456);
+        let below = page(2_304);
+
+        assert!(
+            mode.cache_budget_bytes() >= top + below,
+            "Room's {} byte budget has to hold the top rung ({top}) and the rung below it ({below})",
+            mode.cache_budget_bytes()
+        );
+    }
+
+    /// `Lean` really is the smaller of the two, in every figure it publishes.
+    ///
+    /// A mode that saved memory in one place and spent it in another would be no mode at all — a lean
+    /// render scale with a room cache would still fill the memory it was meant to save.
+    #[test]
+    fn lean_is_smaller_in_every_figure() {
+        let room = MemoryMode::Room;
+        let lean = MemoryMode::Lean;
+
+        assert!(lean.cache_budget_bytes() < room.cache_budget_bytes());
+        assert!(lean.render_scale() < room.render_scale());
+        assert!(lean.pixel_ceiling() < room.pixel_ceiling());
+        assert!(lean.is_lean());
+        assert!(!room.is_lean());
+    }
+
+    /// Every mode round-trips through its label, which is how a note stores it.
+    #[test]
+    fn every_mode_round_trips_through_its_label() {
+        for mode in MemoryMode::ALL {
+            assert_eq!(MemoryMode::from_label(mode.label()), Some(mode));
+        }
+
+        assert_eq!(MemoryMode::from_label("Room "), None, "no trimming, no guessing");
     }
 }

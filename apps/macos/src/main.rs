@@ -34,5 +34,25 @@ fn main() {
         eprintln!("{report}");
     }));
 
+    // `--memory-report <note> ...`: measure what opening and closing documents costs, print it, exit.
+    // Handled here rather than inside the view because the report needs the platform's own counters and
+    // no window at all — see `note_ui::memory_report`, which owns the arithmetic and the verdict.
+    //
+    // A build with no counters can still run: the report says so and exits `1`, which is the answer a CI
+    // job should see rather than a pass it did not earn.
+    if let Some(paths) = note_ui::memory_report::requested() {
+        let mut stats = platform::vitals::ProcessStats::install();
+
+        let code = match stats.as_mut() {
+            Some(stats) => note_ui::memory_report::run(&paths, stats, &mut std::io::stdout()),
+            None => {
+                println!("this build cannot measure memory: no process counters");
+                1
+            }
+        };
+
+        std::process::exit(code);
+    }
+
     note_ui::run(platform::INSTALLER);
 }

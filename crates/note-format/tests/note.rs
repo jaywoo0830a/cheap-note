@@ -87,6 +87,13 @@ fn a_document_is_copied_in_and_keeps_its_name() {
     let (recorded, bytes) = note.document().expect("a document").expect("one");
     assert_eq!(recorded, "chapter-3.pdf", "the name travels with the note");
     assert_eq!(bytes, a_pdf());
+    // The document is *mapped* rather than read into the heap: that is what lets closing the note give
+    // the memory back, and it is the reason `MappedBytes` exists (see `src/mapped.rs`).
+    #[cfg(unix)]
+    assert!(
+        bytes.is_mapped(),
+        "a note's document is mapped, not copied into the heap"
+    );
 
     // A document written straight in keeps the name it is given, which is what an import of a note
     // from another machine does.

@@ -92,7 +92,7 @@ use crate::chunk::{self, Codec};
 use crate::error::{Error, Result};
 use crate::history::{Edit, History, HistoryUpdate};
 use crate::ink::Stroke;
-use crate::paper::{CanvasSize, CanvasStyle, FrameCap};
+use crate::paper::{CanvasSize, CanvasStyle, FrameCap, MemoryMode};
 use crate::settings::{PenWeight, Settings};
 
 /// The schema version this build writes, in `PRAGMA user_version`.
@@ -1182,6 +1182,7 @@ impl NoteStore {
         into.pen_weight = row_value(conn, "pen_weight", into.pen_weight, PenWeight::from_scale)?;
         into.grayscale_pages = row_value(conn, "grayscale_pages", into.grayscale_pages, flag_of)?;
         into.frame_cap = row_value(conn, "frame_cap", into.frame_cap, FrameCap::from_label)?;
+        into.memory_mode = row_value(conn, "memory_mode", into.memory_mode, MemoryMode::from_label)?;
         into.vsync = row_value(conn, "vsync", into.vsync, flag_of)?;
         into.pen_jitter = row_value(conn, "pen_jitter", into.pen_jitter, flag_of)?;
         into.pressure_fades = row_value(conn, "pressure_fades", into.pressure_fades, flag_of)?;
@@ -1245,6 +1246,7 @@ impl NoteStore {
         put_row(&tx, "pen_weight", settings.pen_weight.scale())?;
         put_flag(&tx, "grayscale_pages", settings.grayscale_pages)?;
         put_row(&tx, "frame_cap", settings.frame_cap.label())?;
+        put_row(&tx, "memory_mode", settings.memory_mode.label())?;
         put_flag(&tx, "vsync", settings.vsync)?;
         put_flag(&tx, "pen_jitter", settings.pen_jitter)?;
         put_flag(&tx, "pressure_fades", settings.pressure_fades)?;
@@ -2316,6 +2318,7 @@ mod tests {
             page_color: 0xF5_F0_E6,
             pen_weight: PenWeight::Fine,
             grayscale_pages: true,
+            memory_mode: MemoryMode::Lean,
             frame_cap: FrameCap::Hz60,
             vsync: false,
             pen_jitter: false,
@@ -2341,6 +2344,7 @@ mod tests {
             page_color: 0x20_20_24,
             pen_weight: PenWeight::Heavy,
             grayscale_pages: false,
+            memory_mode: MemoryMode::Room,
             frame_cap: FrameCap::Hz240,
             vsync: true,
             pen_jitter: true,

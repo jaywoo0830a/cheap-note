@@ -29,6 +29,11 @@ rayon = "=1.12.0"
 zip = { version = "=9.5.1", default-features = false, features = ["deflate"] }
 # Ergonomic custom error types.
 thiserror = "=2.0.21"
+# `mmap`/`munmap`, so a note's document does not hold its bytes in the heap: see `mapped.rs`. Listed
+# unconditionally rather than under `[target.…]` — this crate keeps no target section, and `libc` builds
+# on every platform the format is carried to. The code that calls it is behind `#[cfg(unix)]`; a platform
+# without the call reads the file instead, which is what this crate did before.
+libc = "0.2"
 
 # What the integration tests in `tests/` need to look at a note *from outside*: the SQLite file with
 # SQLite itself, the zip with a zip reader, and a page list with a JSON parser.

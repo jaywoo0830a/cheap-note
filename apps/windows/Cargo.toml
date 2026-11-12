@@ -75,11 +75,21 @@ windows = { version = "0.62", features = [
     # declared by the bindings when these two are on as well.
     "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Imaging",
+    # A thread count for the status line's hardware clause (see `src/platform/vitals.rs`): a toolhelp
+    # snapshot of this process's threads. `sysinfo` cannot answer it — its `Process::tasks` is Linux-only
+    # and returns `None` here — so this is the one counter the platform has to read for itself.
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 # Direct2D's geometry is placed with a matrix, and that matrix type is this crate's.
 windows-numerics = "0.3"
 # Named types for the raw window handle GPUI hands out (used to bind the pen capture).
 raw-window-handle = "0.6"
+
+# What this process is costing the machine (see `src/platform/vitals.rs`): resident memory, processor
+# share and thread count. Listed here rather than in `note-ui`, which may not sit on a dependency edge
+# that declares `[target.…]` dependencies (`doc/MACOS.md` §6). The same crate and the same pin as the
+# macOS build, so the two platforms measure themselves the same way.
+sysinfo = "=0.31.4"
 
 # Build-time: compiles `assets/app.rc` into the executable, which is what puts the app's icon on the
 # desktop, in the task bar, in Alt-Tab and on the window itself. The same crate and the same version

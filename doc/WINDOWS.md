@@ -209,12 +209,18 @@ Not a defect list — a map, so nobody hunts for a Windows equivalent of somethi
 |---|---|---|
 | `CAMetalLayer.displaySyncEnabled`, and `CHEAP_NOTE_NO_VSYNC` overriding it | `apps/macos/src/platform/metal.rs` | Windows has no choice to make: `Present(0, …)` is the whole policy (§3.3) |
 | The `vsync` field's *effect* | `crates/note-format/src/settings.rs` | it is stored on both and honoured on one; the format is deliberately shared |
-| The trailing-window statistics and the offscreen probe | `apps/macos/src/platform/metal.rs` | Metal's counter API. Direct3D has `ID3D11Query`, but this app has never needed it |
 | `unit_scale: 0.75` | `apps/macos/src/platform/mod.rs` | a point is four thirds of a Windows logical pixel, so the palette must scale down to match a Windows one in the hand. Windows answers `1.0` and nothing it draws changes |
 
+There is **no** GPU counter on either platform, and this document said there was before it was checked.
+`apps/macos` has no `MTLCounterSampleBuffer` and no offscreen probe; its frame-cost figures were taken
+with the app's own meters (`crates/note-ui/src/timing.rs`) and a frame cap, not with the driver's
+counters. When a GPU figure is wanted, the honest instrument is the one that already exists: a frame cap
+that holds a rate says the frame has headroom, and one that cannot says it does not (§6.4).
+
 Everything else in `apps/macos` — the Metal canvas, `pen-macos`, the transparent-cursor pointer, the
-ghost drawn in the canvas pass — is **a different implementation of a service Windows also has**, not a
-capability Windows lacks. The two surfaces are peers behind `InkSurface`; neither is the reference.
+ghost drawn in the canvas pass, `platform/vitals.rs` — is **a different implementation of a service
+Windows also has**, not a capability Windows lacks. The two surfaces are peers behind `InkSurface`; neither
+is the reference, and the hardware clause is the same shape on both by construction (§8).
 
 ## 5. Where Windows' cost model differs
 
@@ -309,6 +315,7 @@ Written down so they do not get re-litigated:
 | V-Sync switch | works, and measurably, when the cap is `Unlimited` | present on the bar, and does nothing (§3.3) |
 | Unit scale | `0.75` | `1.0` |
 | Frame cost | measured: 143–146 draws/s on 8,182 strokes | **unknown** (§6.4) |
+| Hardware clause | `17 MiB · 0% cpu · 17 threads` | the same shape, from `sysinfo` + a toolhelp snapshot (§8) |
 
 If one sentence is wanted:
 
@@ -316,7 +323,38 @@ If one sentence is wanted:
 > do not are all cases where a Mac-shaped assumption about the *platform* leaked into code that was
 > supposed to be about the *view* — into a scroll position, a wheel rule, and a switch on the bar.**
 
-## 8. Keeping this document honest
+## 8. The hardware clause (both platforms)
+
+One figure on the status line is gathered rather than computed: **what the process is costing the
+machine.** It reads `17 MiB · 0% cpu · 17 threads` and it is the same shape on both platforms by
+construction, which is what makes the two lines comparable — the question *"why does this feel different
+on Windows"* is answered by numbers, and numbers that are formatted differently on each side would not
+answer it.
+
+| Piece | macOS | Windows |
+|---|---|---|
+| resident memory, cpu share | `sysinfo` (`Process::memory`, `Process::cpu_usage`) | the same crate, the same pin |
+| thread count | `proc_pidinfo(PROC_PIDTASKINFO)` → `pti_threadnum` | a toolhelp snapshot (`CreateToolhelp32Snapshot` + `Thread32Next`) |
+| seam answer | `apps/macos/src/platform/vitals.rs` | `apps/windows/src/platform/vitals.rs` |
+| the numbers' meaning | `crates/note-ui/src/timing.rs` (`Vitals`) | the same code — it is above the seam |
+
+Two things about it are worth recording, because both were discovered rather than assumed.
+
+* **`sysinfo` cannot count threads here.** Its `Process::tasks` is Linux-only and returns `None` on macOS
+  *and* Windows. The first version of this code used it, the test asserting "a running process has
+  threads" failed with `0`, and the fix was one small per-platform call on each side. This is the one
+  place in the feature where the two platforms genuinely diverge.
+* **`sysinfo` is listed in the *app* manifests, not in `note-ui`.** It is a cross-platform crate and it
+  would have been shorter to put above the seam, but it declares `[target.…]` dependencies, and
+  [MACOS.md §6](MACOS.md#6-what-must-not-change) forbids the view from sitting on a dependency edge that
+  does. The view is handed three plain numbers instead.
+
+What it costs: one `refresh_processes(ProcessesToUpdate::Some(&[pid]))` a second — measured at 77 µs
+first call and ~200 µs on a settled one — plus the one per-platform thread call. It is sampled on the
+existing once-a-second status refresh, and **not at all while the status line is hidden**, so a reader who
+turns the line off also stops paying for the figure.
+
+## 9. Keeping this document honest
 
 This file is only useful while it is checked. The two checks that settle most of it:
 

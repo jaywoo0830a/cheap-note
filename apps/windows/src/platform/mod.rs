@@ -22,6 +22,7 @@ pub mod ink_layer;
 pub mod input;
 pub mod pen;
 pub mod system_cursor;
+pub mod vitals;
 
 use std::sync::Arc;
 
@@ -33,6 +34,7 @@ use crate::platform::cursor_overlay::CursorFeed;
 use crate::platform::ink_layer::InkLayer;
 use crate::platform::pen::PenService;
 use crate::platform::system_cursor::SystemCursor;
+use crate::platform::vitals::ProcessStats;
 
 /// What this platform hands the view.
 pub static INSTALLER: Installer = Installer {
@@ -69,6 +71,9 @@ fn install(window: &mut Window) -> Platform {
         // The design's numbers are this platform's own: a Windows logical pixel is a 96-DPI one.
         unit_scale: 1.0,
         pen: Box::new(pen),
+        // What the note costs this machine. The counters are the process's own, so no permission and no
+        // failure mode beyond a system that will not describe it.
+        stats: ProcessStats::install().map(|stats| Box::new(stats) as Box<_>),
     }
 }
 

@@ -392,6 +392,82 @@ impl Measurement {
     }
 }
 
+/// The machine this app is running on, as far as the app is concerned.
+///
+/// ## Why this is here rather than in a platform crate
+///
+/// Because a number that is *read* and a number that is *gathered* are two different jobs, and the seam
+/// between them is where this project already draws it everywhere else. Gathering these three figures
+/// needs an operating system (`task_info` on macOS, `GetProcessMemoryInfo` on Windows, or a crate that
+/// wraps both); formatting them, deciding when to sample, and deciding whether to show them at all are
+/// decisions about the *view*. So the platform answers `Option<Vitals>` and nothing more, and every
+/// judgement about what the numbers mean lives here — which is what keeps `note-ui` free of platform
+/// API while still owning the sentence on screen.
+///
+/// ## Why `Option`, and why it is not a failure
+///
+/// A platform that cannot measure itself, a sandbox that refuses, a process the OS will not describe:
+/// each of those is a line without a hardware clause, not an app that will not start. `None` is
+/// *nothing to say* rather than *something went wrong*, and the status line's rule is that a number
+/// nobody could measure is left out instead of printed as zero (§ the zeros rule in `compose_status`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Vitals {
+    /// Resident set size: the physical memory this process is holding, in bytes.
+    ///
+    /// *Resident* and not virtual, on purpose. Virtual size is the address space a process has been
+    /// given and is not a fact about the machine — it counts memory not touched, swapped out, or
+    /// mapped from a file — and on macOS in particular it is hundreds of gigabytes for every process,
+    /// which is a number that would make this line useless. Resident is what a person means by "how
+    /// much memory is this using".
+    pub resident_bytes: u64,
+    /// The share of one core this process is using, as a percentage.
+    ///
+    /// **One core, not the whole machine**, and that is a decision rather than an oversight. A
+    /// percentage of the machine would fall to a few percent on a twelve-core laptop while the app held
+    /// a whole core flat, which reads as "idle" for the one state worth noticing. This figure can
+    /// exceed 100% — a page rebuild spread across twelve threads genuinely is twelve cores' worth — and
+    /// that is informative rather than broken: it is the number that says a burst happened.
+    pub cpu_percent: f32,
+    /// How many threads the process has.
+    ///
+    /// The figure that makes the one above readable: `420%` across `12 threads` is a parallel page
+    /// rebuild working as intended, and `420%` across `3` would be something to look at.
+    pub threads: usize,
+}
+
+impl Vitals {
+    /// The hardware as one clause of the status line, or nothing when there is nothing worth saying.
+    ///
+    /// Written in the units a person reads these in — mebibytes and a percentage off one core — and
+    /// with the thread count only when it is more than one, because a single-threaded figure states the
+    /// obvious. No bytes, no hertz, no label for a number that does not exist: a platform that answered
+    /// `None` has already been handled by the caller, and a zero here is a real zero.
+    pub fn summary(&self) -> String {
+        match self.threads {
+            0 | 1 => format!(
+                "{:.0} MiB · {:.0}% cpu",
+                mebibytes(self.resident_bytes),
+                self.cpu_percent
+            ),
+            threads => format!(
+                "{:.0} MiB · {:.0}% cpu · {threads} threads",
+                mebibytes(self.resident_bytes),
+                self.cpu_percent
+            ),
+        }
+    }
+}
+
+/// Bytes as whole mebibytes.
+///
+/// Mebibytes (1 024 squared) rather than megabytes (1 000 squared), because every tool a person would
+/// compare this against — Activity Monitor, Task Manager, `top`, `htop` — uses the binary unit while
+/// calling it "MB", and a figure that disagreed with all of them by five percent would be a figure that
+/// looks wrong.
+fn mebibytes(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
 /// The measurement a person starts and stops by hand.
 ///
 /// ## Why a session rather than a live number

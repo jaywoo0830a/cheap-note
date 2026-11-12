@@ -43,7 +43,7 @@ the view declares: `PenSource`, `GhostFeed`, `SystemPointer` and `InkSurface`
 | the chords (`⌘`/`Ctrl`) | `crates/note-ui/src/keys.rs` | **done** | the Windows text pinned, the mac text by `cfg(macos)` |
 | Pdfium loading | `crates/note-ui/src/pdfium/api.rs` | **done** on every platform | loads `libpdfium.dylib` through `libloading` |
 | the Windows platform | `apps/windows` | unchanged | 29 tests |
-| **the macOS platform** | `apps/macos` | **done** — builds and runs | 10 tests; `cargo check -p cheap-note-macos` |
+| **the macOS platform** | `apps/macos` | **done** — builds and runs | 36 tests; `cargo check -p cheap-note-macos` |
 | the pen, on macOS | `apps/macos/pen-macos` | **done** | 5 tests; `examples/watch.rs` |
 
 ## 2. Build and run on the Mac
@@ -323,6 +323,7 @@ pen, and stay unchecked in the repository because they need the hardware in hand
 | the pen service | `apps/macos/src/platform/pen.rs` |
 | the system pointer | `apps/macos/src/platform/pointer.rs` |
 | the ghost's state, and when it shows | `apps/macos/src/platform/ghost.rs` |
+| what the process costs the machine | `apps/macos/src/platform/vitals.rs` |
 | the canvas view, and the Metal renderer | `apps/macos/src/platform/canvas.rs`, `metal.rs` |
 | Pdfium loading, and its search path | `crates/note-ui/src/pdfium/api.rs` |
 | the note itself | `crates/note-format/`, and [`doc/STORE.md`](STORE.md) |

@@ -12,6 +12,7 @@
 //! | [`GhostFeed`] | draw the nib's mark at the pen's angle, now | a layered window above everything |
 //! | [`SystemPointer`] | get the system pointer out of the way, or back | `SetCursor` in a subclass |
 //! | [`InkSurface`] | paint the desk, the paper and the ink | a Direct2D surface under GPUI's |
+//! | [`SystemStats`] | what this process is costing the machine | the process's own counters |
 //!
 //! A platform is one implementation of each, assembled by [`Platform`] and handed to
 //! [`crate::run`]. That is the whole of what a second platform has to write: no element tree, no
@@ -39,6 +40,8 @@ use gpui_kit::{App, Window};
 
 use crate::ink_layer::Canvas;
 use crate::input::{PenInbox, PenStats, Reading};
+
+pub use crate::timing::Vitals;
 
 /// What the frame publishes about the screen the ghost is drawn on: everything a reading cannot say.
 ///
@@ -122,6 +125,36 @@ pub trait SystemPointer {
     fn follow(&mut self, pen_has_its_own_cursor: bool);
 }
 
+/// The machine, as far as this process can see it.
+///
+/// The fourth thing a platform knows and the view cannot: how much memory and processor the app is
+/// actually using. Everything about what those numbers *mean* stays in the view (see
+/// [`Vitals`](crate::timing::Vitals)), so this trait is deliberately as small as it can be — one call,
+/// one optional answer, no configuration.
+///
+/// ## Why it is a trait rather than a crate the view depends on
+///
+/// Because gathering these figures is an operating-system job and `note-ui` may not name one
+/// (`doc/MACOS.md` §6). A crate that wraps both platforms would still have to be listed in *this*
+/// manifest, which is the thing the rule forbids: the view would be carrying an OS dependency even
+/// though it never calls it directly. So the platform answers the question and the view decides what to
+/// do with the answer.
+///
+/// ## Cost, and why the caller must not call it often
+///
+/// On both platforms this reads the process's own counters, which is cheap but not free — measured at
+/// tens to a couple of hundred microseconds depending on the platform's bookkeeping. It is therefore
+/// sampled on the once-a-second status refresh (`STATUS_REFRESH_INTERVAL`) and never per frame, and the
+/// app does not ask at all while the status line is hidden.
+pub trait SystemStats {
+    /// What this process is using, or `None` when the platform cannot say.
+    ///
+    /// `None` is *nothing to report* — a sandbox, a platform without the counters, a process the system
+    /// will not describe — rather than an error. A status line with no hardware clause is the correct
+    /// response, and it is what a build with no implementation of this trait gets automatically.
+    fn vitals(&mut self) -> Option<Vitals>;
+}
+
 /// The surface the desk, the paper and the ink are painted on: the view says what, this says how.
 pub trait InkSurface {
     /// Paints one frame of the canvas.
@@ -183,6 +216,13 @@ pub struct Platform {
     /// The pen. Always there, because a pen that cannot be read is a pen that draws with the mouse —
     /// a service that says so in its status rather than an absence to handle everywhere.
     pub pen: Box<dyn PenSource>,
+    /// What this process is using, when the platform can say.
+    ///
+    /// `None` is a platform with no implementation of [`SystemStats`], which is a build that shows no
+    /// hardware clause rather than one that fails to load. Boxed and optional rather than a required
+    /// field so that a new platform is not obliged to write a counter it does not need in order to
+    /// compile — the same shape the canvas and the ghost already have.
+    pub stats: Option<Box<dyn SystemStats>>,
 }
 
 /// The platform's two halves: what has to happen before a window exists, and what has to happen once

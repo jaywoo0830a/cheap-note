@@ -52,8 +52,8 @@ The format has **two test suites**, and both matter:
 `note.rs`, `chunk.rs`, …) that uses nothing but the public API and opens a note with SQLite, a zip reader
 or a JSON parser rather than with the crate. Those are the contract a second implementation on another
 platform has to satisfy — and the macOS build is the proof they can be met: the two portable crates hold
-**388 tests** (154 in `note-format`, 234 in `note-ui`) that pass unchanged on either platform, and each
-platform adds its own (10 in `apps/macos`, 5 in `pen-macos`, 29 in `apps/windows`).
+**435 tests** (171 in `note-format`, 264 in `note-ui`) that pass unchanged on either platform, and each
+platform adds its own (36 in `apps/macos`, 5 in `pen-macos`, 31 in `apps/windows`).
 
 ## What is where
 

@@ -3,10 +3,10 @@
 use super::{
     bar_line, confirmed, file_label, file_stem, held_by_cap, page_of_write, page_owes_a_rewrite,
     palette_at, palette_centre, palette_colours, palette_face, palette_id, palette_in_hand,
-    palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width, sheet_matches,
-    spun, touches_paper, zoom_text, Confirmation, Edge, EdgeSwipe, PaletteGeometry, PalettePart,
-    PenGesture, Swipe, Turn, BAR_HEIGHT, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX,
-    PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH,
+    palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width, samples_vitals,
+    sheet_matches, spun, touches_paper, zoom_text, Confirmation, Edge, EdgeSwipe, PaletteGeometry,
+    PalettePart, PenGesture, Swipe, Turn, BAR_HEIGHT, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL,
+    PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH,
     PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL,
     PALETTE_WELL_PAD, PDF_QUIET_INTERVAL,
 };
@@ -972,3 +972,22 @@ fn a_pen_pan_that_returns_asks_for_where_it_started() {
         "a hand that came back must ask for the pan it began at"
     );
 }
+
+/// A hidden status line asks the platform for nothing.
+///
+/// The rule that makes the hardware clause free when nobody is reading it: the sample is an operating
+/// system call a second, and it happens only while the line is on screen. Hiding the line is therefore
+/// also how a reader stops paying for it, which is what lets the figure be offered without a switch of
+/// its own (see [`NoteApp::sample_vitals`]).
+#[test]
+fn the_counters_are_read_only_while_the_line_is_shown() {
+    assert!(
+        samples_vitals(true),
+        "a visible line has a hardware clause to fill"
+    );
+    assert!(
+        !samples_vitals(false),
+        "and a hidden one costs the platform nothing"
+    );
+}
+

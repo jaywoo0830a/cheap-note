@@ -864,6 +864,18 @@ pub struct NoteApp {
     status_refreshed_at: Instant,
     /// The status line's log file: one line a second while a note is in front.
     status_log: StatusLog,
+    /// The machine's own counters, when this platform can read them (see [`crate::platform::SystemStats`]).
+    ///
+    /// `None` on a platform with no implementation, which is a status line without a hardware clause
+    /// rather than an app that cannot start.
+    system_stats: Option<Box<dyn crate::platform::SystemStats>>,
+    /// What the last sample of those counters said, and the clause it came to.
+    ///
+    /// Held rather than asked for where the line is composed, because composing happens far more often
+    /// than sampling may (see [`STATUS_REFRESH_INTERVAL`]): the clause is the *sample*, and the line
+    /// repeats it until the next one. Empty when the status line is hidden, so a hidden line costs no
+    /// sampling at all.
+    vitals: String,
     /// The canvas as the last frame described it: the desk, the page's shadow, and the sheet.
     canvas: Canvas,
     /// The colour the ink a lasso has hold of is shown in: the wash over the ink, and the loop's own mark.
@@ -1060,6 +1072,7 @@ impl NoteApp {
             pointer: system_cursor,
             unit_scale,
             pen,
+            stats: system_stats,
         } = platform;
 
         // What the pen says about itself, or the reason it could not be read — a pen that cannot be
@@ -1166,6 +1179,8 @@ impl NoteApp {
             canvas_dirty: false,
             status_refreshed_at: Instant::now(),
             status_log: StatusLog::open(),
+            system_stats,
+            vitals: String::new(),
             canvas: Canvas::default(),
             selection_colour: cx.theme().accent.opacity(SELECTION_TINT),
             page_index: 0,
@@ -1696,6 +1711,9 @@ impl NoteApp {
                         >= STATUS_REFRESH_INTERVAL
                 {
                     app.status_refreshed_at = now;
+                    // The machine's own counters, sampled here and nowhere else: this is the one wake
+                    // that is already about numbers moving on their own (see [`Self::sample_vitals`]).
+                    app.sample_vitals();
                     let before = app.status.clone();
                     app.touch_status();
                     app.status_log.write(&app.status);
@@ -2653,6 +2671,10 @@ impl NoteApp {
     /// Shows or hides the live status line inside the bar.
     fn set_status_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.settings.show_status = shown;
+        // Sampled here as well as on the clock, so switching the line on fills its hardware clause at
+        // once: `finish_setting` rebuilds the line below, and a clause sampled a second later would leave
+        // the reader looking at a line that was missing the very thing they just asked for.
+        self.sample_vitals();
         self.finish_setting(cx);
     }
 
@@ -4692,6 +4714,15 @@ impl NoteApp {
 
         parts.push(self.timings.summary());
 
+        // What this process is costing the machine, when the platform can say. Put after the timing
+        // meters because it answers a question those cannot: a meter says what one path took and this
+        // says what the *process* is holding and burning, which is the figure a reader compares against
+        // the rest of their machine. Empty while hidden and empty on a platform with no counters, so
+        // the line keeps its shape on a build that cannot measure itself.
+        if !self.vitals.is_empty() {
+            parts.push(self.vitals.clone());
+        }
+
         // What the platform's own capture says about itself — how it is attached, how coarsely it
         // batches readings, which axes the digitizer can report, whether the pointer hook took, and
         // which way the pen leans — is diagnostic rather than data. None of it is a fact about the
@@ -4747,6 +4778,36 @@ impl NoteApp {
     /// Rebuilds the status line, for a change the user made and expects to see at once.
     fn touch_status(&mut self) {
         self.status = self.compose_status();
+    }
+
+    /// Samples the machine's own counters, and keeps the clause they came to.
+    ///
+    /// Called on the once-a-second status refresh and from nowhere else. Two reasons it is not part of
+    /// [`Self::touch_status`]: a reader changing a switch should not pay for a `/proc` walk or a
+    /// `task_info` call, and the numbers must not move on their own — a memory figure that changed
+    /// every time an unrelated switch was thrown would be a figure nobody could read.
+    ///
+    /// Asking is skipped entirely while the status line is hidden, which is the one case where a
+    /// reader has said outright that they are not reading numbers.
+    fn sample_vitals(&mut self) {
+        if !samples_vitals(self.settings.show_status) {
+            // Cleared rather than left stale: a line that was shown, hidden and shown again must not
+            // print a figure from a minute ago before the first new sample lands.
+            self.vitals.clear();
+            return;
+        }
+
+        let Some(stats) = self.system_stats.as_mut() else {
+            return;
+        };
+
+        self.vitals = match stats.vitals() {
+            Some(vitals) => vitals.summary(),
+            // A platform that cannot say leaves the clause empty. It is not an error and it is not a
+            // zero: the line simply has one fewer thing in it, which is the same rule the counters
+            // follow for a note that has no marks, no history and no document.
+            None => String::new(),
+        };
     }
 
     /// Puts the status line on the clipboard, so a measurement can leave the app.
@@ -6474,15 +6535,24 @@ fn bar_line(shown: bool, measured: Option<f32>) -> f32 {
     measured.filter(|edge| *edge > 0.0).unwrap_or(BAR_HEIGHT)
 }
 
+/// Whether the machine's counters should be read at all.
+///
+/// A free function because the decision is the part worth testing, and it is the whole of what the switch
+/// does: a hidden status line asks the platform nothing, so hiding the line is also how a reader stops
+/// paying for the sample (see [`NoteApp::sample_vitals`]).
+fn samples_vitals(status_shown: bool) -> bool {
+    status_shown
+}
+
 /// Whether the reader's frame cap holds back a frame, given how long ago the last one was handed over.
 ///
-/// `since` is `None` for a canvas that has never drawn, which is a frame that must go out: the cap paces
-/// a stream, it does not delay the first one. The comparison is `<` rather than `<=` so that a cap of
-/// exactly one interval's worth of time draws — a display at 60 Hz and a cap of 60 Hz have to agree rather
-/// than each waiting for the other to move first.
+/// `since` is `None` for a canvas that has never drawn, which is a frame that must go out: the cap paces a
+/// stream, it does not delay the first one. The comparison is `<` rather than `<=` so that a cap of exactly
+/// one interval's worth of time draws — a display at 60 Hz and a cap of 60 Hz have to agree rather than each
+/// waiting for the other to move first.
 ///
-/// A free function because the decision is the part worth testing: it is one comparison, and it is the
-/// whole of what the setting does.
+/// A free function because the decision is the part worth testing: it is one comparison, and it is the whole
+/// of what the setting does.
 fn held_by_cap(cap: FrameCap, since: Option<std::time::Duration>) -> bool {
     let (Some(interval), Some(since)) = (cap.interval(), since) else {
         return false;

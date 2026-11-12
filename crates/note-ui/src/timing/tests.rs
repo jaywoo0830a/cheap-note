@@ -344,3 +344,70 @@ fn the_present_clause_is_the_ink_s_own_rate() {
         timings.summary()
     );
 }
+
+/// A machine's counters become one clause of the status line, in the units the tools beside it use.
+///
+/// Pinned exactly, because this is the shape a reader sees and the units are a decision rather than an
+/// accident: mebibytes (what Activity Monitor and Task Manager show while calling them MB) and a share of
+/// one core.
+#[test]
+fn the_vitals_clause_is_in_the_units_a_reader_compares_against() {
+    let vitals = Vitals {
+        resident_bytes: 200 * 1024 * 1024,
+        cpu_percent: 118.0,
+        threads: 12,
+    };
+
+    assert_eq!(vitals.summary(), "200 MiB · 118% cpu · 12 threads");
+}
+
+/// A share above one core is stated as it is, not clamped to 100.
+///
+/// The figure that says a burst happened: a page rebuild across twelve threads genuinely is more than one
+/// core's worth, and a number clamped at 100% would hide exactly the state worth noticing.
+#[test]
+fn a_share_above_one_core_is_not_clamped() {
+    let vitals = Vitals {
+        resident_bytes: 64 * 1024 * 1024,
+        cpu_percent: 420.0,
+        threads: 12,
+    };
+
+    assert!(vitals.summary().contains("420% cpu"));
+}
+
+/// One thread, or none reported, leaves the count out rather than stating the obvious.
+///
+/// A platform that could not count threads answers `0` (see the two platform implementations), so both
+/// cases come to the same clause — which is why they are one arm.
+#[test]
+fn a_thread_count_of_one_or_none_is_not_worth_saying() {
+    for threads in [0, 1] {
+        let vitals = Vitals {
+            resident_bytes: 128 * 1024 * 1024,
+            cpu_percent: 7.0,
+            threads,
+        };
+
+        assert_eq!(
+            vitals.summary(),
+            "128 MiB · 7% cpu",
+            "a count of {threads} threads should say nothing"
+        );
+    }
+}
+
+/// Mebibytes are binary, which is what every tool beside this one shows while calling them MB.
+///
+/// The check that the unit is the one the doc comment claims: a thousand-squared megabyte would print
+/// `200` for 209 715 200 bytes, and every tool a reader compares against would disagree by five percent.
+#[test]
+fn a_mebibyte_is_a_thousand_and_twenty_four_kilobytes() {
+    let vitals = Vitals {
+        resident_bytes: 1024 * 1024,
+        cpu_percent: 0.0,
+        threads: 1,
+    };
+
+    assert!(vitals.summary().starts_with("1 MiB"));
+}

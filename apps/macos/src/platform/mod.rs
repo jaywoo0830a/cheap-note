@@ -5,6 +5,7 @@ pub mod ghost;
 pub mod metal;
 pub mod pen;
 pub mod pointer;
+pub mod vitals;
 
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ use crate::platform::canvas::InkCanvas;
 use crate::platform::ghost::Ghost;
 use crate::platform::pen::PenService;
 use crate::platform::pointer::SystemCursor;
+use crate::platform::vitals::ProcessStats;
 
 /// What this platform hands the view.
 pub static INSTALLER: Installer = Installer {
@@ -90,5 +92,8 @@ fn install(window: &mut Window) -> Platform {
         // lengths multiplied by three quarters are the same size in the hand as they are on Windows.
         unit_scale: 0.75,
         pen: Box::new(pen),
+        // What the note costs this machine. Always installable: the counters are the process's own and
+        // reading them needs no permission, so this is `Some` unless the platform genuinely cannot say.
+        stats: ProcessStats::install().map(|stats| Box::new(stats) as Box<_>),
     }
 }

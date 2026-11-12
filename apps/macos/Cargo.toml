@@ -26,6 +26,17 @@ pen-macos = { path = "pen-macos" }
 # The handle the pen is attached with.
 raw-window-handle = "0.6"
 
+# What this process is costing the machine (see `src/platform/vitals.rs`). A cross-platform crate, and
+# still listed here rather than in `note-ui`: it declares `[target.…]` dependencies, and the view may not
+# sit on a dependency edge that does (`doc/MACOS.md` §6). The same crate and the same pin as the Windows
+# build, so the two platforms measure themselves the same way.
+sysinfo = "=0.31.4"
+
+# `proc_pidinfo(PROC_PIDTASKINFO)`: the one counter `sysinfo` cannot give on this platform. It reports a
+# process's thread count, and `sysinfo`'s equivalent (`Process::tasks`) is Linux-only — it answers `None`
+# on macOS and on Windows alike, which is how this became a per-platform call rather than one shared line.
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # The system pointer, and the view the ink is drawn in.
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSCursor", "NSColor", "NSEvent", "NSImage", "NSView", "NSWindow", "block2"] }

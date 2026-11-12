@@ -1044,6 +1044,28 @@ measures in. The palette is drawn at those numbers times `Platform::unit_scale` 
 (`PaletteGeometry`). The rings, the discs, the well, the margin and the reach of a tap all move by that
 one factor, which is what keeps the gaps the palette's tests pin proportional at either size.
 
+### The hardware clause
+
+One figure on the status line is not the app's own: what the process is costing the machine — resident
+memory, processor share, thread count. It is written `17 MiB · 0% cpu · 17 threads`, and every part of
+that is a decision:
+
+* **It is sampled once a second, on the same wake the counters already use** (`STATUS_REFRESH_INTERVAL`),
+  and **not at all while the status line is hidden**. Reading it costs an operating-system call, and the
+  one thing worse than a figure nobody reads is one the app pays for every second with nobody looking.
+* **A percentage of one core, not of the machine.** `420%` across `12 threads` is a parallel page rebuild
+  working as intended; a share of a twelve-core laptop would have read `35%` and looked idle.
+* **Mebibytes, not megabytes**, because Activity Monitor and Task Manager both show the binary unit while
+  calling it MB. A figure that disagreed with every tool beside it by five percent would read as wrong.
+* **A thread count of one is left out**, and so is one the platform could not count (`0`): the first
+  states the obvious and the second would be a lie.
+
+It is a *seam* answer ([`SystemStats`](../crates/note-ui/src/platform.rs)) rather than a crate the view
+depends on, because the counters are an operating system's to give and `note-ui` may not name one
+([MACOS.md](MACOS.md) §6). Both platforms answer with the same `Option<Vitals>`, so the two lines are
+comparable — which is the point, since the question "why does this feel different on Windows" is answered
+by numbers from both.
+
 ## Where this document and the code part company
 
 `crates/note-ui/src/app.rs` keeps the reasoning where a reader needs it *at the line they are reading* — one line, and

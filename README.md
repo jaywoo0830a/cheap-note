@@ -61,6 +61,7 @@ platform adds its own (36 in `apps/macos`, 5 in `pen-macos`, 31 in `apps/windows
 |---|---|
 | [`doc/ARCHITECTURE.md`](doc/ARCHITECTURE.md) | the shape of the program: what runs where, which thread owns what, and what may wait for what |
 | [`doc/VIEW.md`](doc/VIEW.md) | why the view is the way it is: the frame loop, the bar, the sheet, the gestures, the pen's rules |
+| [`doc/STATUS.md`](doc/STATUS.md) | how to read the status line: what each clause means, and which figure to look at when something feels wrong |
 | [`doc/STORE.md`](doc/STORE.md) | one stroke's journey to the disk and back — which is the format crate's story |
 | [`doc/MACOS.md`](doc/MACOS.md) | the macOS build: what the seam gives you, how each platform service is implemented, and what only a Mac can do |
 | [`doc/WINDOWS.md`](doc/WINDOWS.md) | the Windows build's counterpart: which tuning reached it, which platform behaviours still differ (and silently break a gesture), and what is worth optimising here only |

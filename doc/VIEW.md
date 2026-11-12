@@ -150,7 +150,8 @@ its own title into a field when it is double-clicked — and while a name is bei
 
 The counters sit in a translucent pill **on the desk**, out of the bar, because it is a readout rather
 than a control — and because the line changes four times a second: text in the bar would re-lay-out the
-bar, while text in a pill of its own re-lays-out the pill.
+bar, while text in a pill of its own re-lays-out the pill. **For how to read what it says, see
+[STATUS.md](STATUS.md).**
 
 It is rebuilt when the reader changes something, and once a second besides
 (`STATUS_REFRESH_INTERVAL`): the counters move on their own, and a person watching a stroke should see

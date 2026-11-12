@@ -154,11 +154,13 @@ bar, while text in a pill of its own re-lays-out the pill.
 
 It is rebuilt when the reader changes something, and once a second besides
 (`STATUS_REFRESH_INTERVAL`): the counters move on their own, and a person watching a stroke should see
-them move. The pill's copy button puts the whole line on the clipboard, and the same line is appended
-to `status.log` beside the notes — `~/Library/Application Support/cheap-note/status.log` on macOS,
+them move. The same line is appended to `status.log` beside the notes —
+`~/Library/Application Support/cheap-note/status.log` on macOS,
 `%LOCALAPPDATA%\cheap-note\status.log` on Windows — with a UTC timestamp and a session header. A file
 past 8 MB is rotated to `status.log.1` on the next launch; a log that cannot be opened says `log: off`
-in the line it was meant to record.
+in the line it was meant to record. The pill is a readout and nothing else: there is no copy button, so
+the line is not on the clipboard and cannot be pasted elsewhere — it leaves the app through the log
+alone, which is what the log is for.
 
 It wraps, and is allowed 60% of the window's width (`STATUS_PILL_WIDTH`), because of what the line
 carries: the document and the page, the ink's counts, the page cache's ratio, the zoom and the frame's
@@ -167,10 +169,14 @@ part that fell off the end, and the timings are the whole reason to read the lin
 being measured. And it carries only what **both platforms can say**: a capture's own report (how it is
 attached, how coarsely it batches readings, which axes the digitizer has) and the pen's lean are
 diagnostic, and they are read under `CHEAP_NOTE_TRACE` instead, which is what keeps the line the same
-sentence on Windows and on the Mac. It floats `STATUS_LIFT` (40 px) above the desk's bottom row — the
-page pill's height plus a margin — because a readout drawn over the control a person is reaching for is
-worse than one a row higher, and it grows *upward* from the corner it is anchored to rather than down
-off the window.
+sentence on Windows and on the Mac. It hangs `STATUS_DROP` below the **bar**, at the top-left of the
+window, growing *downward* from the edge it is anchored to — the top edge is where a document's identity
+lives, since the bar says *which* note is open and the pill says what that note and its page are made of,
+and reading them at one edge makes them one subject. The bottom edge is left to navigation (the page pill
+and the zoom), which is also what keeps the pill off the corner a person writes in. It is offset by the
+bar's *measured* bottom edge, so it follows the bar's height when the sheet's settings add a second row,
+and follows the bar away when the bar is switched off — in which case it hangs from the window's own top
+margin instead.
 
 **It is on a one-second clock for the counters, and on the change for the rest.** The line is rebuilt
 by the change that made it stale — a key, a tool, a page, a session started or stopped — and once a
@@ -1013,7 +1019,7 @@ on the bar there, which is a small lie in the interface rather than in the mecha
 | `BAR_MARGIN` | 12 logical px | how far the floating bar and the page pill sit from the window's edges: the desk showing in that gap is what makes the sheet read as paper on a desk |
 | `BAR_HEIGHT` | 148 logical px | the estimate `bar_edge` falls back to only on the frame before the bar has been measured; the *measured* edge is the one line ink, the ghost cursor and the system pointer all use |
 | `STATUS_PILL_WIDTH` | 0.6 | the fraction of the window the status pill may use; it wraps, and the fraction is what decides into how many lines |
-| `STATUS_LIFT` | 40 logical px | how far above the desk's bottom row the status pill floats (the page pill's height plus `BAR_MARGIN`) |
+| `STATUS_DROP` | `BAR_MARGIN` (12 logical px) | how far below the bar's measured bottom edge the status pill hangs |
 | `STATUS_REFRESH_INTERVAL` | 1 s | how often the status line's counters are rebuilt while a note is in front: a readout's pace, not a frame's |
 | `MEASURE_KEY` | `Ctrl+M` | the session's one key, for starting and for stopping: named once, and the line that reports on a session says it out loud |
 | `HOUSEKEEPING_INTERVAL` | 1 ms | the housekeeping pump's own clock: a fixed floor, not a rate taken from the display, and the shortest wait that still parks the task rather than spinning it |

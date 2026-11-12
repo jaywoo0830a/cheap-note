@@ -275,8 +275,13 @@ impl PaletteGeometry {
 /// How much of the window's width the status pill may take, as a fraction of it.
 const STATUS_PILL_WIDTH: f32 = 0.6;
 
-/// How far above the desk's bottom row the status pill floats, in logical pixels.
-const STATUS_LIFT: f32 = 40.0;
+/// How far below the bar's bottom edge the status pill hangs, in logical pixels.
+///
+/// The pill belongs to the *top* edge, with the bar, because both say what is open and what it holds;
+/// the bottom edge is left to navigation — the page pill and the zoom — so each edge has one job. The
+/// gap is `BAR_MARGIN`, the same air the bar itself keeps from the window's top: the pill is drawn by
+/// the same hand and reads as part of the same strip.
+const STATUS_DROP: f32 = BAR_MARGIN;
 
 /// How much of the selection's colour is laid over the ink a lasso has hold of.
 ///
@@ -4810,17 +4815,6 @@ impl NoteApp {
         };
     }
 
-    /// Puts the status line on the clipboard, so a measurement can leave the app.
-    fn copy_status(&mut self, cx: &mut Context<Self>) {
-        if self.status.is_empty() {
-            return;
-        }
-
-        cx.write_to_clipboard(ClipboardItem::new_string(self.status.clone()));
-        self.report(String::from("status copied"));
-        cx.notify();
-    }
-
     /// Starts or stops the measurement session, and puts what it found on the status line.
     fn toggle_measurement(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
@@ -5571,7 +5565,7 @@ impl NoteApp {
         }
     }
 
-    /// The desk's own row: the counters at one edge, the page in the middle, the zoom at the other.
+    /// The desk's own row: the page in the middle, the zoom at the other edge.
     fn bottom_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Full width with a margin's worth of padding, for the reason the bar gives: the width has to
         // come from somewhere, and it cannot come from two insets on the same element.
@@ -5587,28 +5581,13 @@ impl NoteApp {
             .justify_center()
             .child(self.page_pill(cx));
 
-        // Built only when it is wanted: `compose_status` returns an empty line for a hidden status,
-        // and a pill drawn around nothing is still a pill.
-        //
-        // The left margin is written here for the reason the zoom pill's right one is: an absolutely
-        // positioned child is placed against its parent's padding box, so the row's `px` above does not
-        // reach this one. `BAR_MARGIN` is what the zoom pill has on the right, and what the row itself
-        // sits above the bottom edge — so the counters, the page and the zoom share one margin.
-        if self.settings.show_status {
-            row = row.child(
-                div()
-                    .absolute()
-                    .left(px(BAR_MARGIN))
-                    // A row higher than the page pill, because the line wraps into a wide box and the
-                    // page pill is in the middle of this one: see [`STATUS_LIFT`].
-                    .bottom(px(STATUS_LIFT))
-                    .child(self.status_pill(cx)),
-            );
-        }
+        // Neither of the row's other two children is the counters: the status pill hangs from the bar at
+        // the top of the window now (see [`Self::status_row`]), because what a document *is* and what it
+        // holds are one subject and belong at one edge, which leaves the bottom edge to navigation.
 
         // Zoom stays when the bar is hidden, unlike the controls up there: the switch that brings the bar
         // back lives *in* the bar, so a sheet zoomed into a corner with the bar away would have no way
-        // out. It is reading rather than writing, which is what the page pill and the counters share.
+        // out. It is reading rather than writing, which is what the page pill is too.
         //
         // The right margin is written here rather than left to the row's own padding: an absolutely
         // positioned child is placed against its parent's padding box, not its content, so the `px`
@@ -5890,7 +5869,30 @@ impl NoteApp {
             .children(controls)
     }
 
-    /// The counters, in a translucent pill on the desk.
+    /// The counters, hanging under the bar at the top-left of the window.
+    ///
+    /// The top edge is where a document's identity lives: the bar says *which* note is open, and the pill
+    /// says what that note and its page are made of. Read together they are one subject, so they sit at
+    /// one edge. The bottom edge is left to navigation — the page pill and the zoom — and that split is
+    /// what keeps the pill from being drawn over the corner a person writes in.
+    ///
+    /// Offset by the bar's *measured* bottom edge rather than a constant, because the bar's height
+    /// depends on what it is carrying (a second row appears with the sheet's settings) and because the
+    /// bar can be switched off, in which case the pill hangs from the window's own top margin. Both
+    /// come from [`Self::bar_edge`], the one line the pen is judged by, so the pill starts where the
+    /// page starts.
+    fn status_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let top = self.bar_edge().max(BAR_MARGIN) + STATUS_DROP;
+
+        div()
+            .absolute()
+            .top(px(top))
+            .left(px(BAR_MARGIN))
+            // No width of its own: the pill inside carries `STATUS_PILL_WIDTH`, and a second bound
+            // here would be two answers to one question.
+            .child(self.status_pill(cx))
+    }
+
     /// The counters' pill: a readout of text, so it is given the air a row of buttons would get from
     /// their own padding rather than the tighter box the page and zoom pills wear.
     fn status_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -5904,19 +5906,16 @@ impl NoteApp {
             .text_size(px(11.0))
             .text_color(theme.muted_foreground)
             .max_w(relative(STATUS_PILL_WIDTH))
-            .flex()
-            .flex_row()
-            .items_start()
-            .gap(px(6.0))
-            .child(div().flex_1().min_w(px(0.0)).child(self.status.clone()))
-            .child(icon_button(
-                "status-copy",
-                IconName::Copy,
-                "Copy status",
-                !self.status.is_empty(),
-                cx,
-                |app, cx| app.copy_status(cx),
-            ))
+            // A layer over the desk, like the bar: the pill is read *across* a page, and a page is ink of
+            // its own, so the pill has to be seen to sit above it rather than in it. `shadow_md` is what
+            // this interface spends on that, and the hairline is what keeps the edge legible where the
+            // shadow falls on something already dark.
+            .border_1()
+            .border_color(theme.title_bar_border)
+            .shadow_md()
+            // The line is the whole pill, so the pill is a block that holds text and nothing else: no
+            // row, no trailing button, and no inner box to squeeze the text to a width of its own.
+            .child(self.status.clone())
     }
 
     /// The way back when the bar is hidden.
@@ -6158,7 +6157,15 @@ impl Render for NoteApp {
                 // this element paints is nothing — which is what keeps the desk, the sheet and the ink out of
                 // the frame (see [`crate::ink_layer`]).
                 .child(bar)
-                // The desk's own row: the page in the middle, the counters at the edge. Last, so it
+                // The counters, hanging under the bar at the top-left: what the open document is and
+                // what it holds, read at the edge where the document itself is named. Drawn after the
+                // bar so it is never buried by it.
+                .children(
+                    self.settings
+                        .show_status
+                        .then(|| self.status_row(cx).into_any_element()),
+                )
+                // The desk's own row: the page in the middle, the zoom at the edge. Last, so it
                 // paints over the sheet — a page pill *under* the paper would be no pill at all.
                 .child(self.bottom_row(cx));
 

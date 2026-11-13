@@ -5526,9 +5526,7 @@ impl NoteApp {
                     "V-Sync",
                     self.settings.vsync,
                     cx,
-                    |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
-                        app.set_vsync(on, cx)
-                    },
+                    |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| app.set_vsync(on, cx),
                 )
                 .into_any_element(),
                 toolbar_divider(hairline).into_any_element(),
@@ -5606,7 +5604,11 @@ impl NoteApp {
                 cx,
                 |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
                     app.set_memory_mode(
-                        if on { MemoryMode::Lean } else { MemoryMode::Room },
+                        if on {
+                            MemoryMode::Lean
+                        } else {
+                            MemoryMode::Room
+                        },
                         cx,
                     )
                 },
@@ -6945,17 +6947,12 @@ fn scroll_of(delta: &ScrollDelta, wheel_pans: bool) -> Option<ScrollRead> {
             gesture: true,
         }),
         ScrollDelta::Lines(lines) if wheel_pans => Some(ScrollRead {
-            distance: (
-                lines.x * WHEEL_PAN_PER_LINE,
-                lines.y * WHEEL_PAN_PER_LINE,
-            ),
+            distance: (lines.x * WHEEL_PAN_PER_LINE, lines.y * WHEEL_PAN_PER_LINE),
             gesture: false,
         }),
         _ => None,
     }
 }
-
-
 
 /// How much a pinch zooms, as a factor to multiply the current zoom by.
 fn pinch_zoom_factor(delta: f32) -> f32 {

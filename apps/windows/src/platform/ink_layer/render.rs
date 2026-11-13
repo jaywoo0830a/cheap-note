@@ -469,18 +469,17 @@ impl Renderer {
         let mut index = 0;
 
         while index < strokes.len() {
-            let chunk = self.ink.chunks.get(chunk_at).map(|chunk| {
-                (chunk.start, chunk.start + chunk.len)
-            });
+            let chunk = self
+                .ink
+                .chunks
+                .get(chunk_at)
+                .map(|chunk| (chunk.start, chunk.start + chunk.len));
 
             if let Some((start, end)) = chunk {
                 if start == index {
-                    let in_hand = (start..end)
-                        .any(|index| selected.get(index).copied().unwrap_or(false));
-                    let on_screen = overlaps(
-                        self.ink.chunks[chunk_at].bounds,
-                        visible,
-                    );
+                    let in_hand =
+                        (start..end).any(|index| selected.get(index).copied().unwrap_or(false));
+                    let on_screen = overlaps(self.ink.chunks[chunk_at].bounds, visible);
 
                     if !in_hand && !on_screen {
                         index = end;
@@ -544,8 +543,6 @@ impl Renderer {
         }
     }
 
-
-
     /// Brings the cached geometry up to date with the app's strokes.
     ///
     /// The zoom travels with the strokes because a realization is flattened for a size, not for a
@@ -578,9 +575,7 @@ impl Renderer {
         self.ink
             .identities
             .extend(strokes.iter().skip(self.ink.identities.len()).map(identity));
-        self.ink
-            .realizations
-            .resize_with(strokes.len(), || None);
+        self.ink.realizations.resize_with(strokes.len(), || None);
 
         self.rebuild_from_chunked(strokes, canvas.ink.zoom)
     }
@@ -652,8 +647,8 @@ impl Renderer {
             } else {
                 // The tail: built per-stroke, and deliberately not advanced — the next stroke may
                 // join it, and only then is the run long enough (or closed) to bake.
-                for index in start..end {
-                    self.ensure_realization(index, &strokes[index], zoom)?;
+                for (index, stroke) in strokes.iter().enumerate().take(end).skip(start) {
+                    self.ensure_realization(index, stroke, zoom)?;
                 }
 
                 break;
@@ -763,8 +758,6 @@ impl Renderer {
 
         Ok(geometry)
     }
-
-
 
     /// A stroke's ribbon outline as Direct2D geometry: the shape a realization is made from, and the
     /// shape the stroke under the pen is filled from, frame by frame.
@@ -994,7 +987,6 @@ fn ink_matrix(
         M22: (yy - oy) * drawn,
         M31: origin.0 * scale + ox * drawn,
         M32: origin.1 * scale + oy * drawn,
-        ..Default::default()
     }
 }
 
@@ -1053,7 +1045,7 @@ fn point_of(point: [f32; 2]) -> Vector2 {
 /// brush — and the whole of the difference is here. `rgba` takes `0xRRGGBBAA` while a stroke's colour carries its
 /// alpha in the *top* byte (`0xAARRGGBB`), so the two have to be moved to where Direct2D's brush reads them; and a
 /// colour with no alpha byte is opaque, which is what every pen stroke is (see [`note_ui::paint::alpha_of`]).
-
+///
 /// Straight (not premultiplied) red, green, blue, alpha in `0..=1`. Not the byte order of a BGRA
 /// *pixel* — that is the surface's business, and Direct2D is the one that writes it.
 fn colour_of(hsla: Hsla) -> D2D1_COLOR_F {
@@ -1316,10 +1308,7 @@ mod tests {
     fn a_chunk_is_culled_by_the_union_of_its_strokes() {
         assert!(overlaps([0.0, 0.0, 10.0, 10.0], [5.0, 5.0, 20.0, 20.0]));
         assert!(overlaps([0.0, 0.0, 10.0, 10.0], [-5.0, -5.0, 0.0, 0.0]));
-        assert!(!overlaps(
-            [0.0, 0.0, 10.0, 10.0],
-            [10.1, 0.0, 20.0, 10.0]
-        ));
+        assert!(!overlaps([0.0, 0.0, 10.0, 10.0], [10.1, 0.0, 20.0, 10.0]));
     }
 
     /// The flattening tolerance is in the paper's units, coarser than the default only where a paper

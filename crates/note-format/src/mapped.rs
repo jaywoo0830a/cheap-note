@@ -131,7 +131,10 @@ impl PartialEq<Vec<u8>> for MappedBytes {
 
 impl PartialEq for MappedBytes {
     fn eq(&self, other: &Self) -> bool {
-        &**self == &**other
+        // Named as slices first: `*self == *other` resolves to this same implementation again.
+        let this: &[u8] = self;
+        let that: &[u8] = other;
+        this == that
     }
 }
 
@@ -231,10 +234,15 @@ mod tests {
     use super::*;
 
     /// A file written for one test, and removed when the test ends.
+    ///
+    /// The two tests that use it only run where `mmap` does, so the fixture is gated with them rather
+    /// than compiled into a test binary on a platform whose `MappedBytes::open` copies the file.
+    #[cfg(unix)]
     struct TempFile {
         path: std::path::PathBuf,
     }
 
+    #[cfg(unix)]
     impl TempFile {
         fn with(contents: &[u8]) -> Self {
             // Named by a counter that is global rather than per-thread, and by the process, because two
@@ -243,16 +251,15 @@ mod tests {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            let path = std::env::temp_dir().join(format!(
-                "mapped-test-{}-{id}.bin",
-                std::process::id()
-            ));
+            let path =
+                std::env::temp_dir().join(format!("mapped-test-{}-{id}.bin", std::process::id()));
 
             std::fs::write(&path, contents).expect("the fixture writes");
             TempFile { path }
         }
     }
 
+    #[cfg(unix)]
     impl Drop for TempFile {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.path);
@@ -287,7 +294,10 @@ mod tests {
         let file = TempFile::with(b"%PDF-1.7 still here");
 
         let bytes = MappedBytes::open(&file.path).expect("the fixture maps");
-        let fingerprint: u8 = bytes.iter().map(|byte| byte ^ 0x5a).fold(0, u8::wrapping_add);
+        let fingerprint: u8 = bytes
+            .iter()
+            .map(|byte| byte ^ 0x5a)
+            .fold(0, u8::wrapping_add);
 
         // Read again through the same value, then drop it: if the mapping had been released early the
         // read below would be a use of unmapped memory, which the guard pages catch as a crash.
@@ -299,7 +309,10 @@ mod tests {
         // nothing in this type writes.
         let read_back = std::fs::read(&file.path).expect("the fixture still reads");
         assert_eq!(
-            read_back.iter().map(|byte| byte ^ 0x5a).fold(0, u8::wrapping_add),
+            read_back
+                .iter()
+                .map(|byte| byte ^ 0x5a)
+                .fold(0, u8::wrapping_add),
             fingerprint
         );
     }

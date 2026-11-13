@@ -429,6 +429,10 @@ mod tests {
             assert_eq!(MemoryMode::from_label(mode.label()), Some(mode));
         }
 
-        assert_eq!(MemoryMode::from_label("Room "), None, "no trimming, no guessing");
+        assert_eq!(
+            MemoryMode::from_label("Room "),
+            None,
+            "no trimming, no guessing"
+        );
     }
 }

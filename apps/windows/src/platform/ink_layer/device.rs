@@ -18,6 +18,13 @@
 //! one assumption this arrangement makes, and the whole of the canvas depends on it: the interface
 //! is GPUI's and the canvas is this layer's, in the one window both were made for.
 //!
+//! **The assumption is about GPUI's own target, not just this one.** `gpui-pre-windows` 0.3.11 made
+//! GPUI's target topmost, which left the non-topmost layer for this module. 0.3.12 asks for the
+//! non-topmost layer itself; Windows allows only one target per layer, so `CreateTargetForHwnd`
+//! here fails with `DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED` and the app cannot start. The
+//! workspace patches that one line back (`[patch.crates-io]` in the root `Cargo.toml`, and
+//! `third_party/gpui-pre-windows/README.md`). Re-check it whenever GPUI is upgraded.
+//!
 //! ## A composition swap chain's three requirements
 //!
 //! Premultiplied alpha, stretch scaling, and no zero-sized buffer. They are requirements of the

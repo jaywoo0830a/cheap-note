@@ -34,3 +34,12 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# One dependency is vendored because a published release broke an assumption this platform's
+# canvas is built on. `gpui-pre-windows` 0.3.12 moved GPUI's DirectComposition target from the
+# window's topmost layer to its non-topmost one; Windows has only those two layers, and the canvas
+# needs the non-topmost one to be drawn behind GPUI's interface. The local copy restores the
+# topmost choice, and `third_party/gpui-pre-windows/README.md` records the one-line difference and
+# what to do when the dependency is next upgraded. Remove both when upstream restores it.
+[patch.crates-io]
+gpui-pre-windows = { path = "third_party/gpui-pre-windows" }

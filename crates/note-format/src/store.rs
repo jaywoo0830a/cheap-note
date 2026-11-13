@@ -1182,7 +1182,12 @@ impl NoteStore {
         into.pen_weight = row_value(conn, "pen_weight", into.pen_weight, PenWeight::from_scale)?;
         into.grayscale_pages = row_value(conn, "grayscale_pages", into.grayscale_pages, flag_of)?;
         into.frame_cap = row_value(conn, "frame_cap", into.frame_cap, FrameCap::from_label)?;
-        into.memory_mode = row_value(conn, "memory_mode", into.memory_mode, MemoryMode::from_label)?;
+        into.memory_mode = row_value(
+            conn,
+            "memory_mode",
+            into.memory_mode,
+            MemoryMode::from_label,
+        )?;
         into.vsync = row_value(conn, "vsync", into.vsync, flag_of)?;
         into.pen_jitter = row_value(conn, "pen_jitter", into.pen_jitter, flag_of)?;
         into.pressure_fades = row_value(conn, "pressure_fades", into.pressure_fades, flag_of)?;

@@ -1330,18 +1330,24 @@ mod tests {
             BODY_SHADOW_REACH >= reach,
             "the drop reaches {reach} and the window allows {BODY_SHADOW_REACH}"
         );
-        assert!(
-            BODY_SHADOW_DROP[0] > BODY_HALO_GROW && BODY_SHADOW_DROP[1] > BODY_HALO_GROW,
-            "the shadow is thrown further than the edge reaches, or the two would be one edge"
-        );
-        assert!(
-            BODY_SHADOW_ALPHA < BODY_ALPHA,
-            "a shadow is fainter than the body that throws it"
-        );
-        assert!(
-            BODY_SHADOW_ALPHA > BODY_HALO_ALPHA,
-            "and stronger than the rim, because being found is its whole job"
-        );
+        const {
+            assert!(
+                BODY_SHADOW_DROP[0] > BODY_HALO_GROW && BODY_SHADOW_DROP[1] > BODY_HALO_GROW,
+                "the shadow is thrown further than the edge reaches, or the two would be one edge"
+            );
+        }
+        const {
+            assert!(
+                BODY_SHADOW_ALPHA < BODY_ALPHA,
+                "a shadow is fainter than the body that throws it"
+            );
+        }
+        const {
+            assert!(
+                BODY_SHADOW_ALPHA > BODY_HALO_ALPHA,
+                "and stronger than the rim, because being found is its whole job"
+            );
+        }
     }
 
     /// The bounding box of everything drawn on a surface, or `None` when nothing was.

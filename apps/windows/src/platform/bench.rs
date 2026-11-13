@@ -342,7 +342,7 @@ fn page(strokes: usize) -> Canvas {
         .collect();
 
     Canvas {
-        desk: Hsla::from(rgb(0x2A2A_2E)),
+        desk: Hsla::from(rgb(0x2A2A2E)),
         scale: 1.0,
         fills,
         sheet: Some(sheet),
@@ -434,15 +434,12 @@ mod tests {
         let page = page(3);
 
         assert_eq!(page.ink.strokes.len(), 3);
-        assert!(
-            page.ink
-                .strokes
-                .iter()
-                .all(|stroke| !stroke.outline.is_empty())
-        );
+        assert!(page
+            .ink
+            .strokes
+            .iter()
+            .all(|stroke| !stroke.outline.is_empty()));
         assert_eq!(page.rules.len(), 40);
         assert!(page.sheet.is_some());
     }
 }
-
-

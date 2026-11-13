@@ -44,7 +44,8 @@
 // that terminal's console and would show either way, and `cargo test` prints the measurements its
 // timing tests take: `cfg(test)` covers the test build of this crate, including `cargo test
 // --release`, so those prints survive. What is lost in release is only a diagnostic (the font failing
-// to register — `theme`) and a panic message, and only when there is no console to write them to.
+// to register — `theme`); a panic is preserved by the hook in `main`, which writes its message to
+// stderr when there is one and to `cheap-note-panic.log` beside the executable otherwise.
 #![cfg_attr(
     all(windows, not(debug_assertions), not(test)),
     windows_subsystem = "windows"
@@ -55,7 +56,55 @@ use cheap_note::platform;
 
 #[cfg(windows)]
 fn main() {
+    // The release profile is `panic = "abort"` and the image is a windows-subsystem one, so a panic
+    // during startup would otherwise leave nothing behind: no console, no message, just a process
+    // that vanished. This hook is what turns that into a sentence — the message, the place in the
+    // source, and a backtrace when `RUST_BACKTRACE` is set — for the same reason the macOS `main`
+    // has one. It costs nothing when nothing panics.
+    std::panic::set_hook(Box::new(|panic| {
+        let mut report = String::new();
+        report.push_str("cheap-note panicked: ");
+        report.push_str(&panic.to_string());
+
+        if std::env::var_os("RUST_BACKTRACE").is_some() {
+            report.push('\n');
+            report.push_str(&std::backtrace::Backtrace::force_capture().to_string());
+        }
+
+        // Best-effort: a windows-subsystem build started from Explorer has no stderr handle at all,
+        // and `eprintln!` would panic on it — inside the panic hook, turning one panic into an abort
+        // before the report below is written.
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "{report}");
+        }
+        write_panic_report(&report);
+    }));
+
     note_ui::run(platform::INSTALLER);
+}
+
+/// Writes a panic report where a person can find it after a release build has closed.
+///
+/// Beside the executable is the first choice: the release is a folder that can be carried anywhere,
+/// and the report belongs with the binary it describes. An installation directory may not be
+/// writable, though, so the temporary directory is the fallback rather than no report at all.
+#[cfg(windows)]
+fn write_panic_report(report: &str) {
+    let report = format!("{report}\n");
+    let beside = std::env::current_exe().ok().and_then(|executable| {
+        executable
+            .parent()
+            .map(|directory| directory.join("cheap-note-panic.log"))
+    });
+
+    if let Some(path) = beside {
+        if std::fs::write(path, &report).is_ok() {
+            return;
+        }
+    }
+
+    let _ = std::fs::write(std::env::temp_dir().join("cheap-note-panic.log"), report);
 }
 
 /// Off Windows this crate is a workspace member with nothing to build — the app for *this* machine is

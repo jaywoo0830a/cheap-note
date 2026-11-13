@@ -18,7 +18,9 @@ If you read only one paragraph, read this one:
 > no-op** while the setting is still stored. The wheel, which used to be dropped, is now read on Windows
 > through a seam answer (`Platform::wheel_pans`), and the V-Sync switch is left out where the surface
 > cannot honour it (§3.2, §3.3). The Windows canvas also has a cost model of its own — baked Direct2D
-> realizations rather than a multisampled Metal pass — and a benchmark of its own (§6.4).
+> realizations rather than a multisampled Metal pass — and a benchmark of its own (§6.4). One release
+> did not start at all: GPUI 0.3.12 took the DirectComposition layer the canvas lives in, and the
+> workspace now pins a one-line patched copy of that crate (§3.5).
 
 ## 1. How to read the tables
 
@@ -74,9 +76,11 @@ Two of these deserve a caveat rather than a clean tick, because "shared code" do
 
 ## 3. What was broken on Windows
 
-Three things were. Two now have a seam answer — the wheel is read where the platform says it is, and the
+Four things were. Two now have a seam answer — the wheel is read where the platform says it is, and the
 V-Sync switch is left out where the surface cannot act on it — and one remains: the edge swipe's origin.
-The remaining one is invisible in the way this section is about: it compiles, the tests pass, and the
+The fourth was the window itself: a GPUI update took the DirectComposition layer the canvas lives in, so
+the app did not start at all; it is fixed by a pinned, one-line patch (§3.5).
+The edge-swipe one is invisible in the way this section is about: it compiles, the tests pass, and the
 feature is unreliable at run time.
 
 ### 3.1 An edge swipe's origin is not reliable
@@ -209,6 +213,51 @@ The 32 px above is the one Windows-specific number this work introduces. It is a
 `crates/note-ui/src/app.rs` rather than a setting, because it is a reading preference and not a note
 property; if a measurement says it is wrong, the number changes in one place. The wheel's *lines* are
 not guessed — GPUI applied the system setting before the view sees them.
+
+### 3.5 A GPUI update took the layer the canvas lives in
+
+The release build did not start. There was no window and no message — double-clicking
+`cheap-note.exe` produced a process that was gone before it could be seen — and the event log
+recorded `0xc0000409`, the exception `abort` raises through `__fastfail`, against the executable. A
+debug build, which has a console, had the sentence:
+
+```
+thread 'main' panicked at apps\windows\src\platform\mod.rs:
+a canvas for the window: "composing the canvas under the window's content: DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED (0x88980800)"
+```
+
+The cause is the arrangement `apps/windows/src/platform/ink_layer/device.rs` describes: the interface
+and the canvas share one window by taking one DirectComposition target each. Microsoft's
+[`CreateTargetForHwnd`](https://learn.microsoft.com/en-us/windows/win32/api/dcomp/nf-dcomp-idcompositiondevice-createtargetforhwnd)
+is exact about how many there can be: **at most two targets per HWND, one topmost and one not**. GPUI
+draws the bar, the pills and the lists, so it must be the topmost one; the canvas asks for
+`topmost = false` and is drawn behind it.
+
+`gpui-pre-windows` 0.3.11 did that — its `DirectComposition::new` called
+`CreateTargetForHwnd(hwnd, true)`. 0.3.12, which `update crates` moved to, calls it with `false`: the
+dependency took the only non-topmost layer for itself. The canvas then has no layer left, and its own
+`CreateTargetForHwnd` fails with `DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED` before the first frame
+can be drawn. The app's `expect("a canvas for the window")` turns that into the panic above.
+
+The fix is one word in a vendored copy of the dependency:
+
+```diff
+-let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, false) }?;
++let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, true) }?;
+```
+
+`third_party/gpui-pre-windows/` is the published 0.3.12 crate with only that line changed (and the
+reason written above it); the workspace `Cargo.toml` selects it with `[patch.crates-io]`, and the
+vendored README records the check to make when GPUI is next upgraded. The crate is Apache-2.0, and its
+licence is carried with it.
+
+The failure was silent because two release-only choices met: `panic = "abort"` (so the abort path is
+taken rather than an unwind) and a windows-subsystem image (so there is no console for the default
+panic hook to print to). `apps/windows/src/main.rs` now installs the Windows counterpart of the macOS
+hook: the message and an optional backtrace go to stderr when there is one, and to
+`cheap-note-panic.log` beside the executable otherwise — and to the temporary directory if the
+executable's folder is not writable. A release crash is a sentence in a file rather than a process that
+vanished.
 
 ## 4. What is Mac only, and rightly
 
@@ -355,6 +404,7 @@ Written down so they do not get re-litigated:
 | | macOS | Windows |
 |---|---|---|
 | Canvas | Metal, one MSAA pass, fragment-bound | Direct2D, baked realizations, draw-bound |
+| Window composition | the canvas is a texture handed to GPUI | two DirectComposition layers in one HWND: GPUI's target topmost, the canvas's not; a GPUI release that takes both layers stops the app starting (§3.5) |
 | Pacing | frame cap **and** `displaySyncEnabled`, both real | frame cap only; presents immediately, always |
 | Scroll | trackpad pixels; `position` = where the gesture began | trackpad pixels **or** wheel lines, read at 32 px a line; `position` = the system cursor |
 | Edge swipe | works | **unreliable**, because the band is read from a position that is not necessarily the gesture's (§3.1) |
@@ -371,6 +421,9 @@ If one sentence is wanted:
 > origin is the one remaining case where a Mac-shaped assumption about the *platform* leaked into code
 > that was supposed to be about the *view*. The wheel and the V-Sync switch now have their seam answers:
 > read where the platform says it is, and left out where it cannot act.**
+
+And one failure was not about a gesture at all: a GPUI release took the composition layer the canvas
+lives in, so the window did not start until the one-line pin in §3.5.
 
 ## 8. The hardware clause (both platforms)
 
@@ -405,7 +458,7 @@ turns the line off also stops paying for the figure.
 
 ## 9. Keeping this document honest
 
-This file is only useful while it is checked. The two checks that settle most of it:
+This file is only useful while it is checked. The checks that settle most of it:
 
 ```bash
 # Nothing in apps/windows handles a scroll: every gesture above the seam speaks for Windows too.
@@ -415,16 +468,24 @@ grep -rn 'ScrollDelta' apps/windows/src        # (no output)
 grep -rn 'cfg(target_os' crates/note-ui/src
 #   pdfium/api.rs:129    a library *file name*: libpdfium.dylib
 #   keys/tests.rs:106    a mac-only chord-formatting test
+
+# The one patched dependency still asks for the topmost layer the canvas does not take (§3.5).
+grep -rn 'CreateTargetForHwnd(hwnd, true)' third_party/gpui-pre-windows/src
 ```
 
 The second check is the invariant [MACOS.md §6](MACOS.md#6-what-must-not-change) states, and the two
 exceptions are exactly the kind it allows: a `const &str` naming a shared library, and a `#[test]` that
 only makes sense on one platform. Neither is behaviour. The reason that distinction matters here is that
-**every problem in §3 came from a *behavioural* assumption above the seam, where this grep cannot see
+**every *behavioural* problem in §3 came from an assumption above the seam, where this grep cannot see
 it**: `event.position` looks like a number on both platforms and means two different things, a
 `ScrollDelta::Pixels` branch read like a filter on a format nobody argues about, and `fn set_vsync` was
 present and typed on Windows while doing nothing. No search finds those. The two that were fixed were
 fixed by a seam *answer* — `Platform::wheel_pans` and `InkSurface::honours_vsync` — not by a `cfg`.
+
+The startup failure in §3.5 is the exception, and it is instructive for a different reason: it was not
+above the seam at all. It was a dependency's choice about the window's composition layers, a fact the
+compiler could not see and no `cfg` in this workspace could change; the answer was to pin the choice.
+The third check is there because that pin is load-bearing and one line long.
 
 The first check is why §3.1 cannot be fixed in `apps/windows`: the code that decides the edge band is not
 there. It is above the seam, which is the only place it can be fixed.

@@ -8,6 +8,17 @@ cargo run -p cheap-note --release         # Windows; add `-- <file.pdf>` to open
 cargo run -p cheap-note-macos --release   # macOS;   the same binary name, `cheap-note`
 ```
 
+The Windows canvas has its own console benchmark — the app's release image has no console, so the
+measurement is a separate binary — which draws a synthetic page through the same Direct2D device:
+
+```text
+cargo run --release -p cheap-note --bin cheap-note-bench
+cargo run --release -p cheap-note --bin cheap-note-bench -- --strokes 0,29,316,1000,8182 --frames 60
+```
+
+See [doc/WINDOWS.md §6.4](doc/WINDOWS.md#64-measure-the-windows-canvas) for what each column means and
+the numbers it produced.
+
 The two platform apps build to the same binary name (`cheap-note`), but they are separate workspace
 members: run the one your machine is. `cargo test --workspace` builds and tests everything on **either**
 platform — the app for the other platform compiles to a stub and runs no tests, so the same command works

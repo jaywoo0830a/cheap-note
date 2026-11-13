@@ -64,7 +64,7 @@ use gpui_kit::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::HWND;
 
-mod device;
+pub(crate) mod device;
 /// The canvas's own renderer. `pub(crate)` rather than private because a *colour* crosses the other way: the app
 /// describes a highlight in the one conversion the brush understands ([`render::ink_colour`]), so that a preview
 /// and the ink it previews cannot come out two different colours.
@@ -180,4 +180,9 @@ impl note_ui::platform::InkSurface for InkLayer {
     /// with it, because a note is carried between machines and the platform that *can* honour it is
     /// the one that should.
     fn set_vsync(&mut self, _on: bool) {}
+
+    /// Not this surface: the sync interval is zero for a measured reason (see `device.rs`).
+    fn honours_vsync(&self) -> bool {
+        false
+    }
 }

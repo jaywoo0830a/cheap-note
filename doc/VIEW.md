@@ -655,20 +655,19 @@ the unfinished bitmap.
 
 ## 9. Gestures
 
-The trackpad is the only pointer this app takes a scroll from. A two-finger drag pans the sheet, and a pinch
-zooms about the point between the fingers, with the sheet moving the way the *view* was pushed. A mouse
-wheel is not read at all — not the scroll, not a `⌘`-held roll — because a wheel reports lines and a trackpad
-reports pixels, and the conversion between them was a guess about a system setting this app has no API for.
-Pans and pinches both report pixels, which are the units the view already pans in, so nothing is converted.
+The trackpad is the pointer this app's gesture rule was written for. A two-finger drag pans the sheet, and a
+pinch zooms about the point between the fingers, with the sheet moving the way the *view* was pushed.
 
-Ignoring the wheel is a deliberate loss of support rather than an oversight: a line-based delta is dropped at
-`NoteApp::on_scroll`, so a plugged-in mouse pans nothing and zooms nothing. The advantage is that there is one
-zoom gesture and one pan gesture, with no chord that turns one into the other.
+A mouse wheel is read only where the platform says it is how that machine's readers scroll
+(`Platform::wheel_pans`). On Windows a line-based delta is turned into `WHEEL_PAN_PER_LINE` logical pixels
+(32 at 96 DPI, roughly a line of text and its leading); on macOS the wheel stays unread. GPUI has already
+turned a notch into the system's own line count — a notch is normally three lines — so the only number being
+chosen is how tall a line is, rather than what the wheel's setting means.
 
-That trade was made on a Mac, where a trackpad is part of the machine, and it reads differently on Windows,
-where a desktop usually has a wheel and no precision trackpad — so the same rule means "no scrolling with the
-mouse at all" there. It is left as it is knowingly rather than overlooked; [WINDOWS.md §3.2](WINDOWS.md#32-a-mouse-wheel-pans-nothing)
-sets out the three ways it could be revisited and what each costs.
+A wheel is never an edge swipe. It has no gesture to follow and no origin to measure, and a vertical notch
+at the window's edge is a scroll rather than a page turn: line-based readings are kept out of the edge
+machinery entirely. The trade the old rule made is written down in [WINDOWS.md §3.2](WINDOWS.md#32-a-wheel-is-read-where-the-platform-has-one),
+where it was revisited.
 
 
 **A swipe that began at either side turns the page.** Rightwards from the left edge is the previous page,
@@ -983,6 +982,11 @@ default. `CAMetalLayer.displaySyncEnabled` is the whole of the mechanism on macO
 the moment the switch does — the property is consulted at present time, not at layer creation, so there is
 no restart and no new window.
 
+Windows has no such mechanism to move: its canvas presents at a sync interval of zero on purpose, so
+`InkSurface::honours_vsync` answers `false` there and the bar leaves the switch out
+([WINDOWS.md §3.3](WINDOWS.md#33-the-v-sync-switch-is-gone-where-it-cannot-act)). The setting is still
+stored with the note, because it travels between machines.
+
 **It paces the frame rate, and the earlier reading that said otherwise was measuring the cap instead.**
 With `frame_cap` at `360 Hz`, the trace read 144 draws/s either way, and that was taken to mean the switch
 did nothing. It meant the cap was doing the pacing in both cases: a `360 Hz` ceiling is a 2.78 ms interval,
@@ -1008,9 +1012,10 @@ is not a substitute for the other, and a cap above the display's rate does not m
 just hides it.
 
 Windows has no choice to make at all: it presents at a sync interval of zero always, for reasons `device.rs`
-records, so its `set_vsync` is empty and the setting is carried with the note regardless. The switch is still
-on the bar there, which is a small lie in the interface rather than in the mechanism —
-[WINDOWS.md §3.3](WINDOWS.md#33-the-v-sync-switch-does-nothing) has the two ways to stop telling it.
+records, so its `set_vsync` is empty and the setting is carried with the note regardless. The switch is
+left out there rather than shown as a control that does nothing: `InkSurface::honours_vsync` answers
+`false` on Windows, and [WINDOWS.md §3.3](WINDOWS.md#33-the-v-sync-switch-is-gone-where-it-cannot-act)
+records the change.
 
 ## 12. The numbers, in one table
 

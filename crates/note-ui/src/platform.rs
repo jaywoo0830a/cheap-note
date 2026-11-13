@@ -190,6 +190,17 @@ pub trait InkSurface {
     /// reasons of its own (see `apps/windows/platform/ink_layer/device.rs`). Called when the setting
     /// moves and once at install, so a surface never has to guess what the note wanted.
     fn set_vsync(&mut self, on: bool);
+
+    /// Whether this surface can honour [`Self::set_vsync`] at all.
+    ///
+    /// `true` is the default, because a surface that has no opinion keeps the switch visible and
+    /// keeps the old behaviour. Windows answers `false`: its canvas presents at a sync interval of
+    /// zero on purpose, so a V-Sync switch there would be a control that does nothing. The setting
+    /// is still stored with the note — it travels between machines — but the bar only offers it
+    /// where pressing it can have an effect (see `NoteApp::honours_vsync`).
+    fn honours_vsync(&self) -> bool {
+        true
+    }
 }
 
 /// Where the pen's readings come from.
@@ -231,6 +242,17 @@ pub struct Platform {
     /// quarters of those numbers there; a platform that measures in the design's own unit answers
     /// `1.0`. Every length that has to look the same on both is multiplied by this.
     pub unit_scale: f32,
+    /// Whether a line-based scroll — a mouse wheel — moves the sheet.
+    ///
+    /// The view's rule is that a trackpad reports pixels and a wheel reports lines, and that only
+    /// pixels are the distance the sheet already pans in (see `NoteApp::on_scroll`). A platform
+    /// whose wheel is the ordinary way to scroll a page answers `true`; the view then reads a line
+    /// as `WHEEL_PAN_PER_LINE` logical pixels. A platform whose trackpad is the pointer the rule was
+    /// written for answers `false`, and a wheel stays unread.
+    ///
+    /// A field rather than a `cfg`: the wheel rule is about what this machine's users scroll with,
+    /// and `note-ui` may not name an operating system (`doc/MACOS.md` §6).
+    pub wheel_pans: bool,
     /// The pen. Always there, because a pen that cannot be read is a pen that draws with the mouse —
     /// a service that says so in its status rather than an absence to handle everywhere.
     pub pen: Box<dyn PenSource>,

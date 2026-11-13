@@ -51,7 +51,7 @@
 )]
 
 #[cfg(windows)]
-mod platform;
+use cheap_note::platform;
 
 #[cfg(windows)]
 fn main() {

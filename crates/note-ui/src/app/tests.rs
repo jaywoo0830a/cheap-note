@@ -4,11 +4,11 @@ use super::{
     bar_line, confirmed, file_label, file_stem, held_by_cap, page_of_write, page_owes_a_rewrite,
     palette_at, palette_centre, palette_colours, palette_face, palette_id, palette_in_hand,
     palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width, samples_vitals,
-    sheet_matches, spun, touches_paper, zoom_text, Confirmation, Edge, EdgeSwipe, PaletteGeometry,
-    PalettePart, PenGesture, Swipe, Turn, BAR_HEIGHT, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL,
-    PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH,
-    PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL,
-    PALETTE_WELL_PAD, PDF_QUIET_INTERVAL,
+    scroll_of, sheet_matches, spun, touches_paper, zoom_text, Confirmation, Edge, EdgeSwipe,
+    PaletteGeometry, PalettePart, PenGesture, Swipe, Turn, BAR_HEIGHT, EDGE_SWIPE_BAND,
+    EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN,
+    PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC,
+    PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
 use crate::ink::{Notes, Tool};
@@ -756,28 +756,33 @@ fn the_palettes_discs_are_not_the_bars_swatches() {
     }
 }
 
-/// A scroll only pans, and only when the trackpad reported it in pixels.
+/// A scroll only pans, and only when the platform says what it is.
 ///
-/// The trackpad is the one pointer this app takes a scroll from, so the two things the old reading had to
-/// reconcile — lines versus pixels, and whether the primary key turns a scroll into a zoom — are both gone.
-/// A line-based delta is a wheel's, and a wheel is not read: it is dropped rather than converted.
+/// Pixels are a trackpad's and are always read: they are already the units the view pans in. A
+/// line-based delta is a wheel's; whether it is read is the platform's answer
+/// ([`crate::platform::Platform::wheel_pans`]), and a line is converted at
+/// [`WHEEL_PAN_PER_LINE`]. A wheel is never a gesture that can turn a page.
 #[test]
-fn a_scroll_is_a_trackpad_that_reports_pixels() {
+fn a_scroll_is_a_trackpad_or_a_wheel_the_platform_reads() {
     use gpui_kit::{point, px, ScrollDelta};
 
-    let ScrollDelta::Pixels(delta) = ScrollDelta::Pixels(point(px(1.5), px(4.0))) else {
-        unreachable!("a pixels delta is a pixels delta")
-    };
-    assert_eq!(
-        (f32::from(delta.x), f32::from(delta.y)),
-        (1.5, 4.0),
-        "pixels are already the units the view pans in"
-    );
+    let pixels = ScrollDelta::Pixels(point(px(1.5), px(-4.0)));
+    let read = scroll_of(&pixels, false).expect("pixels are read everywhere");
+    assert_eq!(read.distance, (1.5, -4.0), "pixels are already the units");
+    assert!(read.gesture, "a trackpad reading may become an edge swipe");
 
-    // The shape a wheel arrives in, and the one thing that makes it a wheel rather than a trackpad.
+    let wheel = ScrollDelta::Lines(point(0.0, 3.0));
+    let read = scroll_of(&wheel, true).expect("a wheel is read where it scrolls");
+    assert_eq!(
+        read.distance,
+        (0.0, 3.0 * WHEEL_PAN_PER_LINE),
+        "three lines are three line heights"
+    );
+    assert!(!read.gesture, "a wheel is never an edge swipe");
+
     assert!(
-        matches!(ScrollDelta::Lines(point(0.0, 3.0)), ScrollDelta::Lines(_)),
-        "a line-based delta is a wheel's, and `on_scroll` returns on it"
+        scroll_of(&wheel, false).is_none(),
+        "a platform whose pointer is a trackpad leaves a wheel unread"
     );
 }
 

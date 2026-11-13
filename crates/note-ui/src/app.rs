@@ -69,10 +69,12 @@ const PDF_PIXEL_WIDTHS: [u32; 4] = [1_024, 1_536, 2_304, 3_456];
 
 /// How far in from a window's side edge a horizontally-swiped trackpad gesture still counts as an edge swipe.
 ///
-/// A trackpad reports where a gesture *began*, so this band is measured once per gesture rather than per frame.
-/// A hundred and twenty logical pixels is wide enough to catch a swipe that starts at the rim without asking a
-/// hand to aim, and narrow enough that a scroll started over the page is never mistaken for one — the paper fills
-/// the window, so a start further in than this is a reader panning what they are reading.
+/// A trackpad reports where a gesture *began* on macOS, so this band is measured once per gesture
+/// rather than per frame. Windows reports its system cursor instead, which may not be the gesture's
+/// start — the remaining unreliability in `doc/WINDOWS.md` §3.1. A hundred and twenty logical pixels
+/// is wide enough to catch a swipe that starts at the rim without asking a hand to aim, and narrow
+/// enough that a scroll started over the page is never mistaken for one — the paper fills the window,
+/// so a start further in than this is a reader panning what they are reading.
 const EDGE_SWIPE_BAND: f32 = 120.0;
 
 /// How far sideways an edge gesture must travel before it turns the page.
@@ -90,6 +92,16 @@ const EDGE_SWIPE_TRAVEL: f32 = 80.0;
 /// for. Two-to-one is a generous margin — a diagonal flick still counts — and it is checked against the same
 /// accumulated travel the threshold uses.
 const EDGE_SWIPE_SLOPE: f32 = 2.0;
+
+/// How far one line of a mouse wheel's scroll moves the sheet, in logical pixels.
+///
+/// A line is not a distance until someone says how tall it is, and this is that decision: 32 px at
+/// 96 DPI, a comfortable line of text and its leading. GPUI has already applied the system's
+/// lines-per-notch setting (a notch is three lines by default), so this multiplies what Windows
+/// meant rather than guessing at it; the remaining guess is how tall a line is. A platform whose
+/// wheel is not how its readers scroll answers [`crate::platform::Platform::wheel_pans`] `false`,
+/// and this number is never reached there.
+const WHEEL_PAN_PER_LINE: f32 = 32.0;
 
 /// The margin, in logical pixels, between a sheet and the window's edges.
 const PAGE_MARGIN: f32 = 24.0;
@@ -897,6 +909,13 @@ pub struct NoteApp {
     /// How large one of the design's logical pixels is on this platform, as a factor: what the palette
     /// is drawn at (see [`crate::platform::Platform::unit_scale`]).
     unit_scale: f32,
+    /// Whether a wheel's line-based scroll moves the sheet (see [`crate::platform::Platform::wheel_pans`]).
+    ///
+    /// A wheel reports lines and a trackpad reports pixels; the view pans in pixels, so a platform
+    /// that answers `true` here gets its wheel's lines converted at [`WHEEL_PAN_PER_LINE`]. The
+    /// answer is the platform's because it is about what the machine's readers scroll with, and the
+    /// view may not name an operating system.
+    wheel_pans: bool,
     /// How large the sheet is drawn, and where it sits in the window.
     view: Viewport,
     /// The desk colour the canvas was last described with.
@@ -1077,6 +1096,7 @@ impl NoteApp {
             ghost: cursor,
             pointer: system_cursor,
             unit_scale,
+            wheel_pans,
             pen,
             stats: system_stats,
         } = platform;
@@ -1192,6 +1212,7 @@ impl NoteApp {
             page_index: 0,
             scale: window.scale_factor(),
             unit_scale,
+            wheel_pans,
             view,
             desk: cx.theme().background,
             scroll_waiting: (0.0, 0.0),
@@ -2223,6 +2244,18 @@ impl NoteApp {
         }
     }
 
+    /// Whether the canvas can honour the note's V-Sync setting at all.
+    ///
+    /// The setting is stored with the note on every platform, because it travels between machines;
+    /// the *switch* is only offered where pressing it can have an effect. Windows presents at a sync
+    /// interval of zero on purpose (see `apps/windows/platform/ink_layer/device.rs`), so its surface
+    /// answers `false` and the bar leaves the control out rather than showing one that does nothing.
+    fn honours_vsync(&self) -> bool {
+        self.ink_layer
+            .as_ref()
+            .is_none_or(|ink| ink.honours_vsync())
+    }
+
     /// Hands the note's memory mode to the cache, which is the one part of the app that holds memory in
     /// bulk. See [`MemoryMode`].
     ///
@@ -2432,10 +2465,15 @@ impl NoteApp {
 
     /// Pans with a trackpad's two-finger scroll, and turns the page from a swipe at either side.
     ///
-    /// The trackpad is the only pointer this app takes a scroll from: a mouse wheel is not read at all, so
-    /// there is no notch to convert, no line height to guess at, and no `⌘`-wheel zoom competing with the
-    /// pinch for the same event. A trackpad reports pixels, which are the units the view already pans in,
-    /// so what arrives is the distance and nothing has to be scaled.
+    /// The view's rule is that a trackpad reports pixels and a wheel reports lines, and that only
+    /// pixels are the distance the sheet already pans in. A platform whose wheel is the ordinary
+    /// way to scroll a page (`Platform::wheel_pans`) is the exception: its lines are read as
+    /// `WHEEL_PAN_PER_LINE` logical pixels each. GPUI has already turned a notch into the system's
+    /// own line count, so this is not a guess at the wheel's setting — only at how tall a line is.
+    ///
+    /// A wheel is never an edge swipe. It has no gesture to follow and no origin to measure, and a
+    /// vertical notch at the window's edge is a scroll rather than a page turn, so line-based
+    /// readings are kept out of [`EdgeSwipe`] entirely.
     ///
     /// Zooming is the pinch ([`Self::on_pinch`]) and only the pinch. A two-finger scroll pans, always, and
     /// the modifier keys do not turn it into something else.
@@ -2445,48 +2483,52 @@ impl NoteApp {
     /// across readings by [`EdgeSwipe`] rather than decided on one, and while it is in flight it does not pan —
     /// a page turn that dragged the sheet sideways first would be two motions for one intention.
     fn on_scroll(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let ScrollDelta::Pixels(delta) = event.delta else {
-            // A line-based delta is a wheel's, and a wheel is not read (see this method's docs). Ignoring
-            // it here is what keeps a plugged-in mouse from moving the sheet at a step the trackpad never
-            // asked for.
+        let Some(scroll) = scroll_of(&event.delta, self.wheel_pans) else {
             return;
         };
 
-        let distance = (f32::from(delta.x), f32::from(delta.y));
+        let distance = scroll.distance;
 
         if !distance.0.is_finite() || !distance.1.is_finite() {
             return;
         }
 
-        // An edge swipe is begun from where the gesture *started*, which the platform reports alongside every
-        // reading of it, so the band is answered for the whole gesture from one position.
-        if self.edge_swipe.is_none() {
-            self.scrolled_at = Some(Instant::now());
-            if let Some(edge) = Edge::at(f32::from(event.position.x), self.sheet.window.0) {
-                self.edge_swipe = Some(EdgeSwipe::new(edge));
-            }
-        }
-
-        if let Some(swipe) = self.edge_swipe.as_mut() {
-            swipe.moved(distance);
-            self.scrolled_at = Some(Instant::now());
-
-            if let Swipe::Turn(turn) = swipe.decided() {
-                swipe.turned();
-                match turn {
-                    Turn::Previous => self.previous_page(cx),
-                    Turn::Next => self.next_page(cx),
+        // Only a pixel reading is a gesture that can turn a page. A wheel's lines are a sequence of
+        // notches with no origin and no hand to follow, and a vertical notch at the window's edge is
+        // a scroll — so a wheel is kept out of the edge machinery entirely.
+        if scroll.gesture {
+            // An edge swipe is begun from where the gesture *started*. macOS reports that position
+            // with every reading; Windows reports its system cursor, which is not necessarily the
+            // gesture's start (see `doc/WINDOWS.md` §3.1), so the band is only as reliable as that
+            // platform's answer.
+            if self.edge_swipe.is_none() {
+                self.scrolled_at = Some(Instant::now());
+                if let Some(edge) = Edge::at(f32::from(event.position.x), self.sheet.window.0) {
+                    self.edge_swipe = Some(EdgeSwipe::new(edge));
                 }
-                // The pan the swipe had accumulated is dropped rather than spent: the gesture was a page turn,
-                // and moving the sheet as well would leave the new page scrolled by a swipe that never meant to
-                // scroll.
-                self.scroll_waiting = (0.0, 0.0);
+            }
+
+            if let Some(swipe) = self.edge_swipe.as_mut() {
+                swipe.moved(distance);
+                self.scrolled_at = Some(Instant::now());
+
+                if let Swipe::Turn(turn) = swipe.decided() {
+                    swipe.turned();
+                    match turn {
+                        Turn::Previous => self.previous_page(cx),
+                        Turn::Next => self.next_page(cx),
+                    }
+                    // The pan the swipe had accumulated is dropped rather than spent: the gesture was a page turn,
+                    // and moving the sheet as well would leave the new page scrolled by a swipe that never meant to
+                    // scroll.
+                    self.scroll_waiting = (0.0, 0.0);
+                    return;
+                }
+
+                // A gesture that has not decided neither pans nor ends here: it is followed until a reading says it
+                // has stopped (see [`Self::end_edge_swipe`], which the pump calls on the same quiet gap a zoom uses).
                 return;
             }
-
-            // A gesture that has not decided neither pans nor ends here: it is followed until a reading says it
-            // has stopped (see [`Self::end_edge_swipe`], which the pump calls on the same quiet gap a zoom uses).
-            return;
         }
 
         // Left for the frame that shows it, not spent here: the readings arrive faster than frames do, and a
@@ -5473,6 +5515,28 @@ impl NoteApp {
             }
         }
 
+        // The display's clock is a switch only where the surface can honour it: a reader whose
+        // platform cannot make a frame wait is not offered a control that does nothing. The divider
+        // stays either way, so hiding the switch is not a hole in the row.
+        let vsync: Vec<AnyElement> = if self.honours_vsync() {
+            vec![
+                toolbar_divider(hairline).into_any_element(),
+                visibility_switch(
+                    "vsync",
+                    "V-Sync",
+                    self.settings.vsync,
+                    cx,
+                    |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| {
+                        app.set_vsync(on, cx)
+                    },
+                )
+                .into_any_element(),
+                toolbar_divider(hairline).into_any_element(),
+            ]
+        } else {
+            vec![toolbar_divider(hairline).into_any_element()]
+        };
+
         div()
             .flex()
             .flex_row()
@@ -5505,17 +5569,9 @@ impl NoteApp {
             // canvas's work, not the display's. See [`FrameCap`].
             .child(control_label("Frames", muted))
             .child(self.chooser("chooser-frames", &self.frame_select, cx))
-            .child(toolbar_divider(hairline))
-            // The display's clock, beside the canvas's own ceiling: the two are the whole of what paces
-            // a frame, and they are the reader's to trade against each other (see [`Settings::vsync`]).
-            .child(visibility_switch(
-                "vsync",
-                "V-Sync",
-                self.settings.vsync,
-                cx,
-                |app: &mut NoteApp, on: bool, cx: &mut Context<NoteApp>| app.set_vsync(on, cx),
-            ))
-            .child(toolbar_divider(hairline))
+            // The display's clock, beside the canvas's own ceiling, where the surface can honour it:
+            // the two are the whole of what paces a frame (see [`Settings::vsync`]).
+            .children(vsync)
             // The pen's own steadiness, beside the two things that pace a frame: what it corrects is the
             // gesture that moves the sheet — the pan and the zoom a held modifier makes of the nib — and it is
             // the one setting here that is about the *hardware*. Named for the gesture rather than for the pen,
@@ -6862,6 +6918,44 @@ impl EdgeSwipe {
         self.turned = true;
     }
 }
+/// One scroll reading, in the units the sheet pans in, and whether it is a gesture that may turn a
+/// page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScrollRead {
+    /// The distance to add to the sheet's pan, in logical pixels.
+    distance: (f32, f32),
+    /// Whether this reading belongs to a gesture that can arm and feed an [`EdgeSwipe`].
+    ///
+    /// A trackpad's pixel readings are such a gesture; a wheel's lines are not (see
+    /// [`NoteApp::on_scroll`]).
+    gesture: bool,
+}
+
+/// Reads one scroll into the distance the sheet should move, or `None` when this platform does not
+/// take that kind of scroll.
+///
+/// GPUI reports a trackpad in pixels and a wheel in lines. Pixels are already the units the view
+/// pans in; a line is turned into pixels by [`WHEEL_PAN_PER_LINE`], and only where the platform
+/// answered [`crate::platform::Platform::wheel_pans`] `true`. A reading this function returns
+/// `None` for is not a scroll this machine asked the app to follow.
+fn scroll_of(delta: &ScrollDelta, wheel_pans: bool) -> Option<ScrollRead> {
+    match delta {
+        ScrollDelta::Pixels(delta) => Some(ScrollRead {
+            distance: (f32::from(delta.x), f32::from(delta.y)),
+            gesture: true,
+        }),
+        ScrollDelta::Lines(lines) if wheel_pans => Some(ScrollRead {
+            distance: (
+                lines.x * WHEEL_PAN_PER_LINE,
+                lines.y * WHEEL_PAN_PER_LINE,
+            ),
+            gesture: false,
+        }),
+        _ => None,
+    }
+}
+
+
 
 /// How much a pinch zooms, as a factor to multiply the current zoom by.
 fn pinch_zoom_factor(delta: f32) -> f32 {

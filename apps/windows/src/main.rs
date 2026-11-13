@@ -13,6 +13,7 @@
 //! | [`platform::cursor_overlay`] | the nib's ghost, drawn in a layered window above everything |
 //! | [`platform::system_cursor`] | `SetCursor`, so the system pointer is out of the way while it is |
 //! | [`platform::ink_layer`] | the desk, the paper and the ink: Direct3D 11, Direct2D, DirectComposition |
+//! | [`platform::report`] | `--memory-report`: the process's counters, and a console or file to print them to |
 //!
 //! Plus Pdfium's own C entry points, which are `#[cfg(windows)]` in the view's `pdfium` module for
 //! now, and `main`, which is the six lines that assemble the lot (see [`platform`]).
@@ -80,6 +81,14 @@ fn main() {
         }
         write_panic_report(&report);
     }));
+
+    // Note the one exception on the way in: `--memory-report <note> ...` becomes a measurement rather
+    // than a window (see `platform::report`). It runs before the installer because it needs no window
+    // at all, and it is handled here for the same reason the macOS `main` handles it — the report wants
+    // the platform's own counters and a place to print, not the view's frame loop.
+    if let Some(paths) = note_ui::memory_report::requested() {
+        std::process::exit(platform::report::run(&paths));
+    }
 
     note_ui::run(platform::INSTALLER);
 }

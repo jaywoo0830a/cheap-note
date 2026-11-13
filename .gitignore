@@ -17,6 +17,10 @@ cheap-note.settings.json
 /*.txt
 /*.ps1
 
+# The memory report's fallback file when a release has no console to print to (see
+# `apps/windows/src/platform/report.rs`).
+/cheap-note-standalone/cheap-note-memory-report.txt
+
 # The packaged app a release build produces (see `apps/macos/bundle.sh` and the Windows release
 # folder for the zip).
 /dist/

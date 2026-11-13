@@ -83,6 +83,10 @@ windows = { version = "0.62", features = [
     # snapshot of this process's threads. `sysinfo` cannot answer it — its `Process::tasks` is Linux-only
     # and returns `None` here — so this is the one counter the platform has to read for itself.
     "Win32_System_Diagnostics_ToolHelp",
+    # The memory report's way out of a windows-subsystem image (see `src/platform/report.rs`):
+    # `AttachConsole` reaches the terminal that started a release build, and `SetConsoleOutputCP` makes
+    # the note names in the table readable on it.
+    "Win32_System_Console",
 ] }
 # Direct2D's geometry is placed with a matrix, and that matrix type is this crate's.
 windows-numerics = "0.3"

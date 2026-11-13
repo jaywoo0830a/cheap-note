@@ -89,14 +89,17 @@ fn a_document_is_copied_in_and_keeps_its_name() {
     assert_eq!(bytes, a_pdf());
     // The document is *mapped* rather than read into the heap: that is what lets closing the note give
     // the memory back, and it is the reason `MappedBytes` exists (see `src/mapped.rs`).
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     assert!(
         bytes.is_mapped(),
         "a note's document is mapped, not copied into the heap"
     );
 
     // A document written straight in keeps the name it is given, which is what an import of a note
-    // from another machine does.
+    // from another machine does. The old mapping has to go first: Windows will not truncate a file
+    // while a view of it is mapped (`ERROR_USER_MAPPED_FILE`), and the app drops its document view
+    // before replacing one.
+    drop(bytes);
     note.put_document("plate-7.pdf", b"%PDF-1.4 plate")
         .expect("a document written in");
     let (recorded, bytes) = note.document().expect("a document").expect("one");

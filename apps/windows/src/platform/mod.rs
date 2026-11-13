@@ -22,6 +22,7 @@ pub mod cursor_overlay;
 pub mod ink_layer;
 pub mod input;
 pub mod pen;
+pub mod report;
 pub mod system_cursor;
 pub mod vitals;
 

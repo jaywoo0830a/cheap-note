@@ -414,6 +414,8 @@ Written down so they do not get re-litigated:
 | Unit scale | `0.75` | `1.0` |
 | Frame cost | measured: 143–146 draws/s on 8,182 strokes | measured: **2.03 ms a frame** on 8,182 (draw 1.02 + present 1.00), about 490 fps of canvas work (§6.4) |
 | Hardware clause | `17 MiB · 0% cpu · 17 threads` | the same shape, from `sysinfo` + a toolhelp snapshot (§8) |
+| Document bytes | `MappedBytes` over `mmap`/`munmap` | the same type over `CreateFileMappingW`/`MapViewOfFile` (§8.1) |
+| Memory report | `--memory-report`; GPU from `TASK_VM_INFO` | `--memory-report`; GPU column `—` (§8.1) |
 
 If one sentence is wanted:
 
@@ -456,6 +458,28 @@ first call and ~200 µs on a settled one — plus the one per-platform thread ca
 existing once-a-second status refresh, and **not at all while the status line is hidden**, so a reader who
 turns the line off also stops paying for the figure.
 
+### 8.1 The mapped document and the memory report (both platforms)
+
+Two pieces used to be Mac-only and are now answered on Windows as well.
+
+* **A PDF's bytes are mapped, not copied.** `crates/note-format/src/mapped.rs` uses `mmap`/`munmap` on
+  Unix and `CreateFileMappingW`/`MapViewOfFile`/`UnmapViewOfFile` on Windows; the drop returns the
+  document's size to the machine rather than to the allocator's free list. A platform with neither call
+  still falls back to a copy, and an empty or unmappable file still opens. The Windows consequence is
+  that a live mapping keeps `source.pdf` from being truncated, so the document view is dropped before a
+  note's document is replaced (see `Note::put_document`).
+* **`--memory-report` runs here.** The arithmetic is shared (`crates/note-ui/src/memory_report.rs`); the
+  Windows half is `apps/windows/src/platform/report.rs`, which supplies `ProcessStats` and a way out of a
+  windows-subsystem image. A release started from a terminal attaches to that console; a redirected run
+  uses its stdout; with neither, the table goes to `cheap-note-memory-report.txt` beside the executable
+  (the temporary directory is the fallback). The exit codes are the same as macOS: `0` clean, `1` over
+  the allowance, `2` the report could not run.
+
+The GPU column is still `—` on Windows: `SystemStats::surface_bytes` has no Windows implementation, so
+the report measures resident memory and the page cache rather than a graphics ledger. That is why the
+rows to read are `RSS`, `cache` and `pages`: a close that empties the cache and returns the process to
+its baseline is the clean one.
+
 ## 9. Keeping this document honest
 
 This file is only useful while it is checked. The checks that settle most of it:
@@ -471,6 +495,12 @@ grep -rn 'cfg(target_os' crates/note-ui/src
 
 # The one patched dependency still asks for the topmost layer the canvas does not take (§3.5).
 grep -rn 'CreateTargetForHwnd(hwnd, true)' third_party/gpui-pre-windows/src
+
+# The Windows document is mapped through the kernel32 calls, not copied into the heap (§8.1).
+grep -n 'CreateFileMappingW' crates/note-format/src/mapped.rs
+
+# The memory report is wired into the Windows main, not only the Mac one (§8.1).
+grep -n 'memory_report::requested' apps/windows/src/main.rs
 ```
 
 The second check is the invariant [MACOS.md §6](MACOS.md#6-what-must-not-change) states, and the two

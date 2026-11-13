@@ -31,8 +31,9 @@ zip = { version = "=9.5.1", default-features = false, features = ["deflate"] }
 thiserror = "=2.0.21"
 # `mmap`/`munmap`, so a note's document does not hold its bytes in the heap: see `mapped.rs`. Listed
 # unconditionally rather than under `[target.…]` — this crate keeps no target section, and `libc` builds
-# on every platform the format is carried to. The code that calls it is behind `#[cfg(unix)]`; a platform
-# without the call reads the file instead, which is what this crate did before.
+# on every platform the format is carried to. The code that calls it is behind `#[cfg(unix)]`; Windows
+# uses the kernel32 mapping calls declared in the same module, and a platform without either reads the
+# file instead, which is what this crate did before.
 libc = "0.2"
 
 # What the integration tests in `tests/` need to look at a note *from outside*: the SQLite file with

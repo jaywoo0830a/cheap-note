@@ -333,6 +333,12 @@ impl Note {
     }
 
     /// Writes a document into the note, and records the name it had.
+    ///
+    /// A caller still holding a [`MappedBytes`] from [`Self::document`] must drop it first on Windows:
+    /// the operating system will not truncate a file while a view of it is mapped
+    /// (`ERROR_USER_MAPPED_FILE`), and the error this returns would be that refusal rather than a
+    /// failure of the write. The app's document view is dropped before a note's document is replaced;
+    /// nothing reads a note's document while it is being written.
     pub fn put_document(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
         let path = self.dir.join(NOTE_PDF);
         std::fs::write(&path, bytes).map_err(|error| {

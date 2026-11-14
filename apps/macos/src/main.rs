@@ -45,6 +45,27 @@ fn main() {
     // job should see rather than a pass it did not earn.
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // `--bench`: what a frame of this canvas costs, measured rather than guessed. The same command line
+    // the Windows build answers, so the two numbers can be put in one table — see `doc/CLI.md`.
+    if args.first().map(String::as_str) == Some("--bench") {
+        // The shared flags are taken off here, so the benchmark is handed only what it owns — the same
+        // split `--memory-report` makes, and the reason `--format` means one thing on both.
+        let options = match note_ui::report::Options::parse(&args[1..]) {
+            Ok(options) => options,
+            Err(error) => {
+                eprintln!("cheap-note: {error}");
+                std::process::exit(2);
+            }
+        };
+
+        if options.help {
+            platform::bench::print_usage();
+            std::process::exit(0);
+        }
+
+        std::process::exit(platform::bench::run(&options.rest, options.format));
+    }
+
     if args.first().map(String::as_str) == Some(note_ui::memory_report::FLAG) {
         let options = match note_ui::report::Options::parse(&args[1..]) {
             Ok(options) => options,
@@ -75,6 +96,16 @@ fn main() {
         };
 
         std::process::exit(code);
+    }
+
+    // A flag this build does not know is a mistake, not a request to open a window. Saying so is the
+    // difference between a typo and an app that seems to ignore what it was asked.
+    if let Some(unknown) = args.iter().find(|arg| arg.starts_with('-')) {
+        eprintln!("cheap-note: unknown flag: {unknown}");
+        eprintln!(
+            "usage: cheap-note [--memory-report <note> ... | --bench] [-h | --help]"
+        );
+        std::process::exit(2);
     }
 
     note_ui::run(platform::INSTALLER);

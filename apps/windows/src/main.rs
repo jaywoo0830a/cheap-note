@@ -82,12 +82,34 @@ fn main() {
         write_panic_report(&report);
     }));
 
-    // Note the one exception on the way in: `--memory-report <note> ...` becomes a measurement rather
-    // than a window (see `platform::report`). It runs before the installer because it needs no window
-    // at all, and it is handled here for the same reason the macOS `main` handles it — the report wants
-    // the platform's own counters and a place to print, not the view's frame loop.
+    // Note the two exceptions on the way in: `--memory-report <note> ...` becomes a measurement rather
+    // than a window (see `platform::report`), and `--bench` becomes a frame measurement. Both run before
+    // the installer because neither needs a window, and both are handled here for the same reason the
+    // macOS `main` handles them — the work wants the platform's own counters and a place to print, not
+    // the view's frame loop.
+    //
+    // `--bench` used to be its own console binary (`cheap-note-bench`). It is one command line on both
+    // platforms now; the binary is kept as a thin wrapper so an existing script keeps working.
     if let Some(paths) = note_ui::memory_report::requested() {
         std::process::exit(platform::report::run(&paths));
+    }
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--bench") {
+        let options = match note_ui::report::Options::parse(&args[1..]) {
+            Ok(options) => options,
+            Err(error) => {
+                eprintln!("cheap-note: {error}");
+                std::process::exit(2);
+            }
+        };
+
+        if options.help {
+            platform::bench::print_usage();
+            std::process::exit(0);
+        }
+
+        std::process::exit(platform::bench::run(&options.rest, options.format, &mut std::io::stdout()));
     }
 
     note_ui::run(platform::INSTALLER);

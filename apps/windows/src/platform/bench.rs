@@ -129,7 +129,8 @@ fn parse_strokes(text: &str) -> Result<Vec<usize>, String> {
     Ok(counts)
 }
 
-fn print_usage() {
+/// What the command line accepts, for `--help` and for a mistake.
+pub fn print_usage() {
     println!(
         "usage: cheap-note-bench [--strokes 0,29,316,1000,8182] [--frames 60]\n\
          \n\
@@ -141,38 +142,31 @@ fn print_usage() {
 }
 
 /// The command line as a process exit code.
-pub fn run() -> i32 {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    // `--format` and `--help` are the shared contract's, so this command and `--memory-report` agree on
-    // what those flags mean. Anything else is this benchmark's own.
-    let shared = match note_ui::report::Options::parse(&args) {
-        Ok(shared) => shared,
-        Err(error) => {
-            eprintln!("cheap-note-bench: {error}");
-            return 2;
-        }
-    };
-
-    if shared.help {
+/// Runs the benchmark over the arguments it owns, writing the report in `format` to `out`.
+///
+/// `args` is what is left after the shared flags are taken — `--strokes`, `--frames`, `--help` — so this
+/// function never sees `--format`. Both entry points (the app's `--bench` and the `cheap-note-bench`
+/// wrapper) call it with the same split, which is what makes the two platforms one command line.
+pub fn run(args: &[String], format: note_ui::report::Format, out: &mut impl std::io::Write) -> i32 {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_usage();
         return 0;
     }
 
-    let options = match Options::parse(&shared.rest) {
+    let options = match Options::parse(args) {
         Ok(Some(options)) => options,
         Ok(None) => return 0,
         Err(error) => {
-            eprintln!("cheap-note-bench: {error}");
+            eprintln!("cheap-note: {error}");
             print_usage();
             return 2;
         }
     };
 
-    match measure_all(&options, shared.format) {
+    match measure_all(&options, format, out) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("cheap-note-bench: {error}");
+            eprintln!("cheap-note --bench: {error}");
             2
         }
     }
@@ -190,9 +184,13 @@ struct Row {
     present: Duration,
 }
 
-fn measure_all(options: &Options, format: note_ui::report::Format) -> Result<i32, String> {
+fn measure_all(
+    options: &Options,
+    format: note_ui::report::Format,
+    out: &mut impl std::io::Write,
+) -> Result<i32, String> {
     let hwnd = hidden_window()?;
-    let result = measure_on(hwnd, options, format);
+    let result = measure_on(hwnd, options, format, out);
 
     unsafe {
         let _ = DestroyWindow(hwnd);
@@ -205,6 +203,7 @@ fn measure_on(
     hwnd: HWND,
     options: &Options,
     format: note_ui::report::Format,
+    out: &mut impl std::io::Write,
 ) -> Result<i32, String> {
     use note_ui::report::{Command, Format, Report, Row, Value, Verdict};
 
@@ -251,11 +250,7 @@ fn measure_on(
 
     let report = report.conclude(Verdict::Ok, note);
 
-    Ok(note_ui::report::emit(
-        &report,
-        format,
-        &mut std::io::stdout(),
-    ))
+    Ok(note_ui::report::emit(&report, format, out))
 }
 
 /// Measures one page: its first frame, its settled frames, a rebuild and a pan.

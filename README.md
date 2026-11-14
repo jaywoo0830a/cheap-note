@@ -8,13 +8,21 @@ cargo run -p cheap-note --release         # Windows; add `-- <file.pdf>` to open
 cargo run -p cheap-note-macos --release   # macOS;   the same binary name, `cheap-note`
 ```
 
-The Windows canvas has its own console benchmark — the app's release image has no console, so the
-measurement is a separate binary — which draws a synthetic page through the same Direct2D device:
+The canvas has a benchmark that draws a synthetic page through the same device the window uses — Metal
+on macOS, Direct2D on Windows:
 
 ```text
-cargo run --release -p cheap-note --bin cheap-note-bench
-cargo run --release -p cheap-note --bin cheap-note-bench -- --strokes 0,29,316,1000,8182 --frames 60
+cheap-note --bench                                   # both platforms
+cheap-note --bench --strokes 0,29,316,1000,8182 --frames 60
+cheap-note --bench --format json                     # for a script
 ```
+
+On Windows `cheap-note-bench` is still there as a thin wrapper, for scripts that call it by name.
+
+`cheap-note --memory-report <note-folder> ...` is the other measurement: whether a document gives its
+memory back. Both commands share one contract — the same fields, the same `--format`, and the same
+`0` / `1` / `2` exit codes for pass, fail and could-not-measure. [`doc/CLI.md`](doc/CLI.md) is that
+contract.
 
 See [doc/WINDOWS.md §6.4](doc/WINDOWS.md#64-measure-the-windows-canvas) for what each column means and
 the numbers it produced.

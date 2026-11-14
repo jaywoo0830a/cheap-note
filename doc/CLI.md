@@ -65,20 +65,25 @@ whatever the document's size — and not for a leak. A real leak is proportional
 before the fix, a 62 MB PDF left 130 MiB behind. The allowance sits between the two, so a fixed
 cost passes and a proportional one fails.
 
-## `cheap-note-bench`
+## `cheap-note --bench`
 
 Measures what a frame of the canvas costs.
 
 ```sh
-cheap-note-bench [--strokes 0,29,316,1000,8182] [--frames 60]
-cheap-note-bench --format json [--strokes ...] [--frames ...]
+cheap-note --bench [--format table|json] [--strokes 0,29,316,1000,8182] [--frames 30]
 ```
 
-A **separate binary** because the app's release image on Windows is a subsystem program with no
-console beside its window. It links the same library and draws through the same renderer the window
-does, so what it measures is this app and not a copy of it.
+**One command line on both platforms.** macOS and Windows each implement the drawing half behind their
+own seam and hand the same figures to the same report; the contract is what makes the two tables
+comparable. `cheap-note-bench` still exists on Windows as a thin wrapper, because it used to be the only
+way in and a script may call it.
 
-A page of synthetic strokes is drawn into a hidden window's swap chain. For each stroke count:
+A page of synthetic strokes is drawn into an offscreen surface — an `NSView` with a Metal layer on macOS,
+a hidden `STATIC` window on Windows. On macOS the frame is **waited for** rather than merely queued:
+`draw` commits and returns, so `settle` is what turns "queued" into "paid". That is the reason the two
+`present` columns are not comparable row for row — see the note below.
+
+For each stroke count:
 
 | Field | Meaning |
 |---|---|
@@ -87,11 +92,20 @@ A page of synthetic strokes is drawn into a hidden window's swap chain. For each
 | `worst` | the slowest warm frame — a mean hides the one frame a hand would feel |
 | `rebuild` | one frame after a detail rebuild, which invalidates every realization |
 | `pan` | one frame with the sheet moved, which must rebuild nothing |
-| `present` | the compositor's own cost, timed apart from the drawing |
+| `present` | the GPU's share, timed apart from the drawing — see the note below |
 
 `frame` is the warm draw plus the present — what one frame costs while the page is being panned or
 written on. A `present` much larger than the draw is the compositor and not the renderer, and at
 `Present(0)` it is a cost the app cannot remove by drawing faster.
+
+### The one figure that is not the same shape on both platforms
+
+Windows times `present` as the cost of *handing* the frame to the compositor. macOS's `settle` waits for
+the GPU to finish everything the frame queued, because Metal's command buffer does not separate the
+present from the drawing. So macOS's `present` is "all the GPU did for this frame" and Windows's is "the
+hand-off", and **`frame` is the figure to compare across platforms**, not `present`.
+
+The macOS table says so on its own summary line rather than leaving a reader to find out.
 
 The default counts are 0, 29, 316, 1 000 and 8 182 strokes. The first three are the ones the older
 measurements used, and 8 182 is the page the macOS figures in `doc/WINDOWS.md` were taken on — it is in
@@ -111,7 +125,7 @@ that supplies none of them still builds, still runs, and says so.
 | resident memory | `task_info`, `TASK_VM_INFO` | `GetProcessMemoryInfo` | — |
 | graphics ledger | `IOSurface` via `task_vm_info` | none — the column is `—` | — |
 | a console to print to | inherited `stdout` | attach to the parent console, or a file | inherited `stdout` |
-| frame timing | Metal presentation | Direct2D + swap chain | — |
+| frame timing | Metal, waited for with `waitUntilCompleted` | Direct2D + swap chain | — |
 
 The graphics column is the model for how to be honest: Windows **has no** `surface_bytes`, so the
 field is `null` / `—` rather than `0`. A zero would be a claim about an empty GPU.
@@ -206,11 +220,12 @@ choose a unit per row and a script is not.
 ## Where this document and the code part company
 
 Everything above is implemented, and the exit codes, field names and platform table are what the tests
-pin (`crates/note-ui/src/report.rs`). Two honest limits remain:
+pin (`crates/note-ui/src/report.rs`, `apps/macos/src/platform/bench.rs`). Two honest limits remain:
 
-- **The Windows benchmark has not been run from this repository's macOS machine.** Its file is
-  `#[cfg(windows)]`, so it is type-checked only on Windows. The contract it builds is the shared one and
-  is tested there, but the wiring into `measure_on` has not been compiled here.
+- **The Windows benchmark has not been compiled on this machine.** Its file is `#[cfg(windows)]` and the
+  Windows build needs a GPUI build script that cannot run cross-compiled, so it is syntax-checked here
+  and compiled only on Windows. Its *contract* is the shared one, which is tested.
+- **The two `present` columns measure different things** (see above), so `frame` is the comparable figure.
 - **`surface_bytes` on macOS reports zero in a headless run.** The graphics column is therefore
   *measured* (it is a real reading) rather than declared absent — `unmeasured` is derived from the rows,
   so the contract never says a column is unmeasured while its cells hold numbers.

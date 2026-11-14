@@ -1,5 +1,6 @@
 //! The services the view asks for, on macOS, and the assembly of them.
 
+pub mod bench;
 pub mod canvas;
 pub mod ghost;
 pub mod metal;

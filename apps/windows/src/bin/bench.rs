@@ -15,7 +15,28 @@
 
 #[cfg(windows)]
 fn main() {
-    std::process::exit(cheap_note::platform::bench::run());
+    // A thin wrapper kept for scripts that call the old binary name directly. The command line is
+    // `cheap-note --bench` now — one flag on both platforms — and this forwards to the same runner.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let options = match note_ui::report::Options::parse(&args) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("cheap-note-bench: {error}");
+            std::process::exit(2);
+        }
+    };
+
+    if options.help {
+        cheap_note::platform::bench::print_usage();
+        std::process::exit(0);
+    }
+
+    std::process::exit(cheap_note::platform::bench::run(
+        &options.rest,
+        options.format,
+        &mut std::io::stdout(),
+    ));
 }
 
 #[cfg(not(windows))]

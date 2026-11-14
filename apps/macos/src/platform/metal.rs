@@ -136,7 +136,7 @@ struct PageVertex {
 }
 
 /// The window's GPU canvas.
-pub(super) struct Surface {
+pub(crate) struct Surface {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     /// Fills, ruling and ink: one vertex per corner, one colour each.
@@ -181,13 +181,18 @@ pub(super) struct Surface {
     page_texture: Option<(usize, Retained<ProtocolObject<dyn MTLTexture>>)>,
     /// The multisampled target the passes draw into, resolved into the drawable. Made with the size.
     msaa: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
+    /// The command buffer committed by the most recent `draw`, kept so that a benchmark can wait for it.
+    ///
+    /// `None` until the first frame is committed. The app never reads it: it exists for
+    /// [`Surface::settle`], which is the only caller that needs a frame's cost to have been paid.
+    last_commit: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
     width: usize,
     height: usize,
 }
 
 impl Surface {
     /// Gives a view a Metal layer, and the pipelines a canvas is drawn with.
-    pub(super) fn install(view: &objc2_app_kit::NSView, scale: f64) -> Option<Self> {
+    pub(crate) fn install(view: &objc2_app_kit::NSView, scale: f64) -> Option<Self> {
         let device = objc2_metal::MTLCreateSystemDefaultDevice()?;
         let queue = device.newCommandQueue()?;
 
@@ -258,13 +263,14 @@ impl Surface {
             buffer_slot: 0,
             page_texture: None,
             msaa: None,
+            last_commit: None,
             width: 1,
             height: 1,
         })
     }
 
     /// Matches the drawable to the view. `width` and `height` are device pixels.
-    pub(super) fn resize(&mut self, width: usize, height: usize, scale: f64) {
+    pub(crate) fn resize(&mut self, width: usize, height: usize, scale: f64) {
         if (self.width, self.height) == (width, height) {
             return;
         }
@@ -1187,7 +1193,7 @@ fn page_quad(canvas: &Canvas, scale: f32) -> Vec<PageVertex> {
 
 impl Surface {
     /// Draws one description of the canvas, and the pen's mark over it. `false` when there was no drawable.
-    pub(super) fn draw(&mut self, canvas: &Canvas, mark: Option<&Mark>) -> bool {
+    pub(crate) fn draw(&mut self, canvas: &Canvas, mark: Option<&Mark>) -> bool {
         let scale = if canvas.scale > 0.0 {
             canvas.scale
         } else {
@@ -1348,9 +1354,29 @@ impl Surface {
 
         buffer.commit();
 
+        // Kept for `settle`: the app never reads it, the benchmark does.
+        self.last_commit = Some(buffer);
+
         self.buffer_slot = (self.buffer_slot + 1) % self.ink_buffers.len();
 
         true
+    }
+
+    /// Waits for every command buffer this surface has committed to finish on the GPU.
+    ///
+    /// `draw` commits and returns — a frame the compositor has not yet shown is a frame whose cost has
+    /// not been paid, which is right for an app drawing to a display and wrong for a benchmark that is
+    /// trying to put a number on that cost. This is the benchmark's door into the same surface: it adds
+    /// no work and changes no state, it only waits for what `draw` already queued.
+    ///
+    /// The wait is on the last committed buffer. Metal runs one queue in order, so the last to be
+    /// committed is the last to finish, and waiting on it waits on everything before it too.
+    pub(crate) fn settle(&self) {
+        // `waitUntilCompleted` is the command buffer's own method, and it is called on a buffer that was
+        // committed by `draw` — never on one still being encoded.
+        if let Some(last) = &self.last_commit {
+            last.waitUntilCompleted()
+        }
     }
 }
 

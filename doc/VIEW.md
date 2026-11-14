@@ -211,12 +211,13 @@ glanced at and stay out of the way at the other edge. The page is centred by *th
 taken out of the flow, so a counter growing by a digit cannot shove the page off centre — a page number
 that moved whenever a number changed would be worse than no page number.
 
-**Making a page is a page turn, so both inserts live in the page pill.** The pill reads `+after · ◀ n / total ▶ · │ +before`:
-the page number is still the middle, the two turning arrows sit either side of it, and the two insert buttons are outside
-them — so adding a page, which changes the *total*, cannot move the number under the hand (the same rule the zoom field's
-fixed width is for). A hairline separates "before" from the arrow it neighbours, because the two are one press apart and
-mean quite different things. The inserts were on the bar's page row until they were moved here: a page that has just been
-made is a page that is about to be *written*, and the hand that made it is already at the bottom of the desk.
+**Making a page is a page turn, so both inserts live in the page pill.** The pill reads
+`+before · ◀ n / total ▶ · +after`: the page number is the middle, the two turning arrows sit either side of it, and each
+insert sits *on the side it puts the page* — `+before` to the left of the back arrow, `+after` to the right of the forward
+one — so the pill reads left to right the way the note runs. Both are outside the arrows, so adding a page (which changes
+the *total*) cannot move the number under the hand; that is the same rule the zoom field's fixed width is for. The inserts
+were on the bar's page row until they were moved here: a page that has just been made is a page that is about to be
+*written*, and the hand that made it is already at the bottom of the desk.
 
 They are also one command with two different endings, and the difference is the whole of it
 (`page_after_insert` in `app.rs`): **a page added *after* this one is turned to, and a page added *before* it is not.**

@@ -6051,11 +6051,12 @@ impl NoteApp {
     ///
     /// The two insert commands live here rather than on the bar's page row (see [VIEW.md](../../doc/VIEW.md),
     /// §4): a page made is a page the hand is already at, so the button that makes one belongs beside the
-    /// buttons that turn, on the desk rather than up on the bar. The page number stays the middle of the
-    /// pill and the two buttons are *outside* the arrows, so a page added — which changes the total —
-    /// cannot move the number under the hand (the same rule that keeps the zoom pill's field a fixed
-    /// width). `+after` leads because it is the half a hand reaches for; `+before` sits after a hairline
-    /// because it means something else (see `page_after_insert` and [`Self::add_page`]).
+    /// buttons that turn, on the desk rather than up on the bar.
+    ///
+    /// **Each insert sits on the side it puts the page** — `before` to the left of the previous arrow,
+    /// `after` to the right of the next one — so the pill reads left-to-right the way the note runs. The
+    /// page number stays between the arrows, so a page added (which changes the total) cannot move the
+    /// number under the hand, which is the same rule that keeps the zoom pill's field a fixed width.
     fn page_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (surface, hairline, foreground) =
@@ -6083,56 +6084,49 @@ impl NoteApp {
                     .border_1()
                     .border_color(hairline)
                     .shadow_sm()
-                    // The page's *next* sheet, first: it is the half of the command a hand reaches for, and it is
-                    // what "keep adding pages" means. The page number stays between the arrows; this button and
-                    // the one after the hairline are outside them, so a total that changed cannot move it.
+                    // The page's *previous* sheet, on the side it goes: left of the back arrow.
+                    .child(icon_button(
+                        "page-before",
+                        IconName::BetweenVerticalStart,
+                        "Add a page before this one (stays on this page)",
+                        true,
+                        cx,
+                        |app, cx| app.add_page(true, cx),
+                    ))
+                    .child(icon_button(
+                        "page-prev",
+                        IconName::ChevronLeft,
+                        "Previous page (Left arrow)",
+                        true,
+                        cx,
+                        |app, cx| app.previous_page(cx),
+                    ))
                     .child(
-                icon_button(
-                    "page-after",
-                    IconName::BetweenVerticalEnd,
-                    "Add a page after this one",
-                    true,
-                    cx,
-                    |app, cx| app.add_page(false, cx),
-                ),
-            )
-            .child(icon_button(
-                "page-prev",
-                IconName::ChevronLeft,
-                "Previous page (Left arrow)",
-                true,
-                cx,
-                |app, cx| app.previous_page(cx),
-            ))
-            .child(
-                div()
-                    .text_size(px(13.0))
-                    .text_color(foreground)
-                    .whitespace_nowrap()
-                    .px_1()
-                    .child(format!("{} / {total}", self.page_index + 1)),
-            )
-            .child(icon_button(
-                "page-next",
-                IconName::ChevronRight,
-                "Next page (Right arrow)",
-                true,
-                cx,
-                |app, cx| app.next_page(cx),
-            ))
-            // After a hairline: a page *in front of* this one is the less-read half of the command — it
-            // leaves the reader where they are — and it must not be pressed by a hand reaching for "back".
-            .child(toolbar_divider(hairline))
-            .child(
-                icon_button(
-                    "page-before",
-                    IconName::BetweenVerticalStart,
-                    "Add a page before this one (stays on this page)",
-                    true,
-                    cx,
-                    |app, cx| app.add_page(true, cx),
-                ),
-            )
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(foreground)
+                            .whitespace_nowrap()
+                            .px_1()
+                            .child(format!("{} / {total}", self.page_index + 1)),
+                    )
+                    .child(icon_button(
+                        "page-next",
+                        IconName::ChevronRight,
+                        "Next page (Right arrow)",
+                        true,
+                        cx,
+                        |app, cx| app.next_page(cx),
+                    ))
+                    // And the *next* sheet, on the side it goes: right of the forward arrow, which is
+                    // the half a hand reaches for when it is adding pages in order.
+                    .child(icon_button(
+                        "page-after",
+                        IconName::BetweenVerticalEnd,
+                        "Add a page after this one",
+                        true,
+                        cx,
+                        |app, cx| app.add_page(false, cx),
+                    )),
             )
     }
 

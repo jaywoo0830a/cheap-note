@@ -15,12 +15,7 @@ fn open_fixture(path: &std::path::Path, width: u32) -> Result<PdfDocumentView> {
         AppError::Other(format!("{} could not be read: {error}", path.display()))
     })?;
 
-    PdfDocumentView::open_bytes(
-        name,
-        MappedBytes::solid(bytes),
-        width,
-        CACHE_BUDGET_BYTES,
-    )
+    PdfDocumentView::open_bytes(name, MappedBytes::solid(bytes), width, CACHE_BUDGET_BYTES)
 }
 
 /// A one-page A4 PDF with a grid of black rectangles on it, built object by object.
@@ -459,7 +454,11 @@ fn a_budget_that_fits_drops_nothing() {
     view.set_budget(1024 * 1024 * 1024);
 
     assert_eq!(view.stats().bytes, kept, "the cache is untouched");
-    assert_eq!(view.stats().evicted, evicted, "and nothing was counted as gone");
+    assert_eq!(
+        view.stats().evicted,
+        evicted,
+        "and nothing was counted as gone"
+    );
     assert!(view.cache_len() > 0, "the bitmaps are still there");
 }
 

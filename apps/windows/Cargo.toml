@@ -6,10 +6,14 @@ rust-version = "1.90"
 description = "Minimal, high-performance handwriting note-taking prototype (pen input + PDF pages)."
 license = "MIT OR Apache-2.0"
 publish = false
+# Two binaries: the window (`cheap-note`) and the console benchmark (`cheap-note-bench`). The
+# window is what `cargo run -p cheap-note` means; the benchmark is named explicitly.
+default-run = "cheap-note"
 
 # The Windows app: the platform half of the view, and nothing else. Every module here is an
 # implementation of a trait the view declared — nothing in this crate is imported by anything above
-# it — plus `main`, which assembles them and hands them over.
+# it — plus `main`, which assembles them and hands them over, and `cheap-note-bench`, which draws a
+# synthetic canvas through the same device for measurement (see `src/bin/bench.rs`).
 #
 # That is what makes the next platform a rewrite of *this* crate and not of the application. A macOS
 # build would replace the canvas, the pen capture, the ghost cursor's window and Pdfium's loader, and
@@ -79,6 +83,10 @@ windows = { version = "0.62", features = [
     # snapshot of this process's threads. `sysinfo` cannot answer it — its `Process::tasks` is Linux-only
     # and returns `None` here — so this is the one counter the platform has to read for itself.
     "Win32_System_Diagnostics_ToolHelp",
+    # The memory report's way out of a windows-subsystem image (see `src/platform/report.rs`):
+    # `AttachConsole` reaches the terminal that started a release build, and `SetConsoleOutputCP` makes
+    # the note names in the table readable on it.
+    "Win32_System_Console",
 ] }
 # Direct2D's geometry is placed with a matrix, and that matrix type is this crate's.
 windows-numerics = "0.3"
@@ -96,3 +104,11 @@ sysinfo = "=0.40.3"
 # GPUI's own build script already uses for its manifest. See `build.rs`.
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "=3.0.11"
+
+# The benchmark is a console program, deliberately separate from the app: the app's release
+# image is a *windows* subsystem one (no console beside the window), and a measurement that has
+# nowhere to print is not a measurement. Both binaries share the library in `src/lib.rs`, so the
+# benchmark draws through the same `Device` and `Renderer` the window does.
+[[bin]]
+name = "cheap-note-bench"
+path = "src/bin/bench.rs"

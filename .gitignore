@@ -1,12 +1,30 @@
-target
+# Build output.
+/target/
+
 # The downloaded Pdfium build: the library itself is never in git, and the note that says where it
 # comes from is the one thing in this folder that is (see `vendor/README.md`).
-vendor/*
-!vendor/README.md
-cheap-note.settings.json
-*.txt
-*.log
-*.ps1
+/vendor/*
+!/vendor/README.md
 
-# The packaged app a release build produces (see apps/macos/bundle.sh).
-dist/
+# A note's local settings file, written beside it while it is open.
+cheap-note.settings.json
+
+# Logs, ad-hoc reports and local scripts at the repository root: build logs, the release build's
+# `cheap-note-panic.log` (see `apps/windows/src/main.rs`) and one-off scripts. Scoped to the root
+# rather than matched by extension everywhere, so a `.log`, `.txt` or `.ps1` inside a crate can be a
+# fixture that belongs to the repository.
+/*.log
+/*.txt
+/*.ps1
+
+# The memory report's fallback file when a release has no console to print to (see
+# `apps/windows/src/platform/report.rs`).
+/cheap-note-standalone/cheap-note-memory-report.txt
+
+# The packaged app a release build produces (see `apps/macos/bundle.sh` and the Windows release
+# folder for the zip).
+/dist/
+
+# OS metadata.
+.DS_Store
+Thumbs.db

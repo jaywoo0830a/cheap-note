@@ -34,6 +34,7 @@
 //! large. This canvas works in the surface's own pixels and nothing else, so the context is pinned
 //! to 96 — one unit, one pixel — and the window's own scale is a number the canvas carries.
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::Arc;
 
@@ -58,7 +59,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISurface};
 use windows_numerics::{Matrix3x2, Vector2};
 
-use note_format::ink::Stroke;
+use note_format::ink::{alpha_of, Stroke};
 use note_format::pages::Quarters;
 use note_ui::ink_layer::canvas::{Canvas, Fill, Page, Rect};
 use note_ui::ink_layer::ink_colour;
@@ -77,6 +78,19 @@ const DEFAULT_FLATTENING: f32 = 0.25;
 /// How many bytes one pixel of a page takes: BGRA.
 const BYTES_PER_PIXEL: u32 = 4;
 
+/// How many consecutive opaque strokes share one baked realization.
+///
+/// One realization per stroke is exact but expensive to build: a page of 8,182 strokes costs ~257 ms
+/// to bake on the reference machine, which is a visible hitch after a zoom even though the view has
+/// done its own rebuild off-frame. A chunk of 32 strokes has one flattening, one triangulation and
+/// one realization for the lot, and the draw is one call instead of 32.
+///
+/// The tail of a page — the last run that is still growing as the pen writes — stays per-stroke, so
+/// appending a stroke does not rebuild the chunk behind it. A colour change ends a chunk; a
+/// highlighter is never batched, because two translucent strokes filled as one shape would show
+/// their overlap once rather than twice (see [`Renderer::rebuild_from_chunked`]).
+const CHUNK_STROKES: usize = 32;
+
 /// A Direct2D device context on the canvas's device, the brush its shapes are filled with, and the
 /// geometry that is kept between frames.
 pub(crate) struct Renderer {
@@ -85,6 +99,13 @@ pub(crate) struct Renderer {
     /// One brush, recoloured before each fill: a page's shadow is three rectangles that differ in
     /// nothing but their colour, and a brush per colour would be an object per palette entry.
     brush: ID2D1SolidColorBrush,
+    /// The colour the brush was last set to, so a run of shapes in one colour sets it once.
+    ///
+    /// A page of handwriting is overwhelmingly one colour, and a ruling is exactly one: without
+    /// this, `SetColor` is a call per stroke and per rule, on a path whose whole point is that the
+    /// frame does not touch the ink. `Cell` rather than `&mut self` because the ink loop holds the
+    /// realization cache borrowed while it draws.
+    brush_colour: Cell<Option<Hsla>>,
     /// The finished strokes' geometry, and what it was built from.
     ink: InkCache,
     /// The same context, asked for the one interface that can bake a geometry into a realization.
@@ -97,16 +118,40 @@ pub(crate) struct Renderer {
     page: Option<(ImageId, ID2D1Bitmap1)>,
 }
 
-/// The finished strokes' geometry, index-aligned with the app's list of them.
+/// The finished strokes' geometry, and what it was built from.
+///
+/// The cache has two shapes because a page has two kinds of ink. Consecutive **opaque** strokes of
+/// one colour are baked in [`Chunk`]s of [`CHUNK_STROKES`]; a growing tail, a highlighter's
+/// translucent band, and any stroke a selection has to draw on its own keep a per-stroke
+/// realization. `chunked` is the boundary: every stroke before it is in a chunk, and the strokes
+/// after it are the tail the pen may still extend.
 #[derive(Default)]
 struct InkCache {
     /// Each cached stroke, by identity — the address of its `Arc` — and the revision of every
     /// outline it was built at.
     identities: Vec<usize>,
     revision: u64,
-    /// One baked geometry per stroke: the outline flattened, filled and antialiased *once*, at the
-    /// zoom it was built for (see [`Renderer::realization_for`]).
-    realizations: Vec<ID2D1GeometryRealization>,
+    /// Per-stroke geometry for the strokes not covered by a chunk: the tail, highlighters, and a
+    /// stroke a selection has to draw on its own.
+    realizations: Vec<Option<ID2D1GeometryRealization>>,
+    /// Runs of consecutive opaque, same-colour strokes, in stroke order.
+    chunks: Vec<Chunk>,
+    /// How many leading strokes the chunks cover. The strokes after it are the per-stroke tail.
+    chunked: usize,
+}
+
+/// One baked run of opaque strokes, and what it was built from.
+struct Chunk {
+    /// The first stroke's index in the page's list.
+    start: usize,
+    /// How many strokes the realization contains.
+    len: usize,
+    /// The colour every stroke in the run was written in.
+    colour: u32,
+    /// The union of the strokes' bounds, for the same culling test a single stroke gets.
+    bounds: [f32; 4],
+    /// The outline of the whole run, flattened and filled once.
+    realization: ID2D1GeometryRealization,
 }
 
 impl Renderer {
@@ -137,6 +182,7 @@ impl Renderer {
             factory,
             context,
             brush,
+            brush_colour: Cell::new(None),
             ink: InkCache::default(),
             context1,
             page: None,
@@ -238,7 +284,7 @@ impl Renderer {
     /// Fills one rectangle, with the brush set to its colour first.
     fn fill(&self, fill: &Fill, scale: f32) {
         unsafe {
-            self.brush.SetColor(&colour_of(fill.colour));
+            self.set_brush(fill.colour);
 
             let rect = rect_of(fill.rect, scale);
 
@@ -264,6 +310,23 @@ impl Renderer {
 }
 
 impl Renderer {
+    /// Sets the brush to `colour`, unless it is already there.
+    ///
+    /// The comparison is exact and that is deliberate: both sides come from the same `Hsla` value
+    /// on the canvas, so equal colours are the same bits; a tolerance would only make two colours
+    /// that differ by a rounding step draw as one.
+    fn set_brush(&self, colour: Hsla) {
+        if self.brush_colour.get() == Some(colour) {
+            return;
+        }
+
+        unsafe {
+            self.brush.SetColor(&colour_of(colour));
+        }
+
+        self.brush_colour.set(Some(colour));
+    }
+
     /// Draws the ink: the finished strokes, then the one under the pen.
     ///
     /// A finished stroke is a realization — a shape its outline was flattened and filled into once —
@@ -272,36 +335,19 @@ impl Renderer {
     /// path geometry built for this frame; it is one stroke, and the frame after it will not be.
     fn draw_ink(&mut self, canvas: &Canvas) -> Result<()> {
         self.refresh_ink(canvas)?;
+        self.prepare_selection(canvas)?;
 
         // What is off the sheet's visible part is skipped, not drawn: it is the same test the app counts
         // its `culled` figure with, so the number on the status line is what happened, and it is what makes
         // zooming in on a page of handwriting cheap (see [`Stroke::visible_in`]).
         let visible = canvas.ink.visible;
         let selected = &canvas.ink.selected;
-        let in_hand = |index: usize| selected.get(index).copied().unwrap_or(false);
         let offset = canvas.ink.offset;
         let drawn = canvas.scale * canvas.ink.zoom;
 
         unsafe {
             self.context.SetTransform(&ink_transform(canvas));
-
-            for (index, (stroke, realization)) in canvas
-                .ink
-                .strokes
-                .iter()
-                .zip(self.ink.realizations.iter())
-                .enumerate()
-            {
-                // The ink in hand is drawn in the pass below, where the drag has taken it: drawing it here
-                // as well would leave a ghost of it behind at every step of a drag.
-                if in_hand(index) || !stroke.visible_in(visible) {
-                    continue;
-                }
-
-                self.brush.SetColor(&colour_of(ink_colour(stroke.color)));
-                self.context1
-                    .DrawGeometryRealization(realization, &self.brush);
-            }
+            self.draw_finished(canvas, visible)?;
 
             // The ink *in hand*, where a drag has taken it, and once more in the selection's colour. The same
             // realization twice rather than a second geometry: a highlight built as its own outline would be
@@ -319,23 +365,22 @@ impl Renderer {
                     visible[3] - offset.1,
                 ];
 
-                for (index, (stroke, realization)) in canvas
-                    .ink
-                    .strokes
-                    .iter()
-                    .zip(self.ink.realizations.iter())
-                    .enumerate()
-                {
-                    if !in_hand(index) || !stroke.visible_in(culled) {
+                for (index, stroke) in canvas.ink.strokes.iter().enumerate() {
+                    let in_hand = selected.get(index).copied().unwrap_or(false);
+                    if !in_hand || !stroke.visible_in(culled) {
                         continue;
                     }
 
-                    self.brush.SetColor(&colour_of(ink_colour(stroke.color)));
+                    let Some(realization) = self.ink.realizations[index].as_ref() else {
+                        continue;
+                    };
+
+                    self.set_brush(ink_colour(stroke.color));
                     self.context1
                         .DrawGeometryRealization(realization, &self.brush);
 
                     if let Some(colour) = canvas.ink.selection {
-                        self.brush.SetColor(&colour_of(colour));
+                        self.set_brush(colour);
                         self.context1
                             .DrawGeometryRealization(realization, &self.brush);
                     }
@@ -346,7 +391,7 @@ impl Renderer {
                 let outline = self.outline_geometry(stroke)?;
                 // The live stroke is drawn in the colour it will keep: a highlighter marks as it goes, with the
                 // page showing through it, which is exactly what the reader is deciding about.
-                self.brush.SetColor(&colour_of(ink_colour(stroke.color)));
+                self.set_brush(ink_colour(stroke.color));
                 self.context.FillGeometry(&outline, &self.brush, None);
             }
 
@@ -360,7 +405,7 @@ impl Renderer {
                     .selection
                     .unwrap_or_else(|| ink_colour(loop_stroke.color));
 
-                self.brush.SetColor(&colour_of(colour));
+                self.set_brush(colour);
                 self.context.FillGeometry(&outline, &self.brush, None);
             }
 
@@ -371,33 +416,347 @@ impl Renderer {
 
         Ok(())
     }
+    /// Gives every stroke a selection needs to draw on its own a per-stroke realization.
+    ///
+    /// A chunk is one baked shape and cannot leave a stroke out of it. When a selection or a drag is
+    /// in flight, a chunk that contains one of those strokes is not drawn; its strokes are drawn
+    /// individually instead. This is where the per-stroke geometry those draws need is built.
+    fn prepare_selection(&mut self, canvas: &Canvas) -> Result<()> {
+        if canvas.ink.selection.is_none() && canvas.ink.offset == (0.0, 0.0) {
+            return Ok(());
+        }
+
+        let selected = &canvas.ink.selected;
+        let strokes = &canvas.ink.strokes;
+
+        let ranges: Vec<(usize, usize)> = self
+            .ink
+            .chunks
+            .iter()
+            .filter(|chunk| {
+                (chunk.start..chunk.start + chunk.len)
+                    .any(|index| selected.get(index).copied().unwrap_or(false))
+            })
+            .map(|chunk| (chunk.start, chunk.start + chunk.len))
+            .collect();
+
+        for (start, end) in ranges {
+            for index in start..end {
+                self.ensure_realization(index, &strokes[index], canvas.ink.zoom)?;
+            }
+        }
+
+        for index in 0..strokes.len() {
+            if selected.get(index).copied().unwrap_or(false) {
+                self.ensure_realization(index, &strokes[index], canvas.ink.zoom)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Draws the finished strokes that are not in a selection, chunk by chunk.
+    ///
+    /// The chunks are in stroke order and cover a prefix; the strokes after [`InkCache::chunked`]
+    /// are the per-stroke tail. A chunk that contains a selected stroke is drawn stroke by stroke so
+    /// the selection pass can take that stroke away; a chunk that is only partly on screen is drawn
+    /// the same way, so zooming in keeps the per-stroke culling the old path had.
+    fn draw_finished(&mut self, canvas: &Canvas, visible: [f32; 4]) -> Result<()> {
+        let strokes = &canvas.ink.strokes;
+        let selected = &canvas.ink.selected;
+        let zoom = canvas.ink.zoom;
+        let mut chunk_at = 0;
+        let mut index = 0;
+
+        while index < strokes.len() {
+            let chunk = self
+                .ink
+                .chunks
+                .get(chunk_at)
+                .map(|chunk| (chunk.start, chunk.start + chunk.len));
+
+            if let Some((start, end)) = chunk {
+                if start == index {
+                    let in_hand =
+                        (start..end).any(|index| selected.get(index).copied().unwrap_or(false));
+                    let on_screen = overlaps(self.ink.chunks[chunk_at].bounds, visible);
+
+                    if !in_hand && !on_screen {
+                        index = end;
+                        chunk_at += 1;
+                        continue;
+                    }
+
+                    let visible_count = (start..end)
+                        .filter(|index| strokes[*index].visible_in(visible))
+                        .count();
+
+                    if in_hand || visible_count < end - start {
+                        for index in start..end {
+                            if !selected.get(index).copied().unwrap_or(false)
+                                && strokes[index].visible_in(visible)
+                            {
+                                self.ensure_realization(index, &strokes[index], zoom)?;
+                                self.draw_one(index, &strokes[index], visible);
+                            }
+                        }
+                    } else {
+                        let chunk = &self.ink.chunks[chunk_at];
+                        self.set_brush(ink_colour(chunk.colour));
+                        unsafe {
+                            self.context1
+                                .DrawGeometryRealization(&chunk.realization, &self.brush);
+                        }
+                    }
+
+                    index = end;
+                    chunk_at += 1;
+                    continue;
+                }
+            }
+
+            if !selected.get(index).copied().unwrap_or(false) {
+                self.ensure_realization(index, &strokes[index], zoom)?;
+                self.draw_one(index, &strokes[index], visible);
+            }
+
+            index += 1;
+        }
+
+        Ok(())
+    }
+
+    /// Draws one finished stroke from its per-stroke realization, if it is on screen.
+    fn draw_one(&self, index: usize, stroke: &Stroke, visible: [f32; 4]) {
+        if !stroke.visible_in(visible) {
+            return;
+        }
+
+        let Some(realization) = self.ink.realizations[index].as_ref() else {
+            return;
+        };
+
+        self.set_brush(ink_colour(stroke.color));
+        unsafe {
+            self.context1
+                .DrawGeometryRealization(realization, &self.brush);
+        }
+    }
 
     /// Brings the cached geometry up to date with the app's strokes.
     ///
     /// The zoom travels with the strokes because a realization is flattened for a size, not for a
     /// shape: every outline it is built from was rebuilt when the zoom crossed into another detail
     /// rung, and the flattening has to be as well (see [`Renderer::realization_for`]).
+    ///
+    /// The cache is rebuilt **from the first stroke that changed**, not from the whole page. An
+    /// append keeps every chunk before the tail and builds only the new stroke's realization; a
+    /// detail rung invalidates every chunk and rebuilds them at the new zoom. The tail stays
+    /// per-stroke so that writing does not rebuild the chunk behind the pen.
     fn refresh_ink(&mut self, canvas: &Canvas) -> Result<()> {
         let strokes = &canvas.ink.strokes;
 
-        let keep = keep(
-            &self.ink.identities,
-            strokes.iter().map(identity),
-            self.ink.revision,
-            canvas.ink.revision,
-        );
+        if self.ink.revision != canvas.ink.revision {
+            self.ink.identities.clear();
+            self.ink.realizations.clear();
+            self.ink.chunks.clear();
+            self.ink.chunked = 0;
+            self.ink.revision = canvas.ink.revision;
+        }
 
-        self.ink.identities.truncate(keep);
-        self.ink.realizations.truncate(keep);
-        self.ink.revision = canvas.ink.revision;
+        let keep = unchanged_prefix(&self.ink.identities, strokes.iter().map(identity));
 
-        for stroke in strokes.iter().skip(keep) {
-            let realization = self.realization_for(stroke, canvas.ink.zoom)?;
-            self.ink.identities.push(identity(stroke));
-            self.ink.realizations.push(realization);
+        if keep < self.ink.identities.len() {
+            self.ink.identities.truncate(keep);
+            self.ink.realizations.truncate(keep);
+            self.invalidate_chunks_from(keep);
+        }
+
+        self.ink
+            .identities
+            .extend(strokes.iter().skip(self.ink.identities.len()).map(identity));
+        self.ink.realizations.resize_with(strokes.len(), || None);
+
+        self.rebuild_from_chunked(strokes, canvas.ink.zoom)
+    }
+
+    /// Drops the chunks that cover a stroke at or after `index`, and moves the cache boundary back
+    /// to the first chunk that was dropped.
+    fn invalidate_chunks_from(&mut self, index: usize) {
+        while let Some(chunk) = self.ink.chunks.last() {
+            if chunk.start + chunk.len <= index {
+                break;
+            }
+
+            self.ink.chunked = chunk.start;
+            self.ink.chunks.pop();
+        }
+
+        if self.ink.chunked > index {
+            self.ink.chunked = index;
+        }
+    }
+
+    /// Rebuilds the part of the cache after [`InkCache::chunked`], grouping opaque runs into chunks
+    /// and leaving the growing tail per-stroke.
+    ///
+    /// A run is safe to bake when it is full ([`CHUNK_STROKES`]) or when another stroke follows it
+    /// that cannot join it — a different colour or a highlighter. Only the very last run of the page
+    /// is left as a tail, because that is the one the pen may still extend.
+    fn rebuild_from_chunked(&mut self, strokes: &[Arc<Stroke>], zoom: f32) -> Result<()> {
+        let mut start = self.ink.chunked;
+
+        while start < strokes.len() {
+            let first = &strokes[start];
+
+            // A highlighter is translucent, and two translucent strokes filled as one shape would
+            // show their overlap once instead of twice; an empty outline has nothing to batch.
+            if alpha_of(first.color) < 1.0 || first.outline.is_empty() {
+                self.ensure_realization(start, first, zoom)?;
+                start += 1;
+                self.ink.chunked = start;
+                continue;
+            }
+
+            let colour = first.color;
+            let mut end = start + 1;
+            while end < strokes.len()
+                && end - start < CHUNK_STROKES
+                && alpha_of(strokes[end].color) >= 1.0
+                && strokes[end].color == colour
+                && !strokes[end].outline.is_empty()
+            {
+                end += 1;
+            }
+
+            let full = end - start == CHUNK_STROKES;
+            let followed = end < strokes.len();
+
+            if full || followed {
+                let chunk = self.chunk_for(&strokes[start..end], start, colour, zoom)?;
+                self.ink.chunks.push(chunk);
+
+                // The chunk's realization replaces the per-stroke ones; dropping them here is what
+                // keeps a batched page from holding both copies.
+                for index in start..end {
+                    self.ink.realizations[index] = None;
+                }
+
+                start = end;
+                self.ink.chunked = start;
+            } else {
+                // The tail: built per-stroke, and deliberately not advanced — the next stroke may
+                // join it, and only then is the run long enough (or closed) to bake.
+                for (index, stroke) in strokes.iter().enumerate().take(end).skip(start) {
+                    self.ensure_realization(index, stroke, zoom)?;
+                }
+
+                break;
+            }
         }
 
         Ok(())
+    }
+    /// Builds the per-stroke realization at `index` if it is not already there.
+    fn ensure_realization(&mut self, index: usize, stroke: &Stroke, zoom: f32) -> Result<()> {
+        if self
+            .ink
+            .realizations
+            .get(index)
+            .is_some_and(|realization| realization.is_some())
+        {
+            return Ok(());
+        }
+
+        let realization = self.realization_for(stroke, zoom)?;
+        self.ink.realizations[index] = Some(realization);
+
+        Ok(())
+    }
+
+    /// Bakes a run of opaque strokes into one realization, and keeps the union of their bounds.
+    fn chunk_for(
+        &self,
+        strokes: &[Arc<Stroke>],
+        start: usize,
+        colour: u32,
+        zoom: f32,
+    ) -> Result<Chunk> {
+        let geometry = self.chunk_geometry(strokes)?;
+        let geometry: ID2D1Geometry = geometry.cast().context("a chunk, as geometry")?;
+
+        let realization = unsafe {
+            self.context1
+                .CreateFilledGeometryRealization(&geometry, flattening_tolerance(zoom))
+        }
+        .context("baking a chunk's geometry")?;
+
+        let mut bounds = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        for stroke in strokes {
+            bounds[0] = bounds[0].min(stroke.bounds[0]);
+            bounds[1] = bounds[1].min(stroke.bounds[1]);
+            bounds[2] = bounds[2].max(stroke.bounds[2]);
+            bounds[3] = bounds[3].max(stroke.bounds[3]);
+        }
+
+        Ok(Chunk {
+            start,
+            len: strokes.len(),
+            colour,
+            bounds,
+            realization,
+        })
+    }
+
+    /// The outline of a run of strokes as one path, with one figure per stroke.
+    ///
+    /// The same winding rule and the same sink calls as [`Renderer::outline_geometry`]; the only
+    /// difference is that the sink is not closed after each figure.
+    fn chunk_geometry(&self, strokes: &[Arc<Stroke>]) -> Result<ID2D1PathGeometry1> {
+        let geometry =
+            unsafe { self.factory.CreatePathGeometry() }.context("creating a chunk's geometry")?;
+        let sink: ID2D1GeometrySink =
+            unsafe { geometry.Open() }.context("opening a chunk's geometry")?;
+
+        unsafe {
+            sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+        }
+
+        for stroke in strokes {
+            // The ribbon outline is built left edge forward, right edge back, so it keeps one
+            // winding direction even when the line was drawn backwards — a test pins that. A shape
+            // that still comes out the other way is reversed here, so one chunk can never contain
+            // two windings that cancel where they overlap.
+            let mut outline = stroke.outline.clone();
+            if signed_area(&outline) < 0.0 {
+                outline.reverse();
+            }
+
+            let Some((first, rest)) = outline.split_first() else {
+                continue;
+            };
+
+            let points: Vec<Vector2> = rest.iter().map(|point| point_of(*point)).collect();
+
+            unsafe {
+                sink.BeginFigure(point_of(*first), D2D1_FIGURE_BEGIN_FILLED);
+                if !points.is_empty() {
+                    sink.AddLines(&points);
+                }
+                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            }
+        }
+
+        unsafe {
+            sink.Close().ok();
+        }
+
+        Ok(geometry)
     }
 
     /// A stroke's ribbon outline as Direct2D geometry: the shape a realization is made from, and the
@@ -533,28 +892,48 @@ fn identity(stroke: &Arc<Stroke>) -> usize {
     Arc::as_ptr(stroke) as usize
 }
 
-/// How many of the cached geometries are still the right ones.
+/// How many of the cached stroke identities still match the page, from the start.
 ///
-/// A pure function of the identities, in order, and of the two revisions — which is what makes
-/// "appending a stroke builds one geometry and nothing else" a fact that a test can pin rather than
-/// a hope about a loop (see [`Renderer::refresh_ink`]). Everything after the count it returns is
-/// built again: a stroke that changed, or every stroke, when the outlines themselves were rebuilt
-/// at another detail rung.
-fn keep(
-    cached: &[usize],
-    now: impl Iterator<Item = usize>,
-    revision: u64,
-    revision_now: u64,
-) -> usize {
-    if revision != revision_now {
-        return 0;
-    }
-
+/// A pure function of two lists, so "appending a stroke keeps every geometry before it" is a fact a
+/// test can pin rather than a hope about a loop. The revision is handled by the caller, which clears
+/// the cache before asking when the outlines themselves were rebuilt.
+fn unchanged_prefix(cached: &[usize], now: impl Iterator<Item = usize>) -> usize {
     cached
         .iter()
         .zip(now)
         .take_while(|(cached, now)| *cached == now)
         .count()
+}
+
+/// Whether two `[min_x, min_y, max_x, max_y]` rectangles overlap.
+///
+/// The same four comparisons [`Stroke::visible_in`] makes, for a chunk's union of bounds: a chunk
+/// that is entirely off screen is skipped with one test rather than one per stroke.
+fn overlaps(bounds: [f32; 4], visible: [f32; 4]) -> bool {
+    bounds[0] <= visible[2]
+        && bounds[2] >= visible[0]
+        && bounds[1] <= visible[3]
+        && bounds[3] >= visible[1]
+}
+
+/// The signed area of a closed outline, in its own units.
+///
+/// The sign is the winding direction. The ribbon construction keeps one sign for a straight stroke
+/// drawn either way (a test pins it); a chunk normalizes every outline to the same sign anyway, so a
+/// combined fill cannot cancel where two shapes overlap.
+fn signed_area(points: &[[f32; 2]]) -> f32 {
+    if points.len() < 3 {
+        return 0.0;
+    }
+
+    let mut twice = 0.0f32;
+    for index in 0..points.len() {
+        let a = points[index];
+        let b = points[(index + 1) % points.len()];
+        twice += a[0] * b[1] - b[0] * a[1];
+    }
+
+    twice * 0.5
 }
 
 /// How coarsely a stroke's curves may be turned into straight edges, in the paper's own units.
@@ -608,7 +987,6 @@ fn ink_matrix(
         M22: (yy - oy) * drawn,
         M31: origin.0 * scale + ox * drawn,
         M32: origin.1 * scale + oy * drawn,
-        ..Default::default()
     }
 }
 
@@ -667,7 +1045,7 @@ fn point_of(point: [f32; 2]) -> Vector2 {
 /// brush — and the whole of the difference is here. `rgba` takes `0xRRGGBBAA` while a stroke's colour carries its
 /// alpha in the *top* byte (`0xAARRGGBB`), so the two have to be moved to where Direct2D's brush reads them; and a
 /// colour with no alpha byte is opaque, which is what every pen stroke is (see [`note_ui::paint::alpha_of`]).
-
+///
 /// Straight (not premultiplied) red, green, blue, alpha in `0..=1`. Not the byte order of a BGRA
 /// *pixel* — that is the surface's business, and Direct2D is the one that writes it.
 fn colour_of(hsla: Hsla) -> D2D1_COLOR_F {
@@ -864,22 +1242,73 @@ mod tests {
     /// anything per frame: a stroke appended keeps every geometry that was already built.
     #[test]
     fn appending_a_stroke_keeps_every_geometry() {
-        assert_eq!(keep(&[1, 2, 3], [1, 2, 3, 4].into_iter(), 7, 7), 3);
+        assert_eq!(unchanged_prefix(&[1, 2, 3], [1, 2, 3, 4].into_iter()), 3);
     }
 
     /// An erase or an undo changes a stroke in the middle of the list, and everything from there on
     /// is built again — the strokes before it are untouched.
     #[test]
     fn a_changed_stroke_costs_the_ones_after_it() {
-        assert_eq!(keep(&[1, 2, 3], [1, 9, 3].into_iter(), 7, 7), 1);
-        assert_eq!(keep(&[1, 2, 3], [1, 2].into_iter(), 7, 7), 2);
+        assert_eq!(unchanged_prefix(&[1, 2, 3], [1, 9, 3].into_iter()), 1);
+        assert_eq!(unchanged_prefix(&[1, 2, 3], [1, 2].into_iter()), 2);
     }
 
-    /// A zoom that crosses into another detail rung rebuilds every outline without changing any
-    /// stroke's identity, and the revision is what says so.
+    /// The winding sign is what a chunk normalizes: opposite directions have opposite signs, and a
+    /// reversed outline is the same shape with the other sign.
     #[test]
-    fn another_revision_costs_every_geometry() {
-        assert_eq!(keep(&[1, 2, 3], [1, 2, 3].into_iter(), 7, 8), 0);
+    fn an_outline_winds_the_same_way_whichever_direction_it_was_drawn() {
+        let clockwise = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        let counter = [[0.0, 0.0], [0.0, 10.0], [10.0, 10.0], [10.0, 0.0]];
+
+        assert!(signed_area(&clockwise) > 0.0);
+        assert!(signed_area(&counter) < 0.0);
+        assert_eq!(signed_area(&clockwise), -signed_area(&counter));
+    }
+
+    /// A ribbon drawn backwards is still the same winding — the left edge is walked forwards and the
+    /// right edge back, so reversing the line swaps the sides rather than the orientation. That is
+    /// what makes a chunk of opposite-direction strokes safe; [`signed_area`] is the check.
+    #[test]
+    fn a_ribbon_winds_the_same_way_whichever_direction_it_was_drawn() {
+        use note_format::ink::InkPoint;
+
+        let outline = |points: Vec<InkPoint>| {
+            let mut stroke = Stroke {
+                points,
+                color: Stroke::DEFAULT_COLOR,
+                outline: Vec::new(),
+                bounds: [0.0; 4],
+            };
+            stroke.close();
+            stroke.outline
+        };
+
+        let forward = outline(vec![
+            InkPoint::new(0.0, 0.0, 2.0),
+            InkPoint::new(20.0, 0.0, 2.0),
+            InkPoint::new(40.0, 0.0, 2.0),
+        ]);
+        let backward = outline(vec![
+            InkPoint::new(40.0, 0.0, 2.0),
+            InkPoint::new(20.0, 0.0, 2.0),
+            InkPoint::new(0.0, 0.0, 2.0),
+        ]);
+
+        assert!(
+            signed_area(&forward) * signed_area(&backward) > 0.0,
+            "the two outlines wind the same way: {} and {}",
+            signed_area(&forward),
+            signed_area(&backward)
+        );
+    }
+
+    /// A chunk is culled by the union of its strokes' bounds, with the same four comparisons a
+    /// single stroke gets.
+    #[test]
+    fn a_chunk_is_culled_by_the_union_of_its_strokes() {
+        assert!(overlaps([0.0, 0.0, 10.0, 10.0], [5.0, 5.0, 20.0, 20.0]));
+        assert!(overlaps([0.0, 0.0, 10.0, 10.0], [-5.0, -5.0, 0.0, 0.0]));
+        assert!(!overlaps([0.0, 0.0, 10.0, 10.0], [10.1, 0.0, 20.0, 10.0]));
     }
 
     /// The flattening tolerance is in the paper's units, coarser than the default only where a paper

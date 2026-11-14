@@ -276,6 +276,11 @@ command could not run. That is what makes it usable in CI. The allowance is
 `LEAK_TOLERANCE_BYTES`, sized for the fixed cost of Pdfium's first document (30–50 MiB whatever the
 document's size) rather than for a leak.
 
+On Windows the same command runs through `apps/windows/src/platform/report.rs`. A release image is a
+windows-subsystem program, so it attaches to the console that started it (or uses redirected stdout);
+with no console it writes `cheap-note-memory-report.txt` beside the executable, then to the temporary
+directory. The `gpu` column is `—` there because Windows has no `surface_bytes` implementation.
+
 ### What it found
 
 Measuring the 1 218-page chemistry textbook: memory used to grow **with the document's size** —

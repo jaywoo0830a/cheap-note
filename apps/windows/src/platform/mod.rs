@@ -17,10 +17,12 @@
 //!    device cannot run this app at all, and saying so once, at startup, with the reason, is the whole
 //!    of the report.
 
+pub mod bench;
 pub mod cursor_overlay;
 pub mod ink_layer;
 pub mod input;
 pub mod pen;
+pub mod report;
 pub mod system_cursor;
 pub mod vitals;
 
@@ -70,6 +72,9 @@ fn install(window: &mut Window) -> Platform {
         pointer,
         // The design's numbers are this platform's own: a Windows logical pixel is a 96-DPI one.
         unit_scale: 1.0,
+        // A desktop Windows machine scrolls with a wheel, and a wheel reports lines. Reading them
+        // is what keeps a plugged-in mouse from being unable to move the sheet at all.
+        wheel_pans: true,
         pen: Box::new(pen),
         // What the note costs this machine. The counters are the process's own, so no permission and no
         // failure mode beyond a system that will not describe it.

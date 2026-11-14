@@ -39,7 +39,7 @@
 //! test rather than a number someone has to notice.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::note::Note;
 use crate::pdf::{PageRequest, PdfDocumentView};
@@ -104,7 +104,6 @@ impl Step {
         )
     }
 }
-
 
 /// A whole run: the rows, and the two figures the verdict needs.
 #[derive(Clone, Debug, PartialEq)]
@@ -222,7 +221,6 @@ fn truncate(label: &str, width: usize) -> String {
     out
 }
 
-
 /// The notes named on the command line, when this run is a memory report rather than a launch.
 ///
 /// `None` is an ordinary launch. The flag with no paths is a report over nothing — a mistyped command
@@ -249,7 +247,11 @@ pub fn requested() -> Option<Vec<PathBuf>> {
 ///
 /// `stats` is taken rather than built so that the caller decides what a headless run measures itself
 /// with — the platform's own counters, which is the same source the status line reads.
-pub fn run(paths: &[PathBuf], stats: &mut dyn crate::platform::SystemStats, out: &mut impl Write) -> i32 {
+pub fn run(
+    paths: &[PathBuf],
+    stats: &mut dyn crate::platform::SystemStats,
+    out: &mut impl Write,
+) -> i32 {
     if paths.is_empty() {
         let _ = writeln!(out, "usage: cheap-note {FLAG} <note> [<note> ...]");
         return 2;
@@ -260,7 +262,11 @@ pub fn run(paths: &[PathBuf], stats: &mut dyn crate::platform::SystemStats, out:
             let _ = write!(out, "{}", report.render());
             let _ = out.flush();
 
-            if report.is_clean() { 0 } else { 1 }
+            if report.is_clean() {
+                0
+            } else {
+                1
+            }
         }
         Err(error) => {
             let _ = writeln!(out, "{error}");
@@ -315,7 +321,7 @@ struct Opened {
 ///
 /// The page is rendered because that is what the app does when a note is opened, and it is the largest
 /// single allocation in the sequence — a report that skipped it would miss the thing being measured.
-fn open(path: &PathBuf) -> Result<Opened, String> {
+fn open(path: &Path) -> Result<Opened, String> {
     if !path.is_dir() {
         return Err(String::from("pass the note's folder, not the document"));
     }
@@ -329,8 +335,13 @@ fn open(path: &PathBuf) -> Result<Opened, String> {
             // The lean budget and the lean ceiling, because a report that measured the generous
             // configuration would be measuring the one a reader with a big textbook is deliberately not
             // using — and Lean is the mode this exists to check.
-            PdfDocumentView::open_bytes(name, bytes, lean.pixel_ceiling(), lean.cache_budget_bytes())
-                .map_err(|error| error.to_string())?
+            PdfDocumentView::open_bytes(
+                name,
+                bytes,
+                lean.pixel_ceiling(),
+                lean.cache_budget_bytes(),
+            )
+            .map_err(|error| error.to_string())?
         }
         Ok(None) => PdfDocumentView::empty(),
         Err(error) => return Err(error.to_string()),
@@ -361,7 +372,7 @@ fn measure(
 }
 
 /// A name for the report's rows: the note's folder, or the path as it was given.
-fn note_name(path: &PathBuf) -> String {
+fn note_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
@@ -438,7 +449,10 @@ mod tests {
 
         assert!(after.line(Some(&before)).contains("+80 MiB"));
         assert!(closed.line(Some(&after)).contains("-60 MiB"));
-        assert!(before.line(None).contains('—'), "the first row has nothing to compare");
+        assert!(
+            before.line(None).contains('—'),
+            "the first row has nothing to compare"
+        );
     }
 
     /// A long name is cut in the middle, and the ends survive.
@@ -471,5 +485,3 @@ mod tests {
         assert_eq!(FLAG, "--memory-report");
     }
 }
-
-

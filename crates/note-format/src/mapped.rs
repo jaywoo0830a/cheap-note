@@ -11,7 +11,7 @@
 //! for the rest of its life. A reader who opens three textbooks therefore pays for all three at once and
 //! keeps paying, which is the whole of the complaint this module answers.
 //!
-//! A mapped region has no such behaviour: `munmap` returns the pages to the kernel immediately —
+//! A mapped region has no such behaviour: the unmap returns the pages to the kernel immediately —
 //! measured, 385 MiB of mapped regions came back to 1.6 MiB. So a note's document is mapped when it is
 //! opened and unmapped when it is closed, and the machine gets its memory back at the moment the reader
 //! leaves the note.
@@ -22,9 +22,10 @@
 //! that page in. What is saved is the *allocator's* copy keeping its pages after the free, not the
 //! reading of the file.
 //!
-//! **Not portable for free.** `mmap` is a Unix call. A platform without it falls back to copying, which
-//! is what this app did before and is correct everywhere — so the Windows build keeps working and loses
-//! the saving rather than losing the feature.
+//! **Not portable for free.** The call that makes the mapping differs: `mmap`/`munmap` on Unix, and
+//! `CreateFileMappingW`/`MapViewOfFile`/`UnmapViewOfFile` on Windows. A platform with neither falls back
+//! to copying, which is what this app did before and is correct everywhere — so a build without a mapping
+//! call keeps working and loses the saving rather than losing the feature.
 
 use std::ops::Deref;
 
@@ -38,7 +39,7 @@ pub struct MappedBytes {
 
 enum Storage {
     /// A read-only mapping of the file, unmapped when this is dropped.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Mapped(Mapping),
     /// An owned copy, for a platform with no mapping call and for a file that could not be mapped.
     Copied(Vec<u8>),
@@ -48,10 +49,10 @@ impl MappedBytes {
     /// Maps a file for reading, or copies it when it cannot be mapped.
     ///
     /// A copy is the fallback for an empty file, a filesystem that will not map, and a platform with no
-    /// `mmap`, because a document that opens is worth more than the memory it saves. The caller cannot
-    /// tell which happened — both deref to the same bytes, and that is the point of the type.
+    /// mapping call, because a document that opens is worth more than the memory it saves. The caller
+    /// cannot tell which happened — both deref to the same bytes, and that is the point of the type.
     pub fn open(path: &std::path::Path) -> std::io::Result<Self> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if let Ok(mapping) = Mapping::open(path) {
             return Ok(MappedBytes {
                 storage: Storage::Mapped(mapping),
@@ -78,9 +79,9 @@ impl MappedBytes {
     /// Read by the tests that check a note takes the mapped path, and by nothing in the app: which one
     /// it is has no bearing on what a caller does with the bytes.
     pub fn is_mapped(&self) -> bool {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let mapped = matches!(self.storage, Storage::Mapped(_));
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         let mapped = false;
 
         mapped
@@ -92,7 +93,7 @@ impl Deref for MappedBytes {
 
     fn deref(&self) -> &[u8] {
         match &self.storage {
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Storage::Mapped(mapping) => mapping.bytes(),
             Storage::Copied(bytes) => bytes,
         }
@@ -131,7 +132,10 @@ impl PartialEq<Vec<u8>> for MappedBytes {
 
 impl PartialEq for MappedBytes {
     fn eq(&self, other: &Self) -> bool {
-        &**self == &**other
+        // Named as slices first: `*self == *other` resolves to this same implementation again.
+        let this: &[u8] = self;
+        let that: &[u8] = other;
+        this == that
     }
 }
 
@@ -148,14 +152,27 @@ impl std::fmt::Debug for MappedBytes {
     }
 }
 
-/// A read-only `mmap` of a whole file, with the length that goes with it.
+/// A read-only mapping of a whole file, with the length that goes with it.
 ///
-/// One type rather than two fields of [`Storage`] so that the `munmap` runs in a `Drop` that cannot be
-/// reached without the pointer and the length being together.
-#[cfg(unix)]
+/// One type rather than two fields of [`Storage`] so that the unmap runs in a `Drop` that cannot be
+/// reached without the pointer and the length being together. The platform supplies the mapping call;
+/// `bytes` and the address/length pair are the same on both.
+#[cfg(any(unix, windows))]
 struct Mapping {
-    pointer: *mut libc::c_void,
+    pointer: *mut std::ffi::c_void,
     length: usize,
+}
+
+#[cfg(any(unix, windows))]
+impl Mapping {
+    /// The mapped region as a slice.
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: the pointer and the length are the pair the platform's mapping call returned, the
+        // region is mapped for reading for as long as this value lives, and the slice borrows `self` so
+        // it cannot outlive the mapping. The mapping is read-only, so nothing else can change the file's
+        // contents under it.
+        unsafe { std::slice::from_raw_parts(self.pointer.cast::<u8>(), self.length) }
+    }
 }
 
 #[cfg(unix)]
@@ -201,15 +218,10 @@ impl Mapping {
             return Err(std::io::Error::last_os_error());
         }
 
-        Ok(Mapping { pointer, length })
-    }
-
-    /// The mapped region as a slice.
-    fn bytes(&self) -> &[u8] {
-        // SAFETY: the pointer and the length are the pair `mmap` returned, the region is mapped for
-        // reading for as long as this value lives, and the slice borrows `self` so it cannot outlive the
-        // mapping. `MAP_PRIVATE` means nothing else can change the file's contents under it.
-        unsafe { std::slice::from_raw_parts(self.pointer.cast::<u8>(), self.length) }
+        Ok(Mapping {
+            pointer: pointer.cast(),
+            length,
+        })
     }
 }
 
@@ -221,7 +233,127 @@ impl Drop for Mapping {
         // failed would leave the region to be reclaimed with the process, and there is nothing a caller
         // could do about it.
         unsafe {
-            libc::munmap(self.pointer, self.length);
+            libc::munmap(self.pointer.cast(), self.length);
+        }
+    }
+}
+
+/// Windows' own mapping calls, declared here rather than pulled in as a dependency: `note-format` is the
+/// crate both platforms link, and a `windows` dependency in its manifest would be a platform in the
+/// format. The functions are the documented kernel32 entry points; `MapViewOfFile` is the read-only view
+/// of a `PAGE_READONLY` section.
+#[cfg(windows)]
+mod win {
+    use std::ffi::c_void;
+
+    /// A Windows `HANDLE`.
+    pub type Handle = *mut c_void;
+
+    /// `PAGE_READONLY`: the section may be read, not written.
+    pub const PAGE_READONLY: u32 = 0x02;
+    /// `FILE_MAP_READ`: the view may be read, not written.
+    pub const FILE_MAP_READ: u32 = 0x0004;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        #[link_name = "CreateFileMappingW"]
+        pub fn create_file_mapping(
+            file: Handle,
+            attributes: *const c_void,
+            protect: u32,
+            maximum_size_high: u32,
+            maximum_size_low: u32,
+            name: *const u16,
+        ) -> Handle;
+
+        #[link_name = "MapViewOfFile"]
+        pub fn map_view_of_file(
+            mapping: Handle,
+            access: u32,
+            offset_high: u32,
+            offset_low: u32,
+            bytes: usize,
+        ) -> *mut c_void;
+
+        #[link_name = "UnmapViewOfFile"]
+        pub fn unmap_view_of_file(address: *const c_void) -> i32;
+
+        #[link_name = "CloseHandle"]
+        pub fn close_handle(handle: Handle) -> i32;
+    }
+}
+
+#[cfg(windows)]
+impl Mapping {
+    /// Maps `path` read-only through `CreateFileMappingW`/`MapViewOfFile`, or fails with the operating
+    /// system's own error.
+    fn open(path: &std::path::Path) -> std::io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+
+        let file = std::fs::File::open(path)?;
+
+        let length = usize::try_from(file.metadata()?.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the document is larger than this machine can map",
+            )
+        })?;
+
+        // A zero-length file has nothing to map and `CreateFileMappingW` refuses it. The caller's copy
+        // fallback produces an empty buffer, which `Document::open` already rejects by name.
+        if length == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the document is empty",
+            ));
+        }
+
+        let handle: win::Handle = file.as_raw_handle();
+
+        // SAFETY: the handle is the file `File::open` just opened and kept alive for this call; null
+        // attributes and name are the documented defaults; `PAGE_READONLY` matches the read-only file;
+        // and a zero maximum size means "the file's current size".
+        let mapping = unsafe {
+            win::create_file_mapping(
+                handle,
+                std::ptr::null(),
+                win::PAGE_READONLY,
+                0,
+                0,
+                std::ptr::null(),
+            )
+        };
+
+        if mapping.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        // SAFETY: `mapping` is the section handle just made, `FILE_MAP_READ` is the read access
+        // `PAGE_READONLY` allows, the offset is zero, and a zero length maps the whole section. The
+        // error is read before `close_handle`, which would overwrite it.
+        let pointer = unsafe { win::map_view_of_file(mapping, win::FILE_MAP_READ, 0, 0, 0) };
+        let map_error = std::io::Error::last_os_error();
+
+        // The view keeps the section alive by itself; the handle is not needed after the map and is
+        // closed here so that a long-lived document does not hold a second kernel handle open.
+        let _ = unsafe { win::close_handle(mapping) };
+
+        if pointer.is_null() {
+            return Err(map_error);
+        }
+
+        Ok(Mapping { pointer, length })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        // SAFETY: the pointer is exactly what `MapViewOfFile` returned and has not been unmapped since —
+        // `Drop` runs once. The return value is deliberately ignored: an unmap that failed would leave
+        // the view to be reclaimed with the process, and there is nothing a caller could do about it.
+        unsafe {
+            win::unmap_view_of_file(self.pointer.cast_const());
         }
     }
 }
@@ -231,10 +363,15 @@ mod tests {
     use super::*;
 
     /// A file written for one test, and removed when the test ends.
+    ///
+    /// The tests that use it run only where `MappedBytes::open` maps, so the fixture is gated with them
+    /// rather than compiled into a test binary on a platform whose `MappedBytes::open` copies the file.
+    #[cfg(any(unix, windows))]
     struct TempFile {
         path: std::path::PathBuf,
     }
 
+    #[cfg(any(unix, windows))]
     impl TempFile {
         fn with(contents: &[u8]) -> Self {
             // Named by a counter that is global rather than per-thread, and by the process, because two
@@ -243,16 +380,15 @@ mod tests {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            let path = std::env::temp_dir().join(format!(
-                "mapped-test-{}-{id}.bin",
-                std::process::id()
-            ));
+            let path =
+                std::env::temp_dir().join(format!("mapped-test-{}-{id}.bin", std::process::id()));
 
             std::fs::write(&path, contents).expect("the fixture writes");
             TempFile { path }
         }
     }
 
+    #[cfg(any(unix, windows))]
     impl Drop for TempFile {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.path);
@@ -263,7 +399,7 @@ mod tests {
     ///
     /// The whole point of the type: Pdfium is handed these bytes and must see the document, not a
     /// truncated or shifted copy of it.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn a_mapped_file_is_the_file() {
         let file = TempFile::with(b"%PDF-1.4 a whole document");
@@ -278,16 +414,19 @@ mod tests {
     /// A mapping that is dropped leaves its bytes readable *before* the drop, and the type is the only
     /// thing keeping the region alive.
     ///
-    /// This is the safety property the whole type exists for: the `munmap` must happen exactly when the
+    /// This is the safety property the whole type exists for: the unmap must happen exactly when the
     /// `MappedBytes` goes, because Pdfium reads the region through a raw pointer for as long as the
     /// document handle is open.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn the_bytes_live_as_long_as_the_value() {
         let file = TempFile::with(b"%PDF-1.7 still here");
 
         let bytes = MappedBytes::open(&file.path).expect("the fixture maps");
-        let fingerprint: u8 = bytes.iter().map(|byte| byte ^ 0x5a).fold(0, u8::wrapping_add);
+        let fingerprint: u8 = bytes
+            .iter()
+            .map(|byte| byte ^ 0x5a)
+            .fold(0, u8::wrapping_add);
 
         // Read again through the same value, then drop it: if the mapping had been released early the
         // read below would be a use of unmapped memory, which the guard pages catch as a crash.
@@ -295,11 +434,14 @@ mod tests {
 
         drop(bytes);
 
-        // The file itself is untouched by the mapping being dropped — `MAP_PRIVATE` is read-only, and
+        // The file itself is untouched by the mapping being dropped — the mapping is read-only, and
         // nothing in this type writes.
         let read_back = std::fs::read(&file.path).expect("the fixture still reads");
         assert_eq!(
-            read_back.iter().map(|byte| byte ^ 0x5a).fold(0, u8::wrapping_add),
+            read_back
+                .iter()
+                .map(|byte| byte ^ 0x5a)
+                .fold(0, u8::wrapping_add),
             fingerprint
         );
     }
@@ -314,11 +456,11 @@ mod tests {
         assert_eq!(bytes, &[1u8, 2, 3][..]);
     }
 
-    /// An empty file falls back to a copy, because `mmap` refuses a zero-length region.
+    /// An empty file falls back to a copy, because a mapping call refuses a zero-length region.
     ///
     /// The copy is empty, which `Document::open` rejects by name — so this pins that the fallback
     /// happens rather than that an empty document is usable.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn an_empty_file_falls_back_rather_than_failing() {
         let file = TempFile::with(b"");
@@ -338,7 +480,7 @@ mod tests {
     }
 
     /// Two mappings with the same contents are equal, and two with different contents are not.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn contents_decide_equality() {
         let one = TempFile::with(b"same");

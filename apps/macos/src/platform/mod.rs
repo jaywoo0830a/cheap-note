@@ -91,6 +91,9 @@ fn install(window: &mut Window) -> Platform {
         // A macOS logical pixel is a *point*, four thirds of the 96-DPI one the design is written in:
         // lengths multiplied by three quarters are the same size in the hand as they are on Windows.
         unit_scale: 0.75,
+        // The trackpad is the pointer this app was written for, and a wheel stays unread: the rule
+        // is a choice about this machine and not a capability (`NoteApp::on_scroll`).
+        wheel_pans: false,
         pen: Box::new(pen),
         // What the note costs this machine. Always installable: the counters are the process's own and
         // reading them needs no permission, so this is `Some` unless the platform genuinely cannot say.

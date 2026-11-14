@@ -18,6 +18,13 @@
 //! one assumption this arrangement makes, and the whole of the canvas depends on it: the interface
 //! is GPUI's and the canvas is this layer's, in the one window both were made for.
 //!
+//! **The assumption is about GPUI's own target, not just this one.** `gpui-pre-windows` 0.3.11 made
+//! GPUI's target topmost, which left the non-topmost layer for this module. 0.3.12 asks for the
+//! non-topmost layer itself; Windows allows only one target per layer, so `CreateTargetForHwnd`
+//! here fails with `DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED` and the app cannot start. The
+//! workspace patches that one line back (`[patch.crates-io]` in the root `Cargo.toml`, and
+//! `third_party/gpui-pre-windows/README.md`). Re-check it whenever GPUI is upgraded.
+//!
 //! ## A composition swap chain's three requirements
 //!
 //! Premultiplied alpha, stretch scaling, and no zero-sized buffer. They are requirements of the
@@ -120,15 +127,30 @@ impl Device {
     /// first was tried and is far worse: it serialized the ink to the compositor's own pace, which
     /// measured at 47 presents a second against the 165 the display can take.
     pub(crate) fn render(&mut self, canvas: &Canvas) -> Result<()> {
+        self.draw(canvas)?;
+        self.present()
+    }
+
+    /// Draws one frame into the swap chain's current buffer, without presenting it.
+    ///
+    /// Split from [`Self::present`] for two callers: [`Self::render`], which does both, and the
+    /// benchmark, which times the draw and the present as the two different costs they are (see
+    /// `crate::platform::bench`). A present is not part of the drawing and a drawing is not part of
+    /// the compositor's answer; measuring them together hides which one is the frame.
+    pub(crate) fn draw(&mut self, canvas: &Canvas) -> Result<()> {
         self.resize()?;
 
         let buffer: IDXGISurface = unsafe { self.swap_chain.GetBuffer(0)? };
-        self.renderer.draw(buffer, canvas)?;
+        self.renderer.draw(buffer, canvas)
+    }
 
+    /// Hands the frame just drawn to the compositor.
+    ///
+    /// The flush is what makes the present honest: Direct2D and this device share one immediate
+    /// context, so what Direct2D has just ended is still a batch on it, and a present is not
+    /// promised to wait for work that has not been handed over.
+    pub(crate) fn present(&mut self) -> Result<()> {
         unsafe {
-            // Direct2D and this device share one immediate context, so what Direct2D has just
-            // ended is still a batch on it: the flush is what hands the frame over, and a present
-            // is not promised to wait for work that has not been handed over.
             self.context.Flush();
 
             // No interval: the canvas is presented as soon as it is drawn, and nothing here waits

@@ -3,7 +3,8 @@
 use super::{
     bar_line, confirmed, file_label, file_stem, held_by_cap, page_after_insert, page_of_write,
     page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face, palette_id,
-    palette_in_hand, palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width,
+    palette_in_hand, palette_point, parse_zoom, pdf_render_due, pen_cursor_shows,
+    pinch_zoom_factor, quantise_width,
     samples_vitals, scroll_of, sheet_matches, spun, touches_paper, zoom_text, Confirmation, Edge,
     EdgeSwipe, FootPills, FootPlace, FootStrips, PaletteGeometry, PalettePart, PenGesture, Swipe,
     Turn, BAR_HEIGHT, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX, PALETTE_HUB,
@@ -476,6 +477,49 @@ fn the_foot_takes_the_tallest_pill_as_its_line() {
     assert!(
         FootPills::default().strips(1000.0).is_none(),
         "and a row nobody has measured refuses nothing"
+    );
+}
+
+/// The system pointer is the cursor over the bar and over the desk's pills; the ghost is the pen's
+/// everywhere else on the page.
+///
+/// The half that is easy to get wrong is the *transition*: a pen that was writing a moment ago has a
+/// cursor of its own, and one that moves up onto the bar — or down onto a pill — must give the arrow
+/// back on that very reading. A platform that restores the arrow only when the *state* changes leaves a
+/// transparent cursor over its own controls, because the pen arrived there without any state edge being
+/// crossed. So this is asked per reading, and this test is the rule it asks.
+#[test]
+fn the_arrow_is_the_cursor_over_the_bar_and_the_pills() {
+    // A bar 100 tall and a foot whose pills begin at 900: a 1000-wide desk, a 200-wide page pill in its
+    // middle and a 300-wide zoom pill at the window's right margin.
+    let (bar, foot) = (100.0, 900.0);
+    let strips = FootStrips::of(1000.0, 1000.0, Some(200.0), Some(300.0));
+    let shows = |x: f32, y: f32| pen_cursor_shows((x, y), bar, foot, Some(strips));
+
+    assert!(!shows(500.0, 50.0), "on the bar, the arrow is the cursor");
+    assert!(!shows(500.0, bar), "and on the bar's own last pixel");
+    assert!(shows(500.0, bar + 1.0), "one pixel below it is page again");
+
+    assert!(!shows(500.0, 950.0), "over the page pill, the arrow");
+    assert!(!shows(900.0, 950.0), "over the zoom pill too");
+    assert!(shows(650.0, 950.0), "and the desk between them is page");
+}
+
+/// The two edges answer on their own: a hidden bar has no line, and a foot nobody has measured refuses
+/// nothing.
+#[test]
+fn the_two_edges_answer_on_their_own() {
+    assert!(
+        pen_cursor_shows((500.0, 500.0), 0.0, 0.0, None),
+        "no bar and no pills leaves the page the ghost's"
+    );
+    assert!(
+        pen_cursor_shows((500.0, 990.0), 0.0, 0.0, None),
+        "and an unmeasured foot refuses nothing"
+    );
+    assert!(
+        !pen_cursor_shows((500.0, 0.0), 0.0, 900.0, Some(FootStrips::of(1000.0, 1000.0, Some(200.0), None))),
+        "the window's top pixel is still the bar's line, which a hidden bar puts at zero"
     );
 }
 

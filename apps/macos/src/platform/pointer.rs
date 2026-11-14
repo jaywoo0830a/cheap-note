@@ -137,13 +137,17 @@ impl SystemPointer for SystemCursor {
             return;
         }
 
-        if !self.hidden.swap(false, Ordering::Relaxed) {
-            return;
-        }
-
+        // The arrow is re-set on **every** call, not only on the transition, for the same reason the
+        // transparent cursor is: AppKit applies a cursor rect under the pointer whenever the interface
+        // handles an event, and the app's own readings are those moments. A transition-only `set`
+        // leaves the *transparent* cursor current — the pen was over the page a reading ago, and the
+        // desk's pills or the bar are where it is now — until something else happens to update it,
+        // which is a window with no cursor over its own controls.
         NSCursor::arrowCursor().set();
 
-        if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
+        if self.hidden.swap(false, Ordering::Relaxed)
+            && std::env::var_os("CHEAP_NOTE_TRACE").is_some()
+        {
             eprintln!("pointer: the arrow is the cursor again");
         }
     }

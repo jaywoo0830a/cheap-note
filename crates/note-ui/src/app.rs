@@ -3086,14 +3086,15 @@ impl NoteApp {
         // same one; a pointer that followed a different line would leave the arrow under a ghost, or a
         // ghost under the arrow. And not over a pill at the foot of the window: the page and zoom pills
         // are controls the pen presses, so the arrow is the cursor there — beside them is desk, and the
-        // ghost is the pen's there as it is everywhere else on the page.
+        // ghost is the pen's there as it is everywhere else on the page. The rule itself is
+        // [`pen_cursor_shows`], which is what a test can ask without a window.
         let strips = self.pills.get().strips(self.sheet.window.0);
         let foot = self.foot_edge();
+        let bar = self.bar_edge();
 
         self.pen_cursor().is_some_and(|cursor| {
-            let (x, y) = (cursor.position()[0], cursor.position()[1]);
-            y > self.bar_edge()
-                && !strips.is_some_and(|strips| strips.held((x, y), foot))
+            let at = cursor.position();
+            pen_cursor_shows((at[0], at[1]), bar, foot, strips)
         })
     }
 
@@ -7064,6 +7065,33 @@ fn bar_line(shown: bool, measured: Option<f32>) -> f32 {
     }
 
     measured.filter(|edge| *edge > 0.0).unwrap_or(BAR_HEIGHT)
+}
+
+/// Whether the pen has a cursor of its own at `at`, in window logical pixels.
+///
+/// The whole of the geometric half of [`NoteApp::pen_has_its_own_cursor`], as a free function because
+/// it is the part worth testing: the app's own answer also asks whether a ghost was installed at all
+/// and whether a screen is in front, and neither of those can be asked without a window.
+///
+/// Three conditions, and each of them is "the system pointer is the cursor here":
+///
+/// * **above the bar's line** — the interface at the top of the window is pressed with the pen;
+/// * **over one of the pills at the foot** — the same, at the other edge, and only over a pill rather
+///   than over the whole row, because the desk beside them is page;
+/// * and nowhere else, where the page is and the ghost is the pen's own mark.
+///
+/// A bar that is hidden has no line at all (`0.0`), so the strip its switch sat in is page again.
+fn pen_cursor_shows(
+    at: (f32, f32),
+    bar: f32,
+    foot: f32,
+    strips: Option<FootStrips>,
+) -> bool {
+    if at.1 <= bar {
+        return false;
+    }
+
+    !strips.is_some_and(|strips| strips.held(at, foot))
 }
 
 /// Whether the machine's counters should be read at all.

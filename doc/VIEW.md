@@ -303,13 +303,21 @@ there is no arrow that means "a pen held at 40 degrees". The system pointer is t
 beside one — and there is no switch for it. Turning the ghost off would leave the pen with no cursor of
 its own at all, which is a state nobody asked for; what the bar's switches turn off is the bar.
 
+**Both directions are re-asserted on every reading, not only when the state flips.** A pen leaving the
+page for the bar or for a pill crosses no state edge — the bar was already an interface a reading ago —
+so a platform that only restored the arrow *on the change* left the transparent cursor over the app's own
+controls until something else happened to replace it, which is a window with no cursor at all exactly where
+a reader needs one. The view decides where the cursor is (`pen_cursor_shows`) on every reading, and both
+platforms answer with a `set` in both directions: the transparent cursor while the ghost is the pen's, the
+arrow while the pen is over a control (`apps/*/platform/{pointer,system_cursor}.rs`).
+
 Five facts about the ghost are decided here, and each of them is something a pen reading cannot say:
 
 | Fact | Where it comes from |
 |---|---|
 | whether the pen has a cursor of its own at all | the **ink model**, not a batch, so the cursor survives the batches that lay nothing — most of them, while the pen is merely held over the window — and disappears only when the pen does |
 | where it is and how it leans | the pen's newest reading, in window coordinates, with no sign flip: lean right and the ghost extends right of the nib |
-| where it is *not* drawn | **only below the bar**: over the bar it would be drawn behind an opaque background, where it cannot be seen — and **never on the home screen**, which has no sheet to point at and is meant to be tapped, **nor under a control that hangs over the page** (a chooser's list, the palette at the pen) |
+| where it is *not* drawn | **only below the bar and off the desk's pills**: over the bar it would sit behind an opaque background where it cannot be seen, and over a pill it would point at a control the pen is pressing rather than at paper — and **never on the home screen**, which has no sheet to point at and is meant to be tapped, **nor under a control that hangs over the page** (a chooser's list, the palette at the pen) |
 | the scale, the colours on this paper, and where the bar ends | published to the overlay (`publish_screen`) on the frames where they change, so a new pen colour or paper takes hold at once rather than at the next reading |
 | how **thick** the mark is | the same publication (`Screen::nib_radius`): half the width the tool in hand lays, which only the app knows — the pen's weight is a setting, and the marker's band is the tool's |
 

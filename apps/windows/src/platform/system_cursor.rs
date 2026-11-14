@@ -161,13 +161,18 @@ impl SystemCursor {
     /// the pointer is hovering, and that call does not go through this window procedure's question —
     /// so a transition-only hook would leave a pointing hand over the pen's ghost until the next move.
     pub fn follow(&mut self, pen_has_its_own_cursor: bool) {
-        let was_hidden = std::mem::replace(&mut self.is_hidden, pen_has_its_own_cursor);
+        self.is_hidden = pen_has_its_own_cursor;
         self.hidden.store(pen_has_its_own_cursor, Ordering::Relaxed);
 
         unsafe {
             if pen_has_its_own_cursor {
                 SetCursor(None);
-            } else if was_hidden {
+            } else {
+                // The arrow is re-set on **every** call, not only on the transition (see the note
+                // above): the interface sets a cursor of its own over a control the pointer is
+                // hovering, and that call does not go through this window procedure's question. A
+                // pen that leaves the page for the bar or for the desk's pills must find the arrow
+                // still there on the reading that moved it, not on the next `WM_SETCURSOR`.
                 SetCursor(arrow());
             }
         }

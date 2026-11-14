@@ -4,13 +4,12 @@ use super::{
     bar_line, confirmed, file_label, file_stem, held_by_cap, page_after_insert, page_of_write,
     page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face, palette_id,
     palette_in_hand, palette_point, parse_zoom, pdf_render_due, pen_cursor_shows,
-    pinch_zoom_factor, quantise_width,
-    samples_vitals, scroll_of, sheet_matches, spun, touches_paper, zoom_text, Confirmation, Edge,
-    EdgeSwipe, FootPills, FootPlace, FootStrips, PaletteGeometry, PalettePart, PenGesture, Swipe,
-    Turn, BAR_HEIGHT, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX, PALETTE_HUB,
-    PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS,
-    PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD,
-    PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
+    pinch_zoom_factor, quantise_width, samples_vitals, scroll_of, sheet_matches, spun,
+    touches_paper, zoom_text, Confirmation, Edge, EdgeSwipe, FootPills, FootPlace, FootStrips,
+    PaletteGeometry, PalettePart, PenGesture, Swipe, Turn, BAR_HEIGHT, EDGE_SWIPE_BAND,
+    EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN,
+    PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC,
+    PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
 use crate::ink::{Notes, Tool};

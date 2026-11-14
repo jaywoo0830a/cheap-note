@@ -2,10 +2,11 @@
 //!
 //! ## Why this is a module and not a binary
 //!
-//! Windows needs `cheap-note-bench` to be its own *console* binary because its release image is a
-//! windows-subsystem program with no console beside the window. macOS has no such constraint, and the
-//! contract is one command line: `cheap-note --bench` on both platforms, with the same `--format` and the
-//! same envelope (see `crates/note-ui/src/report.rs`).
+//! Windows keeps `cheap-note-bench` as its own *console* binary for scripts, because the app is a
+//! windows-subsystem program with no console beside the window; the app's `--bench` reaches the same
+//! measurement through `platform::console`. macOS has no such constraint, and the contract is one
+//! command line: `cheap-note --bench` on both platforms, with the same `--format` and the same envelope
+//! (see `crates/note-ui/src/report.rs`).
 //!
 //! ## How a window is avoided
 //!
@@ -268,11 +269,7 @@ fn offscreen() -> Option<Surface> {
 }
 
 /// Measures one page: its first frame, its settled frames, a rebuild and a pan.
-fn measure_page(
-    surface: &mut Surface,
-    strokes: usize,
-    frames: usize,
-) -> Result<PageCost, String> {
+fn measure_page(surface: &mut Surface, strokes: usize, frames: usize) -> Result<PageCost, String> {
     let mut canvas = page(strokes);
 
     // The first frame is the one that bakes every realization. It is timed before any other frame has
@@ -339,7 +336,6 @@ fn draw(surface: &mut Surface, canvas: &Canvas) -> Result<(), String> {
 fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
 }
-
 
 /// A page of synthetic handwriting, a sheet, a shadow and forty ruled lines.
 ///
@@ -430,7 +426,6 @@ fn page(strokes: usize) -> Canvas {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,7 +469,10 @@ mod tests {
     #[test]
     fn a_stroke_count_that_is_not_a_number_names_itself() {
         let error = Options::parse(&args(&["--strokes", "abc"])).unwrap_err();
-        assert!(error.contains("abc"), "the sentence names what was typed: {error}");
+        assert!(
+            error.contains("abc"),
+            "the sentence names what was typed: {error}"
+        );
     }
 
     /// `--help` asks for the usage rather than for a run.
@@ -529,4 +527,3 @@ mod tests {
         assert!((ms(Duration::from_micros(1_500)) - 1.5).abs() < f64::EPSILON);
     }
 }
-

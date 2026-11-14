@@ -63,6 +63,14 @@ pub const LEAK_TOLERANCE_BYTES: u64 = 64 * 1024 * 1024;
 /// The flag that asks for this report rather than a window.
 pub const FLAG: &str = "--memory-report";
 
+/// The command line this report accepts, for a mistaken invocation.
+///
+/// One sentence rather than a line per platform: both mains dispatch on the same flag and both hand
+/// the rest to the same `report::Options` parser, so the usage cannot drift between them.
+pub fn usage() -> String {
+    format!("usage: cheap-note {FLAG} [--format table|json] <note> [<note> ...]\n")
+}
+
 /// One row of the report: what the process held after one operation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Step {
@@ -221,48 +229,21 @@ fn truncate(label: &str, width: usize) -> String {
     out
 }
 
-/// The notes named on the command line, when this run is a memory report rather than a launch.
-///
-/// `None` is an ordinary launch. The flag with no paths is a report over nothing — a mistyped command
-/// rather than a request — and it comes back as an empty `Some` so the caller can say so.
-pub fn requested() -> Option<Vec<PathBuf>> {
-    let mut args = std::env::args_os();
-
-    // The first argument is the program itself.
-    args.next()?;
-
-    if args.next()? != FLAG {
-        return None;
-    }
-
-    Some(args.map(PathBuf::from).collect())
-}
-
-/// Runs the report over `paths`, writing the table to `out`.
+/// Runs the report in `format`, writing it to `out`.
 ///
 /// Returns the exit code the process should end with: `0` for a run that gave its memory back, `1` for
 /// one that did not, and `2` for a report that could not be run at all — no paths, or a note that would
 /// not open. Three codes rather than two because "the app leaked" and "the command was wrong" are
 /// different problems, and a CI job wants to tell them apart.
 ///
-/// `stats` is taken rather than built so that the caller decides what a headless run measures itself
-/// with — the platform's own counters, which is the same source the status line reads.
-pub fn run(
-    paths: &[PathBuf],
-    stats: &mut dyn crate::platform::SystemStats,
-    out: &mut impl Write,
-) -> i32 {
-    run_in(paths, stats, out, crate::report::Format::Table, "unknown")
-}
-
-/// Runs the report in `format`, writing it to `out`.
-///
 /// `--format table` keeps this command's own table, which reads better for one note's sequence;
 /// `--format json` writes the shared contract, which is what a script reads. Both end at the same
 /// verdict, so the two shapes cannot disagree about whether the run passed.
 ///
-/// `platform` is the caller's to name: the view is built for every platform and cannot know which one it
-/// is running on.
+/// `stats` is taken rather than built so that the caller decides what a headless run measures itself
+/// with — the platform's own counters, which is the same source the status line reads. `platform` is the
+/// caller's to name for the same reason: the view is built for every platform and cannot know which one
+/// it is running on. Both mains call this function, so neither can grow a table the other does not have.
 pub fn run_in(
     paths: &[PathBuf],
     stats: &mut dyn crate::platform::SystemStats,
@@ -271,7 +252,7 @@ pub fn run_in(
     platform: &'static str,
 ) -> i32 {
     if paths.is_empty() {
-        let _ = writeln!(out, "usage: cheap-note {FLAG} [--format table|json] <note> [<note> ...]");
+        let _ = write!(out, "{}", usage());
         return 2;
     }
 
@@ -383,7 +364,6 @@ pub fn to_contract(report: &Report, platform: &'static str) -> crate::report::Re
 
     contract.conclude(verdict, note)
 }
-
 
 /// Opens and closes every note in turn, measuring between the operations.
 ///
@@ -587,11 +567,11 @@ mod tests {
         assert_eq!(truncate("abcdefghij", 10), "abcdefghij");
     }
 
-    /// The flag is recognised only as the first argument, and its paths come back in order.
+    /// Both mains dispatch on this flag, and the usage says the same thing they do.
     #[test]
-    fn the_flag_is_the_first_argument() {
-        // `requested` reads the process's own arguments, so this pins the shape it looks for rather
-        // than the parse: the flag first, then whatever was named.
+    fn the_flag_is_the_one_both_mains_dispatch_on() {
         assert_eq!(FLAG, "--memory-report");
+        assert!(usage().contains(FLAG));
+        assert!(usage().contains("--format table|json"));
     }
 }

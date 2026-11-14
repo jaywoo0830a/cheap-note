@@ -13,7 +13,8 @@
 //! | [`platform::cursor_overlay`] | the nib's ghost, drawn in a layered window above everything |
 //! | [`platform::system_cursor`] | `SetCursor`, so the system pointer is out of the way while it is |
 //! | [`platform::ink_layer`] | the desk, the paper and the ink: Direct3D 11, Direct2D, DirectComposition |
-//! | [`platform::report`] | `--memory-report`: the process's counters, and a console or file to print them to |
+//! | [`platform::report`] | `--memory-report`: the process's counters and the platform's name in the contract |
+//! | [`platform::console`] | where a measuring command's output goes: a console, or a file beside the executable |
 //!
 //! Plus Pdfium's own C entry points, which are `#[cfg(windows)]` in the view's `pdfium` module for
 //! now, and `main`, which is the six lines that assemble the lot (see [`platform`]).
@@ -82,34 +83,65 @@ fn main() {
         write_panic_report(&report);
     }));
 
-    // Note the two exceptions on the way in: `--memory-report <note> ...` becomes a measurement rather
-    // than a window (see `platform::report`), and `--bench` becomes a frame measurement. Both run before
+    // Note the two exceptions on the way in: `--bench` becomes a frame measurement, and
+    // `--memory-report <note> ...` becomes a memory report (see `platform::report`). Both run before
     // the installer because neither needs a window, and both are handled here for the same reason the
     // macOS `main` handles them — the work wants the platform's own counters and a place to print, not
     // the view's frame loop.
     //
-    // `--bench` used to be its own console binary (`cheap-note-bench`). It is one command line on both
-    // platforms now; the binary is kept as a thin wrapper so an existing script keeps working.
-    if let Some(paths) = note_ui::memory_report::requested() {
-        std::process::exit(platform::report::run(&paths));
-    }
-
+    // The shared `report::Options` parser takes `--format` off both command lines, so `--format json`
+    // means the same thing here as on macOS. The output is buffered and handed to `platform::console`,
+    // which is the one way out of a windows-subsystem image: a console when the run has one, a file
+    // beside the executable when it does not. That is what makes `cheap-note --bench` work here as it
+    // does on macOS; `cheap-note-bench` is kept as a console wrapper for scripts.
     let args: Vec<String> = std::env::args().skip(1).collect();
+
     if args.first().map(String::as_str) == Some("--bench") {
         let options = match note_ui::report::Options::parse(&args[1..]) {
             Ok(options) => options,
             Err(error) => {
-                eprintln!("cheap-note: {error}");
+                let mut out = format!("cheap-note: {error}\n").into_bytes();
+                out.extend_from_slice(platform::bench::usage().as_bytes());
+                platform::console::deliver(&out, platform::bench::FALLBACK_FILE);
                 std::process::exit(2);
             }
         };
 
-        if options.help {
-            platform::bench::print_usage();
-            std::process::exit(0);
-        }
+        let mut out = Vec::new();
+        let code = if options.help {
+            out.extend_from_slice(platform::bench::usage().as_bytes());
+            0
+        } else {
+            platform::bench::run(&options.rest, options.format, &mut out)
+        };
 
-        std::process::exit(platform::bench::run(&options.rest, options.format, &mut std::io::stdout()));
+        platform::console::deliver(&out, platform::bench::FALLBACK_FILE);
+        std::process::exit(code);
+    }
+
+    if args.first().map(String::as_str) == Some(note_ui::memory_report::FLAG) {
+        let options = match note_ui::report::Options::parse(&args[1..]) {
+            Ok(options) => options,
+            Err(error) => {
+                let mut out = format!("cheap-note: {error}\n").into_bytes();
+                out.extend_from_slice(note_ui::memory_report::usage().as_bytes());
+                platform::console::deliver(&out, platform::report::FALLBACK_FILE);
+                std::process::exit(2);
+            }
+        };
+
+        let paths: Vec<std::path::PathBuf> =
+            options.rest.iter().map(std::path::PathBuf::from).collect();
+
+        std::process::exit(platform::report::run(&paths, options.format));
+    }
+
+    // A flag this build does not know is a mistake, not a request to open a window. Saying so is the
+    // difference between a typo and an app that seems to ignore what it was asked.
+    if let Some(unknown) = args.iter().find(|arg| arg.starts_with('-')) {
+        eprintln!("cheap-note: unknown flag: {unknown}");
+        eprintln!("usage: cheap-note [--memory-report <note> ... | --bench] [-h | --help]");
+        std::process::exit(2);
     }
 
     note_ui::run(platform::INSTALLER);

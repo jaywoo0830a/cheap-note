@@ -1,10 +1,12 @@
 //! What the Windows canvas costs: the benchmark behind `cheap-note-bench`.
 //!
-//! ## Why a separate program
+//! ## Why a separate program, and why the app answers too
 //!
-//! The app's release image is a Windows-subsystem one, so it has no console to print a table to.
-//! The benchmark is therefore its own console binary (`src/bin/bench.rs`), linked against the same
-//! library and drawing through the same [`Device`] the window does. It is a measurement of the
+//! The app's release image is a Windows-subsystem one, so it has no console of its own. `cheap-note
+//! --bench` therefore hands its buffered report to [`super::console`] — the parent console when it can
+//! attach to one, `cheap-note-bench.txt` beside the executable otherwise — and `cheap-note-bench`
+//! remains a console binary (`src/bin/bench.rs`) for scripts. Both call [`run`] here, linked against the
+//! same library and drawing through the same [`Device`] the window does. It is a measurement of the
 //! renderer this app runs, not of a copy of it.
 //!
 //! ## What it measures
@@ -56,7 +58,10 @@ const MARGIN: f32 = 40.0;
 const DEFAULT_STROKES: [usize; 5] = [0, 29, 316, 1_000, 8_182];
 
 /// How many warm frames each page is measured over.
-const DEFAULT_FRAMES: usize = 60;
+///
+/// The same default as the macOS benchmark and `doc/CLI.md`, so a bare `--bench` compares like with
+/// like. A longer run is a flag away: `--frames 60`.
+const DEFAULT_FRAMES: usize = 30;
 
 /// What the command line asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,10 +78,7 @@ impl Options {
 
         while at < args.len() {
             match args[at].as_str() {
-                "--help" | "-h" => {
-                    print_usage();
-                    return Ok(None);
-                }
+                "--help" | "-h" => return Ok(None),
                 "--strokes" => {
                     at += 1;
                     let list = args
@@ -129,27 +131,38 @@ fn parse_strokes(text: &str) -> Result<Vec<usize>, String> {
     Ok(counts)
 }
 
+/// The name of the fallback report, beside the executable or in the temporary directory.
+pub const FALLBACK_FILE: &str = "cheap-note-bench.txt";
+
 /// What the command line accepts, for `--help` and for a mistake.
-pub fn print_usage() {
-    println!(
-        "usage: cheap-note-bench [--strokes 0,29,316,1000,8182] [--frames 60]\n\
-         \n\
-         Draws a synthetic page through the same Direct2D canvas the app uses and reports the\n\
-         first, warm, rebuild and pan costs of a frame, with the present timed separately.\n\
-         \n\
-         Run it in release: cargo run --release -p cheap-note --bin cheap-note-bench"
-    );
+///
+/// Returned rather than printed so both entry points can put it wherever their output goes: stdout
+/// for the console wrapper, the shared `console::deliver` for the app's `--bench` in a
+/// windows-subsystem image.
+pub fn usage() -> &'static str {
+    "usage: cheap-note --bench [--format table|json] [--strokes 0,29,316,1000,8182] [--frames 30]\n\
+     \n\
+     Draws a synthetic page through the same Direct2D canvas the app uses and reports the first,\n\
+     warm, worst, rebuild and pan costs of a frame, with the present timed separately.\n\
+     \n\
+     Run it in release: cargo run --release -p cheap-note -- --bench\n\
+     The console wrapper `cheap-note-bench` runs the same measurement."
 }
 
-/// The command line as a process exit code.
-/// Runs the benchmark over the arguments it owns, writing the report in `format` to `out`.
+/// Prints [`usage`] to stdout, for the console wrapper.
+pub fn print_usage() {
+    print!("{}", usage());
+}
+
+/// Runs the benchmark over the arguments it owns, writing the report in `format` to `out`, and answers
+/// the process exit code.
 ///
 /// `args` is what is left after the shared flags are taken — `--strokes`, `--frames`, `--help` — so this
 /// function never sees `--format`. Both entry points (the app's `--bench` and the `cheap-note-bench`
 /// wrapper) call it with the same split, which is what makes the two platforms one command line.
 pub fn run(args: &[String], format: note_ui::report::Format, out: &mut impl std::io::Write) -> i32 {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print_usage();
+        let _ = out.write_all(usage().as_bytes());
         return 0;
     }
 
@@ -157,8 +170,8 @@ pub fn run(args: &[String], format: note_ui::report::Format, out: &mut impl std:
         Ok(Some(options)) => options,
         Ok(None) => return 0,
         Err(error) => {
-            eprintln!("cheap-note: {error}");
-            print_usage();
+            let _ = writeln!(out, "cheap-note: {error}");
+            let _ = out.write_all(usage().as_bytes());
             return 2;
         }
     };
@@ -166,7 +179,9 @@ pub fn run(args: &[String], format: note_ui::report::Format, out: &mut impl std:
     match measure_all(&options, format, out) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("cheap-note --bench: {error}");
+            // The error is written to the same place as the report, so a release run with no console
+            // still leaves a sentence in `cheap-note-bench.txt` rather than failing silently.
+            let _ = writeln!(out, "cheap-note --bench: {error}");
             2
         }
     }
@@ -415,20 +430,10 @@ fn hidden_window() -> Result<HWND, String> {
     .map_err(|error| format!("the benchmark could not make a window: {error}"))
 }
 
-/// A duration as milliseconds with three decimals, or microseconds below a millisecond.
-fn millis(duration: Duration) -> String {
-    let value = duration.as_secs_f64() * 1_000.0;
-    if value < 1.0 {
-        format!("{:.1} µs", duration.as_secs_f64() * 1_000_000.0)
-    } else {
-        format!("{value:.3} ms")
-    }
-}
-
 /// The same figure as a plain number of milliseconds, for the contract.
 ///
 /// One unit everywhere is what lets a script compare the two commands' numbers without knowing which
-/// table it came from; the `µs` above is a courtesy for a person reading a row.
+/// table it came from.
 fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
 }
@@ -445,15 +450,28 @@ mod tests {
         assert!(parse_strokes(" , ").is_err());
     }
 
+    /// The default pages and frame count are the shared ones, so a bare `--bench` on either platform
+    /// puts the same kind of table beside the other.
     #[test]
-    fn the_defaults_are_the_pages_the_document_measured() {
+    fn the_defaults_are_the_shared_page_set() {
         let options = Options::parse(&[]).unwrap().unwrap();
         assert_eq!(
             options.strokes,
             vec![0, 29, 316, 1_000, 8_182],
             "the counts doc/WINDOWS.md and doc/VIEW.md quote"
         );
-        assert_eq!(options.frames, 60);
+        assert_eq!(options.frames, 30, "the default doc/CLI.md documents");
+    }
+
+    /// The usage names the command line both platforms answer, not only the wrapper's old name.
+    #[test]
+    fn the_usage_names_the_shared_command_line() {
+        let usage = usage();
+
+        assert!(usage.contains("cheap-note --bench"), "{usage}");
+        assert!(usage.contains("--format table|json"), "{usage}");
+        assert!(usage.contains("--frames 30"), "{usage}");
+        assert!(usage.contains("cheap-note-bench"), "{usage}");
     }
 
     #[test]

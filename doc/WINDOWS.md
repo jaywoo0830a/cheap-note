@@ -345,14 +345,20 @@ leaves the switch out. The setting still round-trips in the note.
 
 ### 6.4 Measure the Windows canvas
 
-The gap is closed. `cheap-note-bench` is a console binary in `apps/windows` — separate from the app,
-whose release image is a `windows` subsystem one with no console to print a table to — and it draws
-through the same `Device` and `Renderer` the window does:
+The gap is closed, and the command line is the shared one. `cheap-note --bench` runs the measurement in
+the app itself; because the release image is a `windows` subsystem one, the buffered report goes through
+`platform::console` — the parent console when there is one, `cheap-note-bench.txt` beside the executable
+when there is not. `cheap-note-bench` remains a console binary for scripts, and both draw through the same
+`Device` and `Renderer` the window does:
 
 ```sh
-cargo run --release -p cheap-note --bin cheap-note-bench
-cargo run --release -p cheap-note --bin cheap-note-bench -- --strokes 0,29,316,1000,8182 --frames 60
+cargo run --release -p cheap-note -- --bench
+cargo run --release -p cheap-note -- --bench --strokes 0,29,316,1000,8182 --frames 60
+cargo run --release -p cheap-note --bin cheap-note-bench   # the console wrapper
 ```
+
+A bare `--bench` uses the shared defaults — 0, 29, 316, 1 000 and 8 182 strokes over 30 warm frames. The
+table below used 60 warm frames, which is why its command says so explicitly.
 
 It draws a synthetic page (desk, shadow, sheet, forty rules and the ink) into a hidden window's
 composition swap chain. `first` is the frame that bakes the page, `warm` is the mean of the frames
@@ -415,7 +421,7 @@ Written down so they do not get re-litigated:
 | Frame cost | measured: 143–146 draws/s on 8,182 strokes | measured: **2.03 ms a frame** on 8,182 (draw 1.02 + present 1.00), about 490 fps of canvas work (§6.4) |
 | Hardware clause | `17 MiB · 0% cpu · 17 threads` | the same shape, from `sysinfo` + a toolhelp snapshot (§8) |
 | Document bytes | `MappedBytes` over `mmap`/`munmap` | the same type over `CreateFileMappingW`/`MapViewOfFile` (§8.1) |
-| Memory report | `--memory-report`; GPU from `TASK_VM_INFO` | `--memory-report`; GPU column `—` (§8.1) |
+| Memory report | `--memory-report` with `--format`; GPU from `TASK_VM_INFO` | the same command, contract and exit codes; GPU column `—` (§8.1) |
 
 If one sentence is wanted:
 
@@ -468,12 +474,18 @@ Two pieces used to be Mac-only and are now answered on Windows as well.
   still falls back to a copy, and an empty or unmappable file still opens. The Windows consequence is
   that a live mapping keeps `source.pdf` from being truncated, so the document view is dropped before a
   note's document is replaced (see `Note::put_document`).
-* **`--memory-report` runs here.** The arithmetic is shared (`crates/note-ui/src/memory_report.rs`); the
-  Windows half is `apps/windows/src/platform/report.rs`, which supplies `ProcessStats` and a way out of a
-  windows-subsystem image. A release started from a terminal attaches to that console; a redirected run
-  uses its stdout; with neither, the table goes to `cheap-note-memory-report.txt` beside the executable
-  (the temporary directory is the fallback). The exit codes are the same as macOS: `0` clean, `1` over
-  the allowance, `2` the report could not run.
+* **`--memory-report` runs here, with the same contract.** The arithmetic is shared
+  (`crates/note-ui/src/memory_report.rs`); the Windows half is `apps/windows/src/platform/report.rs`,
+  which supplies `ProcessStats` and the platform name, and `apps/windows/src/platform/console.rs`, which
+  is the way out of a windows-subsystem image. Both `--format table` and `--format json` are parsed by
+  the same `report::Options` the macOS `main` uses, so the JSON envelope and the exit codes (`0` clean,
+  `1` over the allowance, `2` the report could not run) are identical. A release started from a terminal
+  attaches to that console; a redirected run uses its stdout; with neither, the report goes to
+  `cheap-note-memory-report.txt` beside the executable (the temporary directory is the fallback).
+
+  The same `platform/console.rs` carries `--bench`'s output, with `cheap-note-bench.txt` as its fallback
+  name; see §6.4. Both measuring commands therefore have one way out, and neither depends on a standard
+  handle the release image may not have inherited.
 
 The GPU column is still `—` on Windows: `SystemStats::surface_bytes` has no Windows implementation, so
 the report measures resident memory and the page cache rather than a graphics ledger. That is why the
@@ -500,7 +512,10 @@ grep -rn 'CreateTargetForHwnd(hwnd, true)' third_party/gpui-pre-windows/src
 grep -n 'CreateFileMappingW' crates/note-format/src/mapped.rs
 
 # The memory report is wired into the Windows main, not only the Mac one (§8.1).
-grep -n 'memory_report::requested' apps/windows/src/main.rs
+grep -n 'memory_report::FLAG' apps/windows/src/main.rs
+
+# Both measuring commands leave through the one console/file route (§6.4, §8.1).
+grep -n 'platform::console::deliver' apps/windows/src/main.rs
 ```
 
 The second check is the invariant [MACOS.md §6](MACOS.md#6-what-must-not-change) states, and the two

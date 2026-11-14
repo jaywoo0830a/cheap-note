@@ -1089,17 +1089,17 @@ fn the_bar_is_a_line_in_the_window() {
 /// on a pill, measured in the window and not on the sheet, whatever the scale factor is.
 #[test]
 fn the_bottom_row_is_a_line_in_the_window() {
-    let footed = |foot: f32| InkTransform {
-        foot,
-        ..papered()
-    };
+    let footed = |foot: f32| InkTransform { foot, ..papered() };
     let scaled = InkTransform {
         scale: 2.0,
         ..footed(700.0)
     };
 
     assert!(scaled.on_bar(1400.0), "1400 physical pixels is 700 logical");
-    assert!(!scaled.on_bar(1398.0), "and the pixel above the line is not");
+    assert!(
+        !scaled.on_bar(1398.0),
+        "and the pixel above the line is not"
+    );
     assert!(
         !footed(700.0).on_bar(400.0),
         "a reading on the sheet is not on the row, however far down it is"

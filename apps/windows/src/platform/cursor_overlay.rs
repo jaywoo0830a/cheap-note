@@ -328,41 +328,14 @@ impl Surface {
         }
     }
 
-    /// The edges of the strip a ghost may be drawn in: above the bar's line and above the bottom row's,
-/// both in the surface's own coordinates.
-///
-/// Two lines rather than one because a ghost hangs both ways — a body leaning up is cut at the bar, and
-/// one leaning down is cut at the page and zoom pills — and the same coverage rule applies at each: the
-/// row a line passes through is covered less rather than dropped, so the ghost ends *under* the
-/// controls instead of ending at a seam.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Band {
-    /// The lowest row the ghost may paint in: above the bar.
-    pub top: f32,
-    /// The highest row it may paint in: the desk's own row begins below this.
-    pub bottom: f32,
-}
-
-/// A band of a surface with no interface over it: both lines outside the pixels it has.
-pub const WHOLE: Band = Band {
-    top: f32::NEG_INFINITY,
-    bottom: f32::INFINITY,
-};
-
-/// Fills a closed convex outline, antialiased, in one colour.
+    /// Fills a closed convex outline, antialiased, in one colour.
     ///
     /// The rules are the ones an outline wants and no more: a scanline crosses a convex shape twice,
     /// so the crossings are sorted and paired, and the cover of a pixel is how much of its width
     /// lies between a pair. Each row is sampled [`SUB_ROWS`] times down its height, which is what
     /// softens the flanks and the cap. The coverage is accumulated per row and composited once, so
     /// the sub-rows of one pixel add up instead of painting the pixel twice.
-    fn fill_polygon(
-        &mut self,
-        points: &[[f32; 2]],
-        band: Band,
-        alpha: f32,
-        colour: [u8; 3],
-    ) {
+    fn fill_polygon(&mut self, points: &[[f32; 2]], band: Band, alpha: f32, colour: [u8; 3]) {
         if points.len() < 3 || alpha <= 0.0 {
             return;
         }
@@ -532,6 +505,27 @@ pub const WHOLE: Band = Band {
         }
     }
 }
+
+/// The edges of the strip a ghost may be drawn in: above the bar's line and above the bottom row's,
+/// both in the surface's own coordinates.
+///
+/// Two lines rather than one because a ghost hangs both ways — a body leaning up is cut at the bar, and
+/// one leaning down is cut at the page and zoom pills — and the same coverage rule applies at each: the
+/// row a line passes through is covered less rather than dropped, so the ghost ends *under* the
+/// controls instead of ending at a seam.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Band {
+    /// The lowest row the ghost may paint in: above the bar.
+    pub top: f32,
+    /// The highest row it may paint in: the desk's own row begins below this.
+    pub bottom: f32,
+}
+
+/// A band of a surface with no interface over it: both lines outside the pixels it has.
+pub const WHOLE: Band = Band {
+    top: f32::NEG_INFINITY,
+    bottom: f32::INFINITY,
+};
 
 /// The rows of a surface a shape can touch, or `None` when it touches none of them.
 ///
@@ -1500,7 +1494,7 @@ mod tests {
     #[test]
     fn a_disc_covers_its_centre_and_nothing_beyond_its_radius() {
         let mut surface = Surface::new(16, 16);
-        surface.fill_disc([8.0, 8.0], 4.0, None, 1.0, [0, 0, 0]);
+        surface.fill_disc([8.0, 8.0], 4.0, WHOLE, 1.0, [0, 0, 0]);
 
         let opaque = |surface: &Surface, x: usize, y: usize| surface.pixels()[y * 16 + x] >> 24;
 
@@ -1592,10 +1586,7 @@ mod tests {
         // A lean forty degrees toward the top of the window: `tilt_y` is positive toward the user.
         let shape = shape((100.0, 300.0), Some((0.0, -40.0)));
         let clip = middle - 8.0;
-        let band = Band {
-            top: clip,
-            ..WHOLE
-        };
+        let band = Band { top: clip, ..WHOLE };
 
         surface.draw(&shape, [middle, middle], band);
         let (_, cut_top, _, cut_bottom) = drawn(&surface).expect("a ghost was drawn");
@@ -1646,8 +1637,8 @@ mod tests {
             "the drawing ends in the row the line passes through: {cut_bottom} against {cut}"
         );
         assert!(
-            cut_top as f32 > middle,
-            "and the nib mark is still drawn above it"
+            (cut_top as f32) < cut,
+            "and the nib mark is still drawn above the cut: {cut_top} against {cut}"
         );
 
         surface.clear();

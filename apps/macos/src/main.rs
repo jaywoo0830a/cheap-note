@@ -102,9 +102,7 @@ fn main() {
     // difference between a typo and an app that seems to ignore what it was asked.
     if let Some(unknown) = args.iter().find(|arg| arg.starts_with('-')) {
         eprintln!("cheap-note: unknown flag: {unknown}");
-        eprintln!(
-            "usage: cheap-note [--memory-report <note> ... | --bench] [-h | --help]"
-        );
+        eprintln!("usage: cheap-note [--memory-report <note> ... | --bench] [-h | --help]");
         std::process::exit(2);
     }
 

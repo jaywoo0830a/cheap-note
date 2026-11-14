@@ -150,7 +150,6 @@ impl Value {
     }
 }
 
-
 /// One measurement: a label and the values [`Report::columns`] names.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
@@ -288,7 +287,6 @@ impl Report {
     }
 }
 
-
 /// JSON string escaping, because these reports carry note names and paths.
 fn json_escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
@@ -383,8 +381,6 @@ fn table(report: &Report) -> String {
 
     out
 }
-
-
 
 /// One JSON object, for a script.
 ///
@@ -540,8 +536,6 @@ pub fn emit(report: &Report, format: Format, out: &mut impl std::io::Write) -> i
     let _ = out.flush();
     report.verdict.exit_code()
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -767,4 +761,3 @@ mod tests {
         assert!(text.contains("allowance 64 MiB"));
     }
 }
-

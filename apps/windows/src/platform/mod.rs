@@ -18,6 +18,7 @@
 //!    of the report.
 
 pub mod bench;
+pub mod console;
 pub mod cursor_overlay;
 pub mod ink_layer;
 pub mod input;

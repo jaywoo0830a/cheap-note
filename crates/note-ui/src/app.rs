@@ -2019,7 +2019,9 @@ impl NoteApp {
             return false;
         }
 
-        let transform = self.sheet.transform(self.scale, self.bar_edge(), self.foot_edge());
+        let transform = self
+            .sheet
+            .transform(self.scale, self.bar_edge(), self.foot_edge());
         let _timed = measure(&self.timings.ink);
 
         // A reading is a press on a pill rather than ink when it lands on one: the foot's *line* is
@@ -2036,9 +2038,8 @@ impl NoteApp {
             1.0
         };
 
-        let refused = |sample: &Reading| {
-            strips.held((sample.pixel.x / scale, sample.pixel.y / scale), foot)
-        };
+        let refused =
+            |sample: &Reading| strips.held((sample.pixel.x / scale, sample.pixel.y / scale), foot);
 
         // The common case is a batch that is all page, and it is the hot path: nothing is allocated for
         // it, and only a batch with a reading on a pill is copied. An unmeasured pill is no strip, so a
@@ -6026,25 +6027,22 @@ impl NoteApp {
     fn pill_box(&self, place: FootPlace, pill: impl IntoElement) -> impl IntoElement {
         let pills = Rc::clone(&self.pills);
 
-        div()
-            .relative()
-            .child(pill)
-            .child(
-                canvas(
-                    move |bounds, _, _| {
-                        let measured = pills.get();
-                        pills.set(measured.measured(
-                            place,
-                            f32::from(bounds.left()),
-                            f32::from(bounds.right()),
-                            f32::from(bounds.top()),
-                        ));
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
+        div().relative().child(pill).child(
+            canvas(
+                move |bounds, _, _| {
+                    let measured = pills.get();
+                    pills.set(measured.measured(
+                        place,
+                        f32::from(bounds.left()),
+                        f32::from(bounds.right()),
+                        f32::from(bounds.top()),
+                    ));
+                },
+                |_, _, _, _| {},
             )
+            .absolute()
+            .inset_0(),
+        )
     }
 
     /// Which page is on the desk, the way to the others, and the way to make a new one.
@@ -6069,65 +6067,63 @@ impl NoteApp {
         // The pill's own box, fitted to the pill rather than stretched to the row: the pill is the
         // centred child of a full-width row, so without this its box would be the window's width and
         // the strip the pen refuses would be the whole row (see [`Self::pill_box`]).
-        div()
-            .flex_none()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .px(px(4.0))
-                    .py(px(4.0))
-                    .rounded(theme.radius_lg)
-                    .bg(surface)
-                    .border_1()
-                    .border_color(hairline)
-                    .shadow_sm()
-                    // The page's *previous* sheet, on the side it goes: left of the back arrow.
-                    .child(icon_button(
-                        "page-before",
-                        IconName::BetweenVerticalStart,
-                        "Add a page before this one (stays on this page)",
-                        true,
-                        cx,
-                        |app, cx| app.add_page(true, cx),
-                    ))
-                    .child(icon_button(
-                        "page-prev",
-                        IconName::ChevronLeft,
-                        "Previous page (Left arrow)",
-                        true,
-                        cx,
-                        |app, cx| app.previous_page(cx),
-                    ))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(foreground)
-                            .whitespace_nowrap()
-                            .px_1()
-                            .child(format!("{} / {total}", self.page_index + 1)),
-                    )
-                    .child(icon_button(
-                        "page-next",
-                        IconName::ChevronRight,
-                        "Next page (Right arrow)",
-                        true,
-                        cx,
-                        |app, cx| app.next_page(cx),
-                    ))
-                    // And the *next* sheet, on the side it goes: right of the forward arrow, which is
-                    // the half a hand reaches for when it is adding pages in order.
-                    .child(icon_button(
-                        "page-after",
-                        IconName::BetweenVerticalEnd,
-                        "Add a page after this one",
-                        true,
-                        cx,
-                        |app, cx| app.add_page(false, cx),
-                    )),
-            )
+        div().flex_none().child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px(px(4.0))
+                .py(px(4.0))
+                .rounded(theme.radius_lg)
+                .bg(surface)
+                .border_1()
+                .border_color(hairline)
+                .shadow_sm()
+                // The page's *previous* sheet, on the side it goes: left of the back arrow.
+                .child(icon_button(
+                    "page-before",
+                    IconName::BetweenVerticalStart,
+                    "Add a page before this one (stays on this page)",
+                    true,
+                    cx,
+                    |app, cx| app.add_page(true, cx),
+                ))
+                .child(icon_button(
+                    "page-prev",
+                    IconName::ChevronLeft,
+                    "Previous page (Left arrow)",
+                    true,
+                    cx,
+                    |app, cx| app.previous_page(cx),
+                ))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(foreground)
+                        .whitespace_nowrap()
+                        .px_1()
+                        .child(format!("{} / {total}", self.page_index + 1)),
+                )
+                .child(icon_button(
+                    "page-next",
+                    IconName::ChevronRight,
+                    "Next page (Right arrow)",
+                    true,
+                    cx,
+                    |app, cx| app.next_page(cx),
+                ))
+                // And the *next* sheet, on the side it goes: right of the forward arrow, which is
+                // the half a hand reaches for when it is adding pages in order.
+                .child(icon_button(
+                    "page-after",
+                    IconName::BetweenVerticalEnd,
+                    "Add a page after this one",
+                    true,
+                    cx,
+                    |app, cx| app.add_page(false, cx),
+                )),
+        )
     }
 
     /// The way the sheet is looked at: two steps, the number they are at, and the two fits.

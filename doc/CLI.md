@@ -33,6 +33,11 @@ cheap-note --memory-report --format json <note-folder> [<note-folder> ...]
 No window opens. Every note is opened, measured, closed, and measured again **in one process** —
 two processes would answer a question about the operating system rather than about the app.
 
+Both platforms take the same `--format` flag: `report::Options` parses it before the note folders, so
+`--format json` is one contract on macOS and Windows. The Windows build writes the result through
+`apps/windows/src/platform/console.rs` — a console when the run has one, a file beside the executable
+when it does not.
+
 ### What each column means
 
 | Field | Meaning |
@@ -78,6 +83,11 @@ own seam and hand the same figures to the same report; the contract is what make
 comparable. `cheap-note-bench` still exists on Windows as a thin wrapper, because it used to be the only
 way in and a script may call it.
 
+The Windows release image has no console beside its window, so the app hands the buffered table (or
+JSON) to the same `platform::console` route the memory report uses: a console when it can attach to one,
+and `cheap-note-bench.txt` beside the executable when it cannot. `cheap-note-bench` remains the console
+binary, and a redirected run keeps its stdout.
+
 A page of synthetic strokes is drawn into an offscreen surface — an `NSView` with a Metal layer on macOS,
 a hidden `STATIC` window on Windows. On macOS the frame is **waited for** rather than merely queued:
 `draw` commits and returns, so `settle` is what turns "queued" into "paid". That is the reason the two
@@ -107,12 +117,11 @@ hand-off", and **`frame` is the figure to compare across platforms**, not `prese
 
 The macOS table says so on its own summary line rather than leaving a reader to find out.
 
-The default counts are 0, 29, 316, 1 000 and 8 182 strokes. The first three are the ones the older
-measurements used, and 8 182 is the page the macOS figures in `doc/WINDOWS.md` were taken on — it is in
-the list because the question this benchmark exists for is whether a platform is draw-bound at that
-page size.
-
-
+The default counts are 0, 29, 316, 1 000 and 8 182 strokes, and both platforms default to 30 warm
+frames. The first three counts are the ones the older measurements used, and 8 182 is the page the macOS
+figures in `doc/WINDOWS.md` were taken on — it is in the list because the question this benchmark exists
+for is whether a platform is draw-bound at that page size. `--frames 60` is the longer run §6.4 of that
+document quotes.
 
 ## What a platform has to provide
 
@@ -200,7 +209,7 @@ The benchmark's object is the same shape:
 {
   "command": "bench",
   "platform": "windows",
-  "tool": "Direct2D canvas · 1600×1000 at 1.0x",
+  "tool": "Direct2D canvas · 1280×900 at 1.0x",
   "measured": ["strokes", "first", "warm", "worst", "rebuild", "pan", "present", "frame"],
   "unmeasured": [],
   "columns": ["strokes", "first", "warm", "worst", "rebuild", "pan", "present", "frame"],
@@ -219,12 +228,11 @@ choose a unit per row and a script is not.
 
 ## Where this document and the code part company
 
-Everything above is implemented, and the exit codes, field names and platform table are what the tests
-pin (`crates/note-ui/src/report.rs`, `apps/macos/src/platform/bench.rs`). Two honest limits remain:
+Everything above is implemented on both platforms, and the exit codes, field names and platform table
+are what the tests pin (`crates/note-ui/src/report.rs`, `crates/note-ui/src/memory_report.rs`,
+`apps/macos/src/platform/bench.rs`, `apps/windows/src/platform/bench.rs`,
+`apps/windows/src/platform/report.rs`). Two honest limits remain:
 
-- **The Windows benchmark has not been compiled on this machine.** Its file is `#[cfg(windows)]` and the
-  Windows build needs a GPUI build script that cannot run cross-compiled, so it is syntax-checked here
-  and compiled only on Windows. Its *contract* is the shared one, which is tested.
 - **The two `present` columns measure different things** (see above), so `frame` is the comparable figure.
 - **`surface_bytes` on macOS reports zero in a headless run.** The graphics column is therefore
   *measured* (it is a real reading) rather than declared absent — `unmeasured` is derived from the rows,

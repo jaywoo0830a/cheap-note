@@ -93,6 +93,7 @@ mod note;
 mod outline;
 mod pages;
 mod pdf;
+pub mod report;
 mod pdfium;
 mod pen_gesture;
 mod recent;

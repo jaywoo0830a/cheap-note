@@ -294,6 +294,9 @@ opened twice now costs nothing the second time.
 A headless run renders bitmaps but never presents them, so the `gpu` column reports what the process
 allocated rather than what a compositor pooled. Read it for its direction, not its size.
 
+The commands' full contract — arguments, exit codes, the shape a script can read, and what a new
+platform has to provide — is [`doc/CLI.md`](CLI.md).
+
 
 ## Where this document and the code part company
 

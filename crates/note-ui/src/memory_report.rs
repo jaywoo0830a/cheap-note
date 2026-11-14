@@ -252,28 +252,138 @@ pub fn run(
     stats: &mut dyn crate::platform::SystemStats,
     out: &mut impl Write,
 ) -> i32 {
+    run_in(paths, stats, out, crate::report::Format::Table, "unknown")
+}
+
+/// Runs the report in `format`, writing it to `out`.
+///
+/// `--format table` keeps this command's own table, which reads better for one note's sequence;
+/// `--format json` writes the shared contract, which is what a script reads. Both end at the same
+/// verdict, so the two shapes cannot disagree about whether the run passed.
+///
+/// `platform` is the caller's to name: the view is built for every platform and cannot know which one it
+/// is running on.
+pub fn run_in(
+    paths: &[PathBuf],
+    stats: &mut dyn crate::platform::SystemStats,
+    out: &mut impl Write,
+    format: crate::report::Format,
+    platform: &'static str,
+) -> i32 {
     if paths.is_empty() {
-        let _ = writeln!(out, "usage: cheap-note {FLAG} <note> [<note> ...]");
+        let _ = writeln!(out, "usage: cheap-note {FLAG} [--format table|json] <note> [<note> ...]");
         return 2;
     }
 
     match collect(paths, stats) {
-        Ok(report) => {
-            let _ = write!(out, "{}", report.render());
-            let _ = out.flush();
+        Ok(report) => match format {
+            crate::report::Format::Table => {
+                let _ = write!(out, "{}", report.render());
+                let _ = out.flush();
 
-            if report.is_clean() {
-                0
-            } else {
-                1
+                if report.is_clean() {
+                    0
+                } else {
+                    1
+                }
             }
-        }
+            crate::report::Format::Json => {
+                let contract = to_contract(&report, platform);
+                crate::report::emit(&contract, format, out)
+            }
+        },
         Err(error) => {
             let _ = writeln!(out, "{error}");
             2
         }
     }
 }
+
+/// The report in the shape both measuring commands share.
+///
+/// The table above is this command's own, and stays: it is easier to read for the sequence of a single
+/// note. This is the *contract* form — the same fields, under the same names, that `cheap-note-bench`
+/// produces — and it is what `--format json` writes.
+///
+/// `platform` is passed rather than guessed: the view cannot know which platform it was built for, and a
+/// wrong name in a JSON field is worse than none.
+pub fn to_contract(report: &Report, platform: &'static str) -> crate::report::Report {
+    use crate::report::{Command, Report as Contract, Row, Value, Verdict};
+
+    let mut contract = Contract::new(Command::MemoryReport, platform, "process resident memory")
+        .columns(&["rss", "delta", "cache", "gpu", "pages"]);
+
+    let mut previous: Option<u64> = None;
+
+    for step in &report.steps {
+        let delta = previous.map(|before| step.rss_bytes as i64 - before as i64);
+        previous = Some(step.rss_bytes);
+
+        // `delta` is absent on the first row rather than zero: there is nothing above it to be measured
+        // against, and a zero would read as "did not change".
+        let delta = match delta {
+            Some(bytes) => Value::Signed(bytes),
+            None => Value::Absent("the first row has nothing above it"),
+        };
+
+        let gpu = match step.surface_bytes {
+            Some(bytes) => Value::Count(bytes),
+            None => Value::Absent("no-gpu-ledger"),
+        };
+
+        contract.push(Row::new(
+            step.label.clone(),
+            vec![
+                Value::Count(step.rss_bytes),
+                delta,
+                Value::Count(step.cache_bytes),
+                gpu,
+                Value::Count(step.pages as u64),
+            ],
+        ));
+    }
+
+    let peak = report.steps.iter().map(|step| step.rss_bytes).max();
+    if let Some(peak) = peak {
+        contract.summarise("peak", Value::Count(peak));
+    }
+    if let Some(final_rss) = report.final_step().map(|step| step.rss_bytes) {
+        contract.summarise("final", Value::Count(final_rss));
+    }
+    if let Some(growth) = report.growth_bytes() {
+        contract.summarise("growth", Value::Signed(growth));
+    }
+    contract.summarise("tolerance", Value::Count(LEAK_TOLERANCE_BYTES));
+
+    // Whether the GPU column was measured is a fact about the *rows*, not about the platform: macOS
+    // reports the ledger and Windows does not, but a headless run may still read zero here. Declaring a
+    // column unmeasured while its cells hold numbers would be a claim the table contradicts.
+    if report.steps.iter().all(|step| step.surface_bytes.is_none()) {
+        contract = contract.unmeasured("gpu", "no graphics ledger was reported");
+    }
+
+    let verdict = match report.growth_bytes() {
+        Some(_) if report.is_clean() => Verdict::Ok,
+        Some(_) => Verdict::Failed,
+        // An empty report measured nothing, and saying so is not the same as passing.
+        None => Verdict::Skipped,
+    };
+
+    let note = match verdict {
+        Verdict::Ok => Some(format!(
+            "came back within {} MiB",
+            LEAK_TOLERANCE_BYTES / (1024 * 1024)
+        )),
+        Verdict::Failed => Some(format!(
+            "grew more than the {} MiB allowance",
+            LEAK_TOLERANCE_BYTES / (1024 * 1024)
+        )),
+        Verdict::Skipped => Some(String::from("no rows were measured")),
+    };
+
+    contract.conclude(verdict, note)
+}
+
 
 /// Opens and closes every note in turn, measuring between the operations.
 ///

@@ -38,13 +38,36 @@ fn main() {
     // Handled here rather than inside the view because the report needs the platform's own counters and
     // no window at all — see `note_ui::memory_report`, which owns the arithmetic and the verdict.
     //
+    // `--format` is read here rather than in the view for the same reason: only this file knows which
+    // platform it is, and the contract's JSON names it.
+    //
     // A build with no counters can still run: the report says so and exits `1`, which is the answer a CI
     // job should see rather than a pass it did not earn.
-    if let Some(paths) = note_ui::memory_report::requested() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.first().map(String::as_str) == Some(note_ui::memory_report::FLAG) {
+        let options = match note_ui::report::Options::parse(&args[1..]) {
+            Ok(options) => options,
+            Err(error) => {
+                eprintln!("cheap-note: {error}");
+                std::process::exit(2);
+            }
+        };
+
         let mut stats = platform::vitals::ProcessStats::install();
 
         let code = match stats.as_mut() {
-            Some(stats) => note_ui::memory_report::run(&paths, stats, &mut std::io::stdout()),
+            Some(stats) => note_ui::memory_report::run_in(
+                &options
+                    .rest
+                    .iter()
+                    .map(std::path::PathBuf::from)
+                    .collect::<Vec<_>>(),
+                stats,
+                &mut std::io::stdout(),
+                options.format,
+                "macos",
+            ),
             None => {
                 println!("this build cannot measure memory: no process counters");
                 1

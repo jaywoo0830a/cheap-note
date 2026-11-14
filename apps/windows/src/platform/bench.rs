@@ -144,7 +144,22 @@ fn print_usage() {
 pub fn run() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    let options = match Options::parse(&args) {
+    // `--format` and `--help` are the shared contract's, so this command and `--memory-report` agree on
+    // what those flags mean. Anything else is this benchmark's own.
+    let shared = match note_ui::report::Options::parse(&args) {
+        Ok(shared) => shared,
+        Err(error) => {
+            eprintln!("cheap-note-bench: {error}");
+            return 2;
+        }
+    };
+
+    if shared.help {
+        print_usage();
+        return 0;
+    }
+
+    let options = match Options::parse(&shared.rest) {
         Ok(Some(options)) => options,
         Ok(None) => return 0,
         Err(error) => {
@@ -154,8 +169,8 @@ pub fn run() -> i32 {
         }
     };
 
-    match measure_all(&options) {
-        Ok(()) => 0,
+    match measure_all(&options, shared.format) {
+        Ok(code) => code,
         Err(error) => {
             eprintln!("cheap-note-bench: {error}");
             2
@@ -175,9 +190,9 @@ struct Row {
     present: Duration,
 }
 
-fn measure_all(options: &Options) -> Result<(), String> {
+fn measure_all(options: &Options, format: note_ui::report::Format) -> Result<i32, String> {
     let hwnd = hidden_window()?;
-    let result = measure_on(hwnd, options);
+    let result = measure_on(hwnd, options, format);
 
     unsafe {
         let _ = DestroyWindow(hwnd);
@@ -186,35 +201,61 @@ fn measure_all(options: &Options) -> Result<(), String> {
     result
 }
 
-fn measure_on(hwnd: HWND, options: &Options) -> Result<(), String> {
+fn measure_on(
+    hwnd: HWND,
+    options: &Options,
+    format: note_ui::report::Format,
+) -> Result<i32, String> {
+    use note_ui::report::{Command, Format, Report, Row, Value, Verdict};
+
     let mut device = Device::new(hwnd)
         .map_err(|error| format!("this machine has no Direct3D 11 canvas: {error:#}"))?;
 
-    println!(
-        "cheap-note bench · Windows canvas · {}×{} at 1.0x · {} warm frames",
-        WINDOW.0, WINDOW.1, options.frames
-    );
-    println!(
-        "{:>7}  {:>10}  {:>10}  {:>10}  {:>10}  {:>9}  {:>9}  {:>9}",
-        "strokes", "first", "warm", "worst", "rebuild", "pan", "present", "frame"
-    );
+    let mut rows = Vec::new();
 
     for &strokes in &options.strokes {
-        let row = measure_page(&mut device, strokes, options.frames)?;
-        println!(
-            "{:>7}  {:>10}  {:>10}  {:>10}  {:>10}  {:>9}  {:>9}  {:>9}",
-            row.strokes,
-            millis(row.first),
-            millis(row.warm),
-            millis(row.worst),
-            millis(row.rebuild),
-            millis(row.pan),
-            millis(row.present),
-            millis(row.warm + row.present),
-        );
+        rows.push(measure_page(&mut device, strokes, options.frames)?);
     }
 
-    Ok(())
+    let mut report = Report::new(
+        Command::Bench,
+        "windows",
+        format!("Direct2D canvas · {}×{} at 1.0x", WINDOW.0, WINDOW.1),
+    )
+    .columns(&[
+        "strokes", "first", "warm", "worst", "rebuild", "pan", "present", "frame",
+    ]);
+
+    for row in &rows {
+        report.push(Row::new(
+            format!("{} strokes", row.strokes),
+            vec![
+                Value::Count(row.strokes as u64),
+                Value::Millis(ms(row.first)),
+                Value::Millis(ms(row.warm)),
+                Value::Millis(ms(row.worst)),
+                Value::Millis(ms(row.rebuild)),
+                Value::Millis(ms(row.pan)),
+                Value::Millis(ms(row.present)),
+                // The figure worth comparing across platforms: one frame while the page is being panned
+                // or written on. See the module docs.
+                Value::Millis(ms(row.warm + row.present)),
+            ],
+        ));
+    }
+
+    let note = match format {
+        Format::Table => Some(format!("{} warm frames per page", options.frames)),
+        Format::Json => None,
+    };
+
+    let report = report.conclude(Verdict::Ok, note);
+
+    Ok(note_ui::report::emit(
+        &report,
+        format,
+        &mut std::io::stdout(),
+    ))
 }
 
 /// Measures one page: its first frame, its settled frames, a rebuild and a pan.
@@ -387,6 +428,14 @@ fn millis(duration: Duration) -> String {
     } else {
         format!("{value:.3} ms")
     }
+}
+
+/// The same figure as a plain number of milliseconds, for the contract.
+///
+/// One unit everywhere is what lets a script compare the two commands' numbers without knowing which
+/// table it came from; the `µs` above is a courtesy for a person reading a row.
+fn ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
 }
 
 #[cfg(test)]

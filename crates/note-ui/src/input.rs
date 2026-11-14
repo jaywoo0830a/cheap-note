@@ -262,20 +262,31 @@ pub struct PenInbox {
 }
 
 impl PenInbox {
-    /// Takes everything queued so far, leaving the queue empty.
+    /// Takes everything queued so far into a batch the caller keeps between reads.
     ///
-    /// `mem::take` moves the existing allocation out and leaves an empty `Vec` behind, so the
-    /// steady state allocates nothing on either side.
-    pub fn take(&self) -> PenBatch {
+    /// The two `Vec`s are swapped rather than moved: the batch hands the queue the buffer it
+    /// emptied last time, so the queue's next `push` grows a buffer that already has room. A
+    /// caller that made a fresh `PenBatch` per read would allocate on every pen batch — the
+    /// steady state this exists to avoid — which is why the pump reuses one.
+    pub fn take_into(&self, batch: &mut PenBatch) {
         let mut queue = self.lock();
-        let readings = std::mem::take(&mut queue.readings);
-        let waited = queue
+        batch.readings.clear();
+        std::mem::swap(&mut batch.readings, &mut queue.readings);
+        batch.waited = queue
             .newest_at
             .take()
             .map(|newest| Instant::now().saturating_duration_since(newest))
             .unwrap_or_default();
+    }
 
-        PenBatch { readings, waited }
+    /// Takes everything queued so far, leaving the queue empty.
+    ///
+    /// A convenience for callers that do not have a batch to reuse; the pen pump uses
+    /// [`Self::take_into`] so that its steady state allocates nothing.
+    pub fn take(&self) -> PenBatch {
+        let mut batch = PenBatch::default();
+        self.take_into(&mut batch);
+        batch
     }
 
     /// Appends a batch. Called by the pen thread, and by nothing else.

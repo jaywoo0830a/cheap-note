@@ -39,6 +39,7 @@ use crate::cursor::{nib_radius_for_width, PenCursor};
 use crate::home::Home;
 use crate::ink::{paper_of_drawn, InkTransform, Notes, Stroke, Tool, HIGHLIGHTER_WIDTH};
 use crate::ink_layer::{Canvas, Ink, Page, Rect};
+use crate::input::PenBatch;
 use crate::input::PenInbox;
 use crate::input::Reading;
 use crate::keys;
@@ -1534,10 +1535,13 @@ impl NoteApp {
     fn start_pen_pump(&mut self, cx: &mut Context<Self>) {
         let inbox: Arc<PenInbox> = self.pen.inbox();
 
+        // Reused across reads: the batch hands its buffer back to the queue, so a steady stream of
+        // readings does not allocate a `Vec` per batch.
+        let mut batch = PenBatch::default();
+
         cx.spawn(async move |this, cx| loop {
             inbox.wait().await;
-
-            let batch = inbox.take();
+            inbox.take_into(&mut batch);
 
             let alive = this.update(cx, |app, cx| {
                 // The gap between this wake and the last, recorded against the interval a

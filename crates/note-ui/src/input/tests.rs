@@ -72,6 +72,22 @@ fn a_batch_reports_how_long_it_waited() {
     );
 }
 
+/// A reused batch is cleared before it takes the next one, and its buffer comes back with it.
+#[test]
+fn a_reused_batch_does_not_keep_the_previous_readings() {
+    let inbox = PenInbox::default();
+    let mut batch = PenBatch::default();
+
+    inbox.push(&[reading(), reading()]);
+    inbox.take_into(&mut batch);
+    assert_eq!(batch.readings.len(), 2);
+
+    inbox.push(&[reading()]);
+    inbox.take_into(&mut batch);
+    assert_eq!(batch.readings.len(), 1, "the old batch was cleared");
+    assert!(inbox.take().readings.is_empty(), "the queue is drained");
+}
+
 /// The wait is measured from the *newest* reading: that is the one whose ink the user is waiting
 /// to see, and the older readings of a batch are already behind it.
 #[test]

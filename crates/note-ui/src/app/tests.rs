@@ -414,30 +414,28 @@ fn a_page_added_before_this_one_leaves_the_reader_where_they_were() {
 ///
 /// The row is full-width and the pills float in it, so the desk beside them is still desk: a reader
 /// may be writing on paper behind the gap between the two pills, and refusing the whole row would take
-/// that away. This pins down both halves — the strip each pill covers (plus the slack a missed press
-/// deserves) and the line the strips begin at.
+/// that away. Each strip is the pill's own measured box grown by `FOOT_SLACK`.
 #[test]
 fn the_foot_refuses_the_pills_and_not_the_row() {
-    // A 1000-wide desk, a 200-wide page pill centred in it, and a 300-wide zoom pill at the window's
-    // right margin: 1000 - 12 - 300 .. 1000 - 12, plus the slack either side.
-    let strips = FootStrips::of(1000.0, 1000.0, Some(200.0), Some(300.0));
+    // The page pill measured at 400..600 and the zoom pill at 700..900, with 12 px of slack either side.
+    let strips = FootPills::default()
+        .measured(FootPlace::Page, 400.0, 600.0, 930.0)
+        .measured(FootPlace::Zoom, 700.0, 900.0, 910.0)
+        .strips();
 
     let held = |x: f32, y: f32| strips.held((x, y), 900.0);
 
     assert!(held(500.0, 950.0), "the middle of the page pill");
     assert!(held(400.0, 950.0), "its left edge");
-    assert!(held(388.0, 950.0), "and the slack beside it, a press that missed");
+    assert!(
+        held(388.0, 950.0),
+        "and the slack beside it, a press that missed"
+    );
     assert!(!held(300.0, 950.0), "but not the desk further out");
 
-    assert!(held(826.0, 950.0), "the left edge of the zoom pill");
-    assert!(
-        held(988.0, 950.0),
-        "up to the window's own margin, and not past it"
-    );
-    assert!(
-        !held(650.0, 950.0),
-        "and the gap between the two pills is page"
-    );
+    assert!(held(712.0, 950.0), "the slack before the zoom pill");
+    assert!(held(900.0, 950.0), "its right edge");
+    assert!(!held(930.0, 950.0), "and not past the slack after it");
 
     assert!(
         !held(500.0, 899.0),
@@ -445,39 +443,32 @@ fn the_foot_refuses_the_pills_and_not_the_row() {
     );
 
     // An unmeasured pill is no strip at all: the pen is refused nowhere it cannot see a pill.
-    let none = FootStrips::of(1000.0, 1000.0, None, None);
-    assert!(!none.held((500.0, 950.0), 900.0));
+    assert!(!FootPills::default().strips().held((500.0, 950.0), 900.0));
 }
 
-/// The measurements the strips come from: each pill reports its width and its top, and the tallest top
-/// is the line — because a reading over either pill is a press.
+/// Each pill's measured box becomes its strip, and the taller pill's top is the line — because a
+/// reading over either pill is a press.
 #[test]
 fn the_foot_takes_the_tallest_pill_as_its_line() {
     let measured = FootPills::default()
-        .row_width(1000.0)
-        .measured(FootPlace::Page, 200.0, 930.0)
-        .measured(FootPlace::Zoom, 300.0, 910.0);
+        .measured(FootPlace::Page, 400.0, 600.0, 930.0)
+        .measured(FootPlace::Zoom, 700.0, 900.0, 910.0);
 
-    assert_eq!(measured.row, Some(1000.0), "the desk the pills are placed along");
-    assert_eq!(measured.page, Some(200.0), "the page pill's own width");
-    assert_eq!(measured.zoom, Some(300.0));
+    assert_eq!(measured.page, Some((400.0, 600.0)), "the page pill's box");
+    assert_eq!(measured.zoom, Some((700.0, 900.0)), "and the zoom pill's");
     assert_eq!(
         measured.top,
         Some(910.0),
         "the taller pill is where the row really begins"
     );
 
-    let strips = measured.strips(1000.0).expect("a measured row has strips");
+    let strips = measured.strips();
     assert_eq!(
         strips.page,
         Some((388.0, 612.0)),
-        "the page pill's strip is a few hundred pixels wide, not the row"
+        "the strip is the box grown by the slack"
     );
-
-    assert!(
-        FootPills::default().strips(1000.0).is_none(),
-        "and a row nobody has measured refuses nothing"
-    );
+    assert_eq!(strips.zoom, Some((688.0, 912.0)));
 }
 
 /// The system pointer is the cursor over the bar and over the desk's pills; the ghost is the pen's
@@ -490,18 +481,21 @@ fn the_foot_takes_the_tallest_pill_as_its_line() {
 /// crossed. So this is asked per reading, and this test is the rule it asks.
 #[test]
 fn the_arrow_is_the_cursor_over_the_bar_and_the_pills() {
-    // A bar 100 tall and a foot whose pills begin at 900: a 1000-wide desk, a 200-wide page pill in its
-    // middle and a 300-wide zoom pill at the window's right margin.
+    // A bar 100 tall, and a foot whose pills begin at 900: the page pill at 400..600 and the zoom pill
+    // at 700..900.
     let (bar, foot) = (100.0, 900.0);
-    let strips = FootStrips::of(1000.0, 1000.0, Some(200.0), Some(300.0));
-    let shows = |x: f32, y: f32| pen_cursor_shows((x, y), bar, foot, Some(strips));
+    let strips = FootPills::default()
+        .measured(FootPlace::Page, 400.0, 600.0, 930.0)
+        .measured(FootPlace::Zoom, 700.0, 900.0, 910.0)
+        .strips();
+    let shows = |x: f32, y: f32| pen_cursor_shows((x, y), bar, foot, strips);
 
     assert!(!shows(500.0, 50.0), "on the bar, the arrow is the cursor");
     assert!(!shows(500.0, bar), "and on the bar's own last pixel");
     assert!(shows(500.0, bar + 1.0), "one pixel below it is page again");
 
     assert!(!shows(500.0, 950.0), "over the page pill, the arrow");
-    assert!(!shows(900.0, 950.0), "over the zoom pill too");
+    assert!(!shows(800.0, 950.0), "over the zoom pill too");
     assert!(shows(650.0, 950.0), "and the desk between them is page");
 }
 
@@ -509,21 +503,71 @@ fn the_arrow_is_the_cursor_over_the_bar_and_the_pills() {
 /// nothing.
 #[test]
 fn the_two_edges_answer_on_their_own() {
+    let none = FootStrips::default();
+
     assert!(
-        pen_cursor_shows((500.0, 500.0), 0.0, 0.0, None),
+        pen_cursor_shows((500.0, 500.0), 0.0, 0.0, none),
         "no bar and no pills leaves the page the ghost's"
     );
     assert!(
-        pen_cursor_shows((500.0, 990.0), 0.0, 0.0, None),
+        pen_cursor_shows((500.0, 990.0), 0.0, 900.0, none),
         "and an unmeasured foot refuses nothing"
     );
     assert!(
-        !pen_cursor_shows((500.0, 0.0), 0.0, 900.0, Some(FootStrips::of(1000.0, 1000.0, Some(200.0), None))),
+        !pen_cursor_shows((500.0, 0.0), 0.0, 900.0, none),
         "the window's top pixel is still the bar's line, which a hidden bar puts at zero"
     );
 }
 
+/// A pill measured as an empty box covers only its own point and the slack around it — never the desk.
+///
+/// This is the failure that made the pen write on its own pills: a zero-size probe measured every pill at
+/// nothing, and an answer derived from a width then came out as the whole row. Reading the box itself
+/// means an empty measurement is an empty strip, which is the safe way round.
+#[test]
+fn a_pill_laid_out_at_no_width_covers_only_its_own_point() {
+    let strips = FootPills::default()
+        .measured(FootPlace::Page, 626.0, 626.0, 752.0)
+        .measured(FootPlace::Zoom, 1013.0, 1013.0, 752.0)
+        .strips();
+
+    assert_eq!(
+        (strips.page, strips.zoom),
+        (Some((614.0, 638.0)), Some((1001.0, 1025.0))),
+        "an unmeasured pill is a point grown by the slack, not a strip across the desk"
+    );
+    assert!(
+        !strips.held((500.0, 950.0), 752.0),
+        "so the desk beside it is still page"
+    );
+}
+
+/// A probe's measurement has to *land*, one pill after the other.
+///
+/// This is the bug the strips had on the first day: `row_width` answered a new value rather than mutating
+/// the receiver, the probe dropped the answer, and so `row` stayed `None` and no strip was ever derived —
+/// the pen wrote on its own pills and the ghost drew its mark over them, with no error anywhere. The
+/// builder is `#[must_use]` so a dropped answer is a warning rather than silence, and each probe now
+/// records the pill it measured rather than a piece of a geometry to be reassembled.
+#[test]
+fn the_two_pills_measure_themselves_one_after_the_other() {
+    let mut measured = FootPills::default();
+
+    measured = measured.measured(FootPlace::Page, 400.0, 600.0, 930.0);
+    assert!(
+        measured.strips().page.is_some(),
+        "one pill is enough for a strip"
+    );
+
+    measured = measured.measured(FootPlace::Zoom, 700.0, 900.0, 910.0);
+
+    let strips = measured.strips();
+    assert!(strips.page.is_some(), "the page pill's strip");
+    assert!(strips.zoom.is_some(), "and the zoom pill's");
+}
+
 /// A page is written out again when an append cannot say what happened to it.
+///
 /// Three cases, and the second is the one the app cannot see by counting: a page that has only grown is a
 /// longer version of what the note holds (an append says it); a page that has *lost* strokes is not; and a
 /// page whose strokes have been **moved** is not either, because a lasso drag changes every point it holds

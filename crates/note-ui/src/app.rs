@@ -556,70 +556,67 @@ impl Sheet {
     }
 }
 
-/// What the foot of the window measured last frame: how wide the row was, how wide each pill is, and
-/// the line the row begins at.
-///
-/// Measurements rather than answers, because the two are not the same thing: the row is full-width and
-/// the pills float inside it, so what the pen must refuse is the strip each pill *covers* — which
-/// [`FootStrips`] works out from these, and which changes when a pill changes size (a note with ten
-/// thousand pages has a wider number).
+/// Where the interface at the window's edges was measured last frame: the bar's last row, and the two
+/// strips of the desk's row at the foot.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct FootPills {
-    /// The desk's own width: the window's less the row's margins, and what the centred pill's strip is
-    /// placed around. It comes from the sheet rather than from a probe, because the row's own box is the
-    /// window's and the page pill inside it is only as wide as its buttons.
-    row: Option<f32>,
-    /// How wide the page pill came out.
-    page: Option<f32>,
-    /// How wide the zoom pill came out.
-    zoom: Option<f32>,
-    /// The line the pills begin at, in window logical pixels.
+    /// The page pill's `x` bounds, in window logical pixels.
+    page: Option<(f32, f32)>,
+    /// The zoom pill's `x` bounds, in window logical pixels.
+    zoom: Option<(f32, f32)>,
+    /// The line the taller of the two begins at, in window logical pixels: a reading below it and over a
+    /// pill is a press rather than ink.
     top: Option<f32>,
 }
 
 impl FootPills {
-    /// Takes one pill's measurement: its own width, the width of the row it sits in, and its top edge.
+    /// Takes one pill's own box, as the layout drew it: `x` bounds, and its top edge.
     ///
-    /// The row's width is only ever needed for the *centred* pill: its strip is placed around the
-    /// row's middle, and the pill is a few hundred pixels wide where the row is the window's. The
-    /// tallest pill's top is the line, because a reading over either pill is a press: the page pill is
+    /// Nothing is derived from these — they are where the pill *is*, so the strip the pen refuses is the
+    /// box itself plus a finger's worth of slack ([`widened`]) rather than a place worked out again from a
+    /// width and a margin. Getting the pill's position from its width was the bug: the centre pill is
+    /// centred on the desk and the zoom pill hangs off a margin, and a second derivation of the same
+    /// geometry is a second thing that can be wrong.
+    ///
+    /// The *taller* pill's top is the line, because a reading over either one is a press: the page pill is
     /// a line of buttons and the zoom pill a row of them, and the row aligns them on their centres.
-    fn measured(mut self, place: FootPlace, width: f32, top: f32) -> Self {
+    #[must_use]
+    fn measured(mut self, place: FootPlace, left: f32, right: f32, top: f32) -> Self {
+        match place {
+            FootPlace::Page => self.page = Some((left, right)),
+            FootPlace::Zoom => self.zoom = Some((left, right)),
+        }
+
         let tallest = self.top.unwrap_or(f32::INFINITY);
         if top < tallest {
             self.top = Some(top);
         }
 
-        match place {
-            FootPlace::Page => self.page = Some(width),
-            FootPlace::Zoom => self.zoom = Some(width),
+        self
+    }
+
+    /// The strips this says the pen refuses, with each pill grown by [`FOOT_SLACK`].
+    fn strips(&self) -> FootStrips {
+        FootStrips {
+            page: self.page.map(widened),
+            zoom: self.zoom.map(widened),
         }
-
-        self
-    }
-
-    /// The row's own width, when the sheet has said it.
-    fn row_width(mut self, width: f32) -> Self {
-        self.row = Some(width);
-        self
-    }
-
-    /// The strips this says the pen refuses, if the row has been measured at all.
-    ///
-    /// `window` is the window's own width, which the zoom pill's strip hangs from: it is placed against
-    /// the window's right margin rather than the row's.
-    fn strips(&self, window: f32) -> Option<FootStrips> {
-        Some(FootStrips::of(self.row?, window, self.page, self.zoom))
     }
 }
 
 /// Which pill of the desk's row a measurement is of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FootPlace {
-    /// The page pill: centred by the row's own flow, and as wide as the row.
+    /// The page pill: centred by the row's own flow.
     Page,
     /// The zoom pill: out of the flow, against the window's right margin.
     Zoom,
+}
+
+/// A pill's `x` bounds grown by [`FOOT_SLACK`]: a nib that lands a millimetre beside a button is a press
+/// that missed rather than a line nobody meant to draw.
+fn widened((left, right): (f32, f32)) -> (f32, f32) {
+    (left - FOOT_SLACK, right + FOOT_SLACK)
 }
 
 /// The strips at the window's foot that a reading is refused in, as `x` bounds in window logical pixels
@@ -627,45 +624,16 @@ enum FootPlace {
 ///
 /// A *strip*, not the whole row: the row is full-width and the pills float in it, so the desk beside
 /// them is still desk, and refusing every reading between the row's line and the window's bottom edge
-/// would stop a reader writing on the paper behind the gap between the two pills. Each strip is
-/// `BAR_MARGIN` wide of the pill itself plus a finger's worth of slack, because a nib that lands *just*
-/// beside a button is a press that missed rather than a line nobody meant to draw.
+/// would stop a reader writing on the paper behind the gap between the two pills.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct FootStrips {
-    /// The page pill's strip: its centre is the window's centre, and it grows both ways from there.
+    /// The page pill's strip.
     page: Option<(f32, f32)>,
-    /// The zoom pill's strip: it hangs from the window's right margin.
+    /// The zoom pill's strip.
     zoom: Option<(f32, f32)>,
 }
 
 impl FootStrips {
-    /// The two strips, given the width of the desk the pills are placed along and of the window itself.
-    ///
-    /// The page pill is centred in the *desk* and the zoom pill hangs from the *window's* right margin
-    /// (`BAR_MARGIN` inside the window's edge, inside the row's own margin) — which is why the two are
-    /// told apart. Either strip is `None` while its pill has not been measured, and a pill wider than
-    /// what it is placed in is clamped: a strip outside the window is a strip the pen cannot land in.
-    fn of(row: f32, window: f32, page: Option<f32>, zoom: Option<f32>) -> Self {
-        let inside = |x: f32, width: f32| x.clamp(0.0, width.max(0.0));
-        let middle = row / 2.0;
-        let slack = FOOT_SLACK;
-
-        FootStrips {
-            page: page.filter(|w| *w > 0.0).map(|w| {
-                (
-                    inside(middle - w / 2.0 - slack, window),
-                    inside(middle + w / 2.0 + slack, window),
-                )
-            }),
-            zoom: zoom.filter(|w| *w > 0.0).map(|w| {
-                (
-                    inside(window - BAR_MARGIN - w - slack, window),
-                    inside(window - BAR_MARGIN + slack, window),
-                )
-            }),
-        }
-    }
-
     /// Whether a point in window logical pixels is over one of the pills.
     ///
     /// `foot` is the line the pills begin at ([`NoteApp::foot_edge`]): above it is page whatever the x
@@ -2060,35 +2028,31 @@ impl NoteApp {
         // and a reader may well be writing on the paper behind the gap between the two. Which readings
         // are refused is decided here, before the model sees them (see [`Self::pills`] and
         // [`FootStrips`]).
-        let strips = self.pills.get().strips(self.sheet.window.0);
-        let kept: Cow<[Reading]> = match strips {
-            Some(strips) => {
-                let foot = self.foot_edge();
-                let scale = if self.scale.is_finite() && self.scale > 0.0 {
-                    self.scale
-                } else {
-                    1.0
-                };
+        let strips = self.pills.get().strips();
+        let foot = self.foot_edge();
+        let scale = if self.scale.is_finite() && self.scale > 0.0 {
+            self.scale
+        } else {
+            1.0
+        };
 
-                let refused = |sample: &Reading| {
-                    strips.held((sample.pixel.x / scale, sample.pixel.y / scale), foot)
-                };
+        let refused = |sample: &Reading| {
+            strips.held((sample.pixel.x / scale, sample.pixel.y / scale), foot)
+        };
 
-                // The common case is a batch that is all page, and it is the hot path: nothing is
-                // allocated for it, and only a batch with a reading on a pill is copied.
-                if samples.iter().any(refused) {
-                    Cow::Owned(
-                        samples
-                            .iter()
-                            .filter(|sample| !refused(sample))
-                            .copied()
-                            .collect(),
-                    )
-                } else {
-                    Cow::Borrowed(samples)
-                }
-            }
-            None => Cow::Borrowed(samples),
+        // The common case is a batch that is all page, and it is the hot path: nothing is allocated for
+        // it, and only a batch with a reading on a pill is copied. An unmeasured pill is no strip, so a
+        // pen reading before the first frame goes through as it always did.
+        let kept: Cow<[Reading]> = if samples.iter().any(refused) {
+            Cow::Owned(
+                samples
+                    .iter()
+                    .filter(|sample| !refused(sample))
+                    .copied()
+                    .collect(),
+            )
+        } else {
+            Cow::Borrowed(samples)
         };
 
         if kept.is_empty() {
@@ -3088,13 +3052,13 @@ impl NoteApp {
         // are controls the pen presses, so the arrow is the cursor there — beside them is desk, and the
         // ghost is the pen's there as it is everywhere else on the page. The rule itself is
         // [`pen_cursor_shows`], which is what a test can ask without a window.
-        let strips = self.pills.get().strips(self.sheet.window.0);
+        let strip = self.pills.get().strips();
         let foot = self.foot_edge();
         let bar = self.bar_edge();
 
         self.pen_cursor().is_some_and(|cursor| {
             let at = cursor.position();
-            pen_cursor_shows((at[0], at[1]), bar, foot, strips)
+            pen_cursor_shows((at[0], at[1]), bar, foot, strip)
         })
     }
 
@@ -3128,14 +3092,11 @@ impl NoteApp {
             // in it, so the desk beside them is page, and the ghost (and the arrow) belong there. In
             // physical pixels like the lines above.
             pill_strips: {
-                let strips = self.pills.get().strips(self.sheet.window.0);
+                let strips = self.pills.get().strips();
                 let at = |strip: Option<(f32, f32)>| {
                     strip.map(|(left, right)| (left * self.scale, right * self.scale))
                 };
-                match strips {
-                    Some(strips) => (at(strips.page), at(strips.zoom)),
-                    None => (None, None),
-                }
+                (at(strips.page), at(strips.zoom))
             },
             suppressed: self.ghost_suppressed(),
         });
@@ -6013,18 +5974,12 @@ impl NoteApp {
     }
 
     /// The desk's own row: the page in the middle, the zoom at the other edge.
+    ///
+    /// Each pill measures itself ([`Self::pill_box`]), so nothing here has to know the window's width or
+    /// where a pill will land: the layout says where they are, once per frame, and that is the line the
+    /// pen is judged by. A frame that is not drawn leaves the last measurement standing, which is the
+    /// frame it was — the pills do not move on their own.
     fn bottom_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // The desk's own width, which is where the centred pill's strip is placed around. It is the
-        // window's, less the row's own margins — the row is `w_full` with `BAR_MARGIN` of padding either
-        // side — and asking the sheet is exact where a canvas callback would only be in time for the
-        // next frame.
-        let row_width = (self.sheet.window.0 - 2.0 * BAR_MARGIN).max(0.0);
-
-        // This frame's measurements start from the row's width and nothing else: a pill that has gone
-        // — a screen in front of the desk, a frame where the row was not drawn — must not leave a strip
-        // behind that the pen is refused in.
-        self.pills.set(FootPills::default().row_width(row_width));
-
         // Full width with a margin's worth of padding, for the reason the bar gives: the width has to
         // come from somewhere, and it cannot come from two insets on the same element.
         let row = div()
@@ -6038,7 +5993,7 @@ impl NoteApp {
             .items_center()
             .justify_center()
             // The page pill is centred by *this* row, and it is the one the pen must not write on.
-            .child(self.pill_box(FootPlace::Page, self.page_pill(cx), row_width))
+            .child(self.pill_box(FootPlace::Page, self.page_pill(cx)))
             // Zoom stays when the bar is hidden, unlike the controls up there: the switch that brings the
             // bar back lives *in* the bar, so a sheet zoomed into a corner with the bar away would have no
             // way out. It is reading rather than writing, which is what the page pill is too.
@@ -6048,7 +6003,7 @@ impl NoteApp {
             // (see [VIEW.md](../../doc/VIEW.md), §4).
             .child(
                 div()
-                    .child(self.pill_box(FootPlace::Zoom, self.zoom_pill(cx), row_width))
+                    .child(self.pill_box(FootPlace::Zoom, self.zoom_pill(cx)))
                     .absolute()
                     .right(px(BAR_MARGIN))
                     .bottom_0(),
@@ -6061,46 +6016,35 @@ impl NoteApp {
         row
     }
 
-    /// One pill of the desk's row, with the zero-height probes that say where it is and how wide it is.
+    /// One pill of the desk's row, with the probe that says where it is.
     ///
-    /// The probes are the bar's own measurement turned around: the bar reports its bottom edge as a
-    /// *line* because a reading above it is a press; a pill reports its top edge and its own width,
-    /// because a reading is a press only over the strip the pill covers (see [`FootPills`]). They paint
-    /// nothing, take no pointer, and are out of the layout.
-    ///
-    /// `row` is the width of the desk along which the pills are placed, and only the centred pill needs
-    /// it: its strip is placed around the row's middle. The zoom pill's strip hangs from the window's
-    /// right margin instead, so its x bounds follow from the width alone.
-    fn pill_box(
-        &self,
-        place: FootPlace,
-        pill: impl IntoElement,
-        row: f32,
-    ) -> impl IntoElement {
+    /// The probe is stretched over the pill it describes and reads the pill's **own box** — `x` bounds and
+    /// top edge — which is the whole of what the pen needs: a strip is that box grown by
+    /// [`FOOT_SLACK`], and nothing is worked out again from a width or a margin. A zero-height probe
+    /// beside the pill is what made this measure nothing at all on the first attempt (a box with no
+    /// content and no width is laid out at zero), so the probe is the pill's own size.
+    fn pill_box(&self, place: FootPlace, pill: impl IntoElement) -> impl IntoElement {
         let pills = Rc::clone(&self.pills);
 
         div()
             .relative()
+            .child(pill)
             .child(
                 canvas(
                     move |bounds, _, _| {
-                        let width = f32::from(bounds.size.width);
-                        let top = f32::from(bounds.top());
-
-                        // Each frame's measurements are its own: the row is rebuilt every frame, and a
-                        // measurement kept from a frame ago would describe a row that has gone. The
-                        // widths survive inside the measurement because both pills are in this row.
                         let measured = pills.get();
-                        measured.row_width(row);
-                        pills.set(measured.measured(place, width, top));
+                        pills.set(measured.measured(
+                            place,
+                            f32::from(bounds.left()),
+                            f32::from(bounds.right()),
+                            f32::from(bounds.top()),
+                        ));
                     },
                     |_, _, _, _| {},
                 )
                 .absolute()
-                .top_0()
-                .h_0(),
+                .inset_0(),
             )
-            .child(pill)
     }
 
     /// Which page is on the desk, the way to the others, and the way to make a new one.
@@ -7081,17 +7025,12 @@ fn bar_line(shown: bool, measured: Option<f32>) -> f32 {
 /// * and nowhere else, where the page is and the ghost is the pen's own mark.
 ///
 /// A bar that is hidden has no line at all (`0.0`), so the strip its switch sat in is page again.
-fn pen_cursor_shows(
-    at: (f32, f32),
-    bar: f32,
-    foot: f32,
-    strips: Option<FootStrips>,
-) -> bool {
+fn pen_cursor_shows(at: (f32, f32), bar: f32, foot: f32, strips: FootStrips) -> bool {
     if at.1 <= bar {
         return false;
     }
 
-    !strips.is_some_and(|strips| strips.held(at, foot))
+    !strips.held(at, foot)
 }
 
 /// Whether the machine's counters should be read at all.

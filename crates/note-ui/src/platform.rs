@@ -73,9 +73,31 @@ pub struct Screen {
     /// three consumers. A ghost drawn below a different line than the ink obeys is a cursor pointing at
     /// a page the pen cannot write on, or an arrow over a place the ghost says is the pen's.
     pub sheet_top: f32,
+    /// The line the ghost is drawn above, in physical client pixels: where the desk's own row begins —
+    /// the page and zoom pills at the foot of the window (`NoteApp::foot_edge`).
+    ///
+    /// The same line, from the other end, for the same three consumers: the row is a control the pen
+    /// presses, so a ghost drawn over it would be a cursor pointing at a pill the pen cannot write on.
+    /// `0.0` means the same thing for both lines — nothing has been measured yet — which draws no ghost
+    /// above the bar and none below the pills.
+    pub sheet_bottom: f32,
+    /// The strips at the foot the ghost is not drawn over: the page pill's, and the zoom pill's, as `x`
+    /// bounds in physical client pixels.
+    ///
+    /// The row is full-width and the pills float in it, so only the part each pill covers is a press —
+    /// the desk beside them is still page, and the ghost belongs there. `None` until the pills have been
+    /// measured, and then `sheet_bottom` keeps the ghost off the whole row for the frame it takes to
+    /// measure them, which is the safe side of the same rule.
+    pub pill_strips: PillStrips,
     /// Whether there is nothing to draw a ghost for on this screen.
     pub suppressed: bool,
 }
+
+/// One strip of the window's foot, as `x` bounds in the window's own pixels.
+pub type Strip = (f32, f32);
+
+/// The strips at the foot of the window: the page pill's, and the zoom pill's (see [`Screen::pill_strips`]).
+pub type PillStrips = (Option<Strip>, Option<Strip>);
 
 impl Default for Screen {
     /// The state before the first frame has said anything: no ghost, which is the honest answer for a
@@ -88,6 +110,8 @@ impl Default for Screen {
             halo: 0x00_00_00,
             nib_radius: crate::cursor::NIB_RADIUS_MIN,
             sheet_top: 0.0,
+            sheet_bottom: 0.0,
+            pill_strips: (None, None),
             suppressed: true,
         }
     }

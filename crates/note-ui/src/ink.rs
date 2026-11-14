@@ -159,6 +159,15 @@ pub struct InkTransform {
     /// the one question this model asks of every reading: is it *on the page the user is writing
     /// on* — and the top of the page behind a bar is not somewhere a nib can write.
     pub bar: f32,
+    /// Where the desk's own row begins: the top of the strip at the window's foot that the page pill
+    /// and the zoom pill float in, in window logical pixels. Everything below it is *in front of* the
+    /// sheet for the same reason the bar is — those are controls, pressed with the pen — and a reading
+    /// there is a press rather than a line. `0.0` means "no such strip", which is a window too short
+    /// to have one or a frame that has not measured the row yet.
+    ///
+    /// Symmetric with [`Self::bar`] in every way that matters: one line at each edge, both the window's
+    /// rather than the sheet's, and [`Self::on_bar`] refuses a reading in either of them.
+    pub foot: f32,
     /// How far the page has been turned, in quarter turns clockwise.
     ///
     /// A reading is turned back by it — see [`paper_of_drawn`] — so ink written on a page the reader
@@ -232,6 +241,7 @@ impl InkTransform {
             origin: (0.0, 0.0),
             paper: (0.0, 0.0),
             bar: 0.0,
+            foot: 0.0,
             rotation: 0,
         }
     }
@@ -282,17 +292,25 @@ impl InkTransform {
         (x.clamp(0.0, self.paper.0), y.clamp(0.0, self.paper.1))
     }
 
-    /// Whether a reading, at a vertical position in **physical client** pixels, landed on the bar.
+    /// Whether a reading, at a vertical position in **physical client** pixels, landed on the
+    /// interface rather than on the page: the bar at the top of the window, or the desk's own row at
+    /// the foot.
     ///
-    /// The bar's line is the *window's*, not the sheet's: a page panned up out from under the bar is
+    /// Both lines are the *window's*, not the sheet's: a page panned up out from under the bar is
     /// still covered where the two overlap, so this is asked of the reading's own pixels — which is
     /// also why the DPI scale divides here, exactly as [`Self::sheet_point`] divides it.
     ///
-    /// A bar of no height refuses nothing, and a reading exactly on the line is the bar's: the line
-    /// is the bar's last pixel, and one pixel of ink behind a button is a dot on the page that the
-    /// user never saw themselves write.
+    /// A line of no height (or no line at all) refuses nothing, and a reading exactly on one of them
+    /// is the interface's: the line is the bar's last pixel, and one pixel of ink behind a button is a
+    /// dot on the page that the user never saw themselves write. The two edges are the same rule
+    /// because they are the same thing — a floating control the pen presses — even though only one of
+    /// them was ever meant to be written on. Neither is a rectangle: the desk *beside* a pill is still
+    /// page, because each line is one line across the window and a pill is not the whole of it.
     pub fn on_bar(&self, pixel_y: f32) -> bool {
-        self.bar > 0.0 && pixel_y / finite_or_one(self.scale) <= self.bar
+        let scale = finite_or_one(self.scale);
+        let y = pixel_y / scale;
+
+        (self.bar > 0.0 && y <= self.bar) || (self.foot > 0.0 && y >= self.foot)
     }
 
     /// Whether there is a paper to be off.
@@ -882,9 +900,10 @@ impl InkDocument {
     /// the sheet's zoom, where the sheet is drawn, and how large the paper is. All of them are
     /// applied here, once, so that nothing downstream has to know about any of them — the ink, the
     /// eraser and the geometry all work in the sheet's own coordinates, and everything they produce
-    /// is *on the paper*, because a reading that is not on it is not ink. Where the bar is counts as
-    /// part of that same question, one layer nearer the eye: a reading that lands on the bar is a
-    /// press on a control (see [`InkTransform::on_bar`]).
+    /// is *on the paper*, because a reading that is not on it is not ink. The interface over the paper
+    /// counts as part of that same question, one layer nearer the eye: a reading that lands on the bar
+    /// at the top of the window, or on the desk's own row at its foot, is a press on a control (see
+    /// [`InkTransform::on_bar`]).
     ///
     /// Returns whether anything changed, which is what the caller uses to decide whether a
     /// repaint is worth scheduling.
@@ -920,19 +939,18 @@ impl InkDocument {
                     self.lasso = None;
 
                     if transform.on_bar(sample.pixel.y) {
-                        // A nib that comes down on the bar opens nothing either: the bar is in
-                        // front of the page and its buttons are pressed *with the pen*, so the
-                        // reading is a press on a control and not a line. A tap that opened a
-                        // stroke here would leave a dot on the page behind the bar — ink the user
-                        // never saw themselves write, saved with the note and hidden there until
-                        // the note was opened with the bar switched off. Nothing opens, so the
-                        // readings that follow the `Down` have no stroke to extend: a tap on the
-                        // bar leaves the page exactly as it was.
+                        // A nib that comes down on the bar — or on the page and zoom pills at the foot
+                        // of the window — opens nothing either: both are in front of the page and their
+                        // controls are pressed *with the pen*, so the reading is a press on a control
+                        // and not a line. A tap that opened a stroke here would leave a dot on the page
+                        // behind a pill — ink the user never saw themselves write, saved with the note
+                        // and hidden there until the pill was moved. Nothing opens, so the readings that
+                        // follow the `Down` have no stroke to extend: a tap on a pill leaves the page
+                        // exactly as it was.
                         //
-                        // Only the `Down` is refused. A line that began on the page and ran up
-                        // behind the bar keeps the ink it has, for the reason the paper's own edge
-                        // is a clamp rather than a cut: the user cannot see the line a cut would
-                        // be made on.
+                        // Only the `Down` is refused. A line that began on the page and ran up behind
+                        // the bar keeps the ink it has, for the reason the paper's own edge is a clamp
+                        // rather than a cut: the user cannot see the line a cut would be made on.
                     } else if !on_paper {
                         // Clipping cannot help a nib that comes down on the desk: there is no line
                         // to clip yet, and starting one would put a dot on the nearest edge of the

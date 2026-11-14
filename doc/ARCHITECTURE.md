@@ -374,6 +374,11 @@ There is one rule that decides what a piece of interface is allowed to be, and t
   bottom edge, observed from the frame, because only the toolkit knows how the bar wrapped. No ink
   point is ever offset by the bar existing — that is the whole point of the bar floating over the
   canvas rather than taking part in the layout.
+* And at the foot of the window, over a pill: the page pill or the zoom pill is pressed with the pen, so
+  a reading on it is not ink (`FootStrips`, `NoteApp::pill_box`). This is the one *measured rectangle* in
+  the rule, and it is safe because the pills are pinned to the window rather than moving over the sheet —
+  the page pill is always the desk's middle, the zoom pill always its right margin — so a frame cannot
+  have moved them. It is the pills' own strip and not the row's: the desk between them is page.
 * Everything that is a *list* is a **screen** rather than a panel floating on the sheet: the home list,
   the note's marked pages, the document's contents. While one is in front, the app is in a state, and
   the pen lays no ink at all. Two of these screens are deliberate twins — same list, same keys, same

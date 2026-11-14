@@ -239,11 +239,14 @@ impl Pages {
             .position(|page| page.show == Page::Document(document_page))
     }
 
-    /// Inserts a blank page before or after `index`, and answers with the page to turn to.
+    /// Inserts a blank page before or after `index`, and answers with where the blank page went.
     ///
-    /// The new page is the one the reader is looking at afterwards, because a page that has just
-    /// been made is the page that is about to be written on. It arrives the right way up: it is blank
-    /// paper, and the sheet it is written on is the note's own.
+    /// A page inserted *after* `index` is the one the reader is looking at afterwards, because a page
+    /// that has just been made is the page that is about to be written on. A page inserted *before*
+    /// `index` is not: the reader stays on the page they were reading, which is now one position along,
+    /// so the caller follows `index + 1` rather than turning to `at` (see the app's `page_after_insert`).
+    /// It arrives the right way up either way: it is blank paper, and the sheet it is written on is the
+    /// note's own.
     pub fn insert(&mut self, index: usize, before: bool) -> usize {
         let at = if before { index } else { index + 1 }.min(self.pages.len());
         self.pages.insert(at, PageEntry::new(Page::Blank));
@@ -296,7 +299,7 @@ mod tests {
         assert_eq!(pages.document_page(3), None, "there is no fourth page");
     }
 
-    /// An inserted page goes where it was asked for, and is the page the reader is turned to.
+    /// An inserted page goes where it was asked for, and the answer is where the blank page landed.
     #[test]
     fn a_page_is_inserted_before_or_after_the_one_in_hand() {
         let mut pages = Pages::of_document(2);

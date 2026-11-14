@@ -1,17 +1,19 @@
 // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
 // scope and shadow the attribute this module needs.
 use super::{
-    bar_line, confirmed, file_label, file_stem, held_by_cap, page_of_write, page_owes_a_rewrite,
-    palette_at, palette_centre, palette_colours, palette_face, palette_id, palette_in_hand,
-    palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width, samples_vitals,
-    scroll_of, sheet_matches, spun, touches_paper, zoom_text, Confirmation, Edge, EdgeSwipe,
-    PaletteGeometry, PalettePart, PenGesture, Swipe, Turn, BAR_HEIGHT, EDGE_SWIPE_BAND,
-    EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN,
-    PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC,
-    PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
+    bar_line, confirmed, file_label, file_stem, held_by_cap, page_after_insert, page_of_write,
+    page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face, palette_id,
+    palette_in_hand, palette_point, parse_zoom, pdf_render_due, pinch_zoom_factor, quantise_width,
+    samples_vitals, scroll_of, sheet_matches, spun, touches_paper, zoom_text, Confirmation, Edge,
+    EdgeSwipe, FootPills, FootPlace, FootStrips, PaletteGeometry, PalettePart, PenGesture, Swipe,
+    Turn, BAR_HEIGHT, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX, PALETTE_HUB,
+    PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS,
+    PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD,
+    PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
 use crate::ink::{Notes, Tool};
+use crate::pages::Pages;
 use gpui_kit::ElementId;
 use std::time::{Duration, Instant};
 
@@ -367,8 +369,117 @@ fn a_write_belongs_to_the_page_the_ink_is_on() {
     );
 }
 
-/// A page is written out again when an append cannot say what happened to it.
+/// A page added **before** this one leaves the reader where they were; one added **after** is turned to.
 ///
+/// The two halves of `NoteApp::add_page`, checked at the layer they share: the page list moves, the ink
+/// moves with the page it was written on, and the page carried in hand moves with it. "Before" is the one
+/// that must not become a turn — the reader is on a page, needs a sheet in front of it, and means to stay
+/// on the page they were reading — so what the command does afterwards is only *follow* the page.
+#[test]
+fn a_page_added_before_this_one_leaves_the_reader_where_they_were() {
+    let mut pages = Pages::of_document(3);
+    let mut ink = Notes::new();
+    ink.go_to(1);
+
+    // "Before" from page 1: the blank page takes position 1, so the page being read is now page 2. The
+    // list and the ink each make the same move, and the view is told to *stay* on the page it was on.
+    let at = pages.insert(1, true);
+    assert_eq!(at, 1, "the blank page took the place in front");
+    assert_eq!(
+        page_after_insert(at, true),
+        Some(2),
+        "the reader stays, on the page the list has renamed for them"
+    );
+
+    ink.insert_at(at);
+    assert_eq!(
+        page_of_write(&ink),
+        2,
+        "and the ink followed its own page, as it always does"
+    );
+
+    // "After" from the same place: the blank page lands at 2, and the command turns to it — the page
+    // made is the page about to be written on.
+    let at = pages.insert(1, false);
+    assert_eq!(at, 2, "the blank page took the place behind");
+    assert_eq!(
+        page_after_insert(at, false),
+        None,
+        "so the command turns to the page it made"
+    );
+}
+
+/// The pills at the foot of the desk are the only part of the row the pen is refused in.
+///
+/// The row is full-width and the pills float in it, so the desk beside them is still desk: a reader
+/// may be writing on paper behind the gap between the two pills, and refusing the whole row would take
+/// that away. This pins down both halves — the strip each pill covers (plus the slack a missed press
+/// deserves) and the line the strips begin at.
+#[test]
+fn the_foot_refuses_the_pills_and_not_the_row() {
+    // A 1000-wide desk, a 200-wide page pill centred in it, and a 300-wide zoom pill at the window's
+    // right margin: 1000 - 12 - 300 .. 1000 - 12, plus the slack either side.
+    let strips = FootStrips::of(1000.0, 1000.0, Some(200.0), Some(300.0));
+
+    let held = |x: f32, y: f32| strips.held((x, y), 900.0);
+
+    assert!(held(500.0, 950.0), "the middle of the page pill");
+    assert!(held(400.0, 950.0), "its left edge");
+    assert!(held(388.0, 950.0), "and the slack beside it, a press that missed");
+    assert!(!held(300.0, 950.0), "but not the desk further out");
+
+    assert!(held(826.0, 950.0), "the left edge of the zoom pill");
+    assert!(
+        held(988.0, 950.0),
+        "up to the window's own margin, and not past it"
+    );
+    assert!(
+        !held(650.0, 950.0),
+        "and the gap between the two pills is page"
+    );
+
+    assert!(
+        !held(500.0, 899.0),
+        "above the line the row begins at is page, whatever the x is"
+    );
+
+    // An unmeasured pill is no strip at all: the pen is refused nowhere it cannot see a pill.
+    let none = FootStrips::of(1000.0, 1000.0, None, None);
+    assert!(!none.held((500.0, 950.0), 900.0));
+}
+
+/// The measurements the strips come from: each pill reports its width and its top, and the tallest top
+/// is the line — because a reading over either pill is a press.
+#[test]
+fn the_foot_takes_the_tallest_pill_as_its_line() {
+    let measured = FootPills::default()
+        .row_width(1000.0)
+        .measured(FootPlace::Page, 200.0, 930.0)
+        .measured(FootPlace::Zoom, 300.0, 910.0);
+
+    assert_eq!(measured.row, Some(1000.0), "the desk the pills are placed along");
+    assert_eq!(measured.page, Some(200.0), "the page pill's own width");
+    assert_eq!(measured.zoom, Some(300.0));
+    assert_eq!(
+        measured.top,
+        Some(910.0),
+        "the taller pill is where the row really begins"
+    );
+
+    let strips = measured.strips(1000.0).expect("a measured row has strips");
+    assert_eq!(
+        strips.page,
+        Some((388.0, 612.0)),
+        "the page pill's strip is a few hundred pixels wide, not the row"
+    );
+
+    assert!(
+        FootPills::default().strips(1000.0).is_none(),
+        "and a row nobody has measured refuses nothing"
+    );
+}
+
+/// A page is written out again when an append cannot say what happened to it.
 /// Three cases, and the second is the one the app cannot see by counting: a page that has only grown is a
 /// longer version of what the note holds (an append says it); a page that has *lost* strokes is not; and a
 /// page whose strokes have been **moved** is not either, because a lasso drag changes every point it holds

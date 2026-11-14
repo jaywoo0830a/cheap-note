@@ -159,6 +159,9 @@ pub struct CursorShape {
     pub nib_radius: f32,
     /// The line the ghost is drawn below, in physical client pixels.
     pub sheet_top: f32,
+    /// The line the ghost is drawn above, in physical client pixels: where the desk's own row — the page
+    /// and zoom pills — begins, so a body leaning down ends under the controls rather than over them.
+    pub sheet_bottom: f32,
 }
 
 /// The side of the overlay's window for a scale factor, in physical pixels: twice [`REACH`], so the
@@ -269,13 +272,14 @@ impl Surface {
 
     /// Draws the whole ghost: the body, the soft edge under it, and the nib mark with its bloom.
     ///
-    /// `nib` is where the pen is **on this surface**, in physical pixels, and `clip` is the line
-    /// above which nothing is drawn — the bar's bottom edge, in the same coordinates, so that a
-    /// body leaning up ends at the controls rather than over them.
+    /// `nib` is where the pen is **on this surface**, in physical pixels, and `band` is the strip
+    /// nothing is drawn outside of — the bar's bottom edge at the top and the desk's own row at the
+    /// bottom, in the same coordinates, so a body leaning up ends at the bar's controls and one leaning
+    /// down ends at the page and zoom pills rather than over either.
     ///
     /// The shapes come from [`PenCursor`] in logical window pixels, which is why both are mapped
     /// here rather than by the caller: the reading is the input and the pixels are the output.
-    pub fn draw(&mut self, shape: &CursorShape, nib: [f32; 2], clip: Option<f32>) {
+    pub fn draw(&mut self, shape: &CursorShape, nib: [f32; 2], band: Band) {
         let scale = sane_scale(shape.scale);
         let colour = rgb_of(shape.colour);
         let halo = rgb_of(shape.halo);
@@ -305,7 +309,7 @@ impl Surface {
                 let shifted = |p: [f32; 2]| map([p[0] + shift[0], p[1] + shift[1]]);
                 flatten(&body.outline(grow), &shifted, &mut self.outline);
                 let outline = std::mem::take(&mut self.outline);
-                self.fill_polygon(&outline, clip, alpha, tint);
+                self.fill_polygon(&outline, band, alpha, tint);
                 self.outline = outline;
             }
         }
@@ -320,11 +324,32 @@ impl Surface {
             (mark + NIB_BLOOM_SPREAD, NIB_BLOOM_ALPHA, halo),
             (mark, NIB_ALPHA, colour),
         ] {
-            self.fill_disc(nib, radius * scale, clip, alpha, tint);
+            self.fill_disc(nib, radius * scale, band, alpha, tint);
         }
     }
 
-    /// Fills a closed convex outline, antialiased, in one colour.
+    /// The edges of the strip a ghost may be drawn in: above the bar's line and above the bottom row's,
+/// both in the surface's own coordinates.
+///
+/// Two lines rather than one because a ghost hangs both ways — a body leaning up is cut at the bar, and
+/// one leaning down is cut at the page and zoom pills — and the same coverage rule applies at each: the
+/// row a line passes through is covered less rather than dropped, so the ghost ends *under* the
+/// controls instead of ending at a seam.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Band {
+    /// The lowest row the ghost may paint in: above the bar.
+    pub top: f32,
+    /// The highest row it may paint in: the desk's own row begins below this.
+    pub bottom: f32,
+}
+
+/// A band of a surface with no interface over it: both lines outside the pixels it has.
+pub const WHOLE: Band = Band {
+    top: f32::NEG_INFINITY,
+    bottom: f32::INFINITY,
+};
+
+/// Fills a closed convex outline, antialiased, in one colour.
     ///
     /// The rules are the ones an outline wants and no more: a scanline crosses a convex shape twice,
     /// so the crossings are sorted and paired, and the cover of a pixel is how much of its width
@@ -334,7 +359,7 @@ impl Surface {
     fn fill_polygon(
         &mut self,
         points: &[[f32; 2]],
-        clip: Option<f32>,
+        band: Band,
         alpha: f32,
         colour: [u8; 3],
     ) {
@@ -348,9 +373,14 @@ impl Surface {
             max_y = max_y.max(point[1]);
         }
 
-        let floor = clip.unwrap_or(f32::NEG_INFINITY);
-        let Some((top, bottom)) = row_bounds(min_y.floor().max(floor), max_y.ceil(), self.height)
-        else {
+        // The rows the band can touch, in whole rows: the lowest row is the one the top line passes
+        // through (a fractional line is rounded *down* to it, so that row is partly painted), and the
+        // highest is the one the bottom line passes through.
+        let Some((top, bottom)) = row_bounds(
+            min_y.floor().max(band.top),
+            max_y.ceil().min(band.bottom),
+            self.height,
+        ) else {
             return;
         };
 
@@ -359,7 +389,12 @@ impl Surface {
 
             for sub in 0..SUB_ROWS {
                 let y = row as f32 + (sub as f32 + 0.5) / SUB_ROWS as f32;
-                if y < floor {
+
+                // A line cuts a row's coverage rather than dropping the row — the same rule the disc
+                // follows — so the body ends *under* the controls at either edge instead of at a seam.
+                // `row_bounds` has already kept the rows the band can touch; this is the sub-rows inside
+                // one of them.
+                if y < band.top || y > band.bottom {
                     continue;
                 }
 
@@ -443,7 +478,7 @@ impl Surface {
         &mut self,
         centre: [f32; 2],
         radius: f32,
-        clip: Option<f32>,
+        band: Band,
         alpha: f32,
         colour: [u8; 3],
     ) {
@@ -451,10 +486,9 @@ impl Surface {
             return;
         }
 
-        let floor = clip.unwrap_or(f32::NEG_INFINITY);
         let Some((top, bottom)) = row_bounds(
-            (centre[1] - radius).max(floor),
-            centre[1] + radius,
+            (centre[1] - radius).max(band.top),
+            (centre[1] + radius).min(band.bottom),
             self.height,
         ) else {
             return;
@@ -476,9 +510,9 @@ impl Surface {
                             row as f32 + (down as f32 + 0.5) / DISC_SAMPLES as f32,
                         ];
 
-                        // The clip is a line, so a row it cuts through is covered less rather than
-                        // dropped: the ghost ends under the controls instead of ending at a seam.
-                        if point[1] < floor {
+                        // A line cuts a row's coverage rather than dropping the row: the ghost ends
+                        // under the controls instead of ending at a seam.
+                        if !(band.top..=band.bottom).contains(&point[1]) {
                             continue;
                         }
 
@@ -622,6 +656,18 @@ fn cursor_for(sample: Reading, screen: &Screen) -> Option<(Reading, CursorShape)
         return None;
     }
 
+    // The pills at the foot of the window are pressed with the pen, so a reading over one has no
+    // ghost — while the desk beside them is page, and has one. The strips are in physical pixels like
+    // the reading, which is why nothing is scaled here.
+    let over = |strip: Option<(f32, f32)>| {
+        strip.is_some_and(|(left, right)| (left..=right).contains(&sample.pixel.x))
+    };
+    if sample.pixel.y >= screen.sheet_bottom
+        && (over(screen.pill_strips.0) || over(screen.pill_strips.1))
+    {
+        return None;
+    }
+
     let cursor = PenCursor::from_sample(sample, screen.scale)?;
     let shape = CursorShape {
         cursor,
@@ -630,6 +676,7 @@ fn cursor_for(sample: Reading, screen: &Screen) -> Option<(Reading, CursorShape)
         halo: screen.halo,
         nib_radius: screen.nib_radius,
         sheet_top: screen.sheet_top,
+        sheet_bottom: screen.sheet_bottom,
     };
 
     Some((sample, shape))
@@ -916,12 +963,15 @@ impl Overlay {
         let origin = window_origin(nib_screen, span);
         let nib = nib_offset(nib_screen, origin);
 
-        // The clip is the bar's bottom edge in this surface's coordinates: the same line, measured
-        // from the nib, which is where the drawing starts from.
-        let clip = nib[1] + (shape.sheet_top - sample.pixel.y);
+        // The band is the two lines in this surface's coordinates: the bar's bottom edge and the top of
+        // the desk's own row, both measured from the nib, which is where the drawing starts from.
+        let band = Band {
+            top: nib[1] + (shape.sheet_top - sample.pixel.y),
+            bottom: nib[1] + (shape.sheet_bottom - sample.pixel.y),
+        };
 
         self.surface.clear();
-        self.surface.draw(&shape, nib, Some(clip));
+        self.surface.draw(&shape, nib, band);
 
         // The surface's pixels *are* a 32-bit DIB's pixels, byte for byte: `0xAARRGGBB` in a `u32` is
         // B, G, R, A in memory, which is the order a `BI_RGB` bitmap at 32 bits is stored in.
@@ -1148,6 +1198,8 @@ mod tests {
             halo: 0x00_00_00,
             nib_radius: note_ui::cursor::nib_radius_for_width(4.5),
             sheet_top: 0.0,
+            sheet_bottom: 10_000.0,
+            pill_strips: (None, None),
             suppressed: false,
         }
     }
@@ -1175,7 +1227,7 @@ mod tests {
             ..shape((middle, middle), None)
         };
 
-        surface.draw(&shape, [middle, middle], None);
+        surface.draw(&shape, [middle, middle], WHOLE);
 
         let at =
             |radius: f32| surface.pixels()[(middle as usize) * span + (middle + radius) as usize];
@@ -1217,7 +1269,7 @@ mod tests {
             };
 
             let mut surface = Surface::new(span, span);
-            surface.draw(&shape, [middle, middle], None);
+            surface.draw(&shape, [middle, middle], WHOLE);
 
             let mut mark = 0.0f32;
             let mut whole = 0.0f32;
@@ -1294,7 +1346,7 @@ mod tests {
             .fold(f32::MIN, f32::max);
 
         let mut surface = Surface::new(span, span);
-        surface.draw(&shape, [middle, middle], None);
+        surface.draw(&shape, [middle, middle], WHOLE);
 
         let (_, _, right, bottom) = drawn(&surface).expect("a leaning pen draws a body");
         assert!(
@@ -1502,6 +1554,28 @@ mod tests {
             "above the bar's edge the pointer is the cursor, not the ghost"
         );
         assert!(
+            hidden(
+                Screen {
+                    sheet_bottom: 200.0,
+                    pill_strips: (Some((60.0, 140.0)), None),
+                    ..screen()
+                },
+                Phase::Hover
+            ),
+            "and over a pill at the foot of the window the pointer is the cursor there too"
+        );
+        assert!(
+            !hidden(
+                Screen {
+                    sheet_bottom: 200.0,
+                    pill_strips: (Some((300.0, 400.0)), None),
+                    ..screen()
+                },
+                Phase::Hover
+            ),
+            "while the desk beside the pill is page, and the ghost is the pen's there"
+        );
+        assert!(
             hidden(screen(), Phase::Leave),
             "a pen out of range has no position to draw"
         );
@@ -1518,8 +1592,12 @@ mod tests {
         // A lean forty degrees toward the top of the window: `tilt_y` is positive toward the user.
         let shape = shape((100.0, 300.0), Some((0.0, -40.0)));
         let clip = middle - 8.0;
+        let band = Band {
+            top: clip,
+            ..WHOLE
+        };
 
-        surface.draw(&shape, [middle, middle], Some(clip));
+        surface.draw(&shape, [middle, middle], band);
         let (_, cut_top, _, cut_bottom) = drawn(&surface).expect("a ghost was drawn");
 
         assert!(
@@ -1532,7 +1610,7 @@ mod tests {
         );
 
         surface.clear();
-        surface.draw(&shape, [middle, middle], None);
+        surface.draw(&shape, [middle, middle], WHOLE);
         let (_, free_top, _, free_bottom) = drawn(&surface).expect("a ghost was drawn");
 
         assert!(
@@ -1542,6 +1620,47 @@ mod tests {
         assert_eq!(
             free_bottom, cut_bottom,
             "and the clip takes nothing away below it"
+        );
+    }
+
+    /// The body leans down into the desk's own row and is cut there: nothing below the line, and
+    /// nothing lost above it — the same rule as the bar, from the other end.
+    #[test]
+    fn the_band_cuts_the_body_at_the_pills() {
+        let span = surface_span(1.0) as usize;
+        let mut surface = Surface::new(span, span);
+        let middle = span as f32 / 2.0;
+        // A lean forty degrees toward the user: the body hangs down the screen from the nib.
+        let shape = shape((100.0, 300.0), Some((0.0, 40.0)));
+        let cut = middle + 8.0;
+        let band = Band {
+            bottom: cut,
+            ..WHOLE
+        };
+
+        surface.draw(&shape, [middle, middle], band);
+        let (_, cut_top, _, cut_bottom) = drawn(&surface).expect("a ghost was drawn");
+
+        assert!(
+            (cut_bottom as f32 - cut).abs() <= 1.0,
+            "the drawing ends in the row the line passes through: {cut_bottom} against {cut}"
+        );
+        assert!(
+            cut_top as f32 > middle,
+            "and the nib mark is still drawn above it"
+        );
+
+        surface.clear();
+        surface.draw(&shape, [middle, middle], WHOLE);
+        let (_, free_top, _, free_bottom) = drawn(&surface).expect("a ghost was drawn");
+
+        assert!(
+            free_bottom > cut_bottom,
+            "without the band the body reaches lower: {free_bottom} against {cut_bottom}"
+        );
+        assert_eq!(
+            free_top, cut_top,
+            "and the band takes nothing away above it"
         );
     }
 
@@ -1567,7 +1686,7 @@ mod tests {
                 // The widest mark the shape allows, so the window is checked against the biggest ghost there can be.
                 shape.nib_radius = NIB_RADIUS_MAX;
 
-                surface.draw(&shape, [middle, middle], None);
+                surface.draw(&shape, [middle, middle], WHOLE);
                 let (left, top, right, bottom) =
                     drawn(&surface).expect("a pen has a nib mark with or without a lean");
 

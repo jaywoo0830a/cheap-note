@@ -211,6 +211,23 @@ glanced at and stay out of the way at the other edge. The page is centred by *th
 taken out of the flow, so a counter growing by a digit cannot shove the page off centre — a page number
 that moved whenever a number changed would be worse than no page number.
 
+**Making a page is a page turn, so both inserts live in the page pill.** The pill reads `+after · ◀ n / total ▶ · │ +before`:
+the page number is still the middle, the two turning arrows sit either side of it, and the two insert buttons are outside
+them — so adding a page, which changes the *total*, cannot move the number under the hand (the same rule the zoom field's
+fixed width is for). A hairline separates "before" from the arrow it neighbours, because the two are one press apart and
+mean quite different things. The inserts were on the bar's page row until they were moved here: a page that has just been
+made is a page that is about to be *written*, and the hand that made it is already at the bottom of the desk.
+
+They are also one command with two different endings, and the difference is the whole of it
+(`page_after_insert` in `app.rs`): **a page added *after* this one is turned to, and a page added *before* it is not.**
+"After" is the next sheet — what the next arrow would do anyway — so a reader who keeps adding pages writes on each one in
+the order they are made. "Before" is the opposite: the reader is on a page, needs a sheet in front of it, and means to stay
+on the page they are reading. A blank page inserted mid-document usually exists to hold something that refers back to where
+the reader is, so taking their place away and turning them onto the blank sheet is a turn they did not ask for. Instead the
+page list moves, the view follows the page it was on (now one position along — its ink, its pan and its history come with
+it because they were never put down), and the status line says what happened. So `+before` is the one command in the app
+that changes the page list **without moving the sheet**.
+
 The zoom pill holds two steps, the zoom itself, the two fits, and a lock. The zoom sits between the steps and is a
 **field rather than a readout**: a person's zoom is often a number they already have in mind — the size they
 read at, the number the page was laid out at — and stepping to 60% is a dozen presses, so a number typed
@@ -234,10 +251,12 @@ no key. It sits at the end of the pill, after a hairline, because it is not anot
 a statement about the gestures that do; it is the note's, like every other setting, and it says `(locked)` on
 the status line so that a Fit which did nothing reads as the lock rather than as a bug.
 
-The page commands — insert a page before or after this one, delete this one, and mark it — lead the
-bar's second row and stand bare on it, rather than in a pill: in the bar, every group does. They lead
-because a page *is* the sheet, and they are the only controls in the app that change how much of it
-there is. The bookmark sits with them because it is a fact about *this page* rather than about the view:
+The page's *own* commands — delete this page, turn it, and mark it — lead the bar's second row and stand
+bare on it, rather than in a pill: in the bar, every group does. They lead because a page *is* the sheet,
+and what is left of the group is what changes a page the note already has rather than how many of them
+there are. Deleting is here rather than at the pen because it is one of the two things this app cannot
+undo, and it goes through the same question box as the bar's other destructive command. The bookmark sits
+with them because it is a fact about *this page* rather than about the view:
 the page pill and the zoom pill are how the sheet is read, and a mark is something the page keeps. Its
 button says which way round the page is — filled for a marked page — and the list of what is marked is
 the button beside it, because the two are the same subject. The document's own contents stand in their
@@ -248,9 +267,9 @@ annotate — and it is disabled for a document that has none, which is most of t
 
 The pen is captured by the **window**, not by anything on it — `pen-windows` delivers a raw
 `WM_POINTER` stream — so nothing in the drawing layer can stand between the pen and the page, and the
-app refuses the pen itself. There are exactly three refusals, and all of them are app *state*:
+app refuses the pen itself. There are four refusals, and three of them are app *state*:
 
-* **A line**: above `bar_edge` a reading is a press on a control rather than ink (§1).
+* **A line** at the top (§1): above `bar_edge` a reading is a press on a control rather than ink.
 * **A screen**: while the home list, the marked pages or the contents are in front, and while a name is
   being typed, every reading is dropped where it would otherwise become a stroke. A name being typed
   must not leave a line across the page behind the field, and a screen is drawn over a sheet nobody can
@@ -260,10 +279,20 @@ app refuses the pen itself. There are exactly three refusals, and all of them ar
   written on, and both halves of that are the same state: the `NoteApp::palette` that refuses the ink is
   what reads the tap (`palette_from_pen`), so there is no press for a stroke to arrive on — and, as with
   a screen, no rectangle that could be wrong by a frame.
+* **The pills at the desk's foot** (§4): a reading over the page pill or the zoom pill is a press on it.
+  This one is the exception, and it is a rectangle — but a measured one rather than a guessed one: each
+  pill reports its own top edge and width from the frame that laid it out (`NoteApp::pill_box`), and the
+  strip refused is that rectangle grown by `FOOT_SLACK` (`FootStrips`). It is *not* the whole row: the
+  desk beside the pills is still desk, and a reader writing on paper behind the gap between the two must
+  be able to. The measurement is of the layout that is on screen, so a strip can only be a frame stale if
+  a pill changed size on the frame the pen was over it — which is exactly when the pen was not writing
+  there anyway.
 
 That second rule is *why* the two lists are screens rather than panels floating on the sheet: a panel
 would have had to add a rectangle to the ink rule, and a rectangle that is wrong by a frame is ink drawn
-under a control.
+under a control. The foot's pills are the one place where the rectangle is the *right* shape, because
+they are pinned to the window rather than moving over the sheet: the page pill is always the middle of the
+desk and the zoom pill always its right margin, so there is nothing for a frame to have moved.
 
 ### The ghost cursor
 
@@ -450,9 +479,12 @@ and the compaction is queued *behind* it, in that order, so the ink is in the no
 follow it.
 
 An **inserted** page is a blank page rather than a copy of its neighbour — it is paper to write on, and
-duplicating a page is a different command, which this app does not have — and the app turns to it,
-because a page that was just made is the page that is about to be written on: leaving the reader on the
-old one would make the button look like it did nothing.
+duplicating a page is a different command, which this app does not have. A page added **after** this one
+is turned to, because a page that was just made is the page that is about to be written on: leaving the
+reader on the old one would make the button look like it did nothing. A page added **before** this one is
+*not* turned to — the reader stays on the page they were reading, which the list has renamed for them, so
+the sheet, the pan and the ink in hand are all untouched — and the status line is what says the button
+did anything at all (see §4, *The desk's own row*).
 
 A **deleted** page takes its ink with it: there is nowhere to show it afterwards, and keeping it would
 mean keeping an identity for "the page that used to be here" that no later page could be confused with.
@@ -1024,6 +1056,8 @@ records the change.
 | `PAGE_MARGIN` | 24 logical px | the margin between the sheet and the window's edges — the strip the floating bar covers |
 | `BAR_MARGIN` | 12 logical px | how far the floating bar and the page pill sit from the window's edges: the desk showing in that gap is what makes the sheet read as paper on a desk |
 | `BAR_HEIGHT` | 148 logical px | the estimate `bar_edge` falls back to only on the frame before the bar has been measured; the *measured* edge is the one line ink, the ghost cursor and the system pointer all use |
+| `FOOT_BAND` | 72 logical px | the estimate `foot_edge` falls back to only until a frame has measured the pills at the desk's foot; an upper bound, so the first frame refuses a little more desk rather than writing on a pill |
+| `FOOT_SLACK` | 12 logical px | how far past a pill's own edge a reading still counts as a press on it: a nib that lands just beside a button is a press that missed, not a line |
 | `STATUS_PILL_WIDTH` | 0.6 | the fraction of the window the status pill may use; it wraps, and the fraction is what decides into how many lines |
 | `STATUS_DROP` | `BAR_MARGIN` (12 logical px) | how far below the bar's measured bottom edge the status pill hangs |
 | `STATUS_REFRESH_INTERVAL` | 1 s | how often the status line's counters are rebuilt while a note is in front: a readout's pace, not a frame's |

@@ -22,6 +22,7 @@ fn a_reading_on_a_turned_page_is_stored_in_the_pages_own_coordinates() {
             origin,
             paper,
             bar: 0.0,
+            foot: 0.0,
             rotation: turns,
         };
 
@@ -57,6 +58,7 @@ fn a_reading_beside_a_turned_page_is_not_ink() {
         origin: (0.0, 0.0),
         paper: (600.0, 800.0),
         bar: 0.0,
+        foot: 0.0,
         rotation: 1,
     };
 
@@ -1081,6 +1083,46 @@ fn the_bar_is_a_line_in_the_window() {
         !InkTransform::identity().on_bar(0.0),
         "no bar refuses nothing, not even the top pixel"
     );
+}
+
+/// The desk's own row is the same rule at the other end of the window: a reading below it is a press
+/// on a pill, measured in the window and not on the sheet, whatever the scale factor is.
+#[test]
+fn the_bottom_row_is_a_line_in_the_window() {
+    let footed = |foot: f32| InkTransform {
+        foot,
+        ..papered()
+    };
+    let scaled = InkTransform {
+        scale: 2.0,
+        ..footed(700.0)
+    };
+
+    assert!(scaled.on_bar(1400.0), "1400 physical pixels is 700 logical");
+    assert!(!scaled.on_bar(1398.0), "and the pixel above the line is not");
+    assert!(
+        !footed(700.0).on_bar(400.0),
+        "a reading on the sheet is not on the row, however far down it is"
+    );
+    assert!(
+        !InkTransform::identity().on_bar(0.0),
+        "no row refuses nothing either"
+    );
+}
+
+/// Both lines at once: the sheet is between them, and either edge of the interface is a press.
+#[test]
+fn the_sheet_is_between_the_two_lines() {
+    let both = InkTransform {
+        bar: 100.0,
+        foot: 700.0,
+        ..papered()
+    };
+
+    assert!(both.on_bar(100.0), "the bar's own last pixel");
+    assert!(!both.on_bar(101.0));
+    assert!(!both.on_bar(699.0));
+    assert!(both.on_bar(700.0), "and the foot's first pixel");
 }
 
 /// A pen with no pressure sensor draws at the constant width, not at zero.

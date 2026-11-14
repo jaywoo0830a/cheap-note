@@ -10,6 +10,7 @@
 //! rasterised page are worth, and every rule the pen obeys — is written out in `doc/VIEW.md`, which is
 //! the map of this module; `doc/ARCHITECTURE.md` is the map of the whole program. What is left here is
 //! the line-long "why" a reader wants where they are reading.
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -115,6 +116,21 @@ const BAR_MARGIN: f32 = 12.0;
 /// edge the last frame laid out is the real line, and everything that asks where the bar ends — the
 /// ink, the ghost cursor, the system pointer — asks it there.
 const BAR_HEIGHT: f32 = 148.0;
+
+/// How tall the strip at the window's foot is — the desk's own row, where the page and zoom pills
+/// float — in logical pixels, as an estimate.
+///
+/// Used only by [`NoteApp::foot_edge`], and there only until a frame has measured the row: the probe on
+/// the row's top edge is the real line once it reports. It is an *upper* bound on the real height, so
+/// the frame before the first measurement errs towards refusing a reading on the desk just above the
+/// pills rather than towards putting a dot on one.
+const FOOT_BAND: f32 = 72.0;
+
+/// How far past a pill's own edge a reading still counts as a press on it, in logical pixels.
+///
+/// A nib that lands a millimetre beside a button is a press that missed, not a line somebody meant to
+/// draw — and the pen is aiming at a pill on purpose when it is down there at all.
+const FOOT_SLACK: f32 = 12.0;
 
 // The two chords the status line names are `keys::chord::MEASURE` and `keys::chord::PALETTE`, written
 // out where they are shown by `keys::label` — never typed here, because the words for them are the
@@ -398,6 +414,23 @@ fn pdf_render_due(last_ink_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(last_ink_at) >= PDF_QUIET_INTERVAL
 }
 
+/// Where the reader stands after a blank page is inserted at `at`.
+///
+/// Two commands share this, and they answer differently on purpose:
+///
+/// * a page added **after** this one is the next sheet, so the reader is *turned* to it — the page made
+///   is the page about to be written on, and `None` says "open `at`" (the sheet then goes to its top);
+/// * a page added **before** this one leaves the reader on the page they were reading, which the list
+///   has renamed to `at + 1`. `Some(at + 1)` is that page: the view follows its own page and nothing is
+///   opened, so the pan, the ink and the history in hand are all untouched — a blank page inserted
+///   mid-document usually exists to hold something that refers back to where the reader is, and taking
+///   their place away to make room would be a turn they did not ask for.
+///
+/// `None` is "turn to the new page"; `Some(page)` is "stay, and this is where the page you were on is".
+fn page_after_insert(at: usize, before: bool) -> Option<usize> {
+    before.then_some(at + 1)
+}
+
 /// The page a write belongs to, given the ink in hand: the ink's own page, never the view's index.
 ///
 /// The two numbers are the same everywhere except in the middle of the two commands that move the
@@ -465,13 +498,18 @@ impl Sheet {
     }
 
     /// Where a reading in physical client pixels lands on the sheet.
-    fn transform(&self, scale: f32, bar: f32) -> InkTransform {
+    ///
+    /// `bar` is where the interface ends at the top of the window and `foot` where it begins at the
+    /// bottom: both are lines the window draws, not the sheet, and a reading on either side of them is a
+    /// press on a control rather than ink (see [`InkTransform::on_bar`]).
+    fn transform(&self, scale: f32, bar: f32, foot: f32) -> InkTransform {
         InkTransform {
             scale,
             zoom: self.zoom,
             origin: self.origin,
             paper: self.ink_paper(),
             bar,
+            foot,
             rotation: self.rotation,
         }
     }
@@ -515,6 +553,129 @@ impl Sheet {
             corners.iter().fold(f32::MIN, |high, at| high.max(at.0)),
             corners.iter().fold(f32::MIN, |high, at| high.max(at.1)),
         ]
+    }
+}
+
+/// What the foot of the window measured last frame: how wide the row was, how wide each pill is, and
+/// the line the row begins at.
+///
+/// Measurements rather than answers, because the two are not the same thing: the row is full-width and
+/// the pills float inside it, so what the pen must refuse is the strip each pill *covers* — which
+/// [`FootStrips`] works out from these, and which changes when a pill changes size (a note with ten
+/// thousand pages has a wider number).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct FootPills {
+    /// The desk's own width: the window's less the row's margins, and what the centred pill's strip is
+    /// placed around. It comes from the sheet rather than from a probe, because the row's own box is the
+    /// window's and the page pill inside it is only as wide as its buttons.
+    row: Option<f32>,
+    /// How wide the page pill came out.
+    page: Option<f32>,
+    /// How wide the zoom pill came out.
+    zoom: Option<f32>,
+    /// The line the pills begin at, in window logical pixels.
+    top: Option<f32>,
+}
+
+impl FootPills {
+    /// Takes one pill's measurement: its own width, the width of the row it sits in, and its top edge.
+    ///
+    /// The row's width is only ever needed for the *centred* pill: its strip is placed around the
+    /// row's middle, and the pill is a few hundred pixels wide where the row is the window's. The
+    /// tallest pill's top is the line, because a reading over either pill is a press: the page pill is
+    /// a line of buttons and the zoom pill a row of them, and the row aligns them on their centres.
+    fn measured(mut self, place: FootPlace, width: f32, top: f32) -> Self {
+        let tallest = self.top.unwrap_or(f32::INFINITY);
+        if top < tallest {
+            self.top = Some(top);
+        }
+
+        match place {
+            FootPlace::Page => self.page = Some(width),
+            FootPlace::Zoom => self.zoom = Some(width),
+        }
+
+        self
+    }
+
+    /// The row's own width, when the sheet has said it.
+    fn row_width(mut self, width: f32) -> Self {
+        self.row = Some(width);
+        self
+    }
+
+    /// The strips this says the pen refuses, if the row has been measured at all.
+    ///
+    /// `window` is the window's own width, which the zoom pill's strip hangs from: it is placed against
+    /// the window's right margin rather than the row's.
+    fn strips(&self, window: f32) -> Option<FootStrips> {
+        Some(FootStrips::of(self.row?, window, self.page, self.zoom))
+    }
+}
+
+/// Which pill of the desk's row a measurement is of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FootPlace {
+    /// The page pill: centred by the row's own flow, and as wide as the row.
+    Page,
+    /// The zoom pill: out of the flow, against the window's right margin.
+    Zoom,
+}
+
+/// The strips at the window's foot that a reading is refused in, as `x` bounds in window logical pixels
+/// — the page pill's, and the zoom pill's — each `None` when that pill has not been measured.
+///
+/// A *strip*, not the whole row: the row is full-width and the pills float in it, so the desk beside
+/// them is still desk, and refusing every reading between the row's line and the window's bottom edge
+/// would stop a reader writing on the paper behind the gap between the two pills. Each strip is
+/// `BAR_MARGIN` wide of the pill itself plus a finger's worth of slack, because a nib that lands *just*
+/// beside a button is a press that missed rather than a line nobody meant to draw.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct FootStrips {
+    /// The page pill's strip: its centre is the window's centre, and it grows both ways from there.
+    page: Option<(f32, f32)>,
+    /// The zoom pill's strip: it hangs from the window's right margin.
+    zoom: Option<(f32, f32)>,
+}
+
+impl FootStrips {
+    /// The two strips, given the width of the desk the pills are placed along and of the window itself.
+    ///
+    /// The page pill is centred in the *desk* and the zoom pill hangs from the *window's* right margin
+    /// (`BAR_MARGIN` inside the window's edge, inside the row's own margin) — which is why the two are
+    /// told apart. Either strip is `None` while its pill has not been measured, and a pill wider than
+    /// what it is placed in is clamped: a strip outside the window is a strip the pen cannot land in.
+    fn of(row: f32, window: f32, page: Option<f32>, zoom: Option<f32>) -> Self {
+        let inside = |x: f32, width: f32| x.clamp(0.0, width.max(0.0));
+        let middle = row / 2.0;
+        let slack = FOOT_SLACK;
+
+        FootStrips {
+            page: page.filter(|w| *w > 0.0).map(|w| {
+                (
+                    inside(middle - w / 2.0 - slack, window),
+                    inside(middle + w / 2.0 + slack, window),
+                )
+            }),
+            zoom: zoom.filter(|w| *w > 0.0).map(|w| {
+                (
+                    inside(window - BAR_MARGIN - w - slack, window),
+                    inside(window - BAR_MARGIN + slack, window),
+                )
+            }),
+        }
+    }
+
+    /// Whether a point in window logical pixels is over one of the pills.
+    ///
+    /// `foot` is the line the pills begin at ([`NoteApp::foot_edge`]): above it is page whatever the x
+    /// is, because a reading above the row is not near a pill at all.
+    fn held(&self, (x, y): (f32, f32), foot: f32) -> bool {
+        y >= foot
+            && [self.page, self.zoom]
+                .into_iter()
+                .flatten()
+                .any(|(left, right)| (left..=right).contains(&x))
     }
 }
 
@@ -978,6 +1139,10 @@ pub struct NoteApp {
     sheet: Sheet,
     /// The bar's bottom edge, in window logical pixels, as the last frame laid it out.
     bar_bottom: Rc<Cell<Option<f32>>>,
+    /// Where the pills in that row are, as the last frame laid them out: the row's width, each pill's
+    /// width, and the line the row begins at. Refusing the whole row would take the desk beside the
+    /// pills with it; these say which part of it is a pill (see [`FootStrips`]).
+    pills: Rc<Cell<FootPills>>,
     /// What every hot path costs, shared with the canvas's renderer.
     timings: Arc<Timings>,
     /// When the pump last woke, for the gap it reports against its own interval.
@@ -1245,6 +1410,7 @@ impl NoteApp {
             pans: HashMap::new(),
             sheet: Sheet::default(),
             bar_bottom: Rc::new(Cell::new(None)),
+            pills: Rc::new(Cell::new(FootPills::default())),
             timings: Arc::new(Timings::default()),
             last_pump: None,
             pending_pdf: None,
@@ -1836,6 +2002,24 @@ impl NoteApp {
         bar_line(self.settings.show_toolbar, self.bar_bottom.get())
     }
 
+    /// Where the desk's own row begins: the line below which a reading is a press on a pill rather
+    /// than ink, in window logical pixels, as the last frame laid the pills out — or [`FOOT_BAND`]
+    /// until a frame has measured them.
+    ///
+    /// The row is the app's own — [`Self::page_pill`] and [`Self::zoom_pill`] — and unlike the bar it
+    /// has no switch: a reader who hid the bar still has a pill to turn the page with. It is measured
+    /// the same way the bar is, a zero-height probe pinned to the top of the tallest pill, because the
+    /// pills differ in height (the page's is a line of buttons, the zoom's is a row of them) and only
+    /// the layout knows either.
+    ///
+    /// The estimate is never *below* the real line, so the frame before the first measurement cannot
+    /// write a dot on a pill; the worst it does is refuse a reading on the desk just above them, for
+    /// one frame. The line is only half of the rule, though: the pills do not fill the row's width, so
+    /// what the pen refuses is the strip each pill occupies (see [`FootStrips`]).
+    fn foot_edge(&self) -> f32 {
+        self.pills.get().top.unwrap_or(FOOT_BAND)
+    }
+
     /// Reads a batch of readings into the ink model, timed — or spends them as a gesture when a key is held.
     fn consume_ink(&mut self, samples: &[Reading], cx: &mut Context<Self>) -> bool {
         // The pen is not a pen while something is in front of the sheet: a name being typed, or a screen
@@ -1867,10 +2051,53 @@ impl NoteApp {
             return false;
         }
 
-        let transform = self.sheet.transform(self.scale, self.bar_edge());
+        let transform = self.sheet.transform(self.scale, self.bar_edge(), self.foot_edge());
         let _timed = measure(&self.timings.ink);
 
-        self.ink.consume(samples, &transform, &self.settings)
+        // A reading is a press on a pill rather than ink when it lands on one: the foot's *line* is
+        // what tells the ink where the row begins, but the pills do not fill the row, so the strip each
+        // one covers is a rectangle the model is not told about — the desk beside them is still desk,
+        // and a reader may well be writing on the paper behind the gap between the two. Which readings
+        // are refused is decided here, before the model sees them (see [`Self::pills`] and
+        // [`FootStrips`]).
+        let strips = self.pills.get().strips(self.sheet.window.0);
+        let kept: Cow<[Reading]> = match strips {
+            Some(strips) => {
+                let foot = self.foot_edge();
+                let scale = if self.scale.is_finite() && self.scale > 0.0 {
+                    self.scale
+                } else {
+                    1.0
+                };
+
+                let refused = |sample: &Reading| {
+                    strips.held((sample.pixel.x / scale, sample.pixel.y / scale), foot)
+                };
+
+                // The common case is a batch that is all page, and it is the hot path: nothing is
+                // allocated for it, and only a batch with a reading on a pill is copied.
+                if samples.iter().any(refused) {
+                    Cow::Owned(
+                        samples
+                            .iter()
+                            .filter(|sample| !refused(sample))
+                            .copied()
+                            .collect(),
+                    )
+                } else {
+                    Cow::Borrowed(samples)
+                }
+            }
+            None => Cow::Borrowed(samples),
+        };
+
+        if kept.is_empty() {
+            // Nothing reached the page. Whatever the nib was in the middle of ends with the readings it
+            // was drawing, so a line is not left open by a hand that wandered onto a pill and off again.
+            return false;
+        }
+
+        self.ink.consume(&kept, &transform, &self.settings)
     }
 
     /// Lets the pen gesture go, committing what it did if it was a zoom.
@@ -2857,9 +3084,17 @@ impl NoteApp {
         // Below the bar's own edge — the measured one, and a bar that is hidden has no edge at all, so
         // the strip its switch sat in is page again (see [`Self::bar_edge`]). The ghost's line is the
         // same one; a pointer that followed a different line would leave the arrow under a ghost, or a
-        // ghost under the arrow.
-        self.pen_cursor()
-            .is_some_and(|cursor| cursor.position()[1] > self.bar_edge())
+        // ghost under the arrow. And not over a pill at the foot of the window: the page and zoom pills
+        // are controls the pen presses, so the arrow is the cursor there — beside them is desk, and the
+        // ghost is the pen's there as it is everywhere else on the page.
+        let strips = self.pills.get().strips(self.sheet.window.0);
+        let foot = self.foot_edge();
+
+        self.pen_cursor().is_some_and(|cursor| {
+            let (x, y) = (cursor.position()[0], cursor.position()[1]);
+            y > self.bar_edge()
+                && !strips.is_some_and(|strips| strips.held((x, y), foot))
+        })
     }
 
     /// Tells the ghost cursor's window what this frame knows about the screen it is drawn on.
@@ -2884,6 +3119,23 @@ impl NoteApp {
             // pixels. One line, three consumers — the ghost that is drawn below it, the ink that is
             // refused above it, and the system pointer that is the cursor there.
             sheet_top: self.bar_edge() * self.scale,
+            // And the line at the other end: the desk's own row, where the page and zoom pills float.
+            // A reading below it is a press on a pill, so the ghost is not drawn there and the system
+            // pointer is the cursor (see [`Self::foot_edge`]).
+            sheet_bottom: self.foot_edge() * self.scale,
+            // And which part of that row is actually a pill: the row is full-width and the pills float
+            // in it, so the desk beside them is page, and the ghost (and the arrow) belong there. In
+            // physical pixels like the lines above.
+            pill_strips: {
+                let strips = self.pills.get().strips(self.sheet.window.0);
+                let at = |strip: Option<(f32, f32)>| {
+                    strip.map(|(left, right)| (left * self.scale, right * self.scale))
+                };
+                match strips {
+                    Some(strips) => (at(strips.page), at(strips.zoom)),
+                    None => (None, None),
+                }
+            },
             suppressed: self.ghost_suppressed(),
         });
     }
@@ -3306,7 +3558,17 @@ impl NoteApp {
         }
     }
 
-    /// Adds a blank page before or after the one being read, and turns to it.
+    /// Adds a blank page before or after the one being read.
+    ///
+    /// **A page added *after* this one is turned to, and a page added *before* it is not.** An
+    /// "after" is the next sheet — it is what "turn to the next page" will do anyway — so the reader
+    /// who keeps adding pages writes on each one in the order they are made. A "before" is the
+    /// opposite: the reader is on a page, needs a sheet in front of it, and means to *stay* on the
+    /// page they were reading (a blank page inserted mid-document usually exists to hold something
+    /// that refers back to where they are). Turning to it would take their place on the page away
+    /// from them, and taking it back is a second turn they did not ask for — which is why this
+    /// command reports what it did on the status line instead of moving the sheet: a button that
+    /// only *seemed* to do nothing is a button that was not read.
     fn add_page(&mut self, before: bool, cx: &mut Context<Self>) {
         self.close_page();
 
@@ -3331,13 +3593,29 @@ impl NoteApp {
         }
         self.rename_pages(at as u64, 1);
 
-        // The page left behind was closed above, *before* the pages were renamed — that is the order
-        // the design asks for — so the turn here is only the half that shows the page that was made.
-        self.show_page(at);
-        // And a page nobody has read opens at its own **top**: the sheet in the view was panned to wherever the page
-        // before it was being read, and carrying that over is how a page added at the end starts half-way down (see
-        // [`Self::turn_to`], which is the same rule for a page turn proper).
-        self.view.reset_pan();
+        match page_after_insert(at, before) {
+            Some(stay) => {
+                // The page the reader was on is not the page they are on any more: every page after the
+                // insertion moved along, so the view *follows its own page*. Nothing else changes — the
+                // ink is renamed with the list by `rename_pages` and read in place, the sheet in the
+                // view is panned to where it was, and no page is opened or closed (the page being left
+                // was closed above). This is the whole of "a page before this one leaves the reader
+                // where they were".
+                self.page_index = stay;
+
+                self.touch_status();
+            }
+            None => {
+                // The page being left was closed above, *before* the pages were renamed — that is the
+                // order the design asks for — so the turn here is only the half that shows the page
+                // that was made.
+                self.show_page(at);
+                // And a page nobody has read opens at its own **top**: the sheet in the view was panned to wherever the
+                // page before it was being read, and carrying that over is how a page added at the end starts half-way
+                // down (see [`Self::turn_to`], which is the same rule for a page turn proper).
+                self.view.reset_pan();
+            }
+        }
         self.save_note_state();
 
         self.report(format!(
@@ -5735,9 +6013,20 @@ impl NoteApp {
 
     /// The desk's own row: the page in the middle, the zoom at the other edge.
     fn bottom_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // The desk's own width, which is where the centred pill's strip is placed around. It is the
+        // window's, less the row's own margins — the row is `w_full` with `BAR_MARGIN` of padding either
+        // side — and asking the sheet is exact where a canvas callback would only be in time for the
+        // next frame.
+        let row_width = (self.sheet.window.0 - 2.0 * BAR_MARGIN).max(0.0);
+
+        // This frame's measurements start from the row's width and nothing else: a pill that has gone
+        // — a screen in front of the desk, a frame where the row was not drawn — must not leave a strip
+        // behind that the pen is refused in.
+        self.pills.set(FootPills::default().row_width(row_width));
+
         // Full width with a margin's worth of padding, for the reason the bar gives: the width has to
         // come from somewhere, and it cannot come from two insets on the same element.
-        let mut row = div()
+        let row = div()
             .absolute()
             .bottom(px(BAR_MARGIN))
             .left_0()
@@ -5747,32 +6036,81 @@ impl NoteApp {
             .flex_row()
             .items_center()
             .justify_center()
-            .child(self.page_pill(cx));
+            // The page pill is centred by *this* row, and it is the one the pen must not write on.
+            .child(self.pill_box(FootPlace::Page, self.page_pill(cx), row_width))
+            // Zoom stays when the bar is hidden, unlike the controls up there: the switch that brings the
+            // bar back lives *in* the bar, so a sheet zoomed into a corner with the bar away would have no
+            // way out. It is reading rather than writing, which is what the page pill is too.
+            //
+            // It is placed out of the flow, against the window's right margin, so that a wider zoom field
+            // — or a page number gaining a digit — cannot shove the page off the centre of the desk
+            // (see [VIEW.md](../../doc/VIEW.md), §4).
+            .child(
+                div()
+                    .child(self.pill_box(FootPlace::Zoom, self.zoom_pill(cx), row_width))
+                    .absolute()
+                    .right(px(BAR_MARGIN))
+                    .bottom_0(),
+            );
 
-        // Neither of the row's other two children is the counters: the status pill hangs from the bar at
-        // the top of the window now (see [`Self::status_row`]), because what a document *is* and what it
-        // holds are one subject and belong at one edge, which leaves the bottom edge to navigation.
-
-        // Zoom stays when the bar is hidden, unlike the controls up there: the switch that brings the bar
-        // back lives *in* the bar, so a sheet zoomed into a corner with the bar away would have no way
-        // out. It is reading rather than writing, which is what the page pill is too.
-        //
-        // The right margin is written here rather than left to the row's own padding: an absolutely
-        // positioned child is placed against its parent's padding box, not its content, so the `px`
-        // above reaches the page pill and not this one. `BAR_MARGIN` is what the pill has below it —
-        // the row itself sits that far from the bottom edge — so the two margins are the same.
-        row = row.child(
-            div()
-                .absolute()
-                .right(px(BAR_MARGIN))
-                .bottom_0()
-                .child(self.zoom_pill(cx)),
-        );
+        // Neither pill is the counters: the status pill hangs from the bar at the top of the window
+        // (see [`Self::status_row`]), because what a document *is* and what it holds are one subject
+        // and belong at one edge, which leaves the bottom edge to navigation.
 
         row
     }
 
-    /// Which page is on the desk, and the way to the others.
+    /// One pill of the desk's row, with the zero-height probes that say where it is and how wide it is.
+    ///
+    /// The probes are the bar's own measurement turned around: the bar reports its bottom edge as a
+    /// *line* because a reading above it is a press; a pill reports its top edge and its own width,
+    /// because a reading is a press only over the strip the pill covers (see [`FootPills`]). They paint
+    /// nothing, take no pointer, and are out of the layout.
+    ///
+    /// `row` is the width of the desk along which the pills are placed, and only the centred pill needs
+    /// it: its strip is placed around the row's middle. The zoom pill's strip hangs from the window's
+    /// right margin instead, so its x bounds follow from the width alone.
+    fn pill_box(
+        &self,
+        place: FootPlace,
+        pill: impl IntoElement,
+        row: f32,
+    ) -> impl IntoElement {
+        let pills = Rc::clone(&self.pills);
+
+        div()
+            .relative()
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        let width = f32::from(bounds.size.width);
+                        let top = f32::from(bounds.top());
+
+                        // Each frame's measurements are its own: the row is rebuilt every frame, and a
+                        // measurement kept from a frame ago would describe a row that has gone. The
+                        // widths survive inside the measurement because both pills are in this row.
+                        let measured = pills.get();
+                        measured.row_width(row);
+                        pills.set(measured.measured(place, width, top));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .h_0(),
+            )
+            .child(pill)
+    }
+
+    /// Which page is on the desk, the way to the others, and the way to make a new one.
+    ///
+    /// The two insert commands live here rather than on the bar's page row (see [VIEW.md](../../doc/VIEW.md),
+    /// §4): a page made is a page the hand is already at, so the button that makes one belongs beside the
+    /// buttons that turn, on the desk rather than up on the bar. The page number stays the middle of the
+    /// pill and the two buttons are *outside* the arrows, so a page added — which changes the total —
+    /// cannot move the number under the hand (the same rule that keeps the zoom pill's field a fixed
+    /// width). `+after` leads because it is the half a hand reaches for; `+before` sits after a hairline
+    /// because it means something else (see `page_after_insert` and [`Self::add_page`]).
     fn page_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (surface, hairline, foreground) =
@@ -5782,18 +6120,37 @@ impl NoteApp {
         // as "1 / 1" rather than as a count of nothing.
         let total = self.page_total().max(1);
 
+        // The pill's own box, fitted to the pill rather than stretched to the row: the pill is the
+        // centred child of a full-width row, so without this its box would be the window's width and
+        // the strip the pen refuses would be the whole row (see [`Self::pill_box`]).
         div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .px(px(4.0))
-            .py(px(4.0))
-            .rounded(theme.radius_lg)
-            .bg(surface)
-            .border_1()
-            .border_color(hairline)
-            .shadow_sm()
+            .flex_none()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px(px(4.0))
+                    .py(px(4.0))
+                    .rounded(theme.radius_lg)
+                    .bg(surface)
+                    .border_1()
+                    .border_color(hairline)
+                    .shadow_sm()
+                    // The page's *next* sheet, first: it is the half of the command a hand reaches for, and it is
+                    // what "keep adding pages" means. The page number stays between the arrows; this button and
+                    // the one after the hairline are outside them, so a total that changed cannot move it.
+                    .child(
+                icon_button(
+                    "page-after",
+                    IconName::BetweenVerticalEnd,
+                    "Add a page after this one",
+                    true,
+                    cx,
+                    |app, cx| app.add_page(false, cx),
+                ),
+            )
             .child(icon_button(
                 "page-prev",
                 IconName::ChevronLeft,
@@ -5818,6 +6175,20 @@ impl NoteApp {
                 cx,
                 |app, cx| app.next_page(cx),
             ))
+            // After a hairline: a page *in front of* this one is the less-read half of the command — it
+            // leaves the reader where they are — and it must not be pressed by a hand reaching for "back".
+            .child(toolbar_divider(hairline))
+            .child(
+                icon_button(
+                    "page-before",
+                    IconName::BetweenVerticalStart,
+                    "Add a page before this one (stays on this page)",
+                    true,
+                    cx,
+                    |app, cx| app.add_page(true, cx),
+                ),
+            )
+            )
     }
 
     /// The way the sheet is looked at: two steps, the number they are at, and the two fits.
@@ -5913,7 +6284,12 @@ impl NoteApp {
             .children(controls)
     }
 
-    /// The page commands: insert a page before or after this one, delete this one, and mark it.
+    /// The page's own commands on the bar: delete this page, and turn or mark it.
+    ///
+    /// The two inserts are *not* here — they live in the page pill at the bottom of the desk, where the
+    /// page is turned (see [`Self::page_pill`] and [VIEW.md](../../doc/VIEW.md), §4). Deleting stays on the
+    /// bar with the rest of what a page *is*, because it is one of the two commands the app cannot undo and
+    /// it goes through the same question box as the bar's other destructive command.
     fn page_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let hairline = theme.title_bar_border;
@@ -5922,25 +6298,6 @@ impl NoteApp {
         // Collected before they are chained: each `cx.listener` takes a mutable borrow of the
         // context, and one long builder chain would hold them all at once.
         let controls = vec![
-            icon_button(
-                "page-before",
-                IconName::BetweenVerticalStart,
-                "Add a page before this one",
-                true,
-                cx,
-                |app, cx| app.add_page(true, cx),
-            )
-            .into_any_element(),
-            icon_button(
-                "page-after",
-                IconName::BetweenVerticalEnd,
-                "Add a page after this one",
-                true,
-                cx,
-                |app, cx| app.add_page(false, cx),
-            )
-            .into_any_element(),
-            toolbar_divider(hairline).into_any_element(),
             icon_button(
                 "page-delete",
                 IconName::FileX,

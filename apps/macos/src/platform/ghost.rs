@@ -67,8 +67,26 @@ impl Ghost {
             return None;
         }
 
-        // The bar's edge is in physical pixels and a cursor is measured in logical ones.
-        if cursor.position()[1] <= screen.sheet_top / sane_scale(screen.scale) {
+        // The lines are in physical pixels and a cursor is measured in logical ones: above the bar's
+        // edge is a place the pen presses rather than writes, and so is a page or zoom pill at the foot
+        // of the window. Beside those pills is desk, and the ghost is the pen's there as it is
+        // everywhere else — the row is full-width and the pills do not fill it.
+        let scale = sane_scale(screen.scale);
+        let at = cursor.position();
+        let (x, y) = (at[0], at[1]);
+        if y <= screen.sheet_top / scale {
+            return None;
+        }
+
+        let over = |strip: Option<(f32, f32)>| {
+            strip.is_some_and(|(left, right)| {
+                let (left, right) = (left / scale, right / scale);
+                (left..=right).contains(&x)
+            })
+        };
+        if y >= screen.sheet_bottom / scale
+            && (over(screen.pill_strips.0) || over(screen.pill_strips.1))
+        {
             return None;
         }
 

@@ -59,7 +59,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISurface};
 use windows_numerics::{Matrix3x2, Vector2};
 
-use note_format::ink::{alpha_of, Stroke};
+use note_format::ink::{alpha_of, detail_zoom, Stroke};
 use note_format::pages::Quarters;
 use note_ui::ink_layer::canvas::{Canvas, Fill, Page, Rect};
 use note_ui::ink_layer::ink_colour;
@@ -77,6 +77,14 @@ const DEFAULT_FLATTENING: f32 = 0.25;
 
 /// How many bytes one pixel of a page takes: BGRA.
 const BYTES_PER_PIXEL: u32 = 4;
+
+/// The most a cached finished-ink bitmap may take, in bytes.
+///
+/// A bitmap is a full-scene cache (Direct2D's own performance guidance recommends one for static
+/// content), so its size has to be bounded: a large sheet at a deep zoom must fall back to drawing
+/// its realizations rather than allocate an unbounded surface. Sixty-four mebibytes covers the
+/// app's 720×1,000 sheet through 4× at 1.0 display scale; beyond that the live path is used.
+const MAX_INK_BITMAP_BYTES: u64 = 64 * 1024 * 1024;
 
 /// How many consecutive opaque strokes share one baked realization.
 ///
@@ -116,6 +124,34 @@ pub(crate) struct Renderer {
     context1: ID2D1DeviceContext1,
     /// The document page's bitmap, and the image it was uploaded from.
     page: Option<(ImageId, ID2D1Bitmap1)>,
+    /// The finished ink as a static color bitmap, when it can be cached.
+    ///
+    /// The guidance is Direct2D's own: a scene that is static frame over frame is cheaper as one
+    /// bitmap than as its primitives (see [`Renderer::ensure_ink_bitmap`]). The bitmap is in the
+    /// paper's coordinates, so a pan is still just the ink transform.
+    ink_bitmap: Option<InkBitmapCache>,
+}
+
+/// A rendered still of the finished ink, and the page it belongs to.
+struct InkBitmapCache {
+    bitmap: ID2D1Bitmap1,
+    /// The exact stroke list, held so that a new list at a recycled address cannot masquerade as
+    /// the cached one.
+    strokes: Arc<Vec<Arc<Stroke>>>,
+    revision: u64,
+    /// Pixels per paper unit the bitmap was rasterised at.
+    resolution: f32,
+    paper: (f32, f32),
+}
+
+impl InkBitmapCache {
+    /// Whether this bitmap is the one `canvas` would ask for now.
+    fn matches(&self, canvas: &Canvas, resolution: f32) -> bool {
+        Arc::ptr_eq(&self.strokes, &canvas.ink.strokes)
+            && self.revision == canvas.ink.revision
+            && self.resolution == resolution
+            && self.paper == canvas.ink.paper
+    }
 }
 
 /// The finished strokes' geometry, and what it was built from.
@@ -186,6 +222,7 @@ impl Renderer {
             ink: InkCache::default(),
             context1,
             page: None,
+            ink_bitmap: None,
         })
     }
 
@@ -195,6 +232,13 @@ impl Renderer {
     /// kept: a swap chain with two buffers hands over a different one each time, and a Direct2D
     /// target that outlives its buffer is the reason DXGI refuses to resize.
     pub(crate) fn draw(&mut self, buffer: IDXGISurface, canvas: &Canvas) -> Result<()> {
+        // The geometry cache and, when the page is still, its bitmap are brought up to date before
+        // the frame's target is bound: both create device resources, and a target is not bound
+        // while a second one is being drawn into (see [`Renderer::ensure_ink_bitmap`]).
+        self.refresh_ink(canvas)?;
+        self.prepare_selection(canvas)?;
+        let cached_ink = self.ensure_ink_bitmap(canvas)?;
+
         let properties = D2D1_BITMAP_PROPERTIES1 {
             pixelFormat: D2D1_PIXEL_FORMAT {
                 format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -263,10 +307,10 @@ impl Renderer {
                     std::ptr::from_ref(&rect_of(sheet, canvas.scale)),
                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                 );
-                self.draw_ink(canvas)?;
+                self.draw_ink(canvas, cached_ink)?;
                 self.context.PopAxisAlignedClip();
             } else {
-                self.draw_ink(canvas)?;
+                self.draw_ink(canvas, cached_ink)?;
             }
         }
 
@@ -327,16 +371,137 @@ impl Renderer {
         self.brush_colour.set(Some(colour));
     }
 
+    /// Keeps the finished ink in one color bitmap when nothing is moving, and says whether it did.
+    ///
+    /// This is Direct2D's own full-scene caching guidance: a scene that is static frame over frame
+    /// is cheaper to draw as one bitmap than as all of its primitives (see *Improving the performance
+    /// of Direct2D apps*, “Full scene caching using a color bitmap”). The bitmap is rendered in the
+    /// paper's coordinates, so panning and turning the page stay pure transform changes; only the
+    /// strokes, the revision, the paper and the rasterisation resolution are keys.
+    ///
+    /// A selection or a drag is live content and bypasses the cache. The open stroke and the lasso
+    /// are always drawn live over it. An append invalidates the bitmap but only builds the new
+    /// stroke's realization, so finishing a stroke does not re-bake the page.
+    fn ensure_ink_bitmap(&mut self, canvas: &Canvas) -> Result<bool> {
+        if canvas.ink.selection.is_some() || canvas.ink.offset != (0.0, 0.0) {
+            return Ok(false);
+        }
+
+        let paper = canvas.ink.paper;
+        if paper.0 <= 0.0 || paper.1 <= 0.0 || canvas.ink.strokes.is_empty() {
+            // Nothing to cache, and holding a bitmap from the page before would be memory with no
+            // possible future hit.
+            self.ink_bitmap = None;
+            return Ok(false);
+        }
+
+        // A rung rather than the live zoom: a pinch inside one rung scales this bitmap rather than
+        // rebuilding it, and crossing a rung already increments the app's revision.
+        let resolution = (canvas.scale * detail_zoom(canvas.ink.zoom)).max(1.0);
+        if !resolution.is_finite() {
+            return Ok(false);
+        }
+
+        let width = (paper.0 * resolution).ceil() as u32;
+        let height = (paper.1 * resolution).ceil() as u32;
+        let bytes = u64::from(width)
+            .saturating_mul(u64::from(height))
+            .saturating_mul(u64::from(BYTES_PER_PIXEL));
+        if width == 0 || height == 0 || bytes > MAX_INK_BITMAP_BYTES {
+            // Too large to be a cache worth holding; the realization path still draws it.
+            self.ink_bitmap = None;
+            return Ok(false);
+        }
+
+        if self
+            .ink_bitmap
+            .as_ref()
+            .is_some_and(|cache| cache.matches(canvas, resolution))
+        {
+            return Ok(true);
+        }
+
+        // The old still cannot be used for the new page, and holding both while the replacement is
+        // built would double the peak this cache is bounded to avoid.
+        self.ink_bitmap = None;
+
+        let properties = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: DOTS_PER_INCH,
+            dpiY: DOTS_PER_INCH,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+            ..Default::default()
+        };
+
+        let bitmap = match unsafe {
+            self.context
+                .CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &properties)
+        } {
+            Ok(bitmap) => bitmap,
+            Err(_) => {
+                self.ink_bitmap = None;
+                return Ok(false);
+            }
+        };
+
+        let transparent = D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        };
+
+        unsafe {
+            self.context.SetTarget(&bitmap);
+            self.context.BeginDraw();
+            self.context.SetTransform(&Matrix3x2 {
+                M11: resolution,
+                M12: 0.0,
+                M21: 0.0,
+                M22: resolution,
+                M31: 0.0,
+                M32: 0.0,
+            });
+            self.context.Clear(Some(std::ptr::from_ref(&transparent)));
+        }
+
+        let drawn = self.draw_finished(canvas, [0.0, 0.0, paper.0, paper.1]);
+        unsafe {
+            self.context.SetTransform(&Matrix3x2::identity());
+        }
+        let ended = unsafe { self.context.EndDraw(None, None) };
+        unsafe {
+            self.context.SetTarget(None::<&ID2D1Image>);
+        }
+
+        if drawn.is_err() || ended.is_err() {
+            // A cache that cannot be built is an optimisation that did not happen, not a frame that
+            // cannot be drawn.
+            self.ink_bitmap = None;
+            return Ok(false);
+        }
+
+        self.ink_bitmap = Some(InkBitmapCache {
+            bitmap,
+            strokes: Arc::clone(&canvas.ink.strokes),
+            revision: canvas.ink.revision,
+            resolution,
+            paper,
+        });
+
+        Ok(true)
+    }
+
     /// Draws the ink: the finished strokes, then the one under the pen.
     ///
     /// A finished stroke is a realization — a shape its outline was flattened and filled into once —
     /// so the device draws it from a cache rather than outlining it again (see
     /// [`Renderer::realization_for`]). The stroke being written is still moving, so it is a plain
     /// path geometry built for this frame; it is one stroke, and the frame after it will not be.
-    fn draw_ink(&mut self, canvas: &Canvas) -> Result<()> {
-        self.refresh_ink(canvas)?;
-        self.prepare_selection(canvas)?;
-
+    fn draw_ink(&mut self, canvas: &Canvas, cached: bool) -> Result<()> {
         // What is off the sheet's visible part is skipped, not drawn: it is the same test the app counts
         // its `culled` figure with, so the number on the status line is what happened, and it is what makes
         // zooming in on a page of handwriting cheap (see [`Stroke::visible_in`]).
@@ -347,42 +512,70 @@ impl Renderer {
 
         unsafe {
             self.context.SetTransform(&ink_transform(canvas));
-            self.draw_finished(canvas, visible)?;
 
-            // The ink *in hand*, where a drag has taken it, and once more in the selection's colour. The same
-            // realization twice rather than a second geometry: a highlight built as its own outline would be
-            // another shape to keep in step with the ink it is meant to be showing.
-            if canvas.ink.selection.is_some() || offset != (0.0, 0.0) {
-                self.context
-                    .SetTransform(&shifted(ink_transform(canvas), offset, drawn));
+            if cached {
+                // Direct2D's full-scene caching guidance: a still scene is one bitmap draw instead of
+                // all its primitives. The bitmap is in paper units, so the transform above is the
+                // whole of its placement — a pan or a turn changes no cache key (see
+                // [`Renderer::ensure_ink_bitmap`]).
+                let cache = self
+                    .ink_bitmap
+                    .as_ref()
+                    .expect("a cached finish was answered as cached");
+                let paper = canvas.ink.paper;
+                let destination = Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: paper.0,
+                    height: paper.1,
+                };
 
-                // The window, in the coordinates the *drawing* is in: a drag moves the ink, so the part of
-                // the paper that is on screen is that much the other way when the ink is asked about itself.
-                let culled = [
-                    visible[0] - offset.0,
-                    visible[1] - offset.1,
-                    visible[2] - offset.0,
-                    visible[3] - offset.1,
-                ];
+                self.context.DrawBitmap(
+                    &cache.bitmap,
+                    Some(std::ptr::from_ref(&rect_of(destination, 1.0))),
+                    1.0,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    None,
+                    None,
+                );
+            } else {
+                self.draw_finished(canvas, visible)?;
 
-                for (index, stroke) in canvas.ink.strokes.iter().enumerate() {
-                    let in_hand = selected.get(index).copied().unwrap_or(false);
-                    if !in_hand || !stroke.visible_in(culled) {
-                        continue;
-                    }
+                // The ink *in hand*, where a drag has taken it, and once more in the selection's colour. The same
+                // realization twice rather than a second geometry: a highlight built as its own outline would be
+                // another shape to keep in step with the ink it is meant to be showing.
+                if canvas.ink.selection.is_some() || offset != (0.0, 0.0) {
+                    self.context
+                        .SetTransform(&shifted(ink_transform(canvas), offset, drawn));
 
-                    let Some(realization) = self.ink.realizations[index].as_ref() else {
-                        continue;
-                    };
+                    // The window, in the coordinates the *drawing* is in: a drag moves the ink, so the part of
+                    // the paper that is on screen is that much the other way when the ink is asked about itself.
+                    let culled = [
+                        visible[0] - offset.0,
+                        visible[1] - offset.1,
+                        visible[2] - offset.0,
+                        visible[3] - offset.1,
+                    ];
 
-                    self.set_brush(ink_colour(stroke.color));
-                    self.context1
-                        .DrawGeometryRealization(realization, &self.brush);
+                    for (index, stroke) in canvas.ink.strokes.iter().enumerate() {
+                        let in_hand = selected.get(index).copied().unwrap_or(false);
+                        if !in_hand || !stroke.visible_in(culled) {
+                            continue;
+                        }
 
-                    if let Some(colour) = canvas.ink.selection {
-                        self.set_brush(colour);
+                        let Some(realization) = self.ink.realizations[index].as_ref() else {
+                            continue;
+                        };
+
+                        self.set_brush(ink_colour(stroke.color));
                         self.context1
                             .DrawGeometryRealization(realization, &self.brush);
+
+                        if let Some(colour) = canvas.ink.selection {
+                            self.set_brush(colour);
+                            self.context1
+                                .DrawGeometryRealization(realization, &self.brush);
+                        }
                     }
                 }
             }
@@ -1063,7 +1256,80 @@ fn colour_of(hsla: Hsla) -> D2D1_COLOR_F {
 mod tests {
     use super::*;
     use gpui_kit::rgba;
+    use note_format::ink::InkPoint;
     use note_ui::ink_layer::canvas::Ink;
+
+    /// A still page takes the bitmap path, and a second frame reuses it.
+    ///
+    /// The first draw bakes the realization and rasterises the finished-ink bitmap; the second finds
+    /// the cache valid and draws it. This is the path the benchmark's warm rows take, so the test is
+    /// the one that says it can run on a real device at all — an API mistake here would otherwise be
+    /// caught only by a screenshot.
+    #[test]
+    fn a_still_page_is_drawn_from_its_cache() {
+        use crate::platform::ink_layer::device::Device;
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WS_OVERLAPPED,
+        };
+
+        let hwnd = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("STATIC"),
+                w!("cheap-note cache"),
+                WS_OVERLAPPED,
+                0,
+                0,
+                320,
+                240,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("a window to draw in");
+
+        {
+            let mut device = Device::new(hwnd).expect("a canvas for that window");
+
+            let mut stroke = Stroke {
+                points: vec![
+                    InkPoint::new(10.0, 10.0, 2.0),
+                    InkPoint::new(90.0, 90.0, 2.0),
+                    InkPoint::new(120.0, 40.0, 2.0),
+                ],
+                color: 0x1B_1B_1F,
+                outline: Vec::new(),
+                bounds: [0.0; 4],
+            };
+            stroke.close();
+
+            let canvas = Canvas {
+                scale: 1.0,
+                sheet: Some(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 200.0,
+                    height: 200.0,
+                }),
+                ink: Ink {
+                    paper: (200.0, 200.0),
+                    zoom: 1.0,
+                    visible: [0.0, 0.0, 200.0, 200.0],
+                    strokes: Arc::new(vec![Arc::new(stroke)]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            device.draw(&canvas).expect("the first, baking frame");
+            device.draw(&canvas).expect("the cached frame");
+        }
+
+        unsafe { DestroyWindow(hwnd) }.expect("the window to close");
+    }
 
     /// The colour conversion, against the one mistake worth catching: a channel swap. The surface is
     /// BGRA and Direct2D's colour is not — passing the surface's byte order through here would turn

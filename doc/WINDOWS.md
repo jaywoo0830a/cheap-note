@@ -290,10 +290,20 @@ different answer than on the Mac.
 |---|---|---|
 | The canvas | one Metal pass into a `CAMetalLayer`, the whole canvas drawn per present | Direct2D bound to a DXGI swap chain's back buffer, per present |
 | A stroke on screen | a triangle strip rebuilt from the outline | an `ID2D1GeometryRealization`: the outline flattened, filled and antialiased **once**, then drawn |
-| What costs the frame | the **fragment** stage — a window-sized multisampled pass plus the page texture. Measured at 16.4 M MSAA samples, and this is what the raised `FACET` could not help | the **draw** of the realizations, each already baked. One at a time it measured **~21 µs a stroke** — 1.69 ms for 29 strokes, 7.87 ms for 316; in chunks of 32 (§6.4) a page of 8,182 draws in 1.02 ms |
+| What costs the frame | the **fragment** stage — a window-sized multisampled pass plus the page texture. Measured at 16.4 M MSAA samples, and this is what the raised `FACET` could not help | the **draw** of the finished ink. A still page is one `DrawBitmap` of the full-scene color cache; the open stroke and any selection are live. The first frame and a detail rebuild still bake the realizations (§6.4): 8,182 strokes measured ~139 ms, and a warm cached frame measured 0.065 ms |
 | What a zoom rung rebuild costs | the frame, until `request_detail`/`build_detail` were split | a rebake of every realization — the same handful of rebuilds `InkDocument::set_zoom` forces, and now off the frame on both platforms because the *view* schedules it. Chunking took 8,182 strokes from 257–303 ms to about 140 ms |
-| What panning costs | a fresh pass over the whole canvas | the same transform applied to already-baked geometry; nothing is rebuilt. Measured at 1.10 ms for 8,182 strokes in chunks |
+| What panning costs | a fresh pass over the whole canvas | the same transform applied to the cached bitmap; nothing is rebuilt. Measured at 0.11 ms for 8,182 strokes |
 | Antialiasing | MSAA on the pass | `D2D1_ANTIALIAS_MODE_PER_PRIMITIVE`, analytic |
+
+The still-page cache is Direct2D's **full-scene caching using a color bitmap** guidance: the finished
+ink is rasterised once into a bitmap in the paper's coordinates, so a pan or a turn is still just the
+ink transform, and a frame with no live ink is one `DrawBitmap`. The bitmap is bounded to 64 MiB; a
+sheet at a deeper zoom falls back to the realization path. A selection or drag bypasses the cache,
+and the open stroke and lasso are always drawn live.
+
+There is also no per-frame `Flush`. Direct2D's guidance says to restrict it — `EndDraw` has already
+ended the batch, and the present is the handoff that has to see it; removing the flush cut the
+present/frame figures by 20–27% on the smaller pages.
 
 The consequence, stated plainly: **the optimisations found on the Mac are largely already done on
 Windows by a different mechanism**, and the ones that transfer are the ones above the seam (§2). Anyone
@@ -365,30 +375,35 @@ composition swap chain. `first` is the frame that bakes the page, `warm` is the 
 after it, `rebuild` is one frame after a detail rebuild, `pan` is the same ink moved with no rebuild,
 and `present` is the compositor's own cost, timed apart from the draw.
 
-On the reference Windows machine, at 1280×900 and 1.0×, sixty warm frames (the final run; `first`,
+On the reference Windows machine, at 1280×900 and 1.0×, 120 warm frames (the final run; `first`,
 `rebuild` and `pan` are single frames):
 
 | strokes | first | warm draw | worst warm | rebuild | pan | present | frame (draw + present) |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 0 | 0.56 ms | 0.047 ms | 0.110 ms | 0.038 ms | 0.038 ms | 0.17 ms | 0.22 ms |
-| 29 | 1.89 ms | 0.149 ms | 0.694 ms | 1.18 ms | 0.115 ms | 0.17 ms | 0.32 ms |
-| 316 | 7.44 ms | 0.144 ms | 0.709 ms | 7.11 ms | 0.123 ms | 0.35 ms | 0.50 ms |
-| 1,000 | 18.5 ms | 0.167 ms | 0.873 ms | 16.8 ms | 0.147 ms | 0.24 ms | 0.40 ms |
-| 8,182 | 136 ms | **1.02 ms** | 2.38 ms | 141 ms | **1.10 ms** | 1.00 ms | **2.03 ms** |
+| 0 | 0.53 ms | 0.044 ms | 0.246 ms | 0.058 ms | 0.054 ms | 0.12 ms | 0.17 ms |
+| 29 | 2.22 ms | 0.045 ms | 0.184 ms | 1.57 ms | 0.075 ms | 0.12 ms | 0.17 ms |
+| 316 | 7.47 ms | 0.047 ms | 0.227 ms | 7.10 ms | 0.142 ms | 0.14 ms | 0.18 ms |
+| 1,000 | 17.9 ms | 0.047 ms | 0.181 ms | 16.2 ms | 0.073 ms | 0.17 ms | 0.21 ms |
+| 8,182 | 134 ms | **0.065 ms** | 0.138 ms | 139 ms | **0.107 ms** | 0.64 ms | **0.70 ms** |
 
-The change that produced the right-hand columns is the renderer's chunk cache
-(`apps/windows/src/platform/ink_layer/render.rs`): consecutive opaque strokes of one colour are baked
-32 at a time into one `ID2D1GeometryRealization`, while the growing tail, a highlighter, and a stroke a
-selection needs on its own stay per-stroke. The same 8,182-stroke page measured **22.9 ms warm draw and
-23.4 ms pan** before that cache; the frame was 23.2 ms. It is now 1.02 ms and 1.10 ms, and 2.03 ms with
-the present included — about 490 frames a second of canvas work, against 43 before.
+The renderer keeps two caches (`apps/windows/src/platform/ink_layer/render.rs`). The **geometry cache**
+bakes consecutive opaque strokes of one colour 32 at a time into one `ID2D1GeometryRealization`, while
+the growing tail, a highlighter, and a stroke a selection needs on its own stay per-stroke. The
+**finished-ink cache** is Direct2D's full-scene color bitmap: when no selection or drag is live, the
+finished strokes are rasterised once into a bitmap in the paper's coordinates, and a frame draws that
+one bitmap. Panning and turning are therefore transforms, not rebuilds; the open stroke and the lasso
+are drawn live over it. The bitmap is bounded to 64 MiB and falls back to the realizations beyond that.
 
-`first` and `rebuild` are still about 135–170 ms on that page: a chunk is one flattening and one
-realization, but 8,182 strokes still make 256 of them. That is the remaining Windows hitch after a zoom
-rung, and the number to attack next if it is felt. The benchmark exists so that the next attempt is
-judged by a measurement rather than by the doc's earlier guess. The `present` column is the
-compositor's and moves with whatever else the desktop is doing — it measured between 0.2 and 2 ms across
-runs — so the draw columns are the ones to compare between builds.
+The 8,182-stroke page measured **22.9 ms warm draw and 23.4 ms pan** before the chunk cache; with the
+chunk cache it was 1.02 ms and 1.10 ms; with the bitmap it is 0.065 ms and 0.107 ms. The present is
+what remains of the frame, and is the compositor's cost.
+
+`first` and `rebuild` are still about 134–140 ms on that page: the chunk cache has 256 realizations to
+bake, and the bitmap is rasterised after them. That is the remaining Windows hitch after a zoom rung,
+and the number to attack next if it is felt. The benchmark exists so that the next attempt is judged by
+a measurement rather than by the doc's earlier guess. The `present` column is the compositor's and moves
+with whatever else the desktop is doing — it measured between 0.2 and 2 ms across runs — so the draw
+columns are the ones to compare between builds.
 
 ### 6.5 Things that are *not* worth doing
 
@@ -409,7 +424,7 @@ Written down so they do not get re-litigated:
 
 | | macOS | Windows |
 |---|---|---|
-| Canvas | Metal, one MSAA pass, fragment-bound | Direct2D, baked realizations, draw-bound |
+| Canvas | Metal, one MSAA pass, fragment-bound | Direct2D, baked realizations plus a full-scene color bitmap; warm frames are one bitmap draw |
 | Window composition | the canvas is a texture handed to GPUI | two DirectComposition layers in one HWND: GPUI's target topmost, the canvas's not; a GPUI release that takes both layers stops the app starting (§3.5) |
 | Pacing | frame cap **and** `displaySyncEnabled`, both real | frame cap only; presents immediately, always |
 | Scroll | trackpad pixels; `position` = where the gesture began | trackpad pixels **or** wheel lines, read at 32 px a line; `position` = the system cursor |
@@ -418,7 +433,7 @@ Written down so they do not get re-litigated:
 | Wheel | dropped, by choice and with little lost | read as lines at `WHEEL_PAN_PER_LINE`; never an edge gesture (§3.2) |
 | V-Sync switch | works, and measurably, when the cap is `Unlimited` | setting stored; the switch is left out where the surface cannot honour it (§3.3) |
 | Unit scale | `0.75` | `1.0` |
-| Frame cost | measured: 143–146 draws/s on 8,182 strokes | measured: **2.03 ms a frame** on 8,182 (draw 1.02 + present 1.00), about 490 fps of canvas work (§6.4) |
+| Frame cost | measured: 143–146 draws/s on 8,182 strokes | measured: **0.70 ms a frame** on 8,182 in the final run (draw 0.065 + present 0.64; present varies), about 1,400 fps of canvas work (§6.4) |
 | Hardware clause | `17 MiB · 0% cpu · 17 threads` | the same shape, from `sysinfo` + a toolhelp snapshot (§8) |
 | Document bytes | `MappedBytes` over `mmap`/`munmap` | the same type over `CreateFileMappingW`/`MapViewOfFile` (§8.1) |
 | Memory report | `--memory-report` with `--format`; GPU from `TASK_VM_INFO` | the same command, contract and exit codes; GPU column `—` (§8.1) |

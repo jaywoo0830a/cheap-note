@@ -78,7 +78,9 @@ pub(crate) struct Device {
     /// Held, not read: the context, the renderer and the swap chain are all made from it, and the
     /// canvas is theirs for as long as it is on the screen.
     _device: ID3D11Device,
-    context: ID3D11DeviceContext,
+    /// Held, not read: Direct2D and the swap chain are on this immediate context, and it belongs to
+    /// the device for as long as the canvas does.
+    _context: ID3D11DeviceContext,
     swap_chain: IDXGISwapChain1,
     /// What draws a frame: Direct2D, on this same device (see [`Renderer`]).
     renderer: Renderer,
@@ -110,7 +112,7 @@ impl Device {
         Ok(Device {
             hwnd,
             _device: device,
-            context,
+            _context: context,
             swap_chain,
             renderer,
             size,
@@ -146,13 +148,12 @@ impl Device {
 
     /// Hands the frame just drawn to the compositor.
     ///
-    /// The flush is what makes the present honest: Direct2D and this device share one immediate
-    /// context, so what Direct2D has just ended is still a batch on it, and a present is not
-    /// promised to wait for work that has not been handed over.
+    /// There is deliberately no `Flush` here. Direct2D's performance guidance says to restrict its
+    /// use: `EndDraw` has already ended the batch, and a flush forces the batched commands to be
+    /// processed separately from the present that is about to submit them. The swap chain's present
+    /// is the handoff that has to see the frame; a second one before it is the avoidable work.
     pub(crate) fn present(&mut self) -> Result<()> {
         unsafe {
-            self.context.Flush();
-
             // No interval: the canvas is presented as soon as it is drawn, and nothing here waits
             // for a display's clock. What paces it is a decision of its own (see [`super`]).
             self.swap_chain

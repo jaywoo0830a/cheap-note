@@ -178,7 +178,12 @@ impl Stroke {
             return;
         }
 
-        let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        // "Nothing found yet", said as a pair of infinities rather than `f32::MAX` and `f32::MIN`.
+        // `f32::MIN` is the most *negative* float, so it happens to work here — but it reads like a
+        // smallest positive, and a later reader who "fixes" it to `f32::MIN_POSITIVE` would clamp every
+        // box that lives left of the origin. The infinities say what is meant and are what the renderers
+        // in this repository already use for an empty region (`metal.rs`, `ink_layer/canvas.rs`).
+        let mut bounds = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
         for point in &self.points {
             bounds[0] = bounds[0].min(point.x);
             bounds[1] = bounds[1].min(point.y);
@@ -718,8 +723,8 @@ impl Model {
             return [0.0, 0.0, 0.0, 0.0];
         }
 
-        let mut low = (f32::MAX, f32::MAX);
-        let mut high = (f32::MIN, f32::MIN);
+        let mut low = (f32::INFINITY, f32::INFINITY);
+        let mut high = (f32::NEG_INFINITY, f32::NEG_INFINITY);
 
         for disc in &self.discs {
             low = (
@@ -813,8 +818,8 @@ pub fn ribbon_outline(model: &Model) -> Vec<[f32; 2]> {
     // The disc is the *enclosing* one: centred where the readings are, and wide enough to reach the furthest
     // reading plus its own nib. A hand that wobbles as it scrubs pushed the ink that far out, so a disc drawn at
     // the nib's plain width would be smaller than the model says the mark is.
-    let mut low = (f32::MAX, f32::MAX);
-    let mut high = (f32::MIN, f32::MIN);
+    let mut low = (f32::INFINITY, f32::INFINITY);
+    let mut high = (f32::NEG_INFINITY, f32::NEG_INFINITY);
 
     for disc in line {
         low = (low.0.min(disc.x), low.1.min(disc.y));

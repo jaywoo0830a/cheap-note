@@ -486,14 +486,14 @@ impl Surface {
         if self.open_id != canvas.ink.open_id
             || self.open_colour != stroke.color
             || self.open_paper != canvas.ink.paper
-            || self.open_rotation != canvas.ink.rotation
+            || self.open_rotation != canvas.ink.rotation.turns()
             || points.len() < self.open_points
         {
             self.open.clear();
             self.open_id = canvas.ink.open_id;
             self.open_colour = stroke.color;
             self.open_paper = canvas.ink.paper;
-            self.open_rotation = canvas.ink.rotation;
+            self.open_rotation = canvas.ink.rotation.turns();
             self.open_points = 0;
         }
 
@@ -1066,7 +1066,7 @@ impl InkKey {
             first: list.first().map(|stroke| Arc::as_ptr(stroke) as usize),
             last: list.last().map(|stroke| Arc::as_ptr(stroke) as usize),
             revision: ink.revision,
-            rotation: ink.rotation,
+            rotation: ink.rotation.into(),
             paper: [ink.paper.0.to_bits(), ink.paper.1.to_bits()],
             offset: [ink.offset.0.to_bits(), ink.offset.1.to_bits()],
             selection: ink.selection.map(|colour| {
@@ -1618,7 +1618,7 @@ mod tests {
         let mut canvas = Canvas::default();
         let before = InkKey::of(&canvas);
 
-        canvas.ink.rotation = 1;
+        canvas.ink.rotation = note_format::pages::Quarters::from_turns(1);
         assert!(
             before != InkKey::of(&canvas),
             "a turn left the ink's key alone"

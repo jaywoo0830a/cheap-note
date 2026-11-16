@@ -15,7 +15,7 @@ fn a_reading_on_a_turned_page_is_stored_in_the_pages_own_coordinates() {
     let paper = (600.0, 800.0);
     let origin = (100.0, 50.0);
 
-    for turns in 0..4u8 {
+    for turns in Quarters::ALL {
         let transform = InkTransform {
             scale: 1.0,
             zoom: 1.0,
@@ -59,7 +59,7 @@ fn a_reading_beside_a_turned_page_is_not_ink() {
         paper: (600.0, 800.0),
         bar: 0.0,
         foot: 0.0,
-        rotation: 1,
+        rotation: Quarters::from_turns(1),
     };
 
     // The drawn sheet is 800 wide and 600 tall; the page is 600 wide and 800 tall. A reading at
@@ -85,7 +85,7 @@ fn a_reading_beside_a_turned_page_is_not_ink() {
 fn the_two_mappings_are_inverses() {
     let paper = (600.0, 800.0);
 
-    for turns in 0..4u8 {
+    for turns in Quarters::ALL {
         for point in [(0.0, 0.0), (600.0, 0.0), (0.0, 800.0), (123.0, 456.0)] {
             let round = paper_of_drawn(drawn_of_paper(point, paper, turns), paper, turns);
 
@@ -97,7 +97,7 @@ fn the_two_mappings_are_inverses() {
     }
 
     assert_eq!(
-        drawn_of_paper((100.0, 200.0), paper, 4),
+        drawn_of_paper((100.0, 200.0), paper, Quarters::from_turns(4)),
         (100.0, 200.0),
         "four turns is the page it was"
     );
@@ -329,7 +329,7 @@ fn sharpest_step(model: &note_format::ink::Model) -> f32 {
 
 /// The distance from a point to the nearest edge of an outline.
 fn distance_to_outline(point: [f32; 2], outline: &[[f32; 2]]) -> f32 {
-    let mut nearest = f32::MAX;
+    let mut nearest = f32::INFINITY;
     for index in 0..outline.len() {
         let from = outline[index];
         let to = outline[(index + 1) % outline.len()];
@@ -924,7 +924,7 @@ fn the_paper_has_edges() {
 
     // A transform with no paper — the one a test without a window uses — has no edges at all.
     let none = InkTransform::identity();
-    assert!(none.on_paper((f32::MAX, f32::MIN)));
+    assert!(none.on_paper((f32::INFINITY, f32::NEG_INFINITY)));
     assert_eq!(none.onto_paper((-10.0, -10.0)), (-10.0, -10.0));
 }
 

@@ -5,7 +5,32 @@
 //! file tests the two things a second implementation has to get identical: the mapping between a
 //! note's page index and a document's, and the bytes the list is stored as.
 
-use note_format::pages::{swaps_axes, turned, Page, PageEntry, Pages, StoredPage};
+use note_format::pages::{swaps_axes, turned, Page, PageEntry, Pages, Quarters, StoredPage};
+
+/// A quarter turn is one number, and the four are the only four it can be.
+///
+/// The reason this type exists rather than a `u8`: a rotation that is not one of the four is a page
+/// no reader can draw, and a type alias would have let one be stored.
+#[test]
+fn a_rotation_is_one_of_four() {
+    assert_eq!(Quarters::ALL.len(), 4);
+    assert_eq!(
+        Quarters::ALL.map(Quarters::turns),
+        [0, 1, 2, 3],
+        "the four ways up a page can be"
+    );
+
+    for turns in -16..16 {
+        assert!(
+            (0..=3).contains(&Quarters::from_turns(turns).turns()),
+            "every rotation a reader asks for comes back as one of the four"
+        );
+    }
+
+    assert_eq!(Quarters::from_turns(-1), Quarters::from_turns(3));
+    assert_eq!(Quarters::from_turns(5), Quarters::from_turns(1));
+    assert_eq!(Quarters::default(), Quarters::UPRIGHT);
+}
 
 /// A document's pages arrive in the document's own order, one for one.
 #[test]
@@ -13,7 +38,11 @@ fn a_documents_pages_are_in_document_order() {
     let pages = Pages::of_document(3);
 
     assert_eq!(pages.len(), 3);
-    assert_eq!(pages.rotation(0), 0, "a page arrives the right way up");
+    assert_eq!(
+        pages.rotation(0),
+        Quarters::UPRIGHT,
+        "a page arrives the right way up"
+    );
 
     for index in 0..3 {
         assert_eq!(pages.document_page(index), Some(index));
@@ -55,7 +84,7 @@ fn a_note_without_a_list_is_read_from_what_it_has() {
 /// Four quarter turns are the page it started with, and a quarter turn is what swaps its axes.
 #[test]
 fn turns_wrap_and_swap_the_axes() {
-    for rotation in 0..=3u8 {
+    for rotation in Quarters::ALL {
         assert_eq!(turned(rotation, 4), rotation);
         assert_eq!(turned(rotation, 0), rotation);
         assert_eq!(
@@ -64,11 +93,16 @@ fn turns_wrap_and_swap_the_axes() {
             "the other way is wrapped too"
         );
         assert_eq!(turned(rotation, 1), turned(rotation, -3));
-        assert_eq!(swaps_axes(rotation), rotation % 2 == 1);
+        assert_eq!(swaps_axes(rotation), rotation.turns() % 2 == 1);
+        assert_eq!(rotation.swaps_axes(), swaps_axes(rotation), "one answer, two spellings");
     }
 
-    assert_eq!(turned(3, 1), 0, "a page turned past upside down is upright");
-    assert_eq!(turned(0, -1), 3);
+    assert_eq!(
+        turned(Quarters::from_turns(3), 1),
+        Quarters::UPRIGHT,
+        "a page turned past upside down is upright"
+    );
+    assert_eq!(turned(Quarters::UPRIGHT, -1), Quarters::from_turns(3));
 }
 
 /// Turning one page turns only that page; turning the note turns every page by its own amount.
@@ -78,20 +112,28 @@ fn a_page_carries_its_own_rotation() {
 
     pages.turn(1, 1);
     assert_eq!(
-        [pages.rotation(0), pages.rotation(1), pages.rotation(2)],
+        [
+            pages.rotation(0).turns(),
+            pages.rotation(1).turns(),
+            pages.rotation(2).turns()
+        ],
         [0, 1, 0]
     );
 
     pages.turn_all(1);
     assert_eq!(
-        [pages.rotation(0), pages.rotation(1), pages.rotation(2)],
+        [
+            pages.rotation(0).turns(),
+            pages.rotation(1).turns(),
+            pages.rotation(2).turns()
+        ],
         [1, 2, 1],
         "every page moves by one, from wherever it was"
     );
 
     // An index the note does not have cannot be turned, and answers as the right way up.
     pages.turn(99, 1);
-    assert_eq!(pages.rotation(99), 0);
+    assert_eq!(pages.rotation(99), Quarters::UPRIGHT);
 }
 
 /// A new page lands where it was asked for, the right way up, and it is the page to turn to.
@@ -107,8 +149,16 @@ fn inserting_a_page_puts_a_blank_sheet_there() {
     );
     assert_eq!(pages.len(), 3);
     assert_eq!(pages.layout()[0].show, Page::Blank, "it is blank paper");
-    assert_eq!(pages.rotation(0), 0, "and it arrives upright");
-    assert_eq!(pages.rotation(1), 2, "the page it displaced kept its turn");
+    assert_eq!(
+        pages.rotation(0),
+        Quarters::UPRIGHT,
+        "and it arrives upright"
+    );
+    assert_eq!(
+        pages.rotation(1),
+        Quarters::from_turns(2),
+        "the page it displaced kept its turn"
+    );
 
     let at = pages.insert(2, false);
     assert_eq!(at, 3, "after the third page");
@@ -172,7 +222,7 @@ fn a_page_written_before_rotation_is_read_upright() {
         turned.entry(),
         PageEntry {
             show: Page::Document(3),
-            rotation: 1
+            rotation: Quarters::from_turns(1)
         }
     );
 
@@ -195,6 +245,50 @@ fn a_page_list_survives_its_json() {
     let read: Vec<PageEntry> = serde_json::from_str(&json).expect("a page list back");
 
     assert_eq!(read, pages.layout());
-    assert_eq!(read[2].rotation, 3);
+    assert_eq!(read[2].rotation, Quarters::from_turns(3));
     assert_eq!(read[1].show, Page::Blank);
+}
+
+/// The stored JSON keeps its shape: a newtype in memory, a plain number on disk.
+///
+/// Serde treats a one-field tuple struct as the field itself, which is what makes [`Quarters`] free
+/// on disk as well as in memory: every note ever written has the rotation as a bare number, and a
+/// `{"turns":1}` in the file would be readable by this build and by nothing else — including the build
+/// that wrote the note the day before. This test is here because that property is easy to lose with
+/// one `#[serde(...)]` attribute and impossible to notice without it.
+#[test]
+fn a_rotation_is_a_plain_number_on_disk() {
+    let entry = PageEntry::new(Page::Blank).turned(1);
+
+    assert_eq!(
+        serde_json::to_string(&entry).expect("a page as JSON"),
+        r#"{"show":"blank","rotation":1}"#,
+        "the rotation is the number it always was, not a wrapped object"
+    );
+
+    let json = serde_json::to_string(Pages::of_document(2).layout()).expect("a list as JSON");
+    let read: Vec<PageEntry> = serde_json::from_str(&json).expect("a list back");
+    assert_eq!(read[0].rotation, Quarters::UPRIGHT);
+}
+
+/// A rotation outside the four is not one: the type is what keeps a fifth from reaching a renderer.
+///
+/// The file is read through `Quarters`, so every rotation that comes out of a note is one of the four
+/// whatever the note said — [`Quarters::from_turns`] is the only way to make one, and it wraps. This
+/// pins that the numbers a note can hold and the numbers a renderer can be handed are the same set.
+#[test]
+fn every_rotation_the_type_holds_is_one_a_page_can_be_drawn_at() {
+    for turns in -8..8 {
+        let rotation = Quarters::from_turns(turns);
+
+        assert_eq!(
+            rotation.turns(),
+            turns.rem_euclid(4) as u8,
+            "{turns} wraps to the quarter turn it is"
+        );
+        assert!(
+            (0..=3).contains(&rotation.turns()),
+            "{turns} produced a rotation no page can have"
+        );
+    }
 }

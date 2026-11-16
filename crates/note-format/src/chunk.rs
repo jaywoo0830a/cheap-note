@@ -49,7 +49,7 @@
 
 use std::ops::Range;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, Variant};
 use crate::ink::{InkPoint, Stroke};
 
 /// Fixed-point units per logical pixel.
@@ -108,7 +108,7 @@ impl Codec {
             0 => Ok(Codec::Raw),
             1 => Ok(Codec::Lz4),
             2 => Ok(Codec::Zstd),
-            other => Err(Error::Note(format!(
+            other => Err(Variant::NewerBuild.said(format!(
                 "this note uses compression {other}, which this build does not know"
             ))),
         }
@@ -177,28 +177,25 @@ pub fn decode(
     stroke_count: usize,
     crc32: u32,
 ) -> Result<Vec<Stroke>> {
-    if crc32fast::hash(data) != crc32 {
-        return Err(Error::Note(String::from(
-            "a chunk of this note is damaged (its checksum does not match)",
+    let found = crc32fast::hash(data);
+    if found != crc32 {
+        return Err(Variant::Damaged.said(format!(
+            "a chunk of this note is damaged (its checksum is {found:#010x}, not {crc32:#010x})"
         )));
     }
 
     let raw = match codec {
         Codec::Raw => data.to_vec(),
         Codec::Lz4 => lz4_flex::decompress(data, raw_len).map_err(|error| {
-            Error::Note(format!(
-                "a chunk of this note could not be unpacked: {error}"
-            ))
+            Variant::Truncated.said(format!("a chunk of this note could not be unpacked: {error}"))
         })?,
         Codec::Zstd => zstd::bulk::decompress(data, raw_len).map_err(|error| {
-            Error::Note(format!(
-                "a chunk of this note could not be unpacked: {error}"
-            ))
+            Variant::Truncated.said(format!("a chunk of this note could not be unpacked: {error}"))
         })?,
     };
 
     if raw.len() != raw_len {
-        return Err(Error::Note(format!(
+        return Err(Variant::Truncated.said(format!(
             "a chunk of this note unpacks to {} bytes, not the {raw_len} it was written as",
             raw.len()
         )));
@@ -206,7 +203,7 @@ pub fn decode(
 
     let strokes = read_arrays(&raw)?;
     if strokes.len() != stroke_count {
-        return Err(Error::Note(format!(
+        return Err(Variant::Misfiled.said(format!(
             "a chunk of this note holds {} strokes, not the {stroke_count} it is filed under",
             strokes.len()
         )));
@@ -232,9 +229,9 @@ pub fn seal(encoded: &Encoded) -> Vec<u8> {
 /// The strokes of one sealed chunk (see [`seal`]), which must hold exactly `strokes` of them.
 pub fn open_sealed(blob: &[u8], strokes: usize) -> Result<Vec<Stroke>> {
     if blob.len() < 9 {
-        return Err(Error::Note(String::from(
+        return Err(Variant::Truncated.said(
             "a chunk of this note is stored in fewer bytes than its own header",
-        )));
+        ));
     }
 
     let codec = Codec::from_id(u32::from(blob[0]))?;
@@ -363,9 +360,9 @@ fn read_arrays(raw: &[u8]) -> Result<Vec<Stroke>> {
 
     let colors = cursor.varint()? as usize;
     if colors > MAX_COLORS {
-        return Err(Error::Note(String::from(
+        return Err(Variant::Misfiled.said(
             "a chunk of this note names more colours than a chunk can hold",
-        )));
+        ));
     }
     let mut palette = Vec::with_capacity(colors);
     for _ in 0..colors {
@@ -375,18 +372,16 @@ fn read_arrays(raw: &[u8]) -> Result<Vec<Stroke>> {
     // Both counts come from the blob, so neither is trusted with an allocation before the bytes that
     // would have to hold them are known to be there: a damaged header must not ask for a gigabyte.
     if count > raw.len() || points > raw.len() {
-        return Err(Error::Note(String::from(
+        return Err(Variant::Misfiled.said(
             "a chunk of this note claims more ink than its own bytes could hold",
-        )));
+        ));
     }
 
     let mut headers: Vec<(u32, usize)> = Vec::with_capacity(count);
     for _ in 0..count {
         let index = usize::from(cursor.byte()?);
         let color = *palette.get(index).ok_or_else(|| {
-            Error::Note(String::from(
-                "a chunk of this note refers to a colour it does not hold",
-            ))
+            Variant::Misfiled.said("a chunk of this note refers to a colour it does not hold")
         })?;
         headers.push((color, cursor.varint()? as usize));
     }
@@ -413,7 +408,7 @@ fn read_arrays(raw: &[u8]) -> Result<Vec<Stroke>> {
     }
 
     if cursor.remaining() != 0 {
-        return Err(Error::Note(format!(
+        return Err(Variant::Misfiled.said(format!(
             "a chunk of this note has {} bytes left over",
             cursor.remaining()
         )));
@@ -548,17 +543,15 @@ impl<'a> Cursor<'a> {
             }
         }
 
-        Err(Error::Note(String::from(
+        Err(Variant::Misfiled.said(
             "a chunk of this note holds a number that is not a number",
-        )))
+        ))
     }
 }
 
 /// The error a chunk raises when it ends in the middle of a value.
 fn short() -> Error {
-    Error::Note(String::from(
-        "a chunk of this note ends in the middle of a value",
-    ))
+    Variant::Truncated.said("a chunk of this note ends in the middle of a value")
 }
 
 #[cfg(test)]

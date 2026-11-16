@@ -340,7 +340,7 @@ impl Surface {
             return;
         }
 
-        let (mut min_y, mut max_y) = (f32::MAX, f32::MIN);
+        let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
         for point in points {
             min_y = min_y.min(point[1]);
             max_y = max_y.max(point[1]);
@@ -1333,11 +1333,11 @@ mod tests {
         let furthest = outline
             .iter()
             .map(|point| point[0])
-            .fold(f32::MIN, f32::max);
+            .fold(f32::NEG_INFINITY, f32::max);
         let lowest = outline
             .iter()
             .map(|point| point[1])
-            .fold(f32::MIN, f32::max);
+            .fold(f32::NEG_INFINITY, f32::max);
 
         let mut surface = Surface::new(span, span);
         surface.draw(&shape, [middle, middle], WHOLE);

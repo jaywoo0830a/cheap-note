@@ -204,7 +204,7 @@ impl PageRequest {
             pixels,
             // The right way up: the reader has not turned it. A page's own `/Rotate` belongs to the
             // document, and is added to this where the key is made and the render is started.
-            rotation: 0,
+            rotation: Quarters::UPRIGHT,
             // Annotations are not drawn *into* the page: the ink the user writes is the app's own
             // layer above it, and a page's own annotations belong there too — on top, not baked in.
             // Baking them in would also make a rasterised page wrong the moment one changed.
@@ -726,7 +726,7 @@ impl PdfDocumentView {
             document: self.document_id,
             page: request.page,
             pixels: request.pixels.max(1),
-            rotation: self.effective_rotation(request.page, request.rotation),
+            rotation: self.effective_rotation(request.page, request.rotation).into(),
             annotations: request.annotations,
             colour: request.colour,
         })
@@ -738,7 +738,7 @@ impl PdfDocumentView {
     /// by the sheet the app lays out — and two ways of adding them is a page drawn one way up, cached
     /// as another, and laid out as a third.
     fn effective_rotation(&mut self, page: usize, turns: Quarters) -> Quarters {
-        crate::pages::turned(self.rotation_of(page), turns as i32)
+        Quarters::from_turns(self.rotation_of(page) as i32 + turns.turns() as i32)
     }
 
     /// The rotation of a page, in quarter turns clockwise, remembered after the first read.

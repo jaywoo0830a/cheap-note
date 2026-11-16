@@ -68,7 +68,9 @@ impl From<note_format::Error> for AppError {
     fn from(error: note_format::Error) -> Self {
         match error {
             note_format::Error::Note(text) => AppError::Note(text),
-            note_format::Error::Other(text) => AppError::Other(text),
+            // A refusal the format names, with the sentence it was given: the variant is what a
+            // caller could branch on, and the app's answer to every one of them is the status line.
+            note_format::Error::Variant(text, _) => AppError::Note(text),
             // The two wrapped variants are the format's own plumbing — an io failure or a page of
             // JSON that would not parse — and the app has never had a better sentence for either
             // than the one the format already built.

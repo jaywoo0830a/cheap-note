@@ -9,6 +9,7 @@ use gpui_kit::{point, px, rgb, size, Bounds, Hsla, Pixels};
 use std::sync::Arc;
 
 use crate::ink_layer::canvas::Fill;
+use crate::pages::Quarters;
 
 /// The highlighter's palette is paler than the pen's, and its own.
 ///
@@ -46,7 +47,10 @@ fn sheet(width: f32, height: f32) -> Bounds<Pixels> {
 
 /// A ruling request for a sheet nobody has turned.
 fn upright(paper: Bounds<Pixels>) -> RulingSheet {
-    RulingSheet { paper, turns: 0 }
+    RulingSheet {
+        paper,
+        turns: Quarters::UPRIGHT,
+    }
 }
 
 /// The rectangle of a ruling mark, as plain floats.
@@ -178,7 +182,7 @@ fn the_ruling_is_rebuilt_only_when_the_sheet_changes() {
         size: size(px(720.0), px(720.0)),
     };
     let turned = RulingSheet {
-        turns: 1,
+        turns: Quarters::from_turns(1),
         ..upright(square)
     };
     let upright_ruling = ruling.rules(upright(square), CanvasStyle::Dots, 0x14_16_1A, 1.0);
@@ -211,14 +215,21 @@ fn the_ruling_turns_with_the_page() {
     // The shape the paper is drawn in, for a page at `turns`: the paper's shape, or that shape on its side.
     // Written out per turn because it is part of the input and not something the mapping can guess — a page
     // and its drawn shape always agree.
-    let drawn = |turns: u8| Rect {
+    let drawn = |turns: Quarters| Rect {
         x: 10.0,
         y: 20.0,
-        width: if turns % 2 == 1 { 1018.0 } else { 720.0 },
-        height: if turns % 2 == 1 { 720.0 } else { 1018.0 },
+        width: if turns.swaps_axes() { 1018.0 } else { 720.0 },
+        height: if turns.swaps_axes() { 720.0 } else { 1018.0 },
     };
 
-    let once = place(rule.clone(), RulingSheet { paper, turns: 1 }, at);
+    let once = place(
+        rule.clone(),
+        RulingSheet {
+            paper,
+            turns: Quarters::from_turns(1),
+        },
+        at,
+    );
     assert_eq!(
         fill_bounds(&once[0]),
         (986.0, 50.0, 2.0, 200.0),
@@ -227,7 +238,7 @@ fn the_ruling_turns_with_the_page() {
 
     // Every turn places the mark inside the sheet that is drawn, which is the whole of what the mapping has
     // to get right: a ruling outside its paper is a grid on the desk instead.
-    for turns in 0..4u8 {
+    for turns in Quarters::ALL {
         let placed = place(rule.clone(), RulingSheet { paper, turns }, at);
         let (x, y, width, height) = fill_bounds(&placed[0]);
         let rect = drawn(turns);
@@ -242,7 +253,14 @@ fn the_ruling_turns_with_the_page() {
     }
 
     // And the whole way round is where it started.
-    let round = place(rule.clone(), RulingSheet { paper, turns: 4 }, at);
+    let round = place(
+        rule.clone(),
+        RulingSheet {
+            paper,
+            turns: Quarters::from_turns(4),
+        },
+        at,
+    );
     assert_eq!(
         fill_bounds(&round[0]),
         (40.0, 60.0, 200.0, 2.0),

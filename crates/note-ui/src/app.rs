@@ -549,10 +549,14 @@ impl Sheet {
         ];
 
         [
-            corners.iter().fold(f32::MAX, |low, at| low.min(at.0)),
-            corners.iter().fold(f32::MAX, |low, at| low.min(at.1)),
-            corners.iter().fold(f32::MIN, |high, at| high.max(at.0)),
-            corners.iter().fold(f32::MIN, |high, at| high.max(at.1)),
+            corners.iter().fold(f32::INFINITY, |low, at| low.min(at.0)),
+            corners.iter().fold(f32::INFINITY, |low, at| low.min(at.1)),
+            corners
+                .iter()
+                .fold(f32::NEG_INFINITY, |high, at| high.max(at.0)),
+            corners
+                .iter()
+                .fold(f32::NEG_INFINITY, |high, at| high.max(at.1)),
         ]
     }
 }
@@ -3734,7 +3738,7 @@ impl NoteApp {
             } else {
                 "counter-clockwise"
             },
-            self.pages.rotation(self.page_index) as u32 * 90
+            self.pages.rotation(self.page_index).turns() as u32 * 90
         )
     }
 
@@ -5085,8 +5089,8 @@ impl NoteApp {
         // Which way up the page in front is, said only when the reader has turned it: the right way up is
         // the ordinary case, and a number on every page would be noise — the same rule the marks follow.
         let turns = self.pages.rotation(self.page_index);
-        if turns > 0 {
-            parts.push(format!("turned {}°", turns as u32 * 90));
+        if turns != Quarters::UPRIGHT {
+            parts.push(format!("turned {}°", turns.turns() as u32 * 90));
         }
 
         // What a lasso has hold of, said only when it has hold of something: it is the answer to "what would

@@ -192,7 +192,7 @@ pub fn drawn_of_paper(
     (width, height): (f32, f32),
     turns: Quarters,
 ) -> (f32, f32) {
-    match turns % 4 {
+    match turns.turns() {
         1 => (height - y, x),
         2 => (width - x, height - y),
         3 => (y, width - x),
@@ -215,7 +215,7 @@ pub fn paper_of_drawn(
     (width, height): (f32, f32),
     turns: Quarters,
 ) -> (f32, f32) {
-    match turns % 4 {
+    match turns.turns() {
         1 => (y, height - x),
         2 => (width - x, height - y),
         3 => (width - y, x),
@@ -242,7 +242,7 @@ impl InkTransform {
             paper: (0.0, 0.0),
             bar: 0.0,
             foot: 0.0,
-            rotation: 0,
+            rotation: Quarters::UPRIGHT,
         }
     }
 

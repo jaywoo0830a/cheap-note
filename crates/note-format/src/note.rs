@@ -47,7 +47,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, Variant};
 use crate::history::HistoryUpdate;
 use crate::ink::Stroke;
 use crate::mapped::MappedBytes;
@@ -263,7 +263,7 @@ impl Note {
         match extension.as_deref() {
             Some("zip") => unpack(source, dir),
             Some("pdf") => start_on_document(source, dir),
-            _ => Err(Error::Note(format!(
+            _ => Err(Variant::NotANote.said(format!(
                 "{} is neither a note zip nor a PDF",
                 source.display()
             ))),

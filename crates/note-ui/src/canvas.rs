@@ -432,7 +432,7 @@ fn place(rules: Vec<Fill>, at: RulingSheet, origin: (f32, f32)) -> Vec<Fill> {
         .map(|mut fill| {
             let rect = fill.rect;
 
-            fill.rect = match at.turns % 4 {
+            fill.rect = match at.turns.turns() {
                 1 => Rect {
                     x: x + height - rect.y - rect.height,
                     y: y + rect.x,

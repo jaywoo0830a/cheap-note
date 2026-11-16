@@ -303,13 +303,12 @@ impl RenderJob {
             ))
         })?;
 
-        // Four turns are the page it started as. Normalising here means a rotation read from a
-        // damaged note can never become a value Pdfium's render API does not define.
-        let turns = turns % 4;
-
         // Which way up it is drawn: the shape the document reports for the page — its own `/Rotate` is
-        // already in it — or that shape on its side.
-        let (shown_width, shown_height) = if crate::pages::swaps_axes(turns) {
+        // already in it — or that shape on its side. Nothing is normalised before this, and nothing
+        // needs to be: [`Quarters`] is one of the four turns and cannot be any other number, so a
+        // rotation read from a damaged note could never have become a value Pdfium's API does not
+        // define.
+        let (shown_width, shown_height) = if turns.swaps_axes() {
             (point_height, point_width)
         } else {
             (point_width, point_height)
@@ -392,7 +391,7 @@ impl RenderJob {
             control,
             pause,
             size: (pixel_width, pixel_height),
-            rotation: turns as c_int,
+            rotation: turns.turns() as c_int,
             flags: if annotations { RENDER_ANNOTATIONS } else { 0 },
             started: false,
             state: State::Ready,

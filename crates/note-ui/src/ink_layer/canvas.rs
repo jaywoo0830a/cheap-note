@@ -168,7 +168,7 @@ impl Default for Ink {
             open_id: 0,
             revision: 0,
             visible: Ink::ALL_VISIBLE,
-            rotation: 0,
+            rotation: Quarters::UPRIGHT,
             paper: (0.0, 0.0),
             selected: Arc::new(Vec::new()),
             offset: (0.0, 0.0),

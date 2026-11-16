@@ -67,4 +67,4 @@ pub mod paper;
 pub mod settings;
 pub mod store;
 
-pub use error::{Error, Result};
+pub use error::{Error, Result, Variant};

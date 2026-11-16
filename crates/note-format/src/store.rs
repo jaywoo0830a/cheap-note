@@ -89,7 +89,7 @@ use rusqlite::{params, Connection, OptionalExtension as _};
 use serde::{Deserialize, Serialize};
 
 use crate::chunk::{self, Codec};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, Variant};
 use crate::history::{Edit, History, HistoryUpdate};
 use crate::ink::Stroke;
 use crate::paper::{CanvasSize, CanvasStyle, FrameCap, MemoryMode};
@@ -237,17 +237,27 @@ impl NoteStore {
         let version: i32 = self
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .map_err(|error| Error::Note(format!("{} is not a note: {error}", path.display())))?;
+            .map_err(|error| {
+                Variant::NotANote.said(format!("{} is not a note: {error}", path.display()))
+            })?;
 
         if version == 0 || version == SCHEMA_VERSION {
             return Ok(());
         }
 
-        Err(Error::Note(format!(
+        let sentence = format!(
             "{} was written by a {} version of this app (note schema {version}, this build reads {SCHEMA_VERSION})",
             path.display(),
             if version > SCHEMA_VERSION { "newer" } else { "older" },
-        )))
+        );
+
+        // A newer note is intact and this build is behind it; an older one is a shape this build
+        // would rewrite in its own. Both are refused, and which one it is is what a caller needs.
+        Err(if version > SCHEMA_VERSION {
+            Variant::NewerBuild.said(sentence)
+        } else {
+            Variant::Misfiled.said(sentence)
+        })
     }
 
     /// Creates the tables and the view, and stamps the version on a file that is new.

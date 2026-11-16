@@ -41,7 +41,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::chunk;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, Variant};
 use crate::ink::Stroke;
 
 /// How many edits a page's history keeps in memory.
@@ -527,7 +527,7 @@ impl Edit {
                 })
             }
 
-            other => Err(Error::Note(format!(
+            other => Err(Variant::NewerBuild.said(format!(
                 "this note's history holds an edit of kind {other}, which this build does not know"
             ))),
         }
@@ -542,9 +542,9 @@ fn open_strokes(read: &mut Reading<'_>, expected: Option<usize>) -> Result<Vec<A
     let blob = read.rest();
 
     if blob.is_empty() {
-        return Err(Error::Note(String::from(
+        return Err(Variant::Misfiled.said(
             "an edit of this note's history holds no ink",
-        )));
+        ));
     }
 
     let strokes = chunk::open_sealed(blob, expected.unwrap_or(1))?;
@@ -583,9 +583,9 @@ impl<'a> Reading<'a> {
     fn number(&mut self) -> Result<u32> {
         let end = self.at + 4;
         if end > self.bytes.len() {
-            return Err(Error::Note(String::from(
+            return Err(Variant::Truncated.said(
                 "a history row of this note ends in the middle of a number",
-            )));
+            ));
         }
 
         let value = u32::from_le_bytes(self.bytes[self.at..end].try_into().expect("four bytes"));

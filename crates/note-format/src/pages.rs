@@ -45,21 +45,100 @@ pub enum Page {
 /// other side, and there is no fourth thing to ask for. An angle would be stored state that has to be
 /// *decided* on the way out — is 359.9° the page it started as? — which is a question this number
 /// cannot be asked.
-pub type Quarters = u8;
+///
+/// ## Why this is a type and not a `u8`
+///
+/// It was `pub type Quarters = u8` once, and a type alias is a comment: nothing stopped a rotation of
+/// `7` from being stored in a page and drawn in a way no page can actually be. A newtype is the same
+/// byte in memory ([`Self::NEWTYPE_REPRESENTATION`] says so out loud) and makes the four the only
+/// four values that can be made. Reading a value that is not one of them — from a note somebody
+/// edited, or from a `u8` this build did not write — is [`Self::from_turns`]'s job, and it wraps
+/// rather than refuses, which is the same rule [`turned`] follows for a command that turns a page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct Quarters(u8);
+
+impl Quarters {
+    /// That this type is exactly a `u8` in memory, as a fact a reader can check.
+    ///
+    /// `#[repr(transparent)]` above is the claim; this is the constant that makes the claim part of
+    /// the API. A build that changed the field's type would fail to compile here rather than quietly
+    /// change what a note's stored bytes mean.
+    pub const NEWTYPE_REPRESENTATION: () = assert!(std::mem::size_of::<Quarters>() == 1);
+
+    /// The page the right way up.
+    pub const UPRIGHT: Quarters = Quarters(0);
+
+    /// Every way up a page can be, in the order a turn takes them.
+    pub const ALL: [Quarters; 4] = [Quarters(0), Quarters(1), Quarters(2), Quarters(3)];
+
+    /// `turns` quarter turns clockwise, wrapped into `0..=3`.
+    ///
+    /// The constructor, and the reason the four are the only four: `rem_euclid` is what makes
+    /// `-1` the rotation before upright rather than a `u8` underflow.
+    pub const fn from_turns(turns: i32) -> Self {
+        Quarters(turns.rem_euclid(4) as u8)
+    }
+
+    /// The number as it is stored: a quarter turn count, `0..=3`.
+    ///
+    /// Named rather than `.0` at every call site, because the number is what goes into a note and
+    /// into a PDF's `/Rotate`, and the places that need it should read as such.
+    pub const fn turns(self) -> u8 {
+        self.0
+    }
+
+    /// Whether a page at this rotation is drawn the other way round: a quarter turn swaps its width
+    /// and its height.
+    ///
+    /// A method rather than the free [`swaps_axes`], which stays for callers that have the number
+    /// and not the type.
+    pub const fn swaps_axes(self) -> bool {
+        self.0 % 2 == 1
+    }
+
+    /// This rotation `turns` quarter turns clockwise.
+    ///
+    /// The method the free [`turned`] is the `u8` spelling of.
+    pub const fn turned(self, turns: i32) -> Self {
+        Quarters::from_turns(self.0 as i32 + turns)
+    }
+}
+
+impl From<Quarters> for u8 {
+    fn from(quarters: Quarters) -> Self {
+        quarters.0
+    }
+}
+
+impl From<Quarters> for f32 {
+    /// The turn as a float, for the renderers that take one.
+    fn from(quarters: Quarters) -> Self {
+        f32::from(quarters.0)
+    }
+}
+
+impl std::fmt::Display for Quarters {
+    /// The number, because that is how a reader says it and how a note stores it.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 /// `turns` quarter turns from `rotation`, wrapped into `0..=3`.
 ///
 /// Wrapped rather than clamped: four turns is the page it started as, and a command that says "turn
 /// clockwise" must not leave a page at a rotation that is not one of the four.
 pub fn turned(rotation: Quarters, turns: i32) -> Quarters {
-    (rotation as i32 + turns).rem_euclid(4) as Quarters
+    rotation.turned(turns)
 }
 
 /// Whether a page at this rotation is drawn the other way round: a quarter turn swaps its width and
 /// its height.
 pub fn swaps_axes(rotation: Quarters) -> bool {
-    rotation % 2 == 1
+    rotation.swaps_axes()
 }
+
 
 /// One page of a note: what it shows, and which way up it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,7 +156,10 @@ pub struct PageEntry {
 impl PageEntry {
     /// A page showing `show`, the right way up.
     pub fn new(show: Page) -> Self {
-        PageEntry { show, rotation: 0 }
+        PageEntry {
+            show,
+            rotation: Quarters::UPRIGHT,
+        }
     }
 
     /// The same page, turned `turns` quarter turns clockwise.
@@ -183,7 +265,9 @@ impl Pages {
     /// The right way up for an index the note does not have: a page that is not there cannot be
     /// turned, and a caller drawing one is drawing something that is not a page.
     pub fn rotation(&self, index: usize) -> Quarters {
-        self.pages.get(index).map_or(0, |page| page.rotation)
+        self.pages
+            .get(index)
+            .map_or(Quarters::UPRIGHT, |page| page.rotation)
     }
 
     /// Turns one page `turns` quarter turns clockwise.
@@ -276,7 +360,7 @@ impl Pages {
 
 #[cfg(test)]
 mod tests {
-    use super::{swaps_axes, turned, Page, PageEntry, Pages, StoredPage};
+    use super::{turned, Page, PageEntry, Pages, Quarters, StoredPage};
 
     /// A page the way a test says what one shows.
     fn page(show: Page) -> PageEntry {
@@ -409,7 +493,7 @@ mod tests {
         assert_eq!(saved.layout(), &[page(Page::Document(1)), blank(), blank()]);
         assert_eq!(
             saved.rotation(0),
-            0,
+            Quarters::UPRIGHT,
             "and a layout read back is the right way up"
         );
     }
@@ -417,24 +501,45 @@ mod tests {
     /// A page is turned in whole quarter turns, and a turn past the fourth comes round to the first.
     #[test]
     fn a_page_turns_in_quarter_turns_and_wraps() {
-        assert_eq!(turned(0, 1), 1, "clockwise from the right way up");
-        assert_eq!(turned(0, -1), 3, "counter-clockwise is the other way round");
-        assert_eq!(turned(3, 1), 0, "a quarter past the last turn is the first");
         assert_eq!(
-            turned(1, -4),
-            1,
+            turned(Quarters::UPRIGHT, 1),
+            Quarters::from_turns(1),
+            "clockwise from the right way up"
+        );
+        assert_eq!(
+            turned(Quarters::UPRIGHT, -1),
+            Quarters::from_turns(3),
+            "counter-clockwise is the other way round"
+        );
+        assert_eq!(
+            turned(Quarters::from_turns(3), 1),
+            Quarters::UPRIGHT,
+            "a quarter past the last turn is the first"
+        );
+        assert_eq!(
+            turned(Quarters::from_turns(1), -4),
+            Quarters::from_turns(1),
             "a whole turn leaves the page where it was"
         );
-        assert_eq!(turned(2, 9), 3);
+        assert_eq!(
+            turned(Quarters::from_turns(2), 9),
+            Quarters::from_turns(3)
+        );
 
-        assert!(!swaps_axes(0), "the right way up is the shape the page is");
-        assert!(swaps_axes(1), "a quarter turn lies it on its side");
         assert!(
-            !swaps_axes(2),
+            !Quarters::UPRIGHT.swaps_axes(),
+            "the right way up is the shape the page is"
+        );
+        assert!(
+            Quarters::from_turns(1).swaps_axes(),
+            "a quarter turn lies it on its side"
+        );
+        assert!(
+            !Quarters::from_turns(2).swaps_axes(),
             "upside down is the same shape the right way round"
         );
         assert!(
-            swaps_axes(3),
+            Quarters::from_turns(3).swaps_axes(),
             "and the other quarter turn is the same shape again"
         );
     }
@@ -447,29 +552,30 @@ mod tests {
         pages.turn(1, 1);
         assert_eq!(
             pages.rotation(0),
-            0,
+            Quarters::UPRIGHT,
             "the page in front is left where it was"
         );
-        assert_eq!(pages.rotation(1), 1);
-        assert_eq!(pages.rotation(2), 0);
+        assert_eq!(pages.rotation(1), Quarters::from_turns(1));
+        assert_eq!(pages.rotation(2), Quarters::UPRIGHT);
+
+        let turns = |pages: &Pages| {
+            [0, 1, 2].map(|index| pages.rotation(index).turns())
+        };
 
         pages.turn_all(1);
         assert_eq!(
-            [pages.rotation(0), pages.rotation(1), pages.rotation(2)],
+            turns(&pages),
             [1, 2, 1],
             "every page moved by one, and each kept its own rotation"
         );
 
         pages.turn_all(-1);
-        assert_eq!(
-            [pages.rotation(0), pages.rotation(1), pages.rotation(2)],
-            [0, 1, 0]
-        );
+        assert_eq!(turns(&pages), [0, 1, 0]);
 
         pages.turn(9, 1);
         assert_eq!(
             pages.rotation(9),
-            0,
+            Quarters::UPRIGHT,
             "a page the note has not got is the right way up"
         );
     }
@@ -484,11 +590,23 @@ mod tests {
         // is part of the page that moves.
         pages.insert(0, true);
 
-        assert_eq!(pages.rotation(0), 0, "the new page is the right way up");
-        assert_eq!(pages.rotation(1), 1, "and the turned page is still turned");
+        assert_eq!(
+            pages.rotation(0),
+            Quarters::UPRIGHT,
+            "the new page is the right way up"
+        );
+        assert_eq!(
+            pages.rotation(1),
+            Quarters::from_turns(1),
+            "and the turned page is still turned"
+        );
 
         assert_eq!(pages.remove(0), Some(0));
-        assert_eq!(pages.rotation(0), 1, "deleting in front moves nothing else");
+        assert_eq!(
+            pages.rotation(0),
+            Quarters::from_turns(1),
+            "deleting in front moves nothing else"
+        );
     }
 
     /// What this build writes is read back as it was written, and a layout from before a page could

@@ -981,22 +981,22 @@ fn the_rotation_handed_to_pdfium_is_the_readers_turn() {
     };
 
     assert_eq!(
-        marked_corners(0),
+        marked_corners(Quarters::UPRIGHT),
         [true, false, false, false],
         "no turn from the reader is the page the document draws"
     );
     assert_eq!(
-        marked_corners(1),
+        marked_corners(Quarters::from_turns(1)),
         [false, true, false, false],
         "one turn is added to the page's own /Rotate, not taken instead of it"
     );
     assert_eq!(
-        marked_corners(2),
+        marked_corners(Quarters::from_turns(2)),
         [false, false, false, true],
         "upside down from the document's own"
     );
     assert_eq!(
-        marked_corners(3),
+        marked_corners(Quarters::from_turns(3)),
         [false, false, true, false],
         "and the other quarter turn"
     );

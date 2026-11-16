@@ -9,6 +9,8 @@
 # Run from anywhere; it works from the repository root it finds itself in:
 #
 #     apps/macos/bundle.sh            → dist/Cheap Note.app
+#     apps/macos/bundle.sh --binary target/aarch64-apple-darwin/release/cheap-note
+#                                     → the same, with a PGO build instead of a plain one (COMPILE.md)
 #
 # The signature is ad-hoc (`-`): enough for this machine to run what it built, and not a claim about
 # distribution. A build that will be handed to someone else needs a Developer ID and a notarisation step,
@@ -21,14 +23,34 @@ cd "$(dirname "$0")/../.."
 APP="dist/Cheap Note.app"
 NAME="cheap-note"
 
-echo "— building (release)"
-cargo build --release -p "$NAME-macos"
+# Which executable goes in the bundle.
+#
+#   (nothing)        build the plain release profile
+#   --binary <path>  use an executable already built — the PGO one, which `cargo pgo` leaves in
+#                    `target/aarch64-apple-darwin/release/` and which a plain `cargo build --release`
+#                    here would overwrite. `COMPILE.md` has the three commands that make it.
+BINARY=""
+if [ "${1:-}" = "--binary" ]; then
+    BINARY="${2:?--binary needs a path}"
+    if [ ! -x "$BINARY" ]; then
+        echo "! $BINARY is not an executable"
+        exit 1
+    fi
+fi
+
+if [ -n "$BINARY" ]; then
+    echo "— using $BINARY (no build)"
+else
+    echo "— building (release)"
+    cargo build --release -p "$NAME-macos"
+    BINARY="target/release/cheap-note"
+fi
 
 echo "— assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-cp target/release/cheap-note "$APP/Contents/MacOS/cheap-note"
+cp "$BINARY" "$APP/Contents/MacOS/cheap-note"
 
 # Pdfium is loaded at run time and looked for beside the executable. A build without it is still a valid
 # app: it starts, draws, writes ink, and says that a PDF cannot be opened.

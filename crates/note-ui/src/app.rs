@@ -118,13 +118,13 @@ const WHEEL_PAN_PER_LINE: f32 = 32.0;
 /// has to miss — a disc's own radius plus the slack a hand needs ([`PALETTE_REACH`]) — and the two rings
 /// are far enough apart that no point on the palette is nearer two controls than one (there is a test for
 /// that, and for the gaps within a ring).
-const PALETTE_RING_RADIUS: f32 = 104.0;
+const PALETTE_RING_RADIUS: f32 = 65.0;
 
 /// How far from the palette's centre the inner ring's tool chips are placed, in logical pixels.
-const PALETTE_TOOL_RADIUS: f32 = 54.0;
+const PALETTE_TOOL_RADIUS: f32 = 32.0;
 
 /// The diameter of one colour disc, in logical pixels at 100%.
-const PALETTE_DISC: f32 = 30.0;
+const PALETTE_DISC: f32 = 20.0;
 
 /// The white gap between a colour disc and its selection ring, in logical pixels at 100%.
 const PALETTE_DISC_PAD: f32 = 2.0;
@@ -138,13 +138,13 @@ const PALETTE_DISC_RING: f32 = 2.0;
 /// A chip rather than a bare glyph: the palette is read at a glance and at arm's length, and a tool with
 /// nothing behind it is a smudge on a white field — which is what the bar's own buttons would be without
 /// the bar under them.
-const PALETTE_TOOL_DISC: f32 = 38.0;
+const PALETTE_TOOL_DISC: f32 = 26.0;
 
 /// The size of the icon inside a tool chip, in logical pixels.
 ///
 /// A little over half the chip: the proportions the bar's own tool buttons are drawn at, so a tool looks
 /// the same in both places.
-const PALETTE_TOOL_ICON: f32 = 20.0;
+const PALETTE_TOOL_ICON: f32 = 14.0;
 
 /// The size of the box one colour disc draws in at 100%: the disc, the white gap and the ring around it.
 ///
@@ -156,13 +156,13 @@ const PALETTE_TOOL_ICON: f32 = 20.0;
 const PALETTE_DISC_BOX: f32 = PALETTE_DISC + (PALETTE_DISC_PAD + PALETTE_DISC_RING) * 2.0;
 
 /// The diameter of the hub: the colour the next stroke is written in, at the middle of the palette.
-const PALETTE_HUB: f32 = 44.0;
+const PALETTE_HUB: f32 = 28.0;
 
 /// How wide the ring of white the hub's colour is set in is, in logical pixels.
-const PALETTE_HUB_RING: f32 = 4.0;
+const PALETTE_HUB_RING: f32 = 3.0;
 
 /// The least gap between the well's rim and the outermost tool chip in it, in logical pixels.
-const PALETTE_WELL_PAD: f32 = 6.0;
+const PALETTE_WELL_PAD: f32 = 4.0;
 
 /// The diameter of the well the hub and the tools sit in, in logical pixels.
 ///
@@ -172,19 +172,23 @@ const PALETTE_WELL_PAD: f32 = 6.0;
 const PALETTE_WELL: f32 = (PALETTE_TOOL_RADIUS + PALETTE_TOOL_DISC / 2.0 + PALETTE_WELL_PAD) * 2.0;
 
 /// The least gap between the palette and the window's edge, in logical pixels.
-const PALETTE_MARGIN: f32 = 8.0;
+const PALETTE_MARGIN: f32 = 6.0;
 
 /// How near a point has to come to a control's centre to be that control, in logical pixels.
 ///
 /// Wider than a disc, because a pen lands where a hand put it rather than on a pixel: the reach is a
 /// disc's own radius plus the slack a hand needs, and the gaps between discs are wider than twice this,
 /// so a tap between two colours belongs to neither rather than to the nearer of them by a hair.
-const PALETTE_REACH: f32 = 24.0;
+const PALETTE_REACH: f32 = 16.0;
 
 /// The white the ring of colours is given inside the palette, in logical pixels.
-const PALETTE_PAD: f32 = 14.0;
+const PALETTE_PAD: f32 = 10.0;
 
 /// The radius of the square the whole palette fits in: the outer ring, half a disc, and that white.
+///
+/// At 100% this is 85, so the palette is **170 px across** — deliberately compact, against the 266 it
+/// was first drawn at. It opens under the pen, where the page is, so its own size is the amount of the
+/// page it hides; the rings and discs stay large enough for a pen's reach, and no smaller.
 const PALETTE_RADIUS: f32 = PALETTE_RING_RADIUS + PALETTE_DISC / 2.0 + PALETTE_PAD;
 
 /// The bar's colour swatches at one interface scale.

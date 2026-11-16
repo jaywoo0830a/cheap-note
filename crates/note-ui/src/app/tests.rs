@@ -4,12 +4,13 @@ use super::{
     bar_line, confirmed, file_label, file_stem, held_by_cap, page_after_insert, page_of_write,
     page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face, palette_id,
     palette_in_hand, palette_point, parse_zoom, pdf_render_due, pen_cursor_shows,
-    pinch_zoom_factor, quantise_width, samples_vitals, scroll_of, sheet_matches, spun,
-    touches_paper, zoom_text, Confirmation, Edge, EdgeSwipe, FootPills, FootPlace, FootStrips,
-    PaletteGeometry, PalettePart, PenGesture, Swipe, Turn, BAR_HEIGHT, EDGE_SWIPE_BAND,
-    EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN,
-    PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC,
-    PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
+    pinch_zoom_factor, quantise_width, samples_vitals, scroll_of, screen_in_front, sheet_is_front,
+    sheet_matches, spun, touches_paper, zoom_text, Confirmation, Edge, EdgeSwipe, FootPills,
+    FootPlace, FootStrips, PaletteGeometry, PalettePart, PenGesture, Screens, Swipe, Turn,
+    BAR_HEIGHT, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX, PALETTE_HUB, PALETTE_HUB_RING,
+    PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS,
+    PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL,
+    WHEEL_PAN_PER_LINE,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
 use crate::ink::{Notes, Tool};
@@ -1178,6 +1179,123 @@ fn a_pen_pan_that_returns_asks_for_where_it_started() {
         (12.0, -34.0),
         "a hand that came back must ask for the pan it began at"
     );
+}
+
+/// Every screen in front of the sheet is a place the system pointer is the cursor on.
+///
+/// The bug this pins: the ghost's own suppression list knew about the home list and not about the
+/// marked pages or the contents, so those two screens drew the pen's cursor over a list it was not on
+/// while hiding the system arrow — a list with no cursor at all, on the two screens that exist to be
+/// clicked. The three lists are the same kind of thing, so they have to be the same answer, and the two
+/// boxes with them.
+///
+/// Each is also a place the *ink* is refused, which is asked here beside it: a screen the cursor forgets
+/// is a screen the pen would also write under, and the two disagreeing is how this went unnoticed.
+#[test]
+fn every_screen_in_front_takes_the_system_pointer() {
+    for (name, screens) in [
+        (
+            "the home list",
+            Screens {
+                home: true,
+                ..Screens::default()
+            },
+        ),
+        (
+            "the marked pages",
+            Screens {
+                marks: true,
+                ..Screens::default()
+            },
+        ),
+        (
+            "the contents",
+            Screens {
+                outline: true,
+                ..Screens::default()
+            },
+        ),
+        (
+            "a question",
+            Screens {
+                asking: true,
+                ..Screens::default()
+            },
+        ),
+        (
+            "the palette at the pen",
+            Screens {
+                palette: true,
+                ..Screens::default()
+            },
+        ),
+    ] {
+        assert!(
+            screen_in_front(screens),
+            "{name}: the ghost goes and the pointer is the cursor"
+        );
+        assert!(
+            !sheet_is_front(screens),
+            "{name}: and the pen lays no ink under it"
+        );
+    }
+}
+
+/// A name being typed refuses ink without being a screen the ghost is taken away for.
+///
+/// It is the one state that is not a screen: the field is *on* the bar, the page behind it is still
+/// there to point at, and the field itself is a text box that wants the keyboard rather than a list of
+/// rows meant to be pressed. So the ghost stays and only the ink is refused — said out loud here because
+/// it is the one case where the two answers differ ([`a_screen_in_front_is_never_the_sheet_too`]).
+#[test]
+fn a_name_being_typed_refuses_ink_and_keeps_the_ghost() {
+    let naming = Screens {
+        naming: true,
+        ..Screens::default()
+    };
+
+    assert!(!sheet_is_front(naming), "a reading under a field is no stroke");
+    assert!(
+        !screen_in_front(naming),
+        "but it is not a screen: the ghost has the page to point at"
+    );
+}
+
+/// With nothing in front, the sheet is, and the ghost is the pen's cursor there.
+#[test]
+fn the_sheet_alone_is_where_the_ghost_is_the_cursor() {
+    let none = Screens::default();
+
+    assert!(
+        !screen_in_front(none),
+        "nothing in front: no screen to suppress"
+    );
+    assert!(sheet_is_front(none), "and the sheet is what the pen writes on");
+}
+
+/// A screen in front always means the sheet is not, whatever else is going on.
+///
+/// Not the exact opposite — a *name being typed* refuses ink without being a screen to point at, and the
+/// ghost belongs over the field — but the one direction that matters: the cursor may never think the
+/// sheet is in front while a screen is.
+#[test]
+fn a_screen_in_front_is_never_the_sheet_too() {
+    // Every combination of the six flags, so a flag added later is covered the day it is added.
+    for bits in 0u8..64 {
+        let screens = Screens {
+            naming: bits & 1 != 0,
+            home: bits & 2 != 0,
+            marks: bits & 4 != 0,
+            outline: bits & 8 != 0,
+            asking: bits & 16 != 0,
+            palette: bits & 32 != 0,
+        };
+
+        assert!(
+            !(screen_in_front(screens) && sheet_is_front(screens)),
+            "a screen in front is never the sheet too ({bits:#08b})"
+        );
+    }
 }
 
 /// A hidden status line asks the platform for nothing.

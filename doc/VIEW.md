@@ -274,7 +274,11 @@ app refuses the pen itself. There are four refusals, and three of them are app *
 * **A screen**: while the home list, the marked pages or the contents are in front, and while a name is
   being typed, every reading is dropped where it would otherwise become a stroke. A name being typed
   must not leave a line across the page behind the field, and a screen is drawn over a sheet nobody can
-  see — a stroke laid there would go into a note the user is not looking at.
+  see — a stroke laid there would go into a note the user is not looking at. The ghost goes with the
+  screen and the system pointer is the cursor on it: a list is meant to be pressed, and a list with the
+  pen's cursor over it and no arrow is a list with no cursor at all. Both answers come from one place
+  (`sheet_is_front` / `screen_in_front`), because they were two lists once and the cursor's was missing
+  these two screens.
 * **The palette at the pen** (§6): while it is up the nib lays nothing, and a reading that lands near one
   of its colours is a *choice* rather than a stroke. This is the one control a pen is aimed at instead of
   written on, and both halves of that are the same state: the `NoteApp::palette` that refuses the ink is
@@ -318,7 +322,7 @@ Five facts about the ghost are decided here, and each of them is something a pen
 |---|---|
 | whether the pen has a cursor of its own at all | the **ink model**, not a batch, so the cursor survives the batches that lay nothing — most of them, while the pen is merely held over the window — and disappears only when the pen does |
 | where it is and how it leans | the pen's newest reading, in window coordinates, with no sign flip: lean right and the ghost extends right of the nib |
-| where it is *not* drawn | **only below the bar and off the desk's pills**: over the bar it would sit behind an opaque background where it cannot be seen, and over a pill it would point at a control the pen is pressing rather than at paper — and **never on the home screen**, which has no sheet to point at and is meant to be tapped, **nor under a control that hangs over the page** (a chooser's list, the palette at the pen) |
+| where it is *not* drawn | **only below the bar and off the desk's pills**: over the bar it would sit behind an opaque background where it cannot be seen, and over a pill it would point at a control the pen is pressing rather than at paper — and **never on a screen in front of the sheet**: the home list, the marked pages and the document's contents, none of which has a sheet to point at and all of which are meant to be pressed, **nor under a control that hangs over the page** (a chooser's list, the palette at the pen) |
 | the scale, the colours on this paper, and where the bar ends | published to the overlay (`publish_screen`) on the frames where they change, so a new pen colour or paper takes hold at once rather than at the next reading |
 | how **thick** the mark is | the same publication (`Screen::nib_radius`): half the width the tool in hand lays, which only the app knows — the pen's weight is a setting, and the marker's band is the tool's |
 

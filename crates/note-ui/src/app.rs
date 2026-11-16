@@ -1567,8 +1567,10 @@ impl NoteApp {
                 // reached the ink with a screen in front would be ink on a page nobody is looking at. The
                 // capture is left alone and the readings are dropped here, where they become strokes — and a
                 // reading that arrives under a confirmation box is dropped for the same reason: nothing is
-                // written while a question is waiting for an answer.
-                if app.home_is_open() || app.asking() {
+                // written while a question is waiting for an answer. The screens are the app's own answer
+                // ([`Self::screen_in_front`]), so a list added later is refused here without this line
+                // changing.
+                if app.screen_in_front() {
                     // The ghost is suppressed with the screen up, so the pointer has to be the system's —
                     // and it has to know the pen moved while readings are being dropped here.
                     app.follow_pen_with_pointer();
@@ -1992,19 +1994,57 @@ impl NoteApp {
         self.pills.get().top.unwrap_or(FOOT_BAND)
     }
 
+    /// Whether the sheet — and nothing else — is in front, so a reading is a stroke rather than a press on
+    /// something drawn over it.
+    ///
+    /// Four screens and two states are refused: the home list, the marked pages, the document's contents,
+    /// the palette at the pen; a question waiting for an answer; and a name being typed.
+    ///
+    /// This is the **one** answer to "is the sheet the thing in front", asked by three callers that must
+    /// never disagree: the ink ([`Self::consume_ink`]), the keyboard
+    /// ([`Self::claim_sheet_keyboard`]) and the cursor ([`Self::ghost_suppressed`], through
+    /// [`Self::screen_in_front`]). The cursor was the one that drifted: it knew about the home list and
+    /// not the other two, so over the marked pages and the contents the ghost was suppressed nowhere and
+    /// the system pointer was hidden by a ghost that was not drawn there — a window with no cursor at
+    /// all on two screens that exist to be clicked.
+    ///
+    /// The answer itself is [`sheet_is_front`], a free function so that a test can ask it without a
+    /// window.
+    fn sheet_is_front(&self) -> bool {
+        sheet_is_front(Screens {
+            naming: self.naming.is_some(),
+            home: self.home.is_open(),
+            marks: self.marks.is_open(),
+            outline: self.outline.is_open(),
+            asking: self.asking(),
+            palette: self.palette_is_open(),
+        })
+    }
+
+    /// Whether a screen is in front of the sheet: the three screens that are places (home, marked pages,
+    /// contents) or the two that are questions (a confirmation box, the palette at the pen).
+    ///
+    /// A screen is drawn over the sheet rather than on it, so there is nothing on it for the ghost to
+    /// point at and every control on it is pressed — which is why both the ghost and the system pointer
+    /// answer this one question (see [`Self::ghost_suppressed`]). The answer itself is
+    /// [`screen_in_front`], a free function so that a test can ask it without a window.
+    fn screen_in_front(&self) -> bool {
+        screen_in_front(Screens {
+            naming: self.naming.is_some(),
+            home: self.home.is_open(),
+            marks: self.marks.is_open(),
+            outline: self.outline.is_open(),
+            asking: self.asking(),
+            palette: self.palette_is_open(),
+        })
+    }
+
     /// Reads a batch of readings into the ink model, timed — or spends them as a gesture when a key is held.
     fn consume_ink(&mut self, samples: &[Reading], cx: &mut Context<Self>) -> bool {
         // The pen is not a pen while something is in front of the sheet: a name being typed, or a screen
         // drawn over a sheet nobody can see. This is why the lists are screens rather than panels — the pen
         // obeys an app state, not a rectangle (see [`crate::bookmarks`]).
-        let sheet_is_front = self.naming.is_none()
-            && !self.home_is_open()
-            && !self.asking()
-            && !self.marks.is_open()
-            && !self.outline.is_open()
-            && !self.palette_is_open();
-
-        if !sheet_is_front {
+        if !self.sheet_is_front() {
             self.pen_mode = None;
             return false;
         }
@@ -2984,8 +3024,7 @@ impl NoteApp {
     /// appearing under the hand that hid it (see [`Self::bar_edge`]).
     fn set_toolbar_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.settings.show_toolbar = shown;
-        self.publish_screen();
-        self.follow_pen_with_pointer();
+        self.publish_cursor();
         self.finish_setting(cx);
     }
 
@@ -3020,8 +3059,9 @@ impl NoteApp {
         self.last_cursor()
     }
 
-    /// Whether something on screen means the ghost is not drawn: the home list, a question waiting for
-    /// an answer, the palette at the pen, or a chooser's list hanging over the page.
+    /// Whether something on screen means the ghost is not drawn: the home list, the marked pages, the
+    /// document's contents, a question waiting for an answer, the palette at the pen, or a chooser's list
+    /// hanging over the page.
     ///
     /// One answer for the ghost *and* the pointer ([`Self::pen_has_its_own_cursor`]): with the ghost
     /// suppressed the pointer has to be the system's, or the app would be showing no cursor at all on a
@@ -3030,8 +3070,11 @@ impl NoteApp {
     /// sees over the ring. A chooser's list is the same case with a different shape — the popup is drawn
     /// *below* its box, over the page, so the one place the reader has to aim at is a place the bar's own
     /// line calls page (see [`Self::chooser_open`]).
+    ///
+    /// The screens come from [`Self::screen_in_front`] rather than being listed again here: this was the
+    /// one place that kept its own list, and it was the one that was missing two entries.
     fn ghost_suppressed(&self) -> bool {
-        self.home_is_open() || self.asking() || self.palette_is_open() || self.chooser_open
+        self.screen_in_front() || self.chooser_open
     }
 
     /// Whether the pen has a cursor of its own where it is, so the system pointer should be out of the way.
@@ -3149,6 +3192,21 @@ impl NoteApp {
         }
     }
 
+    /// Tells the ghost and the pointer what the screen in front is, now.
+    ///
+    /// The two are one answer and are always published together: the ghost's window has to be told a
+    /// screen arrived (or left) or a mark drawn a moment ago stays drawn over a list, and the pointer has
+    /// to be told or the arrow stays away under a ghost that is no longer there. A *state* change is
+    /// exactly when no pen reading will arrive to do it — opening a list is a keypress, and a reader who
+    /// then uses the mouse is never read again — so every path that changes which screen is in front calls
+    /// this once, where it happens (see [`Self::show_marks`], [`Self::hide_marks`], [`Self::show_outline`],
+    /// [`Self::hide_outline`], [`Self::ask`], [`Self::answer`], [`Self::open_palette`],
+    /// [`Self::close_palette`]).
+    fn publish_cursor(&mut self) {
+        self.publish_screen();
+        self.follow_pen_with_pointer();
+    }
+
     /// Persists and repaints after anything changed.
     fn finish_setting(&mut self, cx: &mut Context<Self>) {
         self.save_note_state();
@@ -3230,8 +3288,7 @@ impl NoteApp {
     /// ink — because a stroke arriving under a question would be ink nobody asked for.
     fn ask(&mut self, what: Confirmation, cx: &mut Context<Self>) {
         self.confirm = Some(what);
-        self.follow_pen_with_pointer();
-        self.publish_screen();
+        self.publish_cursor();
         cx.notify();
     }
 
@@ -3249,8 +3306,7 @@ impl NoteApp {
             None => {}
         }
 
-        self.follow_pen_with_pointer();
-        self.publish_screen();
+        self.publish_cursor();
         cx.notify();
     }
 
@@ -3310,8 +3366,7 @@ impl NoteApp {
         // writing on the page — so the pen's own cursor goes and the system's is what the hand sees
         // (see [`Self::ghost_suppressed`]). Published here, once, the same way a question does it
         // ([`Self::ask`]): the suppression is a state of the screen, not of a reading.
-        self.follow_pen_with_pointer();
-        self.publish_screen();
+        self.publish_cursor();
         self.touch_status();
         cx.notify();
     }
@@ -3332,8 +3387,7 @@ impl NoteApp {
         // The list is a screen over the page for as long as it is up, so the ghost and the pointer swap over
         // exactly as they do for the palette (see [`Self::ghost_suppressed`]) — and the canvas has to be told,
         // or a ghost drawn a moment ago stays drawn.
-        self.follow_pen_with_pointer();
-        self.publish_screen();
+        self.publish_cursor();
         self.draw_canvas();
         cx.notify();
     }
@@ -3342,8 +3396,7 @@ impl NoteApp {
     fn close_palette(&mut self, cx: &mut Context<Self>) {
         if self.palette.take().is_some() {
             // And the ghost comes back with it, exactly as an answer brings it back (see [`Self::answer`]).
-            self.follow_pen_with_pointer();
-            self.publish_screen();
+            self.publish_cursor();
             self.touch_status();
             cx.notify();
         }
@@ -3777,6 +3830,11 @@ impl NoteApp {
         self.outline.hide();
         self.marks.show(marked, cx);
 
+        // The screen in front changed on a *keypress*, so no pen reading will arrive to notice it: the
+        // ghost goes and the system pointer comes back here and now, or the list is a list with no cursor
+        // on it (see [`Self::publish_cursor`]).
+        self.publish_cursor();
+
         self.message = if self.bookmarks.is_empty() {
             format!(
                 "no page is marked yet \u{2014} {} marks the page in front",
@@ -3792,6 +3850,7 @@ impl NoteApp {
     /// Takes the bookmark list away: what Escape on it does.
     pub(crate) fn hide_marks(&mut self, cx: &mut Context<Self>) {
         self.marks.hide();
+        self.publish_cursor();
         self.touch_status();
         cx.notify();
     }
@@ -3799,6 +3858,7 @@ impl NoteApp {
     /// Shows a marked page — what opening a row of the list does.
     pub(crate) fn go_to_mark(&mut self, page: usize, cx: &mut Context<Self>) {
         self.marks.hide();
+        self.publish_cursor();
 
         // A row can only be a page the list was given, so this is a guard rather than a case: a note
         // whose pages were deleted from under a list that is somehow still up.
@@ -3876,6 +3936,10 @@ impl NoteApp {
         self.marks.hide();
         self.outline.show(pages, cx);
 
+        // The same as the marked pages: a screen arrived on a keypress, so the ghost and the pointer are
+        // told now rather than at the next reading (see [`Self::publish_cursor`]).
+        self.publish_cursor();
+
         self.message = if count == 1 {
             String::from("1 entry in this document's contents")
         } else {
@@ -3888,6 +3952,7 @@ impl NoteApp {
     /// Takes the contents screen away: what Escape on it does.
     pub(crate) fn hide_outline(&mut self, cx: &mut Context<Self>) {
         self.outline.hide();
+        self.publish_cursor();
         self.touch_status();
         cx.notify();
     }
@@ -3895,6 +3960,7 @@ impl NoteApp {
     /// Shows a page the contents names — what opening a row of it does.
     pub(crate) fn go_to_entry(&mut self, page: usize, cx: &mut Context<Self>) {
         self.outline.hide();
+        self.publish_cursor();
 
         // A row can only name a page the note had when the rows were built, so this is a guard rather than
         // a case: a note whose pages changed under a list that is somehow still up.
@@ -4102,6 +4168,7 @@ impl NoteApp {
         self.writer = Some(writer);
         self.home.hide();
         self.load_page_ink(self.page_index)?;
+        self.publish_cursor();
         self.remember_page();
         self.remember_opened(source);
 
@@ -4172,12 +4239,12 @@ impl NoteApp {
     }
 
     /// Gives the keyboard to the screen in front, on the frame that screen changes.
+    ///
+    /// The same question the ink asks ([`Self::sheet_is_front`]), asked down to the palette: the palette
+    /// is handled before a reading reaches [`Self::consume_ink`], so it never depends on this focus, and it
+    /// takes the keyboard as a *box* does rather than as a screen (see the palette's own note).
     fn claim_sheet_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let in_front = !self.home_is_open()
-            && !self.marks.is_open()
-            && !self.outline.is_open()
-            && !self.asking()
-            && self.naming.is_none();
+        let in_front = self.sheet_is_front() || self.palette_is_open();
 
         if in_front == self.sheet_has_keyboard {
             return;
@@ -4205,6 +4272,9 @@ impl NoteApp {
 
         self.home.show();
         self.start_scan(cx);
+        // Escape is a keypress, so no reading will arrive to notice the screen: the ghost and the pointer
+        // are told here (see [`Self::publish_cursor`]).
+        self.publish_cursor();
         self.touch_status();
         cx.notify();
     }
@@ -4515,6 +4585,9 @@ impl NoteApp {
         self.ink.go_to(0);
         self.loaded.insert(0);
         self.home.hide();
+        // Three screens were put away at once, on a keypress: the ghost comes back now (see
+        // [`Self::publish_cursor`]).
+        self.publish_cursor();
         self.remember_page();
 
         // And the *name* goes with the note: the bar, the window and `Save`'s file name all come from this
@@ -6467,13 +6540,12 @@ impl Render for NoteApp {
 
         // The ghost cursor is not in this frame and does not wait for one: what it needs from the
         // frame is this — the screen it is drawn on, published once per frame rather than sampled
-        // per reading (see [`crate::cursor_overlay`]).
-        self.publish_screen();
-
-        // And the pointer, for the same reason. The pump hands it over on every reading, but the
-        // switch that turns the ghost off can be flipped while the pen is away, and a screen can be
-        // left while it is away too: no reading will arrive to notice either.
-        self.follow_pen_with_pointer();
+        // per reading (see [`crate::cursor_overlay`]) — and the pointer with it. The pump hands both
+        // over on every reading, but the switch that turns the ghost off can be flipped while the pen
+        // is away, and a screen can be left while it is away too: no reading will arrive to notice
+        // either. Publishing both here is also what makes a screen opened by a *keypress* take effect
+        // on the frame that draws it, whatever path opened it.
+        self.publish_cursor();
 
         let theme = cx.theme();
         let (background, foreground) = (theme.background, theme.foreground);
@@ -7007,6 +7079,54 @@ fn bar_line(shown: bool, measured: Option<f32>) -> f32 {
 
 /// Whether the pen has a cursor of its own at `at`, in window logical pixels.
 ///
+/// What is drawn over the sheet, as the cursor, the ink and the keyboard all have to know it.
+///
+/// A plain struct rather than four calls on `NoteApp` so that the two answers below can be asked by a
+/// test without a window — the state has to exist to have a window, and this is the whole of the state
+/// those answers depend on.
+#[derive(Clone, Copy, Default)]
+struct Screens {
+    /// A name being typed over the sheet.
+    naming: bool,
+    /// The home list.
+    home: bool,
+    /// The marked pages.
+    marks: bool,
+    /// The document's contents.
+    outline: bool,
+    /// A question waiting for an answer.
+    asking: bool,
+    /// The palette at the pen.
+    palette: bool,
+}
+
+/// Whether the sheet — and nothing else — is in front, so a reading is a stroke rather than a press.
+///
+/// The one answer to that question, asked by the ink, the keyboard and (through [`screen_in_front`]) the
+/// cursor. It is a free function for the reason [`pen_cursor_shows`] is: it is the part worth testing,
+/// and the app's own method is this plus a way to read the flags.
+fn sheet_is_front(screens: Screens) -> bool {
+    !screens.naming
+        && !screens.home
+        && !screens.marks
+        && !screens.outline
+        && !screens.asking
+        && !screens.palette
+}
+
+/// Whether a screen is in front of the sheet, so the ghost goes and the system pointer is the cursor.
+///
+/// A screen is something *over* the sheet rather than on it: there is no page under it for the ghost to
+/// point at, and every control on it is pressed with a pointer. The home list, the marked pages and the
+/// contents are the three places; a question and the palette are the two that are boxes.
+///
+/// The marked pages and the contents are here because leaving them out is invisible until someone uses
+/// one: the ghost is suppressed nowhere, so the pen's own cursor is drawn over a list it is not on, and
+/// the system arrow is hidden by it — a list with no cursor at all.
+fn screen_in_front(screens: Screens) -> bool {
+    screens.home || screens.marks || screens.outline || screens.asking || screens.palette
+}
+
 /// The whole of the geometric half of [`NoteApp::pen_has_its_own_cursor`], as a free function because
 /// it is the part worth testing: the app's own answer also asks whether a ghost was installed at all
 /// and whether a screen is in front, and neither of those can be asked without a window.

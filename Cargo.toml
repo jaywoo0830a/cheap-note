@@ -34,6 +34,12 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+# The symbol table is 4.6 MB of a 27 MB binary and nothing reads it: the app has no dynamic loading of its
+# own that resolves by name, and a release crash prints through the panic hook rather than a symbolicated
+# backtrace (`apps/macos/src/main.rs`). Measured on arm64: 27.0 MB → 22.3 MB, with no change to any of the
+# benchmark's figures. `symbols` rather than `debuginfo` because there is no debug info here to drop in the
+# first place; `debug = 1` is only on the profiling profile below, which turns this back off.
+strip = "symbols"
 
 # The release build with its symbols kept, for profiling only — never shipped.
 #
@@ -45,6 +51,8 @@ panic = "abort"
 [profile.release-sym]
 inherits = "release"
 debug = 1
+# Undoes the release profile's strip: a profile of a binary with no names in it names nothing.
+strip = "none"
 
 # One dependency is vendored because a published release broke an assumption this platform's
 # canvas is built on. `gpui-pre-windows` 0.3.12 moved GPUI's DirectComposition target from the

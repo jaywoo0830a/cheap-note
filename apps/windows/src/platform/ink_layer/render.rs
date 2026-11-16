@@ -59,7 +59,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISurface};
 use windows_numerics::{Matrix3x2, Vector2};
 
-use note_format::ink::{alpha_of, detail_zoom, Stroke};
+use note_format::ink::{alpha_of, detail_zoom, Bounds, Stroke};
 use note_format::pages::Quarters;
 use note_ui::ink_layer::canvas::{Canvas, Fill, Page, Rect};
 use note_ui::ink_layer::ink_colour;
@@ -185,7 +185,7 @@ struct Chunk {
     /// The colour every stroke in the run was written in.
     colour: u32,
     /// The union of the strokes' bounds, for the same culling test a single stroke gets.
-    bounds: [f32; 4],
+    bounds: Bounds,
     /// The outline of the whole run, flattened and filled once.
     realization: ID2D1GeometryRealization,
 }
@@ -550,12 +550,7 @@ impl Renderer {
 
                     // The window, in the coordinates the *drawing* is in: a drag moves the ink, so the part of
                     // the paper that is on screen is that much the other way when the ink is asked about itself.
-                    let culled = [
-                        visible[0] - offset.0,
-                        visible[1] - offset.1,
-                        visible[2] - offset.0,
-                        visible[3] - offset.1,
-                    ];
+                    let culled = visible.grown(-offset.0, -offset.1);
 
                     for (index, stroke) in canvas.ink.strokes.iter().enumerate() {
                         let in_hand = selected.get(index).copied().unwrap_or(false);
@@ -654,7 +649,7 @@ impl Renderer {
     /// are the per-stroke tail. A chunk that contains a selected stroke is drawn stroke by stroke so
     /// the selection pass can take that stroke away; a chunk that is only partly on screen is drawn
     /// the same way, so zooming in keeps the per-stroke culling the old path had.
-    fn draw_finished(&mut self, canvas: &Canvas, visible: [f32; 4]) -> Result<()> {
+    fn draw_finished(&mut self, canvas: &Canvas, visible: Bounds) -> Result<()> {
         let strokes = &canvas.ink.strokes;
         let selected = &canvas.ink.selected;
         let zoom = canvas.ink.zoom;
@@ -720,7 +715,7 @@ impl Renderer {
     }
 
     /// Draws one finished stroke from its per-stroke realization, if it is on screen.
-    fn draw_one(&self, index: usize, stroke: &Stroke, visible: [f32; 4]) {
+    fn draw_one(&self, index: usize, stroke: &Stroke, visible: Bounds) {
         if !stroke.visible_in(visible) {
             return;
         }
@@ -884,17 +879,9 @@ impl Renderer {
         }
         .context("baking a chunk's geometry")?;
 
-        let mut bounds = [
-            f32::INFINITY,
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            f32::NEG_INFINITY,
-        ];
+        let mut bounds = Bounds::NOTHING;
         for stroke in strokes {
-            bounds[0] = bounds[0].min(stroke.bounds[0]);
-            bounds[1] = bounds[1].min(stroke.bounds[1]);
-            bounds[2] = bounds[2].max(stroke.bounds[2]);
-            bounds[3] = bounds[3].max(stroke.bounds[3]);
+            bounds = bounds.union(stroke.bounds);
         }
 
         Ok(Chunk {
@@ -1098,15 +1085,12 @@ fn unchanged_prefix(cached: &[usize], now: impl Iterator<Item = usize>) -> usize
         .count()
 }
 
-/// Whether two `[min_x, min_y, max_x, max_y]` rectangles overlap.
+/// Whether two boxes overlap.
 ///
-/// The same four comparisons [`Stroke::visible_in`] makes, for a chunk's union of bounds: a chunk
-/// that is entirely off screen is skipped with one test rather than one per stroke.
-fn overlaps(bounds: [f32; 4], visible: [f32; 4]) -> bool {
-    bounds[0] <= visible[2]
-        && bounds[2] >= visible[0]
-        && bounds[1] <= visible[3]
-        && bounds[3] >= visible[1]
+/// The same test [`Stroke::visible_in`] makes, for a chunk's union of bounds: a chunk that is
+/// entirely off screen is skipped with one test rather than one per stroke.
+fn overlaps(bounds: Bounds, visible: Bounds) -> bool {
+    bounds.overlaps(visible)
 }
 
 /// The signed area of a closed outline, in its own units.

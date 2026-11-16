@@ -1036,7 +1036,7 @@ fn a_line_that_runs_up_behind_the_bar_keeps_its_ink() {
     assert_eq!(ink.stroke_count(), 1);
     let stroke = &ink.finished()[0];
     assert!(
-        stroke.bounds[1] < 100.0,
+        stroke.bounds.min.1 < 100.0,
         "the reading behind the bar is part of the line: {:?}",
         stroke.bounds
     );
@@ -1478,13 +1478,13 @@ fn a_growing_stroke_knows_where_it_is() {
     ink.consume(&[reading(7, Phase::Move, 90.0, 70.0, Some(0.5))], &id(), &s);
 
     let open = ink.open().expect("a stroke");
-    assert_eq!(open.bounds, [10.0, 10.0, 90.0, 70.0]);
+    assert_eq!(open.bounds, Bounds::new((10.0, 10.0), (90.0, 70.0)));
     assert!(
-        open.visible_in([0.0, 0.0, 50.0, 50.0]),
+        open.visible_in(Bounds::new((0.0, 0.0), (50.0, 50.0))),
         "the corner overlaps"
     );
     assert!(
-        !open.visible_in([200.0, 200.0, 300.0, 300.0]),
+        !open.visible_in(Bounds::new((200.0, 200.0), (300.0, 300.0))),
         "and away does not"
     );
 }
@@ -1496,13 +1496,13 @@ fn a_stroke_outside_the_view_is_not_visible() {
     stroke.points.push(InkPoint::new(540.0, 520.0, 2.0));
     stroke.close();
 
-    assert!(stroke.visible_in([400.0, 400.0, 600.0, 600.0]));
+    assert!(stroke.visible_in(Bounds::new((400.0, 400.0), (600.0, 600.0))));
     assert!(
-        stroke.visible_in([520.0, 480.0, 700.0, 700.0]),
+        stroke.visible_in(Bounds::new((520.0, 480.0), (700.0, 700.0))),
         "overlapping counts"
     );
-    assert!(!stroke.visible_in([0.0, 0.0, 100.0, 100.0]));
-    assert!(!stroke.visible_in([600.0, 0.0, 700.0, 100.0]), "beside it");
+    assert!(!stroke.visible_in(Bounds::new((0.0, 0.0), (100.0, 100.0))));
+    assert!(!stroke.visible_in(Bounds::new((600.0, 0.0), (700.0, 100.0))), "beside it");
 }
 
 /// Ending a stroke must not copy the page's ink.
@@ -2078,7 +2078,7 @@ fn measures_the_ink_costs() {
     let erased = started.elapsed();
 
     // ── Culling: asking a full page whether each stroke is on screen ─────
-    let rect = [0.0, 0.0, 800.0, 600.0];
+    let rect = Bounds::new((0.0, 0.0), (800.0, 600.0));
     let rounds = 200;
     let started = std::time::Instant::now();
     for _ in 0..rounds {
@@ -2235,7 +2235,7 @@ fn measures_the_rung_costs() {
     // this is the number that says whether a pan needs the same treatment a zoom got. It is two orders of
     // magnitude cheaper, which is why it does not.
     let page = written_page(8_182);
-    let rect = [0.0, 0.0, 800.0, 600.0];
+    let rect = Bounds::new((0.0, 0.0), (800.0, 600.0));
     let rounds = 50u32;
 
     let started = std::time::Instant::now();
@@ -2534,7 +2534,7 @@ fn putting_a_drag_down_moves_the_ink() {
     assert_eq!((stroke.points[0].x, stroke.points[0].y), (140.0, 140.0));
     assert_eq!(
         stroke.bounds,
-        [140.0, 140.0, 240.0, 180.0],
+        Bounds::new((140.0, 140.0), (240.0, 180.0)),
         "the bounds moved with the points, which is what the eraser hit-tests"
     );
     assert_eq!(
@@ -2845,7 +2845,7 @@ fn a_drag_can_be_undone() {
     assert!(ink.undo());
     assert_eq!(ink.finished()[0].points[0].x, 100.0, "the line is back");
     assert_eq!(
-        ink.finished()[0].bounds[0],
+        ink.finished()[0].bounds.min.0,
         100.0,
         "and its bounds came back with it"
     );

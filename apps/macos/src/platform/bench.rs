@@ -347,14 +347,14 @@ fn ms(duration: Duration) -> f64 {
 /// The figures match the Windows benchmark's page, so the two platforms are drawing the same thing and
 /// their numbers can be put side by side.
 fn page(strokes: usize) -> Canvas {
-    use note_format::ink::Stroke;
+    use note_format::ink::{Bounds, Stroke};
     use note_ui::ink_layer::canvas::Fill;
 
     let mut ink = Ink {
         origin: (MARGIN, MARGIN),
         zoom: 1.0,
         paper: SHEET,
-        visible: [0.0, 0.0, SHEET.0, SHEET.1],
+        visible: Bounds::new((0.0, 0.0), SHEET),
         revision: 1,
         ..Default::default()
     };
@@ -374,7 +374,7 @@ fn page(strokes: usize) -> Canvas {
             points,
             color: 0x1B_1B_1F,
             outline: Vec::new(),
-            bounds: [0.0; 4],
+            bounds: Bounds::NOTHING,
         };
         stroke.close();
         list.push(Arc::new(stroke));

@@ -50,7 +50,7 @@
 use std::ops::Range;
 
 use crate::error::{Error, Result, Variant};
-use crate::ink::{InkPoint, Stroke};
+use crate::ink::{Bounds, InkPoint, Stroke};
 
 /// Fixed-point units per logical pixel.
 ///
@@ -422,7 +422,7 @@ fn read_arrays(raw: &[u8]) -> Result<Vec<Stroke>> {
                 points,
                 color,
                 outline: Vec::new(),
-                bounds: [0.0; 4],
+                bounds: Bounds::NOTHING,
             };
             // The bounds and the outline are not stored — they are derivable from the points — but
             // the eraser hit-tests against them and a frame culls by them, so a stroke without them
@@ -734,7 +734,7 @@ mod tests {
 
         assert_eq!(decoded[0].points.len(), 1);
         assert!((decoded[0].points[0].x - 77.5).abs() < 0.02);
-        assert!(decoded[0].bounds[2] > 77.0, "and it knows where it is");
+        assert!(decoded[0].bounds.max.0 > 77.0, "and it knows where it is");
     }
 
     /// The point of the format: a page of handwriting costs a fraction of its own arrays.

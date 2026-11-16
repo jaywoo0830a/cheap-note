@@ -517,12 +517,12 @@ impl Sheet {
 
     /// The part of the sheet that is on screen, in the paper's own coordinates.
     ///
-    /// A *rectangle* of the paper, because that is what the culling test takes — and it is the box
-    /// around the window's four corners turned back onto the paper, because a page the reader has
-    /// turned puts the screen's rectangle at an angle to the paper's axes. A box and not a polygon:
-    /// what this decides is whether a stroke is worth *drawing*, and including a stroke that is only
-    /// near the screen costs one draw call while excluding one that is on it costs a missing line.
-    fn visible(&self) -> [f32; 4] {
+    /// A *box*, because that is what the culling test takes — and it is the box around the window's
+    /// four corners turned back onto the paper, because a page the reader has turned puts the
+    /// screen's rectangle at an angle to the paper's axes. A box and not a polygon: what this decides
+    /// is whether a stroke is worth *drawing*, and including a stroke that is only near the screen
+    /// costs one draw call while excluding one that is on it costs a missing line.
+    fn visible(&self) -> crate::ink::Bounds {
         let zoom = if self.zoom.is_finite() && self.zoom > 0.0 {
             self.zoom
         } else {
@@ -548,16 +548,12 @@ impl Sheet {
             corner(self.window),
         ];
 
-        [
-            corners.iter().fold(f32::INFINITY, |low, at| low.min(at.0)),
-            corners.iter().fold(f32::INFINITY, |low, at| low.min(at.1)),
-            corners
-                .iter()
-                .fold(f32::NEG_INFINITY, |high, at| high.max(at.0)),
-            corners
-                .iter()
-                .fold(f32::NEG_INFINITY, |high, at| high.max(at.1)),
-        ]
+        // Grown over the four corners one at a time: the same four comparisons the old code folded
+        // twice over, said once, and starting from a box that covers nothing rather than from a
+        // corner of the plane.
+        corners
+            .iter()
+            .fold(crate::ink::Bounds::NOTHING, |box_, at| box_.covering(at.0, at.1))
     }
 }
 

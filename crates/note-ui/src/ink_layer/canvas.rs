@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use gpui_kit::{Hsla, RenderImage};
 
-use crate::ink::Stroke;
+use crate::ink::{Bounds, Stroke};
 use crate::pages::Quarters;
 
 /// A rectangle in logical window pixels.
@@ -125,7 +125,7 @@ pub struct Ink {
     /// of a page is off screen. Everything is visible in the default, because a caller with no
     /// window has nothing honest to say and skipping a stroke that *is* on screen is the one mistake
     /// this can make.
-    pub visible: [f32; 4],
+    pub visible: Bounds,
     /// How far the page has been turned, in quarter turns clockwise, and the paper's own size in its
     /// own units.
     ///
@@ -179,17 +179,15 @@ impl Default for Ink {
 }
 
 impl Ink {
-    /// The sheet in full, as a culling rectangle.
+    /// The sheet in full, as a culling box: every point of the plane is inside it.
     ///
-    /// Written down because the two infinities have to be: a rectangle of zeroes — what a derived
-    /// `Default` would leave here — is the one value that means "nothing on this sheet is on screen"
-    /// (see [`Ink::visible`]).
-    const ALL_VISIBLE: [f32; 4] = [
-        f32::NEG_INFINITY,
-        f32::NEG_INFINITY,
-        f32::INFINITY,
-        f32::INFINITY,
-    ];
+    /// Written down because [`Bounds::NOTHING`] — the default — is the one value that means "nothing
+    /// on this sheet is on screen" (see [`Ink::visible`]), and a caller with no window means the
+    /// opposite of that.
+    const ALL_VISIBLE: Bounds = Bounds::new(
+        (f32::NEG_INFINITY, f32::NEG_INFINITY),
+        (f32::INFINITY, f32::INFINITY),
+    );
 }
 
 /// One frame of canvas: the desk, what is printed on it, and the ink in front of it.

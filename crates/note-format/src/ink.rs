@@ -33,9 +33,171 @@
 
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::history;
+
+/// Something that covers part of a page: a stroke's ink, the page that is on screen, the region the
+/// renderer built for.
+///
+/// ## Why this is a type
+///
+/// It was `[f32; 4]` — four numbers whose order was a comment. Every one of the fifteen places that
+/// used one repeated `bounds[0] <= rect[2] && bounds[2] >= rect[0] ...`, and nothing said whether the
+/// four were `min`/`max` pairs or `x`/`y`/`width`/`height`: a culling test written with the wrong two
+/// of those is a page that draws nothing when it is on screen, or draws everything always. The names
+/// are now the definition, and the two questions asked of a box — "does it overlap this one?" and
+/// "is it inside this one?" — are methods rather than four comparisons each caller writes again.
+///
+/// The bounds are *inclusive*: a stroke that ends exactly on the edge of the screen is on the screen.
+/// That is the safe side for a cull test, which is why it is written twice below rather than shared.
+///
+/// Not to be confused with the app's `Rect` (an `x`, a `y` and a size, for filling something): this is
+/// two corners, and the difference matters because a box with a negative size is a real box here and
+/// not a rectangle with no area.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Bounds {
+    /// The smallest `x` and the smallest `y` the box reaches.
+    pub min: (f32, f32),
+    /// The largest `x` and the largest `y` the box reaches.
+    pub max: (f32, f32),
+}
+
+impl Bounds {
+    /// The box that covers nothing at all: the one to start a fold over points with.
+    ///
+    /// The infinities rather than `f32::MAX`/`f32::MIN`, because those are each other's `min` and
+    /// `max` — a fold that began there and met nothing would leave a box that looks like a real one
+    /// at the corner of the plane. This one cannot be mistaken for a place on a page.
+    pub const NOTHING: Bounds = Bounds {
+        min: (f32::INFINITY, f32::INFINITY),
+        max: (f32::NEG_INFINITY, f32::NEG_INFINITY),
+    };
+
+    /// The box around two corners.
+    pub const fn new(min: (f32, f32), max: (f32, f32)) -> Self {
+        Bounds { min, max }
+    }
+
+    /// The box around a single place: a point, or one disc of ink before it meets anything.
+    pub const fn at(x: f32, y: f32) -> Self {
+        Bounds {
+            min: (x, y),
+            max: (x, y),
+        }
+    }
+
+    /// This box grown to cover `x` and `y` as well.
+    pub fn covering(self, x: f32, y: f32) -> Self {
+        Bounds {
+            min: (self.min.0.min(x), self.min.1.min(y)),
+            max: (self.max.0.max(x), self.max.1.max(y)),
+        }
+    }
+
+    /// This box grown to cover `other` as well.
+    ///
+    /// A box that covers nothing is the *identity* of this operation, and it has to be handled rather
+    /// than unioned with: [`Self::NOTHING`]'s corners are infinities, so `min`/`max` against them
+    /// would spread the result over the whole plane — an empty page's box swallowing every stroke
+    /// folded into it after. Union with the empty box is the other box, which is what makes
+    /// [`Self::NOTHING`] the right thing to start a fold with.
+    pub fn union(self, other: Bounds) -> Self {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+
+        self.covering(other.min.0, other.min.1)
+            .covering(other.max.0, other.max.1)
+    }
+
+    /// Whether the two boxes share any part of the plane.
+    ///
+    /// Inclusive, and that is the point: a stroke whose last pixel is exactly the screen's first is
+    /// *on* the screen, and culling it would be a missing line at the seam. A box that covers nothing
+    /// (see [`Self::NOTHING`]) overlaps nothing, which is what makes it safe to fold with.
+    pub fn overlaps(self, other: Bounds) -> bool {
+        self.min.0 <= other.max.0
+            && self.max.0 >= other.min.0
+            && self.min.1 <= other.max.1
+            && self.max.1 >= other.min.1
+    }
+
+    /// Whether this box lies entirely inside `other`.
+    ///
+    /// Inclusive too: a box that shares an edge with the region is inside it, because everything it
+    /// covers is drawn. This is what the ink layer asks before it keeps the triangles it built — a
+    /// scroll inside the margin fits, a zoom outward does not (see the macOS ink layer's `fits`).
+    pub fn within(self, other: Bounds) -> bool {
+        self.min.0 >= other.min.0
+            && self.min.1 >= other.min.1
+            && self.max.0 <= other.max.0
+            && self.max.1 <= other.max.1
+    }
+
+    /// The same box grown by `across` either side and `down` above and below.
+    pub fn grown(self, across: f32, down: f32) -> Self {
+        Bounds {
+            min: (self.min.0 - across, self.min.1 - down),
+            max: (self.max.0 + across, self.max.1 + down),
+        }
+    }
+
+    /// The box's width and height.
+    pub fn size(self) -> (f32, f32) {
+        (self.max.0 - self.min.0, self.max.1 - self.min.1)
+    }
+
+    /// Whether the box covers no part of the plane.
+    pub fn is_empty(self) -> bool {
+        self.max.0 < self.min.0 || self.max.1 < self.min.1
+    }
+
+    /// The four numbers, min first and then max: what a cache key and a shader want.
+    ///
+    /// [`From`] does the same thing; this is the spelling for a caller that has the value in hand and
+    /// does not want `let array: [f32; 4] = bounds.into();` to say so.
+    pub fn into_array(self) -> [f32; 4] {
+        self.into()
+    }
+}
+
+impl Default for Bounds {
+    /// The box that covers nothing — the one a derived `Default` would get wrong.
+    ///
+    /// A `Default` of zeroes is a real box at the origin, and a cull test against it is "draw nothing
+    /// at all", which is the one answer a default has no right to give.
+    fn default() -> Self {
+        Bounds::NOTHING
+    }
+}
+
+impl From<[f32; 4]> for Bounds {
+    /// `[min_x, min_y, max_x, max_y]`, the order every caller of the old type used.
+    fn from([min_x, min_y, max_x, max_y]: [f32; 4]) -> Self {
+        Bounds::new((min_x, min_y), (max_x, max_y))
+    }
+}
+
+impl From<Bounds> for [f32; 4] {
+    fn from(bounds: Bounds) -> Self {
+        [bounds.min.0, bounds.min.1, bounds.max.0, bounds.max.1]
+    }
+}
+
+impl std::fmt::Display for Bounds {
+    /// The four numbers, in the order a note stores them: min first, then max.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "[{}, {}, {}, {}]",
+            self.min.0, self.min.1, self.max.0, self.max.1
+        )
+    }
+}
 
 /// A colour with an alpha stamped into its top byte: `0xAARRGGBB`.
 ///
@@ -108,9 +270,9 @@ pub struct Stroke {
     /// sheet is drawn at another size (see [`Self::close_at`], which is what the app's `InkDocument::set_zoom` calls).
     #[serde(skip)]
     pub outline: Vec<[f32; 2]>,
-    /// The axis-aligned bounds as `[min_x, min_y, max_x, max_y]`, for culling and hit-testing.
+    /// The axis-aligned box the ink covers, for culling and hit-testing.
     #[serde(skip)]
-    pub bounds: [f32; 4],
+    pub bounds: Bounds,
 }
 
 impl Stroke {
@@ -128,7 +290,7 @@ impl Stroke {
             points: vec![point],
             color,
             outline: Vec::new(),
-            bounds: [point.x, point.y, point.x, point.y],
+            bounds: Bounds::at(point.x, point.y),
         }
     }
 
@@ -173,23 +335,19 @@ impl Stroke {
     /// the eraser's first, cheap test.
     pub fn freeze(&mut self, detail: f32, tip: Tip) {
         if self.points.is_empty() {
-            self.bounds = [0.0; 4];
+            self.bounds = Bounds::default();
             self.outline.clear();
             return;
         }
 
-        // "Nothing found yet", said as a pair of infinities rather than `f32::MAX` and `f32::MIN`.
-        // `f32::MIN` is the most *negative* float, so it happens to work here — but it reads like a
-        // smallest positive, and a later reader who "fixes" it to `f32::MIN_POSITIVE` would clamp every
-        // box that lives left of the origin. The infinities say what is meant and are what the renderers
-        // in this repository already use for an empty region (`metal.rs`, `ink_layer/canvas.rs`).
-        let mut bounds = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+        // One box, grown over the points: `covering` is the four comparisons this used to spell out,
+        // and it starts from a box that covers nothing (see [`Bounds::NOTHING`]) so the first point
+        // becomes the box rather than being clamped against a corner of the plane.
+        let mut bounds = Bounds::NOTHING;
         for point in &self.points {
-            bounds[0] = bounds[0].min(point.x);
-            bounds[1] = bounds[1].min(point.y);
-            bounds[2] = bounds[2].max(point.x);
-            bounds[3] = bounds[3].max(point.y);
+            bounds = bounds.covering(point.x, point.y);
         }
+
         self.bounds = bounds;
         self.outline = ribbon_outline(&Model::of(&self.points, detail, tip));
     }
@@ -241,11 +399,7 @@ impl Stroke {
         if self.points.is_empty() {
             return false;
         }
-        if x < self.bounds[0] - radius
-            || x > self.bounds[2] + radius
-            || y < self.bounds[1] - radius
-            || y > self.bounds[3] + radius
-        {
+        if !self.bounds.grown(radius, radius).overlaps(Bounds::at(x, y)) {
             return false;
         }
 
@@ -261,23 +415,19 @@ impl Stroke {
             .any(|pair| distance_to_segment_squared(x, y, pair[0], pair[1]) <= radius_squared)
     }
 
-    /// Whether any of this stroke falls inside a rectangle of the sheet, as `[min_x, min_y,
-    /// max_x, max_y]`.
+    /// Whether any of this stroke falls inside a box of the sheet.
     ///
     /// This is how a frame leaves the ink that is off screen out of the picture. The bounds are
-    /// already kept for hit-testing, so the test is four comparisons — against building a polygon
+    /// already kept for hit-testing, so the test is one call — against building a polygon
     /// for every stroke on the page and letting the renderer discover that most of them are
     /// outside the window, which is the most expensive thing an immediate-mode canvas can be
     /// asked to do. It matters most when zoomed in, where most of a page is off screen.
-    pub fn visible_in(&self, rect: [f32; 4]) -> bool {
+    pub fn visible_in(&self, rect: Bounds) -> bool {
         if self.points.is_empty() {
             return false;
         }
 
-        self.bounds[0] <= rect[2]
-            && self.bounds[2] >= rect[0]
-            && self.bounds[1] <= rect[3]
-            && self.bounds[3] >= rect[1]
+        self.bounds.overlaps(rect)
     }
 }
 
@@ -718,26 +868,19 @@ impl Model {
     }
 
     /// The box the ink occupies: the discs' own bounds, made a little wider than the points.
-    pub fn bounds(&self) -> [f32; 4] {
-        if self.discs.is_empty() {
-            return [0.0, 0.0, 0.0, 0.0];
-        }
-
-        let mut low = (f32::INFINITY, f32::INFINITY);
-        let mut high = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    ///
+    /// [`Bounds::default`] — the box that covers nothing — for a model with no discs, so a caller can
+    /// fold it into a larger box without the empty one dragging the result to the origin.
+    pub fn bounds(&self) -> Bounds {
+        let mut bounds = Bounds::NOTHING;
 
         for disc in &self.discs {
-            low = (
-                low.0.min(disc.x - disc.radius),
-                low.1.min(disc.y - disc.radius),
-            );
-            high = (
-                high.0.max(disc.x + disc.radius),
-                high.1.max(disc.y + disc.radius),
-            );
+            bounds = bounds
+                .covering(disc.x - disc.radius, disc.y - disc.radius)
+                .covering(disc.x + disc.radius, disc.y + disc.radius);
         }
 
-        [low.0, low.1, high.0, high.1]
+        bounds
     }
 
     /// How many of a set of places the model calls ink, out of how many were asked.
@@ -818,19 +961,19 @@ pub fn ribbon_outline(model: &Model) -> Vec<[f32; 2]> {
     // The disc is the *enclosing* one: centred where the readings are, and wide enough to reach the furthest
     // reading plus its own nib. A hand that wobbles as it scrubs pushed the ink that far out, so a disc drawn at
     // the nib's plain width would be smaller than the model says the mark is.
-    let mut low = (f32::INFINITY, f32::INFINITY);
-    let mut high = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    let mut extents = Bounds::NOTHING;
 
     for disc in line {
-        low = (low.0.min(disc.x), low.1.min(disc.y));
-        high = (high.0.max(disc.x), high.1.max(disc.y));
+        extents = extents.covering(disc.x, disc.y);
     }
 
     let widest = line
         .iter()
         .fold(0.0f32, |widest, disc| widest.max(disc.radius * 2.0));
 
-    if (high.0 - low.0).max(high.1 - low.1) <= widest * 0.5 {
+    let (extent_x, extent_y) = extents.size();
+
+    if extent_x.max(extent_y) <= widest * 0.5 {
         let total = line.iter().fold((0.0, 0.0), |total, disc| {
             (total.0 + disc.x, total.1 + disc.y)
         });

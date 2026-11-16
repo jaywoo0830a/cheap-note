@@ -141,16 +141,28 @@ pub fn swaps_axes(rotation: Quarters) -> bool {
 
 
 /// One page of a note: what it shows, and which way up it is.
+///
+/// ## Why `rotation` is not a public field
+///
+/// It was, and that made the one invariant a page has — that it is one of the four ways up — a rule
+/// that only [`Pages`] followed. A `PageEntry` could be built by hand with `rotation: 7` and handed to
+/// a renderer, which is the same hole `Quarters` itself closed for the *type* one level down: a value
+/// that says it is a rotation and is not. Reading it is [`Self::rotation`], which answers
+/// [`Quarters`]; writing it is [`Self::turned`], which is [`Quarters::turned`] and therefore wraps.
+/// There is no other way in, so a page that exists is a page that can be drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageEntry {
     /// What the page shows.
     pub show: Page,
-    /// Which way up it is, in quarter turns clockwise.
+    /// Which way up it is, in quarter turns clockwise. Read with [`Self::rotation`].
+    ///
+    /// Private, so every value that reaches it has come through [`Quarters`]. Serde still reads and
+    /// writes the bare number it always did (see [`Self::rotation`]'s tests).
     ///
     /// Defaulted rather than required: a note written by a build that had no rotation has every page
     /// the right way up, and says nothing about the field at all.
     #[serde(default)]
-    pub rotation: Quarters,
+    rotation: Quarters,
 }
 
 impl PageEntry {
@@ -165,9 +177,16 @@ impl PageEntry {
     /// The same page, turned `turns` quarter turns clockwise.
     pub fn turned(self, turns: i32) -> Self {
         PageEntry {
-            rotation: turned(self.rotation, turns),
+            rotation: self.rotation.turned(turns),
             ..self
         }
+    }
+
+    /// Which way up the page is, in quarter turns clockwise.
+    ///
+    /// The only way to read the rotation, so the number a caller gets is always one of the four.
+    pub fn rotation(self) -> Quarters {
+        self.rotation
     }
 }
 
@@ -303,11 +322,17 @@ impl Pages {
     }
 
     /// The document page shown at `index`, when that page shows one.
+    ///
+    /// The two "may not be there" are chained rather than matched on together: the index may be past
+    /// the end of the list, and the page it names may be a blank sheet. [`Option::and_then`] says
+    /// exactly that — each step either has an answer or the answer is `None` — and it keeps the
+    /// question ("does this page show a document page, and which?") in one expression instead of a
+    /// `match` with a `None` arm for each way the answer can be absent.
     pub fn document_page(&self, index: usize) -> Option<usize> {
-        match self.pages.get(index).map(|page| page.show) {
-            Some(Page::Document(page)) => Some(page),
-            _ => None,
-        }
+        self.pages.get(index).and_then(|page| match page.show {
+            Page::Document(page) => Some(page),
+            Page::Blank => None,
+        })
     }
 
     /// The page of the *note* that shows a document's page, when the note has one.

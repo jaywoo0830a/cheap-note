@@ -91,7 +91,7 @@ use serde::{Deserialize, Serialize};
 use crate::chunk::{self, Codec};
 use crate::error::{Error, Result, Variant};
 use crate::history::{Edit, History, HistoryUpdate};
-use crate::ink::Stroke;
+use crate::ink::{Bounds, Stroke};
 use crate::paper::{CanvasSize, CanvasStyle, FrameCap, MemoryMode};
 use crate::settings::{PenWeight, Settings};
 
@@ -1670,26 +1670,18 @@ fn write_chunks(
 /// The bounds are what the app can answer "is this page blank?" and "where is the ink?" with without
 /// loading it, so they are maintained by the writer rather than derived by a reader.
 fn touch_bounds(conn: &Connection, id: i64, strokes: &[Stroke]) -> Result<()> {
-    let mut bounds: Option<[f32; 4]> = None;
+    let mut bounds = Bounds::NOTHING;
 
     for stroke in strokes {
         if stroke.points.is_empty() {
             continue;
         }
 
-        bounds = Some(match bounds {
-            Some(current) => [
-                current[0].min(stroke.bounds[0]),
-                current[1].min(stroke.bounds[1]),
-                current[2].max(stroke.bounds[2]),
-                current[3].max(stroke.bounds[3]),
-            ],
-            None => stroke.bounds,
-        });
+        bounds = bounds.union(stroke.bounds);
     }
 
-    match bounds {
-        Some([min_x, min_y, max_x, max_y]) => {
+    match bounds.is_empty() {
+        false => {
             conn.execute(
                 "UPDATE pages
                     SET bbox_min_x = COALESCE(MIN(bbox_min_x, ?1), ?1),
@@ -1698,11 +1690,11 @@ fn touch_bounds(conn: &Connection, id: i64, strokes: &[Stroke]) -> Result<()> {
                         bbox_max_y = COALESCE(MAX(bbox_max_y, ?4), ?4),
                         updated_at = ?5
                   WHERE id = ?6",
-                params![min_x, min_y, max_x, max_y, now_millis(), id],
+                params![bounds.min.0, bounds.min.1, bounds.max.0, bounds.max.1, now_millis(), id],
             )
             .map_err(sql)?;
         }
-        None => {
+        true => {
             conn.execute(
                 "UPDATE pages SET updated_at = ?1 WHERE id = ?2",
                 params![now_millis(), id],

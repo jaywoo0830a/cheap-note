@@ -8,7 +8,7 @@
 
 use note_format::ink::{
     alpha_of, densified, detail_of, detail_zoom, outline_of, steadied, steps_for, with_alpha,
-    InkPoint, Stroke, Tip,
+    Bounds, InkPoint, Stroke, Tip,
 };
 
 /// A straight line from `from` to `to`, as the pen would leave it.
@@ -48,10 +48,11 @@ fn a_closed_stroke_knows_its_bounds_and_its_outline() {
     let stroke = line((10.0, 20.0), (110.0, 20.0));
 
     assert!(!stroke.is_empty());
-    assert_eq!(stroke.bounds[0], 10.0);
-    assert_eq!(stroke.bounds[1], 20.0);
-    assert_eq!(stroke.bounds[2], 110.0);
-    assert_eq!(stroke.bounds[3], 20.0);
+    assert_eq!(
+        stroke.bounds,
+        Bounds::new((10.0, 20.0), (110.0, 20.0)),
+        "the box is the line's own two ends"
+    );
     assert!(!stroke.outline.is_empty(), "a line has an outline");
 
     // A ribbon around a horizontal line stays on the line's own rows; the width is what it spreads by.
@@ -67,7 +68,10 @@ fn a_closed_stroke_knows_its_bounds_and_its_outline() {
     empty.close();
 
     assert!(empty.is_empty());
-    assert_eq!(empty.bounds, [0.0; 4]);
+    assert!(
+        empty.bounds.is_empty(),
+        "a stroke with no points covers nothing, rather than a box at the origin"
+    );
     assert!(empty.outline.is_empty());
 }
 
@@ -124,8 +128,11 @@ fn a_moved_stroke_hits_where_it_is_now() {
 
     assert!(!stroke.hits(60.0, 10.0, 1.0), "it is not there any more");
     assert!(stroke.hits(60.0, 110.0, 1.0), "it is here");
-    assert_eq!(stroke.bounds[1], 110.0);
-    assert_eq!(stroke.bounds[3], 110.0);
+    assert_eq!(
+        stroke.bounds,
+        Bounds::new((10.0, 110.0), (110.0, 110.0)),
+        "and its box moved with it"
+    );
 }
 
 /// Culling answers from the same bounds, and never says yes about a page it is not on.
@@ -133,13 +140,19 @@ fn a_moved_stroke_hits_where_it_is_now() {
 fn a_stroke_is_seen_only_inside_the_rectangle_it_is_in() {
     let stroke = line((100.0, 100.0), (200.0, 100.0));
 
-    assert!(stroke.visible_in([0.0, 0.0, 400.0, 400.0]));
-    assert!(!stroke.visible_in([0.0, 0.0, 99.0, 99.0]), "left of it");
+    assert!(stroke.visible_in(Bounds::new((0.0, 0.0), (400.0, 400.0))));
     assert!(
-        !stroke.visible_in([201.0, 0.0, 400.0, 400.0]),
+        !stroke.visible_in(Bounds::new((0.0, 0.0), (99.0, 99.0))),
+        "left of it"
+    );
+    assert!(
+        !stroke.visible_in(Bounds::new((201.0, 0.0), (400.0, 400.0))),
         "right of it"
     );
-    assert!(!stroke.visible_in([0.0, 200.0, 400.0, 400.0]), "below it");
+    assert!(
+        !stroke.visible_in(Bounds::new((0.0, 200.0), (400.0, 400.0))),
+        "below it"
+    );
 }
 
 /// The detail ladder moves in rungs, and a rung is a fixed point of the ladder.
@@ -346,4 +359,81 @@ fn a_facet_is_short_enough_to_hide_and_no_shorter() {
         "a facet of {} would be over the antialiasing's resolution",
         note_format::ink::FACET + 0.5
     );
+}
+
+/// Culling is inclusive, which is the safe side of the one mistake it must not make.
+///
+/// A stroke whose last pixel is exactly the screen's first is *on* the screen. An exclusive test would
+/// cull it, and the cost is a line that vanishes at the seam when a reader pans by exactly one stroke
+/// width — the kind of bug that shows up once and is never reproducible.
+#[test]
+fn a_stroke_on_the_edge_of_the_screen_is_on_the_screen() {
+    let stroke = line((100.0, 100.0), (200.0, 100.0));
+
+    // A box whose right edge *is* the stroke's left edge, and whose bottom edge *is* the stroke's row.
+    assert!(
+        stroke.visible_in(Bounds::new((0.0, 0.0), (100.0, 100.0))),
+        "a box that touches the stroke draws it"
+    );
+
+    // One pixel further left and it is genuinely off screen.
+    assert!(
+        !stroke.visible_in(Bounds::new((0.0, 0.0), (99.0, 100.0))),
+        "a box that stops short of it culls it"
+    );
+
+    // The same on the other side.
+    assert!(stroke.visible_in(Bounds::new((200.0, 0.0), (300.0, 200.0))));
+    assert!(!stroke.visible_in(Bounds::new((201.0, 0.0), (300.0, 200.0))));
+}
+
+/// The box that covers nothing overlaps nothing, so folding with it is safe.
+///
+/// This is what makes [`Bounds::NOTHING`] usable as the start of a fold over strokes: an empty page
+/// has to mean "draw nothing", and a box at the origin would mean "the ink is at (0, 0)".
+#[test]
+fn a_box_that_covers_nothing_overlaps_nothing() {
+    let nothing = Bounds::NOTHING;
+
+    assert!(nothing.is_empty());
+    assert!(!nothing.overlaps(Bounds::new((0.0, 0.0), (100.0, 100.0))));
+    assert!(!nothing.overlaps(nothing), "not even itself");
+    assert_eq!(Bounds::default(), nothing, "the default is the empty box");
+
+    // And it is the identity of a union: folding it with a box gives that box.
+    let real = Bounds::new((10.0, 20.0), (30.0, 40.0));
+    assert_eq!(nothing.union(real), real);
+    assert_eq!(real.union(nothing), real);
+}
+
+/// [`Bounds::within`] is containment, and a box that shares an edge is contained.
+///
+/// The ink layer keeps the triangles it built while the screen still fits inside the region they cover.
+/// If a screen that shares an edge with that region were judged "outside", the layer would rebuild the
+/// page on every frame at exactly the scroll position where the edge lines up — a stutter with no
+/// visible cause.
+#[test]
+fn a_box_sharing_an_edge_is_inside_the_one_it_shares_it_with() {
+    let region = Bounds::new((0.0, 0.0), (100.0, 100.0));
+
+    assert!(region.within(region), "a box is inside itself");
+    assert!(
+        Bounds::new((50.0, 50.0), (100.0, 100.0)).within(region),
+        "a corner that shares the far edges is inside"
+    );
+    assert!(
+        !Bounds::new((50.0, 50.0), (101.0, 100.0)).within(region),
+        "one unit past the edge is outside"
+    );
+}
+
+/// The old four-number order survives the type, so nothing that stored a box changed meaning.
+#[test]
+fn a_box_converts_to_and_from_the_four_numbers_it_used_to_be() {
+    let box_ = Bounds::new((1.0, 2.0), (3.0, 4.0));
+
+    assert_eq!(box_.into_array(), [1.0, 2.0, 3.0, 4.0], "min, then max");
+    assert_eq!(Bounds::from([1.0, 2.0, 3.0, 4.0]), box_);
+    assert_eq!(box_.to_string(), "[1, 2, 3, 4]");
+    assert_eq!(box_.size(), (2.0, 2.0));
 }

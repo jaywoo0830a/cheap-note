@@ -218,13 +218,14 @@ fn the_note_and_the_document_agree_about_which_page_is_which() {
 fn a_page_written_before_rotation_is_read_upright() {
     let turned: StoredPage = serde_json::from_str(r#"{"show":{"document":3},"rotation":1}"#)
         .expect("what this build writes");
+    // Built through the one way in, because there is no longer a second one: a page with a rotation
+    // of its own can only be made by turning it.
     assert_eq!(
         turned.entry(),
-        PageEntry {
-            show: Page::Document(3),
-            rotation: Quarters::from_turns(1)
-        }
+        PageEntry::new(Page::Document(3)).turned(1),
+        "and its rotation is the number the note holds"
     );
+    assert_eq!(turned.entry().rotation(), Quarters::from_turns(1));
 
     let older: StoredPage =
         serde_json::from_str(r#"{"document":3}"#).expect("what an older note has");
@@ -245,7 +246,7 @@ fn a_page_list_survives_its_json() {
     let read: Vec<PageEntry> = serde_json::from_str(&json).expect("a page list back");
 
     assert_eq!(read, pages.layout());
-    assert_eq!(read[2].rotation, Quarters::from_turns(3));
+    assert_eq!(read[2].rotation(), Quarters::from_turns(3));
     assert_eq!(read[1].show, Page::Blank);
 }
 
@@ -268,7 +269,7 @@ fn a_rotation_is_a_plain_number_on_disk() {
 
     let json = serde_json::to_string(Pages::of_document(2).layout()).expect("a list as JSON");
     let read: Vec<PageEntry> = serde_json::from_str(&json).expect("a list back");
-    assert_eq!(read[0].rotation, Quarters::UPRIGHT);
+    assert_eq!(read[0].rotation(), Quarters::UPRIGHT);
 }
 
 /// A rotation outside the four is not one: the type is what keeps a fifth from reaching a renderer.

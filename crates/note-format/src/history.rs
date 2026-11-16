@@ -617,7 +617,7 @@ impl<'a> Reading<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ink::InkPoint;
+    use crate::ink::{Bounds, InkPoint};
 
     /// A finished line of ink, for the tests that have to hold one.
     fn stroke(x: f32, color: u32) -> Arc<Stroke> {
@@ -744,7 +744,7 @@ mod tests {
 
                 assert_eq!(
                     removed[0].1.bounds,
-                    [10.0, 10.0, 50.0, 12.0],
+                    Bounds::new((10.0, 10.0), (50.0, 12.0)),
                     "with the geometry an edit's strokes are put back by"
                 );
             }

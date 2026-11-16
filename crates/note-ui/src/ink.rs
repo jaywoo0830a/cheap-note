@@ -112,7 +112,7 @@ use crate::settings::Settings;
 /// built at a zoom rung, and the ladder is the same arithmetic for the note's own readers — the app
 /// model ([`InkDocument`]), the ink layer, and any other application that draws one of these notes.
 pub use note_format::ink::{
-    alpha_of, detail_of, detail_zoom, editable, with_alpha, InkPoint, Stroke, Tip,
+    alpha_of, detail_of, detail_zoom, editable, with_alpha, Bounds, InkPoint, Stroke, Tip,
 };
 
 /// The rest of the detail ladder: the pieces the tests measure the ink's geometry with, and the
@@ -1539,10 +1539,7 @@ fn add_point(
 
     // Kept up to date as the stroke grows, rather than only when it closes: a frame asks whether the
     // stroke being drawn is on screen before it has ever been closed.
-    stroke.bounds[0] = stroke.bounds[0].min(target_x);
-    stroke.bounds[1] = stroke.bounds[1].min(target_y);
-    stroke.bounds[2] = stroke.bounds[2].max(target_x);
-    stroke.bounds[3] = stroke.bounds[3].max(target_y);
+    stroke.bounds = stroke.bounds.covering(target_x, target_y);
 
     stats.kept_points += 1;
 }

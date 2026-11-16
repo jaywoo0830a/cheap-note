@@ -34,6 +34,7 @@ use note_ui::cursor::{
     BODY_ALPHA, BODY_HALO_ALPHA, BODY_HALO_GROW, NIB_ALPHA, NIB_BLOOM_ALPHA, NIB_BLOOM_SPREAD,
     NIB_RADIUS_MAX, NIB_RADIUS_MIN,
 };
+use note_format::ink::Bounds;
 use note_ui::ink_layer::canvas::Rect;
 use note_ui::ink_layer::{ink_colour, Canvas};
 use note_ui::paint::drawn_of_paper;
@@ -150,13 +151,13 @@ pub(crate) struct Surface {
     ink: Vec<Vertex>,
     /// What `ink` was built from — see [`InkKey`].
     ink_key: Option<InkKey>,
-    /// The region of the paper the ink covers, in the paper's units: the visible rectangle grown by
+    /// The region of the paper the ink covers, in the paper's units: the visible box grown by
     /// [`CULL_SPAN`] at the moment of the build.
     ///
     /// A frame reuses the ink while the screen still fits inside this (see [`fits`]). A scroll moves the screen
     /// around within it and a zoom inward shrinks the screen inside it, so neither costs a build; a scroll out
     /// of it or a zoom out of it is a build, because both show paper this does not cover.
-    ink_covered: [f32; 4],
+    ink_covered: Bounds,
     /// The open stroke's triangles, appended as the pen adds points.
     open: Vec<Vertex>,
     /// The identity of the stroke `open` was built from.
@@ -244,13 +245,8 @@ impl Surface {
             layer,
             ink: Vec::new(),
             ink_key: None,
-            // Nothing built yet: an empty region, so the first frame always does.
-            ink_covered: [
-                f32::INFINITY,
-                f32::INFINITY,
-                f32::NEG_INFINITY,
-                f32::NEG_INFINITY,
-            ],
+            // Nothing built yet: a region that covers nothing, so the first frame always builds.
+            ink_covered: Bounds::NOTHING,
             open: Vec::new(),
             open_id: 0,
             open_points: 0,
@@ -1007,34 +1003,25 @@ const SAMPLES: usize = 4;
 /// room to scroll between builds, in the units the scrolling happens in.
 const CULL_SPAN: f32 = 0.5;
 
-/// The region of the paper the ink is built for: the visible rectangle, grown by [`CULL_SPAN`] of itself.
+/// The region of the paper the ink is built for: the visible box, grown by [`CULL_SPAN`] of itself.
 ///
 /// Grown on every side, so a scroll in any direction — and a zoom around any point — has room inside it. The
 /// growth is a fraction of the *visible extent*, which is what makes the same constant right at every zoom: a
 /// screen at 400% shows a quarter of the paper and gets a quarter of the margin, and the margin is still half a
 /// screen of scrolling in device pixels.
-fn cull_of(visible: [f32; 4]) -> [f32; 4] {
-    let (width, height) = (visible[2] - visible[0], visible[3] - visible[1]);
-    let (across, down) = (width * CULL_SPAN, height * CULL_SPAN);
+fn cull_of(visible: Bounds) -> Bounds {
+    let (width, height) = visible.size();
 
-    [
-        visible[0] - across,
-        visible[1] - down,
-        visible[2] + across,
-        visible[3] + down,
-    ]
+    visible.grown(width * CULL_SPAN, height * CULL_SPAN)
 }
 
 /// Whether `visible` still fits inside the region the ink was built for.
 ///
-/// The whole test, and the reason it is containment rather than distance: a rectangle that fits costs nothing,
+/// The whole test, and the reason it is containment rather than distance: a box that fits costs nothing,
 /// whatever moved to get there, and one that does not is a build. A scroll inside the margin fits; a zoom
 /// inward fits; a zoom outward does not, because it shows paper the build never covered.
-fn fits(visible: [f32; 4], built_for: [f32; 4]) -> bool {
-    visible[0] >= built_for[0]
-        && visible[1] >= built_for[1]
-        && visible[2] <= built_for[2]
-        && visible[3] <= built_for[3]
+fn fits(visible: Bounds, built_for: Bounds) -> bool {
+    visible.within(built_for)
 }
 
 /// What the finished ink's triangles were built from.
@@ -1081,7 +1068,7 @@ impl InkKey {
                 (
                     stroke.points.len(),
                     stroke.outline.len(),
-                    stroke.bounds.map(f32::to_bits),
+                    stroke.bounds.into_array().map(f32::to_bits),
                 )
             }),
         }
@@ -1528,8 +1515,8 @@ mod tests {
         // The state the draw loop keeps, without a device: valid slots and the key they were built for.
         let mut slots = [true; 3];
         let mut key: Option<InkKey> = None;
-        let covered = [0.0, 0.0, 800.0, 600.0];
-        let visible = [10.0, 10.0, 400.0, 300.0];
+        let covered = Bounds::new((0.0, 0.0), (800.0, 600.0));
+        let visible = Bounds::new((10.0, 10.0), (400.0, 300.0));
 
         // The build: a key that is new, so every slot goes stale.
         let refresh = |key: &mut Option<InkKey>, slots: &mut [bool; 3]| {
@@ -1678,7 +1665,7 @@ mod tests {
     /// screen it shows is smaller; a zoom outward does not, because it shows paper the build never covered.
     #[test]
     fn a_build_is_reused_while_the_screen_fits_inside_it() {
-        let screen = [100.0, 200.0, 1100.0, 1000.0];
+        let screen = Bounds::new((100.0, 200.0), (1100.0, 1000.0));
         let covered = cull_of(screen);
 
         assert!(
@@ -1687,22 +1674,22 @@ mod tests {
         );
 
         // A scroll of half the margin, in every direction at once.
-        let scrolled = [100.0 + 100.0, 200.0 + 100.0, 1100.0 + 100.0, 1000.0 + 100.0];
+        let scrolled = screen.grown(100.0, 100.0);
         assert!(
             fits(scrolled, covered),
             "a scroll inside the margin is free"
         );
 
         // Out past the margin: the ink does not cover it.
-        let away = [100.0 + 1000.0, 200.0, 1100.0 + 1000.0, 1000.0];
+        let away = screen.grown(1000.0, 0.0);
         assert!(!fits(away, covered), "a scroll out of the margin builds");
 
         // A zoom in, around the middle: a smaller rectangle inside the same place.
-        let closer = [400.0, 400.0, 800.0, 800.0];
+        let closer = Bounds::new((400.0, 400.0), (800.0, 800.0));
         assert!(fits(closer, covered), "zooming in fits inside the build");
 
         // A zoom out, around the middle: smaller numbers on the paper, so a *larger* rectangle.
-        let further = [-600.0, -400.0, 1800.0, 1600.0];
+        let further = Bounds::new((-600.0, -400.0), (1800.0, 1600.0));
         assert!(
             !fits(further, covered),
             "zooming out shows paper the build never covered"
@@ -1716,9 +1703,9 @@ mod tests {
     #[test]
     fn a_build_covers_the_rectangle_it_was_asked_for() {
         for visible in [
-            [0.0, 0.0, 640.0, 906.0],
-            [-2000.0, 500.0, -1000.0, 700.0],
-            [0.0, 0.0, 0.0, 0.0],
+            Bounds::new((0.0, 0.0), (640.0, 906.0)),
+            Bounds::new((-2000.0, 500.0), (-1000.0, 700.0)),
+            Bounds::new((0.0, 0.0), (0.0, 0.0)),
         ] {
             let covered = cull_of(visible);
 
@@ -1726,10 +1713,16 @@ mod tests {
                 fits(visible, covered),
                 "{visible:?} is not inside the region built for it, {covered:?}"
             );
-            // And the region is larger, never smaller, unless the rectangle had no extent at all.
-            if visible[2] > visible[0] && visible[3] > visible[1] {
-                assert!(covered[0] < visible[0] && covered[2] > visible[2]);
-                assert!(covered[1] < visible[1] && covered[3] > visible[3]);
+            // And the region is larger, never smaller, unless the box had no extent at all.
+            if !visible.is_empty() && visible.size() != (0.0, 0.0) {
+                assert!(
+                    covered.min.0 < visible.min.0 && covered.max.0 > visible.max.0,
+                    "{covered:?} did not grow past {visible:?} sideways"
+                );
+                assert!(
+                    covered.min.1 < visible.min.1 && covered.max.1 > visible.max.1,
+                    "{covered:?} did not grow past {visible:?} downwards"
+                );
             }
         }
     }
@@ -1743,13 +1736,13 @@ mod tests {
     #[test]
     fn the_margin_is_a_screenful_at_every_zoom() {
         // The same screen, at two zooms, in the paper's units.
-        let near = [0.0, 0.0, 720.0, 1018.0];
-        let far = [0.0, 0.0, 180.0, 254.5];
+        let near = Bounds::new((0.0, 0.0), (720.0, 1018.0));
+        let far = Bounds::new((0.0, 0.0), (180.0, 254.5));
 
         for visible in [near, far] {
             let covered = cull_of(visible);
-            let margin = visible[0] - covered[0];
-            let width = visible[2] - visible[0];
+            let margin = visible.min.0 - covered.min.0;
+            let (width, _) = visible.size();
 
             assert!(
                 (margin - width * CULL_SPAN).abs() < 1e-3,
@@ -2440,16 +2433,17 @@ mod fill_tests {
         // A grid the size of a picture, so the check is the same shape however large the stroke is.
         let columns = PICTURE_CELLS;
         let rows = PICTURE_CELLS;
-        let across = (bounds[2] - bounds[0]) / columns as f32;
-        let down = (bounds[3] - bounds[1]) / rows as f32;
+        let (width, height) = bounds.size();
+        let across = width / columns as f32;
+        let down = height / rows as f32;
 
         let mut wrong = Vec::new();
 
         for row in 0..rows {
             for column in 0..columns {
                 let at = (
-                    bounds[0] + column as f32 * across,
-                    bounds[1] + row as f32 * down,
+                    bounds.min.0 + column as f32 * across,
+                    bounds.min.1 + row as f32 * down,
                 );
                 let said = model.is_ink(at.0, at.1);
                 let drawn = vertices

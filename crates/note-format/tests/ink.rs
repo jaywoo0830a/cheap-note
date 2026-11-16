@@ -437,3 +437,55 @@ fn a_box_converts_to_and_from_the_four_numbers_it_used_to_be() {
     assert_eq!(box_.to_string(), "[1, 2, 3, 4]");
     assert_eq!(box_.size(), (2.0, 2.0));
 }
+
+/// A `sum()` of boxes is their union, and an empty page sums to the box that covers nothing.
+///
+/// Both halves matter. The union half is the reason `Sum` exists — a page's box is one expression rather
+/// than a loop with a mutable accumulator. The empty half is the one a careless impl gets wrong, and the
+/// obvious careless version is *not* the one it looks like: this type's `Default` already covers nothing,
+/// so folding from it happens to be right. The version that is wrong is the one a reader writes when
+/// they think "start at zero" — `Bounds::new((0.0, 0.0), (0.0, 0.0))` — which gives an empty page a box
+/// in its top-left corner, and every cull test then draws ink that is not there. That is the mistake
+/// this pins: the identity has to be the box that covers nothing, not the box at the origin.
+#[test]
+fn a_sum_of_boxes_is_their_union_and_an_empty_sum_covers_nothing() {
+    let boxes = [
+        Bounds::new((10.0, 10.0), (20.0, 20.0)),
+        Bounds::new((-5.0, 30.0), (0.0, 40.0)),
+        Bounds::new((15.0, 0.0), (15.0, 5.0)),
+    ];
+
+    assert_eq!(
+        boxes.into_iter().sum::<Bounds>(),
+        Bounds::new((-5.0, 0.0), (20.0, 40.0)),
+        "the union of every box"
+    );
+    assert_eq!(
+        boxes.into_iter().sum::<Bounds>(),
+        boxes.iter().copied().fold(Bounds::NOTHING, Bounds::union),
+        "and it agrees with a fold from the identity"
+    );
+
+    let empty = Vec::<Bounds>::new();
+    assert_eq!(
+        empty.iter().copied().sum::<Bounds>(),
+        Bounds::NOTHING,
+        "an empty page covers nothing, not a box at the origin"
+    );
+    assert!(empty.iter().copied().sum::<Bounds>().is_empty());
+}
+
+/// `+=` grows a box, which is what a running total over a page is.
+#[test]
+fn adding_to_a_box_grows_it_to_cover_the_other() {
+    let mut total = Bounds::NOTHING;
+
+    total += Bounds::new((10.0, 10.0), (20.0, 20.0));
+    total += Bounds::new((0.0, 25.0), (5.0, 30.0));
+
+    assert_eq!(
+        total,
+        Bounds::new((0.0, 10.0), (20.0, 30.0)),
+        "the running box covers both, from the empty start"
+    );
+}

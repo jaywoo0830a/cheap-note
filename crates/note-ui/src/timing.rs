@@ -153,6 +153,12 @@ pub const IDLE_INTERVAL: Duration = Duration::from_millis(250);
 /// — and the one operation an atomic counter cannot do in a single `fetch_*` is a minimum, so it is a
 /// `fetch_min` (which is one instruction, not a loop). Nothing here is on the frame's critical path in
 /// any sense that matters: a handful of relaxed writes per frame, into a cache line that is warm.
+///
+/// ## One field is not zero
+///
+/// Every counter here starts at zero except the minimum, which starts at the top of its range — see the
+/// `Default` impl for why that one is listed rather than derived, and why the other nine are listed
+/// beside it anyway.
 #[derive(Debug)]
 pub struct Intervals {
     /// How many intervals were measured, leaving out the idle ones.
@@ -171,13 +177,23 @@ pub struct Intervals {
     longest_idle_nanos: AtomicU64,
 }
 
+/// The state every counter starts in: zero, except the minimum.
+///
+/// Nine of these ten fields want `AtomicU64::new(0)`, which is what `#[derive(Default)]` gives, and one
+/// wants `u64::MAX`: a minimum has nowhere to start but the top, because the first interval that arrives
+/// has to be able to replace it and `fetch_min` against a zero would keep that zero for ever.
+///
+/// The impl is written out rather than derived for exactly that one field — and it is written out in
+/// full, field by field, on purpose. The alternative is a `#[derive(Default)]` on the struct plus a
+/// `new()` that fixes the minimum up afterwards, which reads as if the derived state were a state the
+/// type could ever be in; it cannot, and a type whose `.default()` is not a value it may hold is a trap
+/// for the next reader. Listing the fields means adding one is a compile error here — the compiler
+/// asks what it defaults to — rather than a silent zero.
 impl Default for Intervals {
     fn default() -> Self {
         Intervals {
             samples: AtomicU64::new(0),
             total_nanos: AtomicU64::new(0),
-            // A minimum has nowhere to start but the top: the first interval that arrives has to be
-            // able to replace it.
             min_nanos: AtomicU64::new(u64::MAX),
             max_nanos: AtomicU64::new(0),
             slow: AtomicU64::new(0),
@@ -442,18 +458,51 @@ impl Vitals {
     /// with the thread count only when it is more than one, because a single-threaded figure states the
     /// obvious. No bytes, no hertz, no label for a number that does not exist: a platform that answered
     /// `None` has already been handled by the caller, and a zero here is a real zero.
+    ///
+    /// A thin alias for the [`Display`](std::fmt::Display) impl below, kept because the call site has
+    /// always said `summary` and what it means is "this as a clause". New code can `{vitals}`.
     pub fn summary(&self) -> String {
+        self.to_string()
+    }
+}
+
+/// The hardware as the status line's clause: the same sentence [`Vitals::summary`] returns.
+///
+/// Implemented because these three numbers *are* how a person reads this type — it exists to be put
+/// into a sentence, and there is no second rendering anybody would want. A type that is only ever
+/// `format!`ed by its own helper is a type whose `Display` was left unwritten; writing it costs one
+/// impl and makes `{vitals}` work in a log line, a test's message, or `eprintln!`.
+impl std::fmt::Display for Vitals {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.threads {
-            0 | 1 => format!(
+            0 | 1 => write!(
+                formatter,
                 "{:.0} MiB · {:.0}% cpu",
                 mebibytes(self.resident_bytes),
                 self.cpu_percent
             ),
-            threads => format!(
+            threads => write!(
+                formatter,
                 "{:.0} MiB · {:.0}% cpu · {threads} threads",
                 mebibytes(self.resident_bytes),
                 self.cpu_percent
             ),
+        }
+    }
+}
+
+/// From the tuple a platform most naturally measures in, to the type the view reads.
+///
+/// A platform's counters arrive as three loose numbers — resident bytes, a percentage, a thread
+/// count — and `Vitals::from((512 << 20, 42.5, 12))` says so without the caller having to spell out
+/// field names it does not care about. The units are the ones the fields are in, so nothing is
+/// converted and nothing is guessed.
+impl From<(u64, f32, usize)> for Vitals {
+    fn from((resident_bytes, cpu_percent, threads): (u64, f32, usize)) -> Self {
+        Vitals {
+            resident_bytes,
+            cpu_percent,
+            threads,
         }
     }
 }

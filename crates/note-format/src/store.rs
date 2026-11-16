@@ -1670,15 +1670,13 @@ fn write_chunks(
 /// The bounds are what the app can answer "is this page blank?" and "where is the ink?" with without
 /// loading it, so they are maintained by the writer rather than derived by a reader.
 fn touch_bounds(conn: &Connection, id: i64, strokes: &[Stroke]) -> Result<()> {
-    let mut bounds = Bounds::NOTHING;
-
-    for stroke in strokes {
-        if stroke.points.is_empty() {
-            continue;
-        }
-
-        bounds = bounds.union(stroke.bounds);
-    }
+    // The union of every stroke's box, as a `sum()`: [`Bounds::NOTHING`] is the identity, so a page
+    // with no ink in this batch sums to a box that covers nothing rather than to one at the origin.
+    let bounds: Bounds = strokes
+        .iter()
+        .filter(|stroke| !stroke.points.is_empty())
+        .map(|stroke| stroke.bounds)
+        .sum();
 
     match bounds.is_empty() {
         false => {

@@ -411,3 +411,41 @@ fn a_mebibyte_is_a_thousand_and_twenty_four_kilobytes() {
 
     assert!(vitals.summary().starts_with("1 MiB"));
 }
+
+/// The clause is the type's `Display`, so `{vitals}` and `.summary()` cannot drift apart.
+///
+/// That is the whole reason `Display` was written: a type whose only rendering is a helper on itself is
+/// a type whose `fmt` was left out, and the day somebody writes `format!("{vitals}")` in a log line they
+/// get the field list instead of the sentence. Pinning both against each other means either one moving
+/// alone is a failing test.
+#[test]
+fn a_vitals_clause_is_the_types_display() {
+    let vitals = Vitals {
+        resident_bytes: 200 * 1024 * 1024,
+        cpu_percent: 118.0,
+        threads: 12,
+    };
+
+    assert_eq!(format!("{vitals}"), vitals.summary());
+    assert_eq!(format!("{vitals}"), "200 MiB · 118% cpu · 12 threads");
+}
+
+/// A platform's three loose counters become a `Vitals` by `From`, in the units the fields hold.
+///
+/// The tuple is the shape a platform measures in — resident bytes, a percentage off one core, a thread
+/// count — so this is the conversion every implementation of `SystemStats` would otherwise write out by
+/// hand, with the field order to get wrong. The clause is compared as well, because getting the order
+/// wrong is exactly a conversion that compiles and says the wrong sentence.
+#[test]
+fn vitals_come_from_the_three_numbers_a_platform_measures() {
+    let vitals = Vitals::from((200 * 1024 * 1024, 118.0, 12));
+
+    assert_eq!(vitals.resident_bytes, 200 * 1024 * 1024);
+    assert_eq!(vitals.cpu_percent, 118.0);
+    assert_eq!(vitals.threads, 12);
+    assert_eq!(
+        format!("{vitals}"),
+        "200 MiB · 118% cpu · 12 threads",
+        "the tuple's order is (memory, cpu, threads), and the sentence says so"
+    );
+}

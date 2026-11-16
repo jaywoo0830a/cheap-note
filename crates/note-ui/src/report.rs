@@ -468,7 +468,15 @@ fn json(report: &Report) -> String {
 /// One parser for both, so `--format` means the same thing everywhere and a mistake gets the same
 /// sentence from either command. What each command does *not* share — `--strokes`, note folders — it
 /// takes from [`Options::rest`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// ## Defaulted by the derive, and the fields chosen so that it can be
+///
+/// Every default here is the one `#[derive(Default)]` would give: [`Format::Table`] is `#[default]` on
+/// the enum, an empty `Vec` and a `false` are what those types default to. A hand-written impl that
+/// lists three fields spends its lines saying nothing, and — the part that bites — has to be edited
+/// every time a field is added, so the day someone adds one the compiler stops asking "what should
+/// this default to?" and the struct quietly gets whatever they wrote in the impl instead.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Options {
     /// How to write the report.
     pub format: Format,
@@ -476,16 +484,6 @@ pub struct Options {
     pub rest: Vec<String>,
     /// `--help` was asked for. The caller prints its usage and exits `0`.
     pub help: bool,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Options {
-            format: Format::Table,
-            rest: Vec::new(),
-            help: false,
-        }
-    }
 }
 
 impl Options {

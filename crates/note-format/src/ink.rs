@@ -175,6 +175,26 @@ impl Default for Bounds {
     }
 }
 
+/// A union written as arithmetic, which is what it is.
+///
+/// [`Bounds::union`] is `+`, so a fold over strokes becomes a `sum()` and a running total becomes
+/// `+=`. The identity is [`Bounds::NOTHING`], which is what makes `Sum` correct: `strokes.map(…).sum()`
+/// over an empty page is the box that covers nothing, not a panic and not a box at the origin. The
+/// operator is not `Add` because a box is not a number: `a + a` is `a`, so nobody should reach for it
+/// expecting doubling, and the name `Bits` — "the box covering both" — would read as an or.
+impl std::iter::Sum for Bounds {
+    fn sum<I: Iterator<Item = Bounds>>(iter: I) -> Self {
+        iter.fold(Bounds::NOTHING, Bounds::union)
+    }
+}
+
+impl std::ops::AddAssign for Bounds {
+    /// Grows this box to cover `rhs`.
+    fn add_assign(&mut self, rhs: Bounds) {
+        *self = self.union(rhs);
+    }
+}
+
 impl From<[f32; 4]> for Bounds {
     /// `[min_x, min_y, max_x, max_y]`, the order every caller of the old type used.
     fn from([min_x, min_y, max_x, max_y]: [f32; 4]) -> Self {
@@ -869,18 +889,17 @@ impl Model {
 
     /// The box the ink occupies: the discs' own bounds, made a little wider than the points.
     ///
-    /// [`Bounds::default`] — the box that covers nothing — for a model with no discs, so a caller can
-    /// fold it into a larger box without the empty one dragging the result to the origin.
+    /// A `sum()` over the discs' boxes, which is a union — see [`std::iter::Sum`]. [`Bounds::default`]
+    /// is the identity, so a model with no discs sums to the box that covers nothing rather than to a
+    /// box at the origin that a caller would fold into a larger one.
     pub fn bounds(&self) -> Bounds {
-        let mut bounds = Bounds::NOTHING;
-
-        for disc in &self.discs {
-            bounds = bounds
-                .covering(disc.x - disc.radius, disc.y - disc.radius)
-                .covering(disc.x + disc.radius, disc.y + disc.radius);
-        }
-
-        bounds
+        self.discs
+            .iter()
+            .map(|disc| {
+                Bounds::at(disc.x - disc.radius, disc.y - disc.radius)
+                    .covering(disc.x + disc.radius, disc.y + disc.radius)
+            })
+            .sum()
     }
 
     /// How many of a set of places the model calls ink, out of how many were asked.

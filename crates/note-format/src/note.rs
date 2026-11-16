@@ -622,12 +622,53 @@ pub enum Report {
 /// The connection is opened *before* the thread starts, so that a note that cannot be opened at all
 /// is an error the app can show, rather than a thread that quietly does nothing for the rest of the
 /// session.
+///
+/// ## Dropping one checkpoints the note, and there is deliberately no `Drop` here
+///
+/// The last thing a writer does is fold the write-ahead log back into the note file, so that a note is
+/// not left beside a log with the last session in it. That job is sent by [`Jobs`] — the field holding
+/// the queue — rather than by a `Drop` on this struct: a field is dropped *after* the struct's own
+/// `Drop::drop` returns, so the ordering is kept by the type that owns the sender instead of by the
+/// order these two fields happen to be declared in. A `Drop` here that sent the checkpoint as well
+/// would send it twice, and the second one would arrive after the queue had closed.
 #[derive(Debug)]
 pub struct NoteWriter {
-    /// The queue the UI thread puts work on.
-    jobs: Sender<Job>,
+    /// The queue the UI thread puts work on, and the checkpoint that closes it.
+    jobs: Jobs,
     /// What the writer has to report, drained by the app on its frame tick.
     reports: Receiver<Report>,
+}
+
+/// The queue's sender, and the checkpoint sent on the way out.
+///
+/// ## Why this is its own type
+///
+/// [`NoteWriter`]'s `Drop` has to send [`Job::Checkpoint`] *before* its sender is dropped, because the
+/// checkpoint is queued on that sender: drop the sender first and the thread sees the queue close before
+/// it has read the job, and the note is left beside a write-ahead log with the last session in it. That
+/// ordering is what `Drop` on the *struct* happens to give today — a field is dropped after the method
+/// returns — but it is an accident of which field comes first, and it survives exactly until somebody
+/// reorders the fields or moves the sender behind a lock.
+///
+/// Holding the sender inside the type whose `Drop` uses it makes the ordering a rule rather than a
+/// layout: the sender cannot be dropped anywhere else, because nothing else can reach it, and the impl
+/// below is the only place a job is sent on the way out.
+#[derive(Debug)]
+struct Jobs {
+    /// The queue the UI thread puts work on. Dropped *after* [`Drop::drop`] has read it.
+    sender: Sender<Job>,
+}
+
+impl Drop for Jobs {
+    /// The last thing a writer does: fold the write-ahead log back into the note file.
+    ///
+    /// Sending this *before* the sender drops is the whole point — the thread parked on the queue then
+    /// finishes this job, sees the queue close, and stops, which is what makes a note not sit next to a
+    /// log with the last session in it. Sending it from here rather than from [`NoteWriter::drop`] is
+    /// what makes that guarantee one the compiler keeps instead of one a comment asks for.
+    fn drop(&mut self) {
+        let _ = self.sender.send(Job::Checkpoint);
+    }
 }
 
 impl NoteWriter {
@@ -654,12 +695,15 @@ impl NoteWriter {
                 Error::Note(format!("the note's writer could not be started: {error}"))
             })?;
 
-        Ok(NoteWriter { jobs, reports })
+        Ok(NoteWriter {
+            jobs: Jobs { sender: jobs },
+            reports,
+        })
     }
 
     /// Adds ink to a page, and tells the note what its history did. Nothing waits for it.
     pub fn append(&self, page: u64, strokes: Vec<Stroke>, history: HistoryUpdate) {
-        let _ = self.jobs.send(Job::Append {
+        let _ = self.jobs.sender.send(Job::Append {
             page,
             strokes,
             history,
@@ -668,7 +712,7 @@ impl NoteWriter {
 
     /// Writes a page again from scratch, with what its history did.
     pub fn rewrite(&self, page: u64, strokes: Vec<Stroke>, history: HistoryUpdate) {
-        let _ = self.jobs.send(Job::Rewrite {
+        let _ = self.jobs.sender.send(Job::Rewrite {
             page,
             strokes,
             history,
@@ -677,17 +721,17 @@ impl NoteWriter {
 
     /// Folds a page's ink into chunks, because the page is being closed.
     pub fn compact(&self, page: u64) {
-        let _ = self.jobs.send(Job::Compact { page });
+        let _ = self.jobs.sender.send(Job::Compact { page });
     }
 
     /// Folds the write-ahead log back into the note file.
     pub fn checkpoint(&self) {
-        let _ = self.jobs.send(Job::Checkpoint);
+        let _ = self.jobs.sender.send(Job::Checkpoint);
     }
 
     /// Writes the note out as one file.
     pub fn export(&self, target: PathBuf) {
-        let _ = self.jobs.send(Job::Export { target });
+        let _ = self.jobs.sender.send(Job::Export { target });
     }
 
     /// What the writer has done or failed to do since the last call. Never blocks.
@@ -728,23 +772,13 @@ fn run(store: &mut NoteStore, dir: &Path, job: Job, reports: &Sender<Report>) ->
     }
 }
 
-/// The last thing a writer does: fold the write-ahead log back into the note file.
-///
-/// Dropping the writer drops its sender, and the thread that is parked on the queue then finishes
-/// the work in hand and stops. Sending this *before* that — a checkpoint is the one job worth
-/// asking for on the way out — means a note does not sit next to a log with the last session in it.
-impl Drop for NoteWriter {
-    fn drop(&mut self) {
-        let _ = self.jobs.send(Job::Checkpoint);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ink::InkPoint;
     use crate::pages::{Page, PageEntry};
     use std::io::Write as _;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
@@ -961,6 +995,56 @@ mod tests {
             .expect("the attachment came back");
 
         assert_eq!(arrived, b"a diagram");
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// Dropping the writer checkpoints the note, and the checkpoint is *received* rather than lost.
+    ///
+    /// This is the guarantee [`Jobs`] exists for, and it is invisible unless something asks: the
+    /// checkpoint is queued on the sender, so if the sender were dropped before `Drop::drop` ran, the
+    /// thread would see a closed queue and stop without ever folding the log back — and the note would
+    /// be left beside a write-ahead log with the last session in it, which nobody would notice until a
+    /// later open. The test drives the same queue the writer does and checks that the job after the
+    /// writer's drop is still delivered, which is what "sent before the close" means in practice.
+    #[test]
+    fn dropping_a_writer_sends_its_checkpoint_before_the_queue_closes() {
+        let scratch = scratch("writer-drop");
+        let home = scratch.join("home");
+        Note::open(&home).expect("a note");
+
+        // The queue and the thread that reads it, as `spawn` builds them: the writer's `Jobs` holds the
+        // sender, so it is the only thing that can close the queue.
+        let (sender, queue) = mpsc::channel::<Job>();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&received);
+        let reader = std::thread::spawn(move || {
+            for job in queue {
+                let name = match job {
+                    Job::Checkpoint => "checkpoint",
+                    Job::Compact { .. } => "compact",
+                    Job::Append { .. } => "append",
+                    Job::Rewrite { .. } => "rewrite",
+                    Job::Export { .. } => "export",
+                };
+                seen.lock().expect("the log").push(name);
+            }
+        });
+
+        let jobs = Jobs { sender };
+        // The work in hand, then the drop: the checkpoint is sent *after* this and still arrives.
+        jobs.sender
+            .send(Job::Compact { page: 0 })
+            .expect("a compact is queued");
+        drop(jobs);
+
+        reader.join().expect("the reader stops when the queue closes");
+
+        assert_eq!(
+            *received.lock().expect("the log"),
+            ["compact", "checkpoint"],
+            "the checkpoint is queued before the sender drops, so it is read rather than lost"
+        );
 
         let _ = std::fs::remove_dir_all(&scratch);
     }

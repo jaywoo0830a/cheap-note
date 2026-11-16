@@ -33,6 +33,33 @@
 //! which is why the canvas here is fast; macOS has no equivalent, so a macOS canvas will hand GPUI a
 //! texture instead. The view does not care — it says what to draw — and that difference is exactly
 //! what the seam is for.
+//!
+//! ## Why these five are trait objects and not generics
+//!
+//! Item 12 of *Effective Rust* weighs the two, and the seam is the one place in this crate where the
+//! answer is trait objects rather than a generic parameter, for reasons that are worth writing down
+//! because the default elsewhere is the reverse:
+//!
+//! * **There is exactly one implementation per platform, chosen at run time.** A generic
+//!   `run<P: PenSource>(pen: P)` would monomorphise the whole application — the bar, the home screen,
+//!   the sheet, every gesture — once per platform, for a type the caller picks when it *starts*. The
+//!   trait object erases it at the one boundary that really is dynamic, and leaves every frame path
+//!   typed. That is the trade Item 12 describes: `dyn` where the choice is late, generics where the
+//!   hot code is.
+//! * **A platform gives the view `Option<Box<dyn InkSurface>>` and friends.** There can be *no*
+//!   canvas (see [`Platform::ink`]), and a generic parameter cannot be absent; the alternative is an
+//!   `Option<impl InkSurface>` in a struct field, which does not exist without boxing anyway.
+//! * **The objects are collected into one struct and handed over once.** [`Platform`] is assembled by
+//!   an [`Installer`] and then read by the frame loop, so the virtual call happens a handful of times
+//!   per frame spread across several trait methods — not once per stroke, which is the shape where
+//!   monomorphisation would have paid.
+//!
+//! The traits are all *object safe* on purpose, and that is a constraint on how they may grow: a
+//! method that returned `Self`, took `self` by value, or had a generic parameter would make the trait
+//! unusable as `dyn`, and the fix would be `where Self: Sized` — which is Item 12's escape hatch and
+//! also its warning that the method is then unreachable through the box. `SystemStats::surface_bytes`
+//! and `InkSurface::honours_vsync` are provided methods with default bodies, which is Item 13: a
+//! platform answers only what it can, and the seam does not require five implementations of nothing.
 
 use std::sync::Arc;
 
@@ -287,6 +314,28 @@ pub struct Platform {
     /// field so that a new platform is not obliged to write a counter it does not need in order to
     /// compile — the same shape the canvas and the ghost already have.
     pub stats: Option<Box<dyn SystemStats>>,
+}
+
+/// A build-time check that every seam trait can still be used as `dyn` (Item 12).
+///
+/// The seam's whole design rests on these being object safe, and each one is written so it stays that
+/// way — no `Self` in a return position, no generic method, no `self` by value. That is easy to break by
+/// accident: a convenience method returning `Self` compiles fine *until* the day one of these is boxed,
+/// which is every day, and the error would land in whichever platform crate was built first rather than
+/// on the line that broke it. These functions never run; they exist so the compiler answers the
+/// question at the definition rather than at a use site three crates away.
+#[allow(dead_code)]
+mod object_safety {
+    use super::{GhostFeed, InkSurface, PenSource, SystemPointer, SystemStats};
+
+    fn each_is_a_trait_object(
+        _: &dyn GhostFeed,
+        _: &dyn SystemPointer,
+        _: &mut dyn SystemStats,
+        _: &mut dyn InkSurface,
+        _: &dyn PenSource,
+    ) {
+    }
 }
 
 /// The platform's two halves: what has to happen before a window exists, and what has to happen once

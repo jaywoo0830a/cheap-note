@@ -220,16 +220,29 @@ fn the_type_ramp_starts_at_the_shipped_sizes() {
     assert_eq!(ramp.caption, 11.0);
     assert_eq!(ramp.title, 15.0);
     assert_eq!(ramp, TypeRamp::at(ScaleStep::P100));
+    assert_eq!(ramp, TypeRamp::SHIPPED);
 }
 
-/// Every type role is exactly its 100% size times the same quarter-step. The values are exact in
-/// binary floating point because every step is a quarter.
+/// Above the floor every type role is exactly its 100% size times the same quarter-step. The values
+/// are exact in binary floating point because every step is a quarter.
 #[test]
-fn every_type_step_is_the_same_proportion() {
-    for step in ScaleStep::ALL {
+fn every_type_step_above_the_floor_is_the_same_proportion() {
+    // 100% is the shipped sizes, so every role is already at or above its floor there and the
+    // proportion holds without a clamp: 10 >= 10, 9 >= 9, and so on for every larger step.
+    for step in [
+        ScaleStep::P100,
+        ScaleStep::P125,
+        ScaleStep::P150,
+        ScaleStep::P175,
+        ScaleStep::P200,
+    ] {
         let factor = step.percent() as f32 / 100.0;
         let ramp = TypeRamp::at(step);
 
+        assert!(
+            ramp.is_proportional(step),
+            "{step:?} must be a plain proportion"
+        );
         assert_eq!(ramp.base, 13.0 * factor);
         assert_eq!(ramp.micro, 10.0 * factor);
         assert_eq!(ramp.caption, 11.0 * factor);
@@ -245,4 +258,74 @@ fn every_type_step_is_the_same_proportion() {
             title: 22.5,
         }
     );
+}
+
+/// No step may take any role below its floor, and the floor bites exactly where a plain proportion
+/// would fall through it.
+///
+/// This is the test the old contract did not have: `doc/DESIGN.md` §7.6 once promised that every
+/// step was the same proportion. A 50% ramp would then be 6.5/5.0/5.5/7.5 px, and the smallest
+/// label would be a five-pixel string nobody can read.
+#[test]
+fn no_type_step_goes_below_the_floor() {
+    for step in ScaleStep::ALL {
+        let ramp = TypeRamp::at(step);
+
+        assert!(
+            ramp.base >= TypeRamp::MINIMUM.base,
+            "{step:?} base {} is below the floor",
+            ramp.base
+        );
+        assert!(
+            ramp.micro >= TypeRamp::MINIMUM.micro,
+            "{step:?} micro is below the floor"
+        );
+        assert!(
+            ramp.caption >= TypeRamp::MINIMUM.caption,
+            "{step:?} caption is below the floor"
+        );
+        assert!(
+            ramp.title >= TypeRamp::MINIMUM.title,
+            "{step:?} title is below the floor"
+        );
+    }
+
+    // The two steps where the proportion would fall through the floor, and the two where it would
+    // not: the clamp is the only reason these differ from their unclamped value.
+    assert!(!TypeRamp::at(ScaleStep::P75).is_proportional(ScaleStep::P75));
+    assert!(!TypeRamp::at(ScaleStep::P50).is_proportional(ScaleStep::P50));
+
+    assert_eq!(
+        TypeRamp::at(ScaleStep::P50),
+        TypeRamp {
+            base: 10.0,
+            micro: 9.0,
+            caption: 10.0,
+            title: 11.0,
+        }
+    );
+    assert_eq!(
+        TypeRamp::at(ScaleStep::P75),
+        TypeRamp {
+            base: 10.0,
+            micro: 9.0,
+            caption: 10.0,
+            title: 11.25,
+        }
+    );
+}
+
+/// The floor is never above the shipped sizes, so 100% is always reachable and the ramp never grows
+/// text as the step shrinks.
+///
+/// A `const` block rather than an `assert!`: the two sides are both constants, so this is a fact the
+/// compiler can check, and a floor typed above a shipped size stops the build rather than a test run.
+#[test]
+fn the_floor_is_below_the_shipped_sizes() {
+    const {
+        assert!(TypeRamp::MINIMUM.base <= TypeRamp::SHIPPED.base);
+        assert!(TypeRamp::MINIMUM.micro <= TypeRamp::SHIPPED.micro);
+        assert!(TypeRamp::MINIMUM.caption <= TypeRamp::SHIPPED.caption);
+        assert!(TypeRamp::MINIMUM.title <= TypeRamp::SHIPPED.title);
+    }
 }

@@ -124,6 +124,17 @@ that lengths no longer add up exactly. This module chooses exactness and a close
 steps. If finer control is wanted later, it is a different contract — fixed-point subpixels or a
 deliberately authored ramp — not a quiet change to this one.
 
+### 2.5 The one exception: text has a floor
+
+Every *layout* length follows the step all the way down. Text does not. A 50% layout is odd-looking
+but usable; a 50% body text would be 6.5 px and the smallest label 5 px, which is not a small label
+but an illegible one — and the person who chose 50% is the person least able to read it.
+
+`TypeRamp` therefore clamps each role at a `MINIMUM`: 10 px body, 9 px micro, 10 px caption, 11 px
+title. The floor bites at `P75` and `P50` and nowhere else; at 100% and above the ramp is the exact
+proportion this document promises. This is the same distinction §7.5 draws for hairlines, the nib
+mark and selection rings — a mark that defines itself at a size does not shrink below it.
+
 ## 3. The API
 
 | Item | What it is | Contract |
@@ -182,7 +193,8 @@ Some lengths must not follow this grid:
 * **Typography, as a separate ramp.** A type size such as 13 px is not on the four-unit grid. Type is
   authored as a deliberate set of sizes per scale rather than as an exact linear multiple, so it
   lives in [`TypeRamp`](../crates/note-ui/src/design/type_ramp.rs) beside `LayoutMetrics` and shares
-  only the step. It should not pretend a 13 px font is a layout token.
+  only the step. It should not pretend a 13 px font is a layout token. It is also the one role group
+  with a floor of its own (§2.5): layout may shrink to 50%, text may not shrink past readable.
 
 ## 5. The scale table
 
@@ -289,11 +301,18 @@ Text follows the scale through `TypeRamp`, beside `LayoutMetrics` rather than in
 Its values do not divide by four, and the two systems share `ScaleStep` without sharing their
 arithmetic.
 
-The ramp's base is the important number. GPUI Kit copies `Theme::font_size` into the window's rem
-size, and its `text_sm`/`text_lg` utilities, icons and control paddings are rem multiples. Setting
-the base therefore carries every rem-based part of the interface in one go; only the few sizes
-written in pixels read `micro`, `caption` and `title` explicitly. The `Theme::update` call is what
-refreshes the already-laid-out windows, so the new rem size reaches the next frame.
+The floor of §2.5 is the one place text departs from the proportion. `TypeRamp::at` applies
+`MINIMUM` per role: at 100% and above the ramp is `SHIPPED × step`, and at `P75`/`P50` any role that
+would fall through the floor is held at it. `is_proportional(step)` says which of the two a ramp is,
+so a test can assert *where* the floor bites rather than repeating the arithmetic.
+
+The ramp's base is still the important number. GPUI Kit copies `Theme::font_size` into the window's
+rem size, and its `text_sm`/`text_lg` utilities, icons and control paddings are rem multiples.
+Setting the base therefore carries every rem-based part of the interface in one go; only the few
+sizes written in pixels read `micro`, `caption` and `title` explicitly. The `Theme::update` call is
+what refreshes the already-laid-out windows, so the new rem size reaches the next frame. Because the
+base is clamped too, lowering the scale to 50% keeps the whole rem-based interface at the same floor
+rather than dragging every control down with it.
 
 ## 8. What the tests pin
 
@@ -312,8 +331,10 @@ The module is pure, so the tests can be exhaustive instead of representative. Th
 | `the_scale_table_is_what_the_design_expects` | the golden values for the bar, page margin, gap, and radius |
 | `metrics_are_the_tokens_at_the_same_scale` | every `LayoutMetrics` field is the same scale's conversion |
 | `the_default_metrics_are_the_shipped_design` | `Default` is 100%, not an accidental zero |
-| `the_type_ramp_starts_at_the_shipped_sizes` | `TypeRamp::default()` is 13/10/11/15 px |
-| `every_type_step_is_the_same_proportion` | every type role is its 100% size times the step |
+| `the_type_ramp_starts_at_the_shipped_sizes` | `TypeRamp::default()` is 13/10/11/15 px, and equals `SHIPPED` |
+| `every_type_step_above_the_floor_is_the_same_proportion` | at 100% and above, every type role is its 100% size times the step |
+| `no_type_step_goes_below_the_floor` | no step takes a role under `MINIMUM`; the clamp bites at `P75`/`P50` only |
+| `the_floor_is_below_the_shipped_sizes` | `MINIMUM ≤ SHIPPED` per role, so 100% is reachable and text never grows as the step shrinks |
 
 The exactness test is the important one. It does not merely assert that the result “looks close”: it
 compares the integer result against the percentage written as an integer equation, so a change to
@@ -327,7 +348,8 @@ Run just this suite with:
 cargo test -p note-ui design
 ```
 
-At the time of writing the module adds twelve tests, and the full `cargo test -p note-ui` suite passes.
+At the time of writing the module adds fourteen tests, and the full `cargo test -p note-ui` suite
+passes.
 The module compiles as part of `note-ui`; there is no window, GPU, or platform setup in any of these
 tests.
 

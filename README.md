@@ -71,8 +71,8 @@ The format has **two test suites**, and both matter:
 `note.rs`, `chunk.rs`, …) that uses nothing but the public API and opens a note with SQLite, a zip reader
 or a JSON parser rather than with the crate. Those are the contract a second implementation on another
 platform has to satisfy — and the macOS build is the proof they can be met: the two portable crates hold
-**435 tests** (171 in `note-format`, 264 in `note-ui`) that pass unchanged on either platform, and each
-platform adds its own (36 in `apps/macos`, 5 in `pen-macos`, 31 in `apps/windows`).
+**499 tests** (171 in `note-format`, 328 in `note-ui`) that pass unchanged on either platform, and each
+platform adds its own (36 in `apps/macos`, 5 in `pen-macos`, 41 in `apps/windows`).
 
 ## What is where
 
@@ -80,6 +80,7 @@ platform adds its own (36 in `apps/macos`, 5 in `pen-macos`, 31 in `apps/windows
 |---|---|
 | [`doc/ARCHITECTURE.md`](doc/ARCHITECTURE.md) | the shape of the program: what runs where, which thread owns what, and what may wait for what |
 | [`doc/VIEW.md`](doc/VIEW.md) | why the view is the way it is: the frame loop, the bar, the sheet, the gestures, the pen's rules |
+| [`doc/DESIGN.md`](doc/DESIGN.md) | the interface's one scale: design units, exact quarter steps, and the contract for wiring it into the view |
 | [`doc/STATUS.md`](doc/STATUS.md) | how to read the status line: what each clause means, and which figure to look at when something feels wrong |
 | [`doc/CLI.md`](doc/CLI.md) | the measuring commands: `--memory-report` and `cheap-note-bench` — their arguments, output, exit codes, and what a platform has to provide to run them |
 | [`doc/STORE.md`](doc/STORE.md) | one stroke's journey to the disk and back — which is the format crate's story |

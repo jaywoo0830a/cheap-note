@@ -73,15 +73,12 @@ use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::{ActiveTheme as _, Icon, IndexPath, Sizable as _};
 use gpui_kit::*;
 
-use crate::app::NoteApp;
+use crate::app::{window_px, NoteApp};
+use crate::design::LayoutMetrics;
 use crate::error::Result;
 use crate::note;
 use crate::recent::{self, Recent, Recents, Stamp};
 use crate::store::{Facts, NoteStore};
-
-/// The space the screen keeps from the window's edges.
-/// The margin the two screens keep: the list of notes, and the list of a note's bookmarks.
-pub(crate) const SIDE_MARGIN: f32 = 56.0;
 
 /// How long after a click a confirmation still counts as that click's.
 ///
@@ -888,14 +885,19 @@ impl Home {
     /// Takes the message from the status line rather than reading it: the message belongs to the app
     /// (a note that would not open, an export that failed), and this screen is where a person is
     /// standing when they need to read it.
-    pub fn view(&self, message: &str, cx: &mut Context<NoteApp>) -> AnyElement {
+    pub fn view(
+        &self,
+        message: &str,
+        metrics: LayoutMetrics,
+        cx: &mut Context<NoteApp>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let (desk, ink, card, hairline, radius) = (
             theme.background,
             theme.foreground,
             theme.title_bar,
             theme.border,
-            theme.radius_lg,
+            px(window_px(metrics.radius_large)),
         );
 
         v_flex()
@@ -909,28 +911,32 @@ impl Home {
             .on_key_down(cx.listener(|app, event: &KeyDownEvent, window, cx| {
                 app.home_key_down(event, window, cx)
             }))
-            .child(self.header(cx))
+            .child(self.header(metrics, cx))
             // The list is a card on the desk, like the bar over the sheet: one white surface with a
             // hairline round it, so what was written reads as *paper* rather than as another menu.
             .child(
-                div().flex_1().w_full().px(px(SIDE_MARGIN)).child(
-                    v_flex()
-                        .size_full()
-                        .rounded(radius)
-                        .bg(card)
-                        .border_1()
-                        .border_color(hairline)
-                        .shadow_md()
-                        .child(List::new(&self.list).size_full()),
-                ),
+                div()
+                    .flex_1()
+                    .w_full()
+                    .px(px(window_px(metrics.screen_margin)))
+                    .child(
+                        v_flex()
+                            .size_full()
+                            .rounded(radius)
+                            .bg(card)
+                            .border_1()
+                            .border_color(hairline)
+                            .shadow_md()
+                            .child(List::new(&self.list).size_full()),
+                    ),
             )
-            .child(self.actions(cx))
-            .child(self.footer(message, cx))
+            .child(self.actions(metrics, cx))
+            .child(self.footer(message, metrics, cx))
             .into_any_element()
     }
 
     /// The top of the screen: what this is, and what the list is for.
-    fn header(&self, cx: &mut Context<NoteApp>) -> AnyElement {
+    fn header(&self, metrics: LayoutMetrics, cx: &mut Context<NoteApp>) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
 
@@ -943,8 +949,8 @@ impl Home {
         };
 
         v_flex()
-            .gap_1()
-            .px(px(SIDE_MARGIN))
+            .gap(px(window_px(metrics.space_1)))
+            .px(px(window_px(metrics.screen_margin)))
             .pt(px(40.0))
             .pb(px(18.0))
             .child(
@@ -961,11 +967,11 @@ impl Home {
     /// *Open* is first because it is what a person with nothing to reopen needs, and *New blank
     /// sheet* is there because writing on nothing at all is a thing this app does rather than a
     /// fallback: the first stroke makes the note.
-    fn actions(&self, cx: &mut Context<NoteApp>) -> AnyElement {
+    fn actions(&self, metrics: LayoutMetrics, cx: &mut Context<NoteApp>) -> AnyElement {
         h_flex()
             .items_center()
-            .gap_2()
-            .px(px(SIDE_MARGIN))
+            .gap(px(window_px(metrics.space_2)))
+            .px(px(window_px(metrics.screen_margin)))
             .pt(px(14.0))
             .child(
                 Button::new("home-open")
@@ -985,15 +991,20 @@ impl Home {
     }
 
     /// The bottom line: what the list holds, what is missing, and whatever the app last said.
-    fn footer(&self, message: &str, cx: &mut Context<NoteApp>) -> AnyElement {
+    fn footer(
+        &self,
+        message: &str,
+        metrics: LayoutMetrics,
+        cx: &mut Context<NoteApp>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let hairline = theme.border;
 
         let mut bar = StatusBar::new()
             .w_full()
-            .px(px(SIDE_MARGIN))
-            .py(px(8.0))
+            .px(px(window_px(metrics.screen_margin)))
+            .py(px(window_px(metrics.space_2)))
             .bg(theme.transparent)
             .border_t_1()
             .border_color(hairline)

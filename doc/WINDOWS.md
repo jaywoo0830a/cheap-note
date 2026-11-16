@@ -268,7 +268,7 @@ Not a defect list — a map, so nobody hunts for a Windows equivalent of somethi
 | `CAMetalLayer.displaySyncEnabled`, and `CHEAP_NOTE_NO_VSYNC` overriding it | `apps/macos/src/platform/metal.rs` | Windows has no choice to make: `Present(0, …)` is the whole policy (§3.3) |
 | The three-buffer upload fix: `refresh_ink` returns `bool` and clears its own upload slots | `apps/macos/src/platform/metal.rs` | Windows uploads no geometry per frame: Direct2D realizations live on the device and `apps/windows/src/platform/ink_layer/render.rs` reuses them, so there are no three buffers to refill |
 | The `vsync` field's *effect* | `crates/note-format/src/settings.rs` | it is stored on both and honoured on one; the format is deliberately shared, and the switch is only shown where a surface can honour it (§3.3) |
-| `unit_scale: 0.75` | `apps/macos/src/platform/mod.rs` | a point is four thirds of a Windows logical pixel, so the palette must scale down to match a Windows one in the hand. Windows answers `1.0` and nothing it draws changes |
+| `unit_scale: 0.75` (removed) | — | the palette was scaled down on macOS to match a Windows palette in the hand. The design module replaced it with one logical interface scale for every length (`doc/DESIGN.md`), so both platforms lay out the same logical interface and physical density is the operating system's |
 
 There is **no** GPU counter on either platform, and this document said there was before it was checked.
 `apps/macos` has no `MTLCounterSampleBuffer` and no offscreen probe; its frame-cost figures were taken

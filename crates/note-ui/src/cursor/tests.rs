@@ -152,6 +152,24 @@ fn the_body_grows_as_the_pen_lies_down() {
     );
 }
 
+/// The interface scale multiplies the body's length and both of its widths, so the rod keeps its
+/// proportions; a scale that cannot be multiplied by is the shipped 100% one.
+#[test]
+fn the_body_follows_the_interface_scale() {
+    let cursor = cursor(Phase::Hover, Some((60.0, 0.0))).expect("a hovering pen has one");
+    let one = cursor.body_shape_at(1.0).expect("a leaning pen has a body");
+    let two = cursor.body_shape_at(2.0).expect("a leaning pen has a body");
+
+    assert!((two.length - one.length * 2.0).abs() < 1e-4);
+    assert!((two.nib_half - one.nib_half * 2.0).abs() < 1e-4);
+    assert!((two.tail_half - one.tail_half * 2.0).abs() < 1e-4);
+    assert!((cursor.body_length_at(2.0) - cursor.body_length() * 2.0).abs() < 1e-4);
+
+    assert_eq!(cursor.body_shape_at(0.0), Some(one));
+    assert_eq!(cursor.body_shape_at(f32::NAN), Some(one));
+    assert_eq!(cursor.body_shape_at(-1.0), Some(one));
+}
+
 /// Where the drawn shape actually ends: a quadratic comes halfway to its control point at the
 /// middle of itself, which is the apex of the cap.
 fn apex(outline: &[[f32; 2]; 7], far: [f32; 2]) -> [f32; 2] {

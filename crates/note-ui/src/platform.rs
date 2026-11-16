@@ -72,14 +72,19 @@ pub use crate::timing::Vitals;
 
 /// What the frame publishes about the screen the ghost is drawn on: everything a reading cannot say.
 ///
-/// These five numbers are the whole of what the view knows and the overlay does not. `suppressed`
-/// means "there is nothing to draw a ghost for here" — the home list is up, or the app is asking a
-/// question the pen must not write under — and it is published rather than inferred because only the
-/// frame knows it.
+/// These numbers are the whole of what the view knows and the overlay does not. `suppressed` means
+/// "there is nothing to draw a ghost for here" — the home list is up, or the app is asking a question
+/// the pen must not write under — and it is published rather than inferred because only the frame
+/// knows it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Screen {
     /// Physical pixels per logical pixel, as the frame laid the window out.
     pub scale: f32,
+    /// The interface scale's factor: `1.0` at 100%, `0.5` at 50%, `2.0` at 200%.
+    ///
+    /// Distinct from [`Self::scale`], which is the platform's density. The ghost's *body* follows
+    /// this — it is an interface hint — while the nib mark keeps the ink's own width.
+    pub unit: f32,
     /// The colour the ghost's mark is drawn in, as `0xRRGGBB`.
     pub colour: u32,
     /// The colour of the soft edge under it, and of the nib's bloom.
@@ -133,6 +138,7 @@ impl Default for Screen {
     fn default() -> Self {
         Screen {
             scale: 1.0,
+            unit: 1.0,
             colour: 0x00_00_00,
             halo: 0x00_00_00,
             nib_radius: crate::cursor::NIB_RADIUS_MIN,
@@ -153,7 +159,8 @@ impl Default for Screen {
 pub trait GhostFeed: Send + Sync {
     /// Offers the newest batch, from the pen thread.
     fn offer(&self, readings: &[Reading]);
-    /// Publishes what the frame knows about the screen: its scale, its colours, the bar's edge.
+    /// Publishes what the frame knows about the screen: its display and interface scales, its colours,
+    /// the bar's edge.
     fn set_screen(&self, screen: Screen);
     /// Whether the ghost's own window is still there to draw into.
     fn is_alive(&self) -> bool;
@@ -285,14 +292,6 @@ pub struct Platform {
     pub ghost: Option<Arc<dyn GhostFeed>>,
     /// The pointer hook, when one could be installed.
     pub pointer: Option<Box<dyn SystemPointer>>,
-    /// How large one of the design's logical pixels is on this platform, as a factor.
-    ///
-    /// The lengths this crate writes down — the palette's rings and its reach, a stroke's width — are
-    /// the logical pixels a **Windows** display measures in (96 to the inch). macOS measures in
-    /// *points*, four thirds as large, so a shape that should look the same in the hand is three
-    /// quarters of those numbers there; a platform that measures in the design's own unit answers
-    /// `1.0`. Every length that has to look the same on both is multiplied by this.
-    pub unit_scale: f32,
     /// Whether a line-based scroll — a mouse wheel — moves the sheet.
     ///
     /// The view's rule is that a trackpad reports pixels and a wheel reports lines, and that only

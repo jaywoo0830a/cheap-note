@@ -36,6 +36,7 @@ use crate::canvas::{
     Swatch, HIGHLIGHTER_COLORS, INK_COLORS, PAPER_COLORS,
 };
 use crate::cursor::{nib_radius_for_width, PenCursor};
+use crate::design::{LayoutMetrics, LayoutPx, ScaleStep, TypeRamp};
 use crate::home::Home;
 use crate::ink::{paper_of_drawn, InkTransform, Notes, Stroke, Tool, HIGHLIGHTER_WIDTH};
 use crate::ink_layer::{Canvas, Ink, Page, Rect};
@@ -48,6 +49,7 @@ use crate::outline::{Outline, OutlinePages};
 use crate::pages::{swaps_axes, Pages, Quarters};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
 use crate::platform::{GhostFeed, InkSurface, PenSource, Platform, Screen, SystemPointer};
+use crate::prefs::Prefs;
 use crate::recent::{self, Recent};
 use crate::settings::{PenWeight, Settings};
 use crate::status_log::StatusLog;
@@ -105,34 +107,6 @@ const EDGE_SWIPE_SLOPE: f32 = 2.0;
 /// and this number is never reached there.
 const WHEEL_PAN_PER_LINE: f32 = 32.0;
 
-/// The margin, in logical pixels, between a sheet and the window's edges.
-const PAGE_MARGIN: f32 = 24.0;
-
-/// How far the floating bar and the floating page pill sit from the window's edges.
-const BAR_MARGIN: f32 = 12.0;
-
-/// How tall the top bar is, in logical pixels, as an estimate.
-///
-/// Used only by [`bar_line`], and there only while the bar is up and no frame has measured it yet: the
-/// edge the last frame laid out is the real line, and everything that asks where the bar ends — the
-/// ink, the ghost cursor, the system pointer — asks it there.
-const BAR_HEIGHT: f32 = 148.0;
-
-/// How tall the strip at the window's foot is — the desk's own row, where the page and zoom pills
-/// float — in logical pixels, as an estimate.
-///
-/// Used only by [`NoteApp::foot_edge`], and there only until a frame has measured the row: the probe on
-/// the row's top edge is the real line once it reports. It is an *upper* bound on the real height, so
-/// the frame before the first measurement errs towards refusing a reading on the desk just above the
-/// pills rather than towards putting a dot on one.
-const FOOT_BAND: f32 = 72.0;
-
-/// How far past a pill's own edge a reading still counts as a press on it, in logical pixels.
-///
-/// A nib that lands a millimetre beside a button is a press that missed, not a line somebody meant to
-/// draw — and the pen is aiming at a pill on purpose when it is down there at all.
-const FOOT_SLACK: f32 = 12.0;
-
 // The two chords the status line names are `keys::chord::MEASURE` and `keys::chord::PALETTE`, written
 // out where they are shown by `keys::label` — never typed here, because the words for them are the
 // platform's (`Ctrl+M` on Windows, `⌘M` on macOS).
@@ -144,42 +118,51 @@ const FOOT_SLACK: f32 = 12.0;
 /// has to miss — a disc's own radius plus the slack a hand needs ([`PALETTE_REACH`]) — and the two rings
 /// are far enough apart that no point on the palette is nearer two controls than one (there is a test for
 /// that, and for the gaps within a ring).
-const PALETTE_RING_RADIUS: f32 = 104.0;
+const PALETTE_RING_RADIUS: f32 = 65.0;
 
 /// How far from the palette's centre the inner ring's tool chips are placed, in logical pixels.
-const PALETTE_TOOL_RADIUS: f32 = 54.0;
+const PALETTE_TOOL_RADIUS: f32 = 32.0;
 
-/// The diameter of one colour disc, in logical pixels.
-const PALETTE_DISC: f32 = 30.0;
+/// The diameter of one colour disc, in logical pixels at 100%.
+const PALETTE_DISC: f32 = 20.0;
+
+/// The white gap between a colour disc and its selection ring, in logical pixels at 100%.
+const PALETTE_DISC_PAD: f32 = 2.0;
+
+/// The selection ring around a colour disc, in logical pixels. A ring is a mark rather than a
+/// proportion, so it is one of the few lengths that does not follow the interface scale.
+const PALETTE_DISC_RING: f32 = 2.0;
 
 /// The diameter of the chip one tool is drawn in, in logical pixels.
 ///
 /// A chip rather than a bare glyph: the palette is read at a glance and at arm's length, and a tool with
 /// nothing behind it is a smudge on a white field — which is what the bar's own buttons would be without
 /// the bar under them.
-const PALETTE_TOOL_DISC: f32 = 38.0;
+const PALETTE_TOOL_DISC: f32 = 26.0;
 
 /// The size of the icon inside a tool chip, in logical pixels.
 ///
 /// A little over half the chip: the proportions the bar's own tool buttons are drawn at, so a tool looks
 /// the same in both places.
-const PALETTE_TOOL_ICON: f32 = 20.0;
+const PALETTE_TOOL_ICON: f32 = 14.0;
 
-/// The size of the box one colour disc draws in: the disc, and the ring around it.
+/// The size of the box one colour disc draws in at 100%: the disc, the white gap and the ring around it.
 ///
 /// What a placement is measured in, because the ring is a border on the box rather than a disc under it
 /// (see [`palette_disc`]): placing by the disc's own size would put every ringed disc a hair off centre.
-/// The eight is that ring and the white gap inside it, two pixels each.
-const PALETTE_DISC_BOX: f32 = PALETTE_DISC + 8.0;
+/// The drawing uses [`PaletteGeometry::disc_box`], which follows the interface scale; this is the
+/// 100% value the palette's own design tests are written against.
+#[cfg(test)]
+const PALETTE_DISC_BOX: f32 = PALETTE_DISC + (PALETTE_DISC_PAD + PALETTE_DISC_RING) * 2.0;
 
 /// The diameter of the hub: the colour the next stroke is written in, at the middle of the palette.
-const PALETTE_HUB: f32 = 44.0;
+const PALETTE_HUB: f32 = 28.0;
 
 /// How wide the ring of white the hub's colour is set in is, in logical pixels.
-const PALETTE_HUB_RING: f32 = 4.0;
+const PALETTE_HUB_RING: f32 = 3.0;
 
 /// The least gap between the well's rim and the outermost tool chip in it, in logical pixels.
-const PALETTE_WELL_PAD: f32 = 6.0;
+const PALETTE_WELL_PAD: f32 = 4.0;
 
 /// The diameter of the well the hub and the tools sit in, in logical pixels.
 ///
@@ -189,51 +172,95 @@ const PALETTE_WELL_PAD: f32 = 6.0;
 const PALETTE_WELL: f32 = (PALETTE_TOOL_RADIUS + PALETTE_TOOL_DISC / 2.0 + PALETTE_WELL_PAD) * 2.0;
 
 /// The least gap between the palette and the window's edge, in logical pixels.
-const PALETTE_MARGIN: f32 = 8.0;
+const PALETTE_MARGIN: f32 = 6.0;
 
 /// How near a point has to come to a control's centre to be that control, in logical pixels.
 ///
 /// Wider than a disc, because a pen lands where a hand put it rather than on a pixel: the reach is a
 /// disc's own radius plus the slack a hand needs, and the gaps between discs are wider than twice this,
 /// so a tap between two colours belongs to neither rather than to the nearer of them by a hair.
-const PALETTE_REACH: f32 = 24.0;
+const PALETTE_REACH: f32 = 16.0;
 
 /// The white the ring of colours is given inside the palette, in logical pixels.
-const PALETTE_PAD: f32 = 14.0;
+const PALETTE_PAD: f32 = 10.0;
 
 /// The radius of the square the whole palette fits in: the outer ring, half a disc, and that white.
+///
+/// At 100% this is 85, so the palette is **170 px across** — deliberately compact, against the 266 it
+/// was first drawn at. It opens under the pen, where the page is, so its own size is the amount of the
+/// page it hides; the rings and discs stay large enough for a pen's reach, and no smaller.
 const PALETTE_RADIUS: f32 = PALETTE_RING_RADIUS + PALETTE_DISC / 2.0 + PALETTE_PAD;
 
-/// The palette's measurements in the logical pixels of the screen it is drawn on.
+/// The bar's colour swatches at one interface scale.
 ///
-/// Every number above is the *design's*, in the 96-DPI logical pixels a Windows display measures in.
-/// macOS measures in points, four thirds of one, so the same palette there has to be three quarters of
-/// those numbers to be the same size in the hand — at the design's numbers it is a third too large,
-/// which is what a 266-pixel ring drawn in points looks like.
+/// The palette's geometry is its own because a palette is a ring; the bar's swatches are a row, but
+/// they are the same kind of thing and they must not stay 16 px while the buttons beside them grow.
+/// The chip, the white gap and the corners follow the step; the hairline edge and the selection ring
+/// are marks and do not (see `doc/DESIGN.md` §7.5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SwatchGeometry {
+    unit: f32,
+}
+
+impl SwatchGeometry {
+    /// The swatches at `scale`.
+    fn at(scale: ScaleStep) -> Self {
+        SwatchGeometry {
+            unit: scale.factor(),
+        }
+    }
+
+    /// The diameter of the colour itself.
+    fn chip(self) -> f32 {
+        SWATCH_CHIP * self.unit
+    }
+
+    /// The white gap between the colour and its selection ring.
+    fn pad(self) -> f32 {
+        SWATCH_PAD * self.unit
+    }
+
+    /// The corner of a square swatch: paper is a page, and a page has corners.
+    fn corner(self) -> f32 {
+        SWATCH_CORNER * self.unit
+    }
+
+    /// The corner of the colour inside the square: a little tighter than the button's own.
+    fn chip_corner(self) -> f32 {
+        SWATCH_CHIP_CORNER * self.unit
+    }
+}
+
+/// The bar's colour chip at 100%, the space around it, and its two corners: the button's ring and the
+/// colour's own square inside it.
+const SWATCH_CHIP: f32 = 16.0;
+const SWATCH_PAD: f32 = 2.0;
+const SWATCH_CORNER: f32 = 6.0;
+const SWATCH_CHIP_CORNER: f32 = 4.0;
+
+/// The palette's measurements at one interface scale.
 ///
-/// One factor applied to every length is what makes this a *size* rather than a different shape: the
-/// rings, the discs, the well and the reach of a tap all move together, so the gaps the palette's own
-/// tests pin stay proportional at any unit. The factor comes from the platform
-/// ([`crate::platform::Platform::unit_scale`]) because only the platform knows how its logical pixels
-/// are measured.
+/// Every number above is the *design's*, in the logical pixels the interface is laid out in. The
+/// palette is not made of the four-unit layout tokens — its rings, discs and gaps are the palette's
+/// own — so it follows the interface's [`ScaleStep`] as one factor rather than through
+/// [`crate::design::px`]. One factor applied to every length is what makes this a *size* rather than a
+/// different shape: the rings, the discs, the well and the reach of a tap all move together, so the
+/// gaps the palette's own tests pin stay proportional at any step.
+///
+/// The step is the same one [`LayoutMetrics`] holds, so the palette and the bar beside it are drawn at
+/// one interface scale. A platform's own physical density is not part of it: the windowing system
+/// already turns logical pixels into physical ones (see `doc/DESIGN.md` §1).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PaletteGeometry {
-    /// How large one of the design's logical pixels is here: `1.0` on Windows, `0.75` on macOS.
+    /// How large the design's logical pixel is at this step: `1.0` at 100%, `0.75` at 75%.
     unit: f32,
 }
 
 impl PaletteGeometry {
-    /// The geometry for a platform whose logical pixel is `unit` of the design's.
-    ///
-    /// A unit that is not a positive number is the design's own: a platform that cannot say how its
-    /// pixels are measured gets the sizes the tests and the eye were tuned at, not a palette of none.
-    fn of(unit: f32) -> Self {
+    /// The geometry at `scale`.
+    fn at(scale: ScaleStep) -> Self {
         PaletteGeometry {
-            unit: if unit.is_finite() && unit > 0.0 {
-                unit
-            } else {
-                1.0
-            },
+            unit: scale.factor(),
         }
     }
 
@@ -259,11 +286,16 @@ impl PaletteGeometry {
 
     /// The box one colour disc draws in: the disc, plus the ring and the white gap around it.
     ///
-    /// The gap and the ring are a hairline's width and do not shrink with the palette — they are the
-    /// two pixels each side that [`PALETTE_DISC_BOX`] adds — so this is the disc at this unit plus
-    /// those, which is the size the element actually comes out at.
+    /// The white gap follows the interface scale with the disc; the selection ring does not, because
+    /// a ring is a mark rather than a proportion. This is the size the element actually comes out at,
+    /// which is what [`placed`] centres.
     fn disc_box(self) -> f32 {
-        self.disc() + (PALETTE_DISC_BOX - PALETTE_DISC)
+        self.disc() + self.disc_pad() * 2.0 + PALETTE_DISC_RING * 2.0
+    }
+
+    /// The white gap between a disc and its ring.
+    fn disc_pad(self) -> f32 {
+        PALETTE_DISC_PAD * self.unit
     }
 
     /// The diameter of the chip one tool is drawn in.
@@ -304,14 +336,6 @@ impl PaletteGeometry {
 
 /// How much of the window's width the status pill may take, as a fraction of it.
 const STATUS_PILL_WIDTH: f32 = 0.6;
-
-/// How far below the bar's bottom edge the status pill hangs, in logical pixels.
-///
-/// The pill belongs to the *top* edge, with the bar, because both say what is open and what it holds;
-/// the bottom edge is left to navigation — the page pill and the zoom — so each edge has one job. The
-/// gap is `BAR_MARGIN`, the same air the bar itself keeps from the window's top: the pill is drawn by
-/// the same hand and reads as part of the same strip.
-const STATUS_DROP: f32 = BAR_MARGIN;
 
 /// How much of the selection's colour is laid over the ink a lasso has hold of.
 ///
@@ -598,11 +622,14 @@ impl FootPills {
         self
     }
 
-    /// The strips this says the pen refuses, with each pill grown by [`FOOT_SLACK`].
-    fn strips(&self) -> FootStrips {
+    /// The strips this says the pen refuses, with each pill grown by `slack`.
+    ///
+    /// `slack` is [`LayoutMetrics::foot_slack`], passed with the snapshot the frame is laid out at
+    /// rather than read here: the strip and the pill it surrounds have to be the same scale.
+    fn strips(&self, slack: LayoutPx) -> FootStrips {
         FootStrips {
-            page: self.page.map(widened),
-            zoom: self.zoom.map(widened),
+            page: self.page.map(|bounds| widened(bounds, slack)),
+            zoom: self.zoom.map(|bounds| widened(bounds, slack)),
         }
     }
 }
@@ -616,10 +643,11 @@ enum FootPlace {
     Zoom,
 }
 
-/// A pill's `x` bounds grown by [`FOOT_SLACK`]: a nib that lands a millimetre beside a button is a press
-/// that missed rather than a line nobody meant to draw.
-fn widened((left, right): (f32, f32)) -> (f32, f32) {
-    (left - FOOT_SLACK, right + FOOT_SLACK)
+/// A pill's `x` bounds grown by `slack`: a nib that lands a millimetre beside a button is a press that
+/// missed rather than a line nobody meant to draw.
+fn widened((left, right): (f32, f32), slack: LayoutPx) -> (f32, f32) {
+    let slack = window_px(slack);
+    (left - slack, right + slack)
 }
 
 /// The strips at the window's foot that a reading is refused in, as `x` bounds in window logical pixels
@@ -949,6 +977,9 @@ impl PenGesture {
 pub struct NoteApp {
     /// Everything the note in hand remembers: its paper, its pen, its switches, and how it feels.
     settings: Settings,
+    /// The machine's own preferences: the interface scale, kept beside the notes so it is the
+    /// same before a note is open (see [`Prefs`]).
+    prefs: Prefs,
     /// The ink.
     ink: Notes,
     /// The note being written: its folder, its database, and the document it was written on.
@@ -1037,10 +1068,27 @@ pub struct NoteApp {
     /// The page being shown.
     page_index: usize,
     /// The window's DPI scale factor, captured each frame.
+    ///
+    /// This is the operating system's physical density and is used only where a physical pixel is
+    /// what is meant — the pen's readings and the ghost's screen description. The interface's own
+    /// scale is [`Self::metrics`].
     scale: f32,
-    /// How large one of the design's logical pixels is on this platform, as a factor: what the palette
-    /// is drawn at (see [`crate::platform::Platform::unit_scale`]).
-    unit_scale: f32,
+    /// Every layout length the view lays out with, resolved once at one interface scale.
+    ///
+    /// One snapshot rather than a token read per use: the bar, the desk's row, the sheet's margins
+    /// and the slack around a pill are all the *same* scale, so none of them can disagree with its
+    /// neighbour by a pixel (`doc/DESIGN.md` §7.1). The framework boundary is [`window_px`].
+    ///
+    /// It is computed once from [`Self::prefs`] when the app starts and replaced in one transaction
+    /// when the scale changes ([`Self::set_interface_scale`]); the step inside it is also what the
+    /// palette is drawn at.
+    ///
+    /// The type sizes are a separate ramp at the same step (see [`TypeRamp`]): `metrics` is exact
+    /// whole logical pixels for layout, while typography is authored for text and carried by the
+    /// theme's rem size.
+    metrics: LayoutMetrics,
+    /// The type sizes at the same step as [`Self::metrics`].
+    type_ramp: TypeRamp,
     /// Whether a wheel's line-based scroll moves the sheet (see [`crate::platform::Platform::wheel_pans`]).
     ///
     /// A wheel reports lines and a trackpad reports pixels; the view pans in pixels, so a platform
@@ -1188,6 +1236,11 @@ pub struct NoteApp {
     /// how much of to spend — and a chooser rather than a switch because there are two named modes with
     /// different costs, not one thing that is on or off. See [`MemoryMode`].
     memory_select: Entity<SelectState<Vec<String>>>,
+    /// The bar's interface-scale chooser: how large every layout token is drawn.
+    ///
+    /// The labels are percentages; what the preference file holds is
+    /// [`ScaleStep::index()`](crate::design::ScaleStep::index) (see [`Prefs`]).
+    scale_select: Entity<SelectState<Vec<String>>>,
     /// Whether one of the bar's choosers has its list open.
     ///
     /// The list is a popup that hangs *below* the box, over the page — so the place the reader is aiming
@@ -1228,6 +1281,15 @@ impl NoteApp {
         // Nothing to load and nowhere to load it from — no note is open — so this is the shipped set. It
         // is not a *global* set: whatever is opened below takes it over (see [`crate::settings`]).
         let settings = Settings::default();
+        // The one preference that is not the note's: how large this person wants the interface.
+        // It is read before the first frame, so the window opens at the size it was left at.
+        let prefs = Prefs::load();
+        let metrics = LayoutMetrics::at(prefs.scale());
+        let type_ramp = TypeRamp::at(prefs.scale());
+        // GPUI Kit makes the window's rem size the theme's font size, so this one value is what
+        // carries `text_sm`, `text_lg`, icons and the component library's own padding. It is set
+        // before the first frame, like the layout snapshot.
+        crate::theme::set_base_size(type_ramp.base, cx);
         let mut message = String::new();
 
         // The services, taken apart again. The pen's thread and the ghost's window are already
@@ -1237,7 +1299,6 @@ impl NoteApp {
             ink: ink_layer,
             ghost: cursor,
             pointer: system_cursor,
-            unit_scale,
             wheel_pans,
             pen,
             stats: system_stats,
@@ -1311,6 +1372,20 @@ impl NoteApp {
             cx,
         );
 
+        // The interface scale's labels are percentages because that is the number a person chooses;
+        // the preference file holds the stable index behind the label (see [`Prefs`]).
+        let scale_select = choice_of(
+            ScaleStep::ALL
+                .iter()
+                .map(|step| scale_label(*step))
+                .collect(),
+            ScaleStep::ALL
+                .iter()
+                .position(|step| *step == prefs.scale()),
+            window,
+            cx,
+        );
+
         // The field a note's name is typed into on the sheet, and the two things the field can say:
         // Enter keeps the name, and losing focus — clicking anywhere else — leaves it as it was.
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("A name"));
@@ -1336,6 +1411,7 @@ impl NoteApp {
 
         let mut app = NoteApp {
             settings,
+            prefs,
             ink: Notes::new(),
             note: None,
             writer: None,
@@ -1367,7 +1443,8 @@ impl NoteApp {
             selection_colour: cx.theme().accent.opacity(SELECTION_TINT),
             page_index: 0,
             scale: window.scale_factor(),
-            unit_scale,
+            metrics,
+            type_ramp,
             wheel_pans,
             view,
             desk: cx.theme().background,
@@ -1410,6 +1487,7 @@ impl NoteApp {
             pen_select,
             frame_select,
             memory_select,
+            scale_select,
             chooser_open: false,
             home: Home::open(window, cx),
         };
@@ -1496,6 +1574,27 @@ impl NoteApp {
                 if let SelectEvent::Confirm(Some(label)) = event {
                     if let Some(mode) = MemoryMode::from_label(label) {
                         app.set_memory_mode(mode, cx);
+                    }
+                }
+            },
+        )
+        .detach();
+
+        cx.subscribe(
+            &app.scale_select,
+            |app, _, event: &SelectEvent<Vec<String>>, cx| {
+                app.chooser_toggled(false, cx);
+
+                // A label is a percentage this build wrote; a label it cannot read is ignored, the
+                // same way a paper size with no name behind it is. The preference holds the index
+                // (see [`Prefs`]), so the list order is the only thing that has to stay stable.
+                if let SelectEvent::Confirm(Some(label)) = event {
+                    if let Some(scale) = ScaleStep::ALL
+                        .iter()
+                        .copied()
+                        .find(|step| scale_label(*step) == *label)
+                    {
+                        app.set_interface_scale(scale, cx);
                     }
                 }
             },
@@ -1975,12 +2074,31 @@ impl NoteApp {
     /// that can write where its own cursor has given way to the arrow is a pen writing through the
     /// interface (see [`bar_line`]).
     fn bar_edge(&self) -> f32 {
-        bar_line(self.settings.show_toolbar, self.bar_bottom.get())
+        bar_line(
+            self.settings.show_toolbar,
+            self.bar_bottom.get(),
+            self.metrics.bar_height,
+        )
+    }
+
+    /// The air between the sheet and the window's edges, in window logical pixels.
+    ///
+    /// Read from the frame's one snapshot ([`Self::metrics`]) rather than from a constant: fitting,
+    /// panning and placing the sheet all have to agree about how much room the window keeps for its
+    /// own furniture.
+    fn page_margin(&self) -> f32 {
+        window_px(self.metrics.page_margin)
+    }
+
+    /// The air between the floating bar, the page pill and the window's edges, in window logical
+    /// pixels.
+    fn bar_margin(&self) -> f32 {
+        window_px(self.metrics.bar_margin)
     }
 
     /// Where the desk's own row begins: the line below which a reading is a press on a pill rather
-    /// than ink, in window logical pixels, as the last frame laid the pills out — or [`FOOT_BAND`]
-    /// until a frame has measured them.
+    /// than ink, in window logical pixels, as the last frame laid the pills out — or the snapshot's
+    /// [`LayoutMetrics::foot_band`] until a frame has measured them.
     ///
     /// The row is the app's own — [`Self::page_pill`] and [`Self::zoom_pill`] — and unlike the bar it
     /// has no switch: a reader who hid the bar still has a pill to turn the page with. It is measured
@@ -1993,7 +2111,10 @@ impl NoteApp {
     /// one frame. The line is only half of the rule, though: the pills do not fill the row's width, so
     /// what the pen refuses is the strip each pill occupies (see [`FootStrips`]).
     fn foot_edge(&self) -> f32 {
-        self.pills.get().top.unwrap_or(FOOT_BAND)
+        self.pills
+            .get()
+            .top
+            .unwrap_or_else(|| window_px(self.metrics.foot_band))
     }
 
     /// Whether the sheet — and nothing else — is in front, so a reading is a stroke rather than a press on
@@ -2076,7 +2197,7 @@ impl NoteApp {
         // and a reader may well be writing on the paper behind the gap between the two. Which readings
         // are refused is decided here, before the model sees them (see [`Self::pills`] and
         // [`FootStrips`]).
-        let strips = self.pills.get().strips();
+        let strips = self.pills.get().strips(self.metrics.foot_slack);
         let foot = self.foot_edge();
         let scale = if self.scale.is_finite() && self.scale > 0.0 {
             self.scale
@@ -2149,7 +2270,8 @@ impl NoteApp {
             return;
         }
 
-        if self.view.hold_pan(sheet.paper, sheet.window, PAGE_MARGIN) {
+        let margin = self.page_margin();
+        if self.view.hold_pan(sheet.paper, sheet.window, margin) {
             self.settle_view();
         }
     }
@@ -2509,6 +2631,57 @@ impl NoteApp {
         self.finish_setting(cx);
     }
 
+    /// Changes how large the interface is drawn, in one transaction (`doc/DESIGN.md` §7.3).
+    ///
+    /// The preference belongs to the *machine*, so it is written to `prefs.json` rather than to the
+    /// note (see [`Prefs`]); a write that fails is reported and does not undo the choice, because
+    /// the interface the person asked for is already on screen.
+    ///
+    /// The measurements made at the old scale are discarded here. A measured line from the old
+    /// scale is not wrong by a percentage — it is wrong by whatever the layout did — and it would
+    /// remain the line the pen is judged by until the next frame measured it again.
+    fn set_interface_scale(&mut self, scale: ScaleStep, cx: &mut Context<Self>) {
+        if self.metrics.scale == scale && self.prefs.scale() == scale {
+            return;
+        }
+
+        // One step, one snapshot. Every length the view reads comes from this snapshot, including
+        // the step the palette is drawn at.
+        let changed = self.prefs.set_scale(scale);
+        self.metrics = LayoutMetrics::at(scale);
+
+        // The type ramp shares the step but not the arithmetic. Its base is also the window's rem
+        // size (GPUI Kit copies the theme's font size there), so every rem-based text style, icon
+        // and control padding moves with it. The explicit pixel sizes in this file read the roles.
+        self.type_ramp = TypeRamp::at(scale);
+        crate::theme::set_base_size(self.type_ramp.base, cx);
+
+        // There is no other framework base size to tell: [`window_px`] writes every layout length
+        // into GPUI as a logical pixel, so the snapshot is the whole of the layout adapter.
+
+        // Measurements at the old scale are old pixels: the bar's bottom edge and the pills' boxes
+        // are re-measured by the next frame, and until then their estimates are the new scale's.
+        self.bar_bottom.set(None);
+        self.pills.set(FootPills::default());
+
+        // The palette was placed and clamped for the old radius; a larger one could hang off the
+        // window, and a smaller one would no longer be under the hand that chose the scale.
+        self.palette = None;
+
+        // The sheet keeps its paper and zoom, but its margin — and therefore its place — moved.
+        self.settle_view();
+        self.publish_cursor();
+
+        if changed {
+            if let Err(error) = self.prefs.save() {
+                self.report(format!("the interface scale could not be saved: {error}"));
+            }
+        }
+
+        self.touch_status();
+        cx.notify();
+    }
+
     /// Tells the canvas whether to wait for the display, if there is a canvas to tell.
     ///
     /// Called at install and whenever the switch moves, so a surface never has to guess: the note's own
@@ -2634,8 +2807,9 @@ impl NoteApp {
         }
 
         let sheet = self.sheet;
+        let margin = self.page_margin();
 
-        if self.view.fit(which, sheet.paper, sheet.window, PAGE_MARGIN) {
+        if self.view.fit(which, sheet.paper, sheet.window, margin) {
             self.finish_zoom(cx);
         }
     }
@@ -2867,7 +3041,8 @@ impl NoteApp {
         // A sheet no frame has drawn yet has no bounds to be held inside — the pan is left alone
         // rather than clamped into a window of nothing (see [`Viewport::hold_pan`]).
         if sheet.window.0 > 0.0 && sheet.window.1 > 0.0 {
-            self.view.hold_pan(sheet.paper, sheet.window, PAGE_MARGIN);
+            let margin = self.page_margin();
+            self.view.hold_pan(sheet.paper, sheet.window, margin);
         }
 
         if self.view.pan() != was {
@@ -2890,7 +3065,8 @@ impl NoteApp {
         }
 
         let zoom = self.view.zoom();
-        let origin = self.view.origin(sheet.paper, sheet.window, PAGE_MARGIN);
+        let margin = self.page_margin();
+        let origin = self.view.origin(sheet.paper, sheet.window, margin);
 
         self.sheet = Sheet {
             zoom,
@@ -2976,10 +3152,11 @@ impl NoteApp {
         let pointer = (event.position.x.into(), event.position.y.into());
         let factor = pinch_zoom_factor(event.delta);
         let sheet = self.sheet;
+        let margin = self.page_margin();
 
         if self
             .view
-            .zoom_around(factor, pointer, sheet.paper, sheet.window, PAGE_MARGIN)
+            .zoom_around(factor, pointer, sheet.paper, sheet.window, margin)
         {
             // The note is written once the pinch has gone quiet (`zoom_settles_at`, below). The *drawing* is
             // not deferred: a trackpad wakes no pump the way a pen does, so a zoom that only moved the sheet
@@ -3102,7 +3279,7 @@ impl NoteApp {
         // are controls the pen presses, so the arrow is the cursor there — beside them is desk, and the
         // ghost is the pen's there as it is everywhere else on the page. The rule itself is
         // [`pen_cursor_shows`], which is what a test can ask without a window.
-        let strip = self.pills.get().strips();
+        let strip = self.pills.get().strips(self.metrics.foot_slack);
         let foot = self.foot_edge();
         let bar = self.bar_edge();
 
@@ -3120,6 +3297,9 @@ impl NoteApp {
 
         cursor.set_screen(Screen {
             scale: self.scale,
+            // The interface scale, for the ghost's body only. The nib mark is the ink's width, and
+            // ink does not follow the interface (see `doc/DESIGN.md` §7.5).
+            unit: self.metrics.scale.factor(),
             // The ghost's mark is the colour in hand: the dot says what the next stroke will be
             // written in, which is what a reader looks at it for. The *halo* is the app's answer for
             // the paper, so a mark that would vanish on it — white ink, a highlighter's pale yellow —
@@ -3142,7 +3322,7 @@ impl NoteApp {
             // in it, so the desk beside them is page, and the ghost (and the arrow) belong there. In
             // physical pixels like the lines above.
             pill_strips: {
-                let strips = self.pills.get().strips();
+                let strips = self.pills.get().strips(self.metrics.foot_slack);
                 let at = |strip: Option<(f32, f32)>| {
                     strip.map(|(left, right)| (left * self.scale, right * self.scale))
                 };
@@ -3356,7 +3536,7 @@ impl NoteApp {
 
         self.palette = Some(Palette {
             centre: palette_centre(
-                PaletteGeometry::of(self.unit_scale),
+                PaletteGeometry::at(self.metrics.scale),
                 near,
                 [size.width.into(), size.height.into()],
             ),
@@ -3487,7 +3667,7 @@ impl NoteApp {
         };
 
         let colours = palette_colours(self.ink.mode()).len();
-        let geometry = PaletteGeometry::of(self.unit_scale);
+        let geometry = PaletteGeometry::at(self.metrics.scale);
         let landed = samples
             .iter()
             .filter(|sample| sample.phase == crate::input::Phase::Down)
@@ -5058,9 +5238,11 @@ impl NoteApp {
             }
         };
 
+        let margin = self.page_margin();
+
         Sheet {
             paper,
-            origin: self.view.origin(paper, window, PAGE_MARGIN),
+            origin: self.view.origin(paper, window, margin),
             window,
             zoom: self.view.zoom(),
             rotation: turns,
@@ -5311,16 +5493,17 @@ impl NoteApp {
 
         // The mark below writes through this; the pump reads it later, with no window to ask.
         let bar_bottom = Rc::clone(&self.bar_bottom);
+        let margin = self.bar_margin();
 
         // Full width from a stretched box with a margin's worth of padding, not from both insets on the bar:
         // an element with a left *and* a right inset is laid out at its content's size here, and a bar at
         // its content's size never wraps its second row — it runs off the edge of the window.
         div()
             .absolute()
-            .top(px(BAR_MARGIN))
+            .top(px(margin))
             .left_0()
             .w_full()
-            .px(px(BAR_MARGIN))
+            .px(px(margin))
             // A zero-height box pinned to the bar's own bottom edge, so it reports the real edge whatever
             // the bar's height turned out to be. It paints nothing, takes no pointer, and is out of the
             // layout: it exists to be measured.
@@ -5337,10 +5520,10 @@ impl NoteApp {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
-                    .p(px(8.0))
+                    .gap(px(window_px(self.metrics.space_2)))
+                    .p(px(window_px(self.metrics.space_2)))
                     .w_full()
-                    .rounded(theme.radius_lg)
+                    .rounded(px(window_px(self.metrics.radius_large)))
                     .bg(surface)
                     .border_1()
                     .border_color(hairline)
@@ -5528,7 +5711,7 @@ impl NoteApp {
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
+            .gap(px(window_px(self.metrics.space_1)))
             .w_full()
             .text_color(muted)
             .child(self.title_chip(cx))
@@ -5549,7 +5732,7 @@ impl NoteApp {
         let title: AnyElement = if self.naming.is_some() {
             Input::new(&self.name_input)
                 .small()
-                .w(px(220.0))
+                .w(px(220.0 * self.metrics.scale.factor()))
                 .into_any_element()
         } else if named {
             Label::new(self.note_title.clone()).into_any_element()
@@ -5565,17 +5748,21 @@ impl NoteApp {
             .flex_row()
             .items_center()
             .gap_1p5()
-            .pl(px(4.0))
+            .pl(px(window_px(self.metrics.space_1)))
             .pr_1()
             // A long name is cut rather than wrapped or allowed to push the commands off the row: the
             // bar has a fixed height, and the name is the one piece of text here whose length the user
             // chooses.
-            .max_w(px(260.0))
+            .max_w(px(260.0 * self.metrics.scale.factor()))
             .text_color(if named { foreground } else { muted })
-            .child(div().text_size(px(15.0)).child(IconName::BookOpen))
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(px(self.type_ramp.title))
+                    .child(IconName::BookOpen),
+            )
+            .child(
+                div()
+                    .text_size(px(self.type_ramp.base))
                     .whitespace_nowrap()
                     .truncate()
                     .child(title),
@@ -5639,10 +5826,10 @@ impl NoteApp {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
-                    .p(px(16.0))
-                    .w(px(360.0))
-                    .rounded(theme.radius_lg)
+                    .gap(px(window_px(self.metrics.space_2)))
+                    .p(px(window_px(self.metrics.space_4)))
+                    .w(px(360.0 * self.metrics.scale.factor()))
+                    .rounded(px(window_px(self.metrics.radius_large)))
                     .bg(surface)
                     .border_1()
                     .border_color(hairline)
@@ -5657,7 +5844,7 @@ impl NoteApp {
                             .flex()
                             .flex_row()
                             .justify_end()
-                            .gap_2()
+                            .gap(px(window_px(self.metrics.space_2)))
                             .pt_2()
                             .child(keep)
                             .child(agree),
@@ -5690,9 +5877,9 @@ impl NoteApp {
 
         let mode = self.ink.mode();
         let colours = palette_colours(mode);
-        // The palette's own size on this platform: the design's numbers, in the logical pixels the
-        // screen it is drawn on measures in (see [`PaletteGeometry`]).
-        let geometry = PaletteGeometry::of(self.unit_scale);
+        // The palette's own size at this interface scale: the design's numbers, in the logical pixels
+        // the window is laid out in (see [`PaletteGeometry`]).
+        let geometry = PaletteGeometry::at(self.metrics.scale);
 
         // Where the ring is measured from *inside* this palette's own square: its middle, which is one
         // radius in from each side. Every placement below is in the box's coordinates, so the box is put
@@ -5775,6 +5962,7 @@ impl NoteApp {
                 geometry.hub() - geometry.hub_ring() * 2.0,
                 colour_edge(in_hand, cx.theme()),
                 true,
+                0.0,
             ));
 
         div()
@@ -5822,6 +6010,7 @@ impl NoteApp {
 
         // Paper is a square — a page has corners — and ink is a circle, which is what a pen's
         // colour looks like on every writing app there is. Two shapes, one table of colours.
+        let swatches = SwatchGeometry::at(self.metrics.scale);
         let mut paper: Vec<AnyElement> = Vec::new();
         for swatch in PAPER_COLORS.iter() {
             paper.push(
@@ -5830,6 +6019,7 @@ impl NoteApp {
                     self.settings.page_color == swatch.color,
                     accent,
                     false,
+                    swatches,
                     cx,
                     |app, color, cx| app.set_paper_color(color, cx),
                 )
@@ -5850,6 +6040,7 @@ impl NoteApp {
                         self.settings.highlighter_color == swatch.color,
                         accent,
                         true,
+                        swatches,
                         cx,
                         |app, color, cx| app.set_highlighter_color(color, cx),
                     )
@@ -5864,6 +6055,7 @@ impl NoteApp {
                         self.settings.ink_color == swatch.color,
                         accent,
                         true,
+                        swatches,
                         cx,
                         |app, color, cx| app.set_ink_color(color, cx),
                     )
@@ -5897,32 +6089,32 @@ impl NoteApp {
             .flex_row()
             .flex_wrap()
             .items_center()
-            .gap_1()
+            .gap(px(window_px(self.metrics.space_1)))
             .w_full()
             .pt_2()
             .border_t_1()
             .border_color(hairline)
-            .child(control_label("Page", muted))
+            .child(control_label("Page", muted, self.type_ramp.micro))
             .child(self.page_controls(cx))
             .child(toolbar_divider(hairline))
-            .child(control_label("Sheet", muted))
+            .child(control_label("Sheet", muted, self.type_ramp.micro))
             .child(self.chooser("chooser-sheet", &self.sheet_select, cx))
             .child(toolbar_divider(hairline))
-            .child(control_label("Style", muted))
+            .child(control_label("Style", muted, self.type_ramp.micro))
             .child(self.chooser("chooser-rule", &self.rule_select, cx))
             .child(toolbar_divider(hairline))
-            .child(control_label("Paper", muted))
+            .child(control_label("Paper", muted, self.type_ramp.micro))
             .children(paper)
             .child(toolbar_divider(hairline))
-            .child(control_label("Ink", muted))
+            .child(control_label("Ink", muted, self.type_ramp.micro))
             .children(ink)
             .child(toolbar_divider(hairline))
-            .child(control_label("Weight", muted))
+            .child(control_label("Weight", muted, self.type_ramp.micro))
             .child(self.chooser("chooser-pen", &self.pen_select, cx))
             .child(toolbar_divider(hairline))
             // The canvas's own ceiling, beside the render option it is a sibling of: what it paces is the
             // canvas's work, not the display's. See [`FrameCap`].
-            .child(control_label("Frames", muted))
+            .child(control_label("Frames", muted, self.type_ramp.micro))
             .child(self.chooser("chooser-frames", &self.frame_select, cx))
             // The display's clock, beside the canvas's own ceiling, where the surface can honour it:
             // the two are the whole of what paces a frame (see [`Settings::vsync`]).
@@ -5955,8 +6147,13 @@ impl NoteApp {
             // rather than a switch because both answers have a name and a cost — `Room` spends what the
             // sheet is worth, `Lean` a quarter of it (see [`MemoryMode`]).
             .child(toolbar_divider(hairline))
-            .child(control_label("Memory", muted))
+            .child(control_label("Memory", muted, self.type_ramp.micro))
             .child(self.chooser("chooser-memory", &self.memory_select, cx))
+            // How large the interface is drawn. A machine preference rather than the note's (see
+            // [`Prefs`]), offered here because this row is where every other kind of size is chosen.
+            .child(toolbar_divider(hairline))
+            .child(control_label("Scale", muted, self.type_ramp.micro))
+            .child(self.chooser("chooser-scale", &self.scale_select, cx))
             // The pen's own half of that row: a light hand writes pale as well as thin. Beside the weights it
             // belongs to, and after the page's options so that the pen's controls stay together at the end.
             .child(visibility_switch(
@@ -5987,7 +6184,7 @@ impl NoteApp {
     ) -> impl IntoElement {
         div()
             .id(id)
-            .w(px(112.0))
+            .w(px(112.0 * self.metrics.scale.factor()))
             .child(Select::new(state).small())
             // The box opens the list; it does not close it. `Select` attaches its own toggle *only* while the
             // list is shut (`allow_open`), so a second press on the box is not a press that closes it — and a
@@ -6028,6 +6225,10 @@ impl NoteApp {
                 self.memory_select.clone(),
                 chosen_index(&MemoryMode::ALL, self.settings.memory_mode),
             ),
+            (
+                self.scale_select.clone(),
+                chosen_index(&ScaleStep::ALL, self.metrics.scale),
+            ),
         ];
 
         for (chooser, chosen) in boxes {
@@ -6062,12 +6263,13 @@ impl NoteApp {
     fn bottom_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Full width with a margin's worth of padding, for the reason the bar gives: the width has to
         // come from somewhere, and it cannot come from two insets on the same element.
+        let margin = self.bar_margin();
         let row = div()
             .absolute()
-            .bottom(px(BAR_MARGIN))
+            .bottom(px(margin))
             .left_0()
             .w_full()
-            .px(px(BAR_MARGIN))
+            .px(px(margin))
             .flex()
             .flex_row()
             .items_center()
@@ -6085,7 +6287,7 @@ impl NoteApp {
                 div()
                     .child(self.pill_box(FootPlace::Zoom, self.zoom_pill(cx)))
                     .absolute()
-                    .right(px(BAR_MARGIN))
+                    .right(px(margin))
                     .bottom_0(),
             );
 
@@ -6100,7 +6302,7 @@ impl NoteApp {
     ///
     /// The probe is stretched over the pill it describes and reads the pill's **own box** — `x` bounds and
     /// top edge — which is the whole of what the pen needs: a strip is that box grown by
-    /// [`FOOT_SLACK`], and nothing is worked out again from a width or a margin. A zero-height probe
+    /// [`LayoutMetrics::foot_slack`], and nothing is worked out again from a width or a margin. A zero-height probe
     /// beside the pill is what made this measure nothing at all on the first attempt (a box with no
     /// content and no width is laid out at zero), so the probe is the pill's own size.
     fn pill_box(&self, place: FootPlace, pill: impl IntoElement) -> impl IntoElement {
@@ -6151,10 +6353,10 @@ impl NoteApp {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_1()
-                .px(px(4.0))
-                .py(px(4.0))
-                .rounded(theme.radius_lg)
+                .gap(px(window_px(self.metrics.space_1)))
+                .px(px(window_px(self.metrics.space_1)))
+                .py(px(window_px(self.metrics.space_1)))
+                .rounded(px(window_px(self.metrics.radius_large)))
                 .bg(surface)
                 .border_1()
                 .border_color(hairline)
@@ -6178,7 +6380,7 @@ impl NoteApp {
                 ))
                 .child(
                     div()
-                        .text_size(px(13.0))
+                        .text_size(px(self.type_ramp.base))
                         .text_color(foreground)
                         .whitespace_nowrap()
                         .px_1()
@@ -6208,8 +6410,11 @@ impl NoteApp {
     /// The way the sheet is looked at: two steps, the number they are at, and the two fits.
     fn zoom_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (surface, hairline, radius) =
-            (theme.title_bar, theme.title_bar_border, theme.radius_lg);
+        let (surface, hairline, radius) = (
+            theme.title_bar,
+            theme.title_bar_border,
+            px(window_px(self.metrics.radius_large)),
+        );
 
         // Collected before they are chained, for the reason the page commands give.
         let mut controls: Vec<AnyElement> = Vec::new();
@@ -6226,7 +6431,7 @@ impl NoteApp {
         );
         controls.push(
             div()
-                .w(px(68.0))
+                .w(px(68.0 * self.metrics.scale.factor()))
                 .child(Input::new(&self.zoom_input).small())
                 .into_any_element(),
         );
@@ -6287,9 +6492,9 @@ impl NoteApp {
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
-            .px(px(4.0))
-            .py(px(4.0))
+            .gap(px(window_px(self.metrics.space_1)))
+            .px(px(window_px(self.metrics.space_1)))
+            .py(px(window_px(self.metrics.space_1)))
             .rounded(radius)
             .bg(surface)
             .border_1()
@@ -6404,7 +6609,7 @@ impl NoteApp {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(2.0))
+            .gap(px(2.0 * self.metrics.scale.factor()))
             .children(controls)
     }
 
@@ -6415,18 +6620,19 @@ impl NoteApp {
     /// one edge. The bottom edge is left to navigation — the page pill and the zoom — and that split is
     /// what keeps the pill from being drawn over the corner a person writes in.
     ///
-    /// Offset by the bar's *measured* bottom edge rather than a constant, because the bar's height
+    /// Offset by the bar's *measured* bottom edge rather than an estimate, because the bar's height
     /// depends on what it is carrying (a second row appears with the sheet's settings) and because the
     /// bar can be switched off, in which case the pill hangs from the window's own top margin. Both
     /// come from [`Self::bar_edge`], the one line the pen is judged by, so the pill starts where the
-    /// page starts.
+    /// page starts; the drop below it is the design's own token, at this frame's scale.
     fn status_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let top = self.bar_edge().max(BAR_MARGIN) + STATUS_DROP;
+        let margin = self.bar_margin();
+        let top = self.bar_edge().max(margin) + window_px(self.metrics.status_drop);
 
         div()
             .absolute()
             .top(px(top))
-            .left(px(BAR_MARGIN))
+            .left(px(margin))
             // No width of its own: the pill inside carries `STATUS_PILL_WIDTH`, and a second bound
             // here would be two answers to one question.
             .child(self.status_pill(cx))
@@ -6437,12 +6643,16 @@ impl NoteApp {
     fn status_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
+        let unit = self.metrics.scale.factor();
+
         div()
-            .px(px(10.0))
-            .py(px(6.0))
-            .rounded(theme.radius)
+            .px(px(10.0 * unit))
+            .py(px(6.0 * unit))
+            // The theme's general radius is 10 px at 100%; the pill scales it with the text it holds
+            // rather than leaving a small corner around doubled text.
+            .rounded(px(10.0 * unit))
             .bg(theme.title_bar.opacity(0.92))
-            .text_size(px(11.0))
+            .text_size(px(self.type_ramp.caption))
             .text_color(theme.muted_foreground)
             .max_w(relative(STATUS_PILL_WIDTH))
             // A layer over the desk, like the bar: the pill is read *across* a page, and a page is ink of
@@ -6460,17 +6670,18 @@ impl NoteApp {
     /// The way back when the bar is hidden.
     fn bar_handle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let margin = self.bar_margin();
 
         div()
             .absolute()
-            .top(px(BAR_MARGIN))
-            .right(px(BAR_MARGIN))
+            .top(px(margin))
+            .right(px(margin))
             .flex()
             .flex_row()
             .items_center()
-            .px(px(4.0))
-            .py(px(4.0))
-            .rounded(theme.radius_lg)
+            .px(px(window_px(self.metrics.space_1)))
+            .py(px(window_px(self.metrics.space_1)))
+            .rounded(px(window_px(self.metrics.radius_large)))
             .bg(theme.title_bar)
             .border_1()
             .border_color(theme.title_bar_border)
@@ -6564,7 +6775,7 @@ impl Render for NoteApp {
             // Once per frame: the list is handed what the index holds, given the keyboard when the
             // screen has just appeared, and scrolled to the note the app came from.
             self.home.settle(window, cx);
-            let home = self.home.view(&self.message, cx);
+            let home = self.home.view(&self.message, self.metrics, cx);
 
             return div()
                 .relative()
@@ -6581,7 +6792,9 @@ impl Render for NoteApp {
         if self.marks.is_open() {
             // Once per frame: the list is handed the keyboard when the screen has just appeared.
             self.marks.settle(window, cx);
-            let marks = self.marks.view(&self.note_title, &self.message, cx);
+            let marks = self
+                .marks
+                .view(&self.note_title, &self.message, self.metrics, cx);
 
             return div()
                 .relative()
@@ -6597,7 +6810,9 @@ impl Render for NoteApp {
         // path would tie a change in either to both.
         if self.outline.is_open() {
             self.outline.settle(window, cx);
-            let outline = self.outline.view(&self.note_title, &self.message, cx);
+            let outline = self
+                .outline
+                .view(&self.note_title, &self.message, self.metrics, cx);
 
             return div()
                 .relative()
@@ -6724,6 +6939,11 @@ impl Render for NoteApp {
     }
 }
 
+/// The label the interface-scale chooser shows for a step.
+fn scale_label(step: ScaleStep) -> String {
+    format!("{}%", step.percent())
+}
+
 /// One of the bar's choosers: a list of options, and the one it starts on.
 fn choice(
     labels: &[&'static str],
@@ -6831,9 +7051,9 @@ fn toolbar_divider(color: Hsla) -> impl IntoElement {
 }
 
 /// A small muted caption in front of a group of controls.
-fn control_label(text: &'static str, color: Hsla) -> impl IntoElement {
+fn control_label(text: &'static str, color: Hsla, size: f32) -> impl IntoElement {
     div()
-        .text_size(px(10.0))
+        .text_size(px(size))
         .text_color(color)
         .mr_1()
         .child(text)
@@ -6905,8 +7125,9 @@ fn colour_edge(color: u32, theme: &Theme) -> Hsla {
 ///
 /// Shared by the bar's swatches and the palette's discs, so that one colour cannot come out two colours
 /// depending on where it is drawn — and so the shape a colour has is chosen in one place: a page is a
-/// square, because a page has corners, and a pen's colour is a circle.
-fn colour_chip(color: u32, size: f32, edge: Hsla, circle: bool) -> Div {
+/// square, because a page has corners, and a pen's colour is a circle. `corner` is ignored by a circle
+/// and scaled by the caller for a square.
+fn colour_chip(color: u32, size: f32, edge: Hsla, circle: bool, corner: f32) -> Div {
     let chip = div()
         .w(px(size))
         .h(px(size))
@@ -6917,7 +7138,7 @@ fn colour_chip(color: u32, size: f32, edge: Hsla, circle: bool) -> Div {
     if circle {
         chip.rounded_full()
     } else {
-        chip.rounded(px(4.0))
+        chip.rounded(px(corner))
     }
 }
 
@@ -6942,7 +7163,7 @@ fn palette_disc(
         // A disc of colour says nothing to a screen reader, and nothing to anyone who cannot tell
         // "ivory" from "white" by eye: the name is what both need to hear or see.
         .aria_label(swatch.name)
-        .p(px(2.0))
+        .p(px(geometry.disc_pad()))
         .border_2()
         .border_color(if chosen { ring } else { none })
         .rounded_full()
@@ -6950,7 +7171,7 @@ fn palette_disc(
         .on_click(
             cx.listener(move |app, _, _, cx| app.palette_take(PalettePart::Colour(place), cx)),
         )
-        .child(colour_chip(swatch.color, geometry.disc(), edge, true))
+        .child(colour_chip(swatch.color, geometry.disc(), edge, true, 0.0))
 }
 
 /// One tool of the palette at the pen: a chip with the tool's icon in it, washed in the accent when the
@@ -7018,6 +7239,7 @@ fn swatch_button(
     in_use: bool,
     ring: Hsla,
     circle: bool,
+    geometry: SwatchGeometry,
     cx: &mut Context<NoteApp>,
     handler: impl Fn(&mut NoteApp, u32, &mut Context<NoteApp>) + 'static,
 ) -> impl IntoElement {
@@ -7032,7 +7254,7 @@ fn swatch_button(
         // A square of colour says nothing to a screen reader, and nothing to anyone who cannot tell
         // "ivory" from "white" by eye. The name is what both need to hear or see.
         .aria_label(swatch.name)
-        .p(px(2.0))
+        .p(px(geometry.pad()))
         .border_2()
         .border_color(if in_use { ring } else { none })
         .cursor_pointer()
@@ -7041,11 +7263,17 @@ fn swatch_button(
     button = if circle {
         button.rounded_full()
     } else {
-        button.rounded(px(6.0))
+        button.rounded(px(geometry.corner()))
     };
 
     // The chip is the shared one: the same colour, drawn by the same rule the palette's discs are.
-    button.child(colour_chip(color, 16.0, edge, circle))
+    button.child(colour_chip(
+        color,
+        geometry.chip(),
+        edge,
+        circle,
+        geometry.chip_corner(),
+    ))
 }
 
 #[cfg(test)]
@@ -7058,6 +7286,16 @@ const PAGE_SHADOW: [(f32, f32, u32); 3] = [
     (3.0, 1.0, 0x0000_0014),
 ];
 
+/// The framework boundary: a design length in the window's logical pixels.
+///
+/// GPUI lays a window out in `f32` logical pixels, while [`LayoutPx`] is a whole number of them
+/// behind a type. This is the one place the design module's type is opened, which is what keeps a
+/// design unit from reaching a framework API unscaled and an already-scaled length from being
+/// multiplied a second time (`doc/DESIGN.md` §7.4).
+pub(crate) fn window_px(length: LayoutPx) -> f32 {
+    length.get() as f32
+}
+
 /// The line the bar's own bottom edge is on, in logical window pixels: `0.0` when there is no bar.
 ///
 /// The measured edge is the real line, and it is one line for everything about the pen — ink refuses a
@@ -7066,17 +7304,19 @@ const PAGE_SHADOW: [(f32, f32, u32); 3] = [
 /// strip it covered is page again, and the switch that hid it was *inside* that strip — the one place
 /// where keeping the old edge would put the system arrow under the hand that had just hidden it.
 ///
-/// [`BAR_HEIGHT`] is only the estimate for the frame before the bar has been measured. It is not a
-/// second answer: once a frame has laid the bar out, the measured edge wins, so a bar that wrapped
-/// taller than the estimate hides the ghost across all of itself and a short one leaves the page under
-/// it as page. A measurement of zero is no measurement — a bar that is up has some height — so it falls
-/// back to the estimate too.
-fn bar_line(shown: bool, measured: Option<f32>) -> f32 {
+/// [`LayoutMetrics::bar_height`] is only the estimate for the frame before the bar has been measured.
+/// It is not a second answer: once a frame has laid the bar out, the measured edge wins, so a bar that
+/// wrapped taller than the estimate hides the ghost across all of itself and a short one leaves the
+/// page under it as page. A measurement of zero is no measurement — a bar that is up has some height —
+/// so it falls back to the estimate too.
+fn bar_line(shown: bool, measured: Option<f32>, estimate: LayoutPx) -> f32 {
     if !shown {
         return 0.0;
     }
 
-    measured.filter(|edge| *edge > 0.0).unwrap_or(BAR_HEIGHT)
+    measured
+        .filter(|edge| *edge > 0.0)
+        .unwrap_or_else(|| window_px(estimate))
 }
 
 /// Whether the pen has a cursor of its own at `at`, in window logical pixels.

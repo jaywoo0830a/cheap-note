@@ -861,8 +861,8 @@ fn trapezoid(
     ]);
 }
 
-/// How far the body's shadow is dropped, in logical pixels — the Windows overlay's own offset, so that the
-/// two builds' cursors are one drawing.
+/// How far the body's shadow is dropped, in logical pixels at 100% — the Windows overlay's own offset, so
+/// that the two builds' cursors are one drawing. The interface scale multiplies it with the body.
 const BODY_SHADOW_DROP: [f32; 2] = [3.0, 3.6];
 
 /// How opaque the body's shadow is at full lean: the widest and faintest of the three passes.
@@ -875,22 +875,29 @@ const BODY_SHADOW_ALPHA: f32 = 0.26;
 /// than in a window of its own: a cursor is above the ink and below the interface, and only this pass is.
 fn cursor_vertices(vertices: &mut Vec<Vertex>, mark: &Mark, scale: f32) {
     let scale = if scale > 0.0 { scale } else { 1.0 };
+    let unit = if mark.unit.is_finite() && mark.unit > 0.0 {
+        mark.unit
+    } else {
+        1.0
+    };
     let position = mark.cursor.position();
     let nib = (position[0] * scale, position[1] * scale);
     let fade = mark.cursor.body_fade();
 
-    if let Some(body) = mark.cursor.body_shape() {
-        // Shadow, soft edge, body: the order and the colours the Windows overlay uses.
+    if let Some(body) = mark.cursor.body_shape_at(unit) {
+        // Shadow, soft edge, body: the order and the colours the Windows overlay uses. The body
+        // already carries the interface scale; the passes around it carry it here.
+        let drop = [BODY_SHADOW_DROP[0] * unit, BODY_SHADOW_DROP[1] * unit];
         polygon(
             vertices,
-            &shifted(body.outline(0.0), BODY_SHADOW_DROP),
+            &shifted(body.outline(0.0), drop),
             scale,
             mark.halo,
             BODY_SHADOW_ALPHA * fade,
         );
         polygon(
             vertices,
-            &body.outline(BODY_HALO_GROW),
+            &body.outline(BODY_HALO_GROW * unit),
             scale,
             mark.halo,
             BODY_HALO_ALPHA * fade,
@@ -914,7 +921,7 @@ fn cursor_vertices(vertices: &mut Vec<Vertex>, mark: &Mark, scale: f32) {
     disc(
         vertices,
         nib,
-        radius + NIB_BLOOM_SPREAD * scale,
+        radius + NIB_BLOOM_SPREAD * unit * scale,
         shaded(mark.halo, NIB_BLOOM_ALPHA),
     );
     disc(vertices, nib, radius, shaded(mark.colour, NIB_ALPHA));

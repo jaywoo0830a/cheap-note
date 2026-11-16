@@ -109,7 +109,9 @@ Three details in it are load-bearing:
 as buttons was more than a narrow window holds, and the one that was current had to be found among its
 neighbours rather than read off the control — so size, ruling and pen are *choosers*, each a single box
 showing what is in use with the alternatives in a list under it, while the twelve colours stay a row of
-swatches, which is what a palette is. Each group is captioned, because without the words it would be a
+swatches, which is what a palette is. The swatches are controls like the buttons beside them: their colour,
+white gap and corners follow the interface scale (`SwatchGeometry`), while the hairline edge and the
+selection ring are marks and stay one and two pixels. Each group is captioned, because without the words it would be a
 guess which of the two runs of squares is the paper and which the ink. The pen's weight sits beside the
 ink's colour because the two are one answer — the colour is *which* pen, the weight is *how heavy* it
 is — and its caption is a property (`Gray`) rather than a thing (`Pen`), since `Ink` already captions
@@ -323,7 +325,7 @@ Five facts about the ghost are decided here, and each of them is something a pen
 | whether the pen has a cursor of its own at all | the **ink model**, not a batch, so the cursor survives the batches that lay nothing — most of them, while the pen is merely held over the window — and disappears only when the pen does |
 | where it is and how it leans | the pen's newest reading, in window coordinates, with no sign flip: lean right and the ghost extends right of the nib |
 | where it is *not* drawn | **only below the bar and off the desk's pills**: over the bar it would sit behind an opaque background where it cannot be seen, and over a pill it would point at a control the pen is pressing rather than at paper — and **never on a screen in front of the sheet**: the home list, the marked pages and the document's contents, none of which has a sheet to point at and all of which are meant to be pressed, **nor under a control that hangs over the page** (a chooser's list, the palette at the pen) |
-| the scale, the colours on this paper, and where the bar ends | published to the overlay (`publish_screen`) on the frames where they change, so a new pen colour or paper takes hold at once rather than at the next reading |
+| the display scale, the interface scale, the colours on this paper, and where the bar ends | published to the overlay (`publish_screen`) on the frames where they change, so a new pen colour, paper or interface scale takes hold at once rather than at the next reading |
 | how **thick** the mark is | the same publication (`Screen::nib_radius`): half the width the tool in hand lays, which only the app knows — the pen's weight is a setting, and the marker's band is the tool's |
 
 **The nib's dot is the colour in hand, and it is as wide as the line in hand.** The mark is drawn in the ink the next
@@ -346,6 +348,13 @@ paper is nearly the colour of the rod: the body is painted *three* times, as the
 itself, widest and faintest first. The drop is what makes the rod read as lying *above* the page rather than being
 painted on it, and it is the layer an eye finds first on a page of writing; the halo alone thickens the body's own
 edge, which is no help at all when that edge and the paper are the same colour.
+
+**The body follows the interface scale; the nib mark does not.** The body, its soft edge and its cast shadow are a
+hint drawn for the reader, so `Screen::unit` multiplies their length, widths and offsets with the same step as the bar
+and the palette. The nib mark is a preview of the *ink*, and ink does not follow the interface (DESIGN.md §7.5): its
+radius stays half the width the tool in hand lays, whatever the interface scale is. Scaling it would make the dot say
+a thickness the next stroke would not have, which is the one thing a nib preview must never do. The system pointer is
+the platform's own bitmap and cannot be scaled; it is hidden while the ghost is the cursor.
 
 The system pointer is driven **from the ghost** and not from the pen's range, because the two states
 have to be impossible to separate: a hidden pointer with nothing drawn in its place is a window with no
@@ -421,9 +430,10 @@ puts it away, and nothing else a key means reaches the sheet or the bar under it
   tool is on the bar and for the same reason: an icon alone on a white field is a smudge. The hub is the
   colour the next stroke will be written in, and it is *not* a control, so it is set in a ring of white —
   the one filled circle in the middle that cannot be pressed does not look like the three that can. Its
-  measurements are in §12 with the rest of them — and they are the design's, in 96-DPI logical pixels, so
-  what is drawn is those numbers times `Platform::unit_scale`: a macOS point is four thirds of one, and
-  the same numbers there would be a third too large (`PaletteGeometry`).
+  measurements are in §12 with the rest of them — and they are the design's, in logical pixels, so what
+  is drawn is those numbers at the frame's `ScaleStep`: the palette and the bar beside it are one
+  interface scale, and the different physical size of a macOS point and a Windows logical pixel is the
+  operating system's layer (`PaletteGeometry`, [DESIGN.md](DESIGN.md) §1).
 
 The two list screens keep the app's own chords and nothing else: the arrows, Enter and Escape belong to
 the list that has the focus, and the same chords work there as on the note, because a person looking at
@@ -1064,15 +1074,35 @@ records the change.
 
 ## 12. The numbers, in one table
 
-| Constant | Value | What it decides |
+The window-furniture rows below — `PAGE_MARGIN`, `BAR_MARGIN`, `BAR_HEIGHT`, `SCREEN_MARGIN`,
+`FOOT_BAND`, `FOOT_SLACK` and `STATUS_DROP` — are the design module's tokens, and the view reads them
+from one `LayoutMetrics` snapshot rather than from constants of its own. The values below are the
+shipped 100% step; every one of them moves with the interface scale, and the seven together cannot
+disagree about what that scale is. The `SPACE_*` and `RADIUS_*` tokens are read from the same
+snapshot by the bar and the three full screens. The other rows are the view's own definitions: the
+`PALETTE_*` lengths follow the same step as one factor (`PaletteGeometry`), while the rest —
+fractions, intervals and the shadow — do not follow the interface scale at all.
+
+The **Scale** chooser on the bar's second row changes every window-furniture, spacing and radius
+token above together. It is the one machine preference rather than a note setting, so its index lives
+in `prefs.json` beside the notes (see [DESIGN.md](DESIGN.md) §7.2) and applies before any note is open.
+
+Type follows the same step through a separate `TypeRamp`: 13px body, 10px micro labels, 11px
+captions and 15px title at 100%. The base is given to the theme, and GPUI Kit uses the theme's font
+size as the window's rem size — so `text_sm`, `text_lg`, icons and the component library's own
+padding scale without touching every call site. The other three roles are used only where a size is
+spelled in pixels: the bar's control names, the status pill and the title chip.
+
+| Token | Value at 100% | What it decides |
 |---|---|---|
 | `PAGE_MARGIN` | 24 logical px | the margin between the sheet and the window's edges — the strip the floating bar covers |
+| `SCREEN_MARGIN` | 56 logical px | the air the home, bookmarks and contents screens keep from the window's edges: their card reads as a page rather than as a panel |
 | `BAR_MARGIN` | 12 logical px | how far the floating bar and the page pill sit from the window's edges: the desk showing in that gap is what makes the sheet read as paper on a desk |
 | `BAR_HEIGHT` | 148 logical px | the estimate `bar_edge` falls back to only on the frame before the bar has been measured; the *measured* edge is the one line ink, the ghost cursor and the system pointer all use |
 | `FOOT_BAND` | 72 logical px | the estimate `foot_edge` falls back to only until a frame has measured the pills at the desk's foot; an upper bound, so the first frame refuses a little more desk rather than writing on a pill |
 | `FOOT_SLACK` | 12 logical px | how far past a pill's own edge a reading still counts as a press on it: a nib that lands just beside a button is a press that missed, not a line |
 | `STATUS_PILL_WIDTH` | 0.6 | the fraction of the window the status pill may use; it wraps, and the fraction is what decides into how many lines |
-| `STATUS_DROP` | `BAR_MARGIN` (12 logical px) | how far below the bar's measured bottom edge the status pill hangs |
+| `STATUS_DROP` | 12 logical px at 100% | how far below the bar's measured bottom edge the status pill hangs — its own design token, resolved from the same snapshot |
 | `STATUS_REFRESH_INTERVAL` | 1 s | how often the status line's counters are rebuilt while a note is in front: a readout's pace, not a frame's |
 | `MEASURE_KEY` | `Ctrl+M` | the session's one key, for starting and for stopping: named once, and the line that reports on a session says it out loud |
 | `HOUSEKEEPING_INTERVAL` | 1 ms | the housekeeping pump's own clock: a fixed floor, not a rate taken from the display, and the shortest wait that still parks the task rather than spinning it |
@@ -1080,13 +1110,14 @@ records the change.
 | `PDF_PIXEL_WIDTHS` | 1024, 1536, 2304, 3456 | the ladder a request is quantised onto; the rungs are half again as wide each time because the cost is quadratic |
 | `PDF_RENDER_SCALE` | 2.0 | the bitmap-width multiplier: twice the logical width keeps page text crisp when scaled, and is paid once per page |
 | `PALETTE_KEY` | `Ctrl+Shift+C` | the palette at the pen's one chord, for opening it and for putting it away; the status line says so while it is up |
-| `PALETTE_RING_RADIUS` / `PALETTE_TOOL_RADIUS` | 104 / 54 logical px | how far the colours and the three tools sit from the palette's centre: the tools are in the well inside and the colours are on the ring outside, and both rings are far enough out that no point on the palette is within reach of two controls |
-| `PALETTE_DISC` / `PALETTE_DISC_BOX` | 30 / 38 logical px | a colour disc, and the box it draws in — the box carries the ring that marks the keyboard's place, so a placement is measured in the box rather than in the disc |
-| `PALETTE_TOOL_DISC` / `PALETTE_TOOL_ICON` | 38 / 20 logical px | a tool chip, and the icon inside it: a little over half, which is the proportion the bar's own tool buttons are drawn at |
-| `PALETTE_HUB` / `PALETTE_HUB_RING` | 44 / 4 logical px | the colour the next stroke is written in, and the ring of white it is set in: the readout at the centre is the one filled circle there that is not a control, and it is drawn so as not to look like one |
-| `PALETTE_WELL` / `PALETTE_WELL_PAD` | 158 / 6 logical px | the well the hub and the tools sit in, and the gap between its rim and the outermost chip: the fill that makes the middle of the palette a zone of its own |
-| `PALETTE_REACH` | 24 logical px | how near a tap has to come to a colour's centre to be that colour: a disc's radius plus the slack a hand needs, and under half the gap between two colours on the densest ring |
-| `PALETTE_MARGIN` / `PALETTE_PAD` / `PALETTE_RADIUS` | 8 / 14 / 133 logical px | how far the palette is kept from the window's edge, the white the ring of colours is given inside it, and the square it is drawn in: the ring radius, half a disc, and that white |
+| `PALETTE_RING_RADIUS` / `PALETTE_TOOL_RADIUS` | 65 / 32 logical px | how far the colours and the three tools sit from the palette's centre: the tools are in the well inside and the colours are on the ring outside, and both rings are far enough out that no point on the palette is within reach of two controls |
+| `PALETTE_DISC` / `PALETTE_DISC_BOX` | 20 / 28 logical px at 100% | a colour disc, and the box it draws in — the box carries the white gap and the ring that marks the keyboard's place, so a placement is measured in the box rather than in the disc |
+| `PALETTE_DISC_PAD` / `PALETTE_DISC_RING` | 2 / 2 logical px | the white gap between a disc and its selection ring, and the ring itself: the gap follows the interface scale with the disc, the ring is a mark and stays two pixels |
+| `PALETTE_TOOL_DISC` / `PALETTE_TOOL_ICON` | 26 / 14 logical px | a tool chip, and the icon inside it: a little over half, which is the proportion the bar's own tool buttons are drawn at |
+| `PALETTE_HUB` / `PALETTE_HUB_RING` | 28 / 3 logical px | the colour the next stroke is written in, and the ring of white it is set in: the readout at the centre is the one filled circle there that is not a control, and it is drawn so as not to look like one |
+| `PALETTE_WELL` / `PALETTE_WELL_PAD` | 98 / 4 logical px | the well the hub and the tools sit in, and the gap between its rim and the outermost chip: the fill that makes the middle of the palette a zone of its own |
+| `PALETTE_REACH` | 16 logical px | how near a tap has to come to a colour's centre to be that colour: a disc's radius plus the slack a hand needs, and under half the gap between two colours on the densest ring |
+| `PALETTE_MARGIN` / `PALETTE_PAD` / `PALETTE_RADIUS` | 6 / 10 / 85 logical px | how far the palette is kept from the window's edge, the white the ring of colours is given inside it, and the square it is drawn in: the ring radius, half a disc, and that white. The square is 170 px across at 100% — deliberately compact because it opens over the page |
 | `BATCH_INTERVAL` / `BATCH_STROKES` | 500 ms / 200 | how long ink may wait in memory, and how much of it may |
 | `CHECKPOINT_QUIET_INTERVAL` / `CHECKPOINT_INTERVAL` | 5 s / 5 min | when the write-ahead log may be folded back into the note file, and how rarely |
 | `PAGE_SHADOW` | three steps | the spread, the offset beyond the spread, and the colour of each of the three rectangles a sheet's shadow is made of, widest and faintest first |
@@ -1097,11 +1128,14 @@ records the change.
 | `FrameCap` (`frame_cap`) | `Unlimited` | the most frames a second the canvas draws, whatever the display can show: `60`, `144`, `180`, `240`, `360` or none. A ceiling on the canvas's own work, checked against the time since the last frame was handed over, and not a display mode — a display slower than the chosen rate simply draws at its own |
 | `vsync` | on | whether a frame waits for the display's clock before it is shown: `CAMetalLayer.displaySyncEnabled` on macOS, nothing on Windows, which presents at a sync interval of zero always. With no `frame_cap` of its own, the switch moves the rate by about forty percent — 177 draws/s off against 124 on, on a 144 Hz display — so it is a real pacer and not a cosmetic flag. A cap tighter than the display's rate binds first and hides it (§11) |
 
-Every `PALETTE_*` length above is a *design* number, in the 96-DPI logical pixels a Windows display
-measures in. The palette is drawn at those numbers times `Platform::unit_scale` — `1.0` on Windows and
-`0.75` on macOS, whose logical pixel is a point — so it is the same size in the hand on both
-(`PaletteGeometry`). The rings, the discs, the well, the margin and the reach of a tap all move by that
-one factor, which is what keeps the gaps the palette's tests pin proportional at either size.
+Every `PALETTE_*` length above is a *design* number, in the logical pixels the interface is laid out
+in. The palette is drawn at those numbers at the frame's `ScaleStep` (`PaletteGeometry`), the same step
+the window's furniture uses: the palette is not made of four-unit layout tokens, so it follows the step
+as one factor rather than through `px()`. The rings, the discs, the well, the white gap around a colour,
+the margin and the reach of a tap all move by that one factor, which keeps the gaps the palette's tests
+pin proportional at every
+step. A platform's physical density is not part of it — the windowing system already owns that
+([DESIGN.md](DESIGN.md) §1).
 
 ### The hardware clause
 

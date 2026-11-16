@@ -57,12 +57,13 @@
 
 use crate::input::{Phase, Reading, Tilt};
 
-/// How long the drawn body is, in logical pixels, when the pen is laid flat.
+/// How long the drawn body is, in logical pixels at 100%, when the pen is laid flat.
 ///
 /// A real pen is about 140 mm, which at this sheet's scale is longer than a hand wants on screen,
 /// so the length is chosen for the eye and only the lean scales it. It is deliberately shorter than
 /// a pen *and* fainter than the nib mark: the body is a hint about the angle, and a long dark one
-/// competes with the page it is drawn on.
+/// competes with the page it is drawn on. The interface scale multiplies it; see
+/// [`PenCursor::body_shape_at`].
 /// Public because the ghost cursor is no longer drawn by the frame: the window it is drawn in has
 /// to be big enough for the body, and that is the longest this number can be (see
 /// [`crate::cursor_overlay`]).
@@ -81,10 +82,10 @@ const MIN_LEAN_DEGREES: f32 = 4.0;
 /// settles into a pen. See [`PenCursor::body_fade`].
 const FULL_LEAN_DEGREES: f32 = 16.0;
 
-/// How wide the drawn body is at the nib, in logical pixels.
+/// How wide the drawn body is at the nib, in logical pixels at 100%.
 const BODY_NIB_WIDTH: f32 = 1.2;
 
-/// How wide the drawn body is at its far end, in logical pixels.
+/// How wide the drawn body is at its far end, in logical pixels at 100%.
 ///
 /// The taper is what makes the shape read as a pen rather than as a smudge, and it is also what
 /// carries the direction: the narrow end is the nib, so the ghost cannot be read the wrong way
@@ -231,8 +232,17 @@ impl PenCursor {
         (length > 0.0).then(|| [x / length, y / length])
     }
 
-    /// How long the drawn body is, in logical pixels.
+    /// How long the drawn body is, in logical pixels at 100%.
     pub fn body_length(self) -> f32 {
+        self.body_length_at(1.0)
+    }
+
+    /// How long the drawn body is after the interface scale has been applied.
+    ///
+    /// `unit` is the interface scale's factor — `1.0` at 100%, `0.5` at 50% — not the window's DPI
+    /// scale. The body is an interface hint, so it follows the person's own scale; the nib mark is
+    /// not, because it previews the ink's width (see [`nib_radius_for_width`]).
+    pub fn body_length_at(self, unit: f32) -> f32 {
         let lean = self.lean_degrees();
         if lean < MIN_LEAN_DEGREES {
             return 0.0;
@@ -240,7 +250,7 @@ impl PenCursor {
 
         // A pen of length L leaning by `lean` from the normal projects to `L * sin(lean)` on the
         // screen, so the drawn length *is* the angle rather than a decoration of it.
-        BODY_LENGTH * lean.to_radians().sin()
+        BODY_LENGTH * sane_unit(unit) * lean.to_radians().sin()
     }
 
     /// How strongly the body is drawn, from nothing at [`MIN_LEAN_DEGREES`] to full at
@@ -255,25 +265,48 @@ impl PenCursor {
         ((lean - MIN_LEAN_DEGREES) / (FULL_LEAN_DEGREES - MIN_LEAN_DEGREES)).clamp(0.0, 1.0)
     }
 
-    /// The pen's body as a shape to draw, or `None` when the pen is too upright to show one.
+    /// The pen's body as a shape to draw at 100%, or `None` when the pen is too upright to show one.
+    pub fn body_shape(self) -> Option<Body> {
+        self.body_shape_at(1.0)
+    }
+
+    /// The pen's body as a shape to draw after the interface scale has been applied.
     ///
     /// `Body` is `Copy` and its outline is a fixed array rather than a path, so building it costs
     /// no allocation: this is rebuilt whenever the pen moves.
-    pub fn body_shape(self) -> Option<Body> {
+    ///
+    /// `unit` scales the body's length and its two widths, so the whole rod keeps its proportions.
+    /// The soft edge and the cast shadow are scaled by the caller, because they are passes *around*
+    /// this shape rather than part of it.
+    pub fn body_shape_at(self, unit: f32) -> Option<Body> {
         let along = self.lean_direction()?;
-        let length = self.body_length();
+        let length = self.body_length_at(unit);
         if length <= 0.0 {
             return None;
         }
+
+        let unit = sane_unit(unit);
 
         Some(Body {
             nib: [self.x, self.y],
             along,
             across: [-along[1], along[0]],
             length,
-            nib_half: BODY_NIB_WIDTH / 2.0,
-            tail_half: BODY_TAIL_WIDTH / 2.0,
+            nib_half: BODY_NIB_WIDTH * unit / 2.0,
+            tail_half: BODY_TAIL_WIDTH * unit / 2.0,
         })
+    }
+}
+
+/// A scale factor of nought, a negative, or a NaN is a scale of one.
+///
+/// One bad number should leave the cursor at its shipped size rather than erase it or fill the
+/// window with it.
+fn sane_unit(unit: f32) -> f32 {
+    if unit.is_finite() && unit > 0.0 {
+        unit
+    } else {
+        1.0
     }
 }
 

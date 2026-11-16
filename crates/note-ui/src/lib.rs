@@ -23,6 +23,8 @@
 //! | ----------- | ------------------------------------------------------------------ |
 //! | [`input`]   | one pen reading in the app's own terms, and the queue it arrives through |
 //! | [`platform`]| the seam: what a platform lends the view                          |
+//! | [`design`]  | the one interface scale: design units to whole logical pixels      |
+//! | `prefs`     | the interface scale itself, kept beside the notes (`prefs.json`)   |
 //! | `keys`      | the chords, and how this platform writes them (`Ctrl+Z`, `⌘Z`)     |
 //! | [`pen_gesture`] | what a held key makes the pen do: space pans, option zooms      |
 //! | [`ink`]     | readings to strokes: edges, resampling, width, erasing             |
@@ -62,7 +64,8 @@
 //!
 //! [`doc/ARCHITECTURE.md`](../../doc/ARCHITECTURE.md) is the picture of the whole program: which
 //! thread owns what, what crosses a thread boundary, and what may wait for what.
-//! [`doc/VIEW.md`](../../doc/VIEW.md) is why the view is the way it is, and
+//! [`doc/VIEW.md`](../../doc/VIEW.md) is why the view is the way it is,
+//! [`doc/DESIGN.md`](../../doc/DESIGN.md) is the interface's one scale, and
 //! [`doc/STORE.md`](../../doc/STORE.md) follows one stroke to the disk and back.
 //!
 //! A note is a folder under the user's application data — a SQLite file, the document, and anything
@@ -75,6 +78,7 @@
 //! opens that instead, and skips the list.
 
 pub mod cursor;
+pub mod design;
 pub mod error;
 pub mod ink_layer;
 pub mod input;
@@ -95,6 +99,7 @@ mod pages;
 mod pdf;
 mod pdfium;
 mod pen_gesture;
+mod prefs;
 mod recent;
 pub mod report;
 mod settings;

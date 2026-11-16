@@ -1,4 +1,5 @@
 use super::{palette, FONT, FONT_FAMILY};
+use crate::design::TypeRamp;
 use gpui_kit::component::theme::ThemeMode;
 
 /// The tokens the view and the type scale are read from, pinned to their values.
@@ -15,7 +16,7 @@ fn the_palette_names_every_token_the_view_reads() {
     assert_eq!(config.name.as_ref(), "GoodNotes");
     assert!(matches!(config.mode, ThemeMode::Light));
     assert_eq!(config.font_family.as_deref(), Some(FONT_FAMILY));
-    assert_eq!(config.font_size, Some(13.0));
+    assert_eq!(config.font_size, Some(TypeRamp::default().base));
     assert_eq!(config.radius, Some(10));
     assert_eq!(config.radius_lg, Some(16));
     assert_eq!(config.shadow, Some(true));

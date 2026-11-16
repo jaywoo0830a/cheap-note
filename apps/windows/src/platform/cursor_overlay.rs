@@ -135,6 +135,20 @@ const BODY_SHADOW_ALPHA: f32 = 0.26;
 const REACH: f32 =
     BODY_LENGTH_LONGEST + BODY_HALO_GROW + BODY_SHADOW_REACH + NIB_RADIUS_MAX + NIB_BLOOM_SPREAD;
 
+/// How far the shape reaches from the nib at an interface scale.
+///
+/// The body, its halo and its shadow follow the interface scale; the nib mark and its bloom are
+/// kept at the ink's own width. The window is sized from this so a scaled body is not clipped.
+fn reach(unit: f32) -> f32 {
+    let unit = sane_unit(unit);
+
+    BODY_LENGTH_LONGEST * unit
+        + BODY_HALO_GROW * unit
+        + BODY_SHADOW_REACH * unit
+        + NIB_RADIUS_MAX
+        + NIB_BLOOM_SPREAD * unit
+}
+
 /// How many scanlines are sampled per pixel row when a shape is filled.
 ///
 /// Four is the usual bargain for a shape this size: the error is a sixteenth of a pixel of
@@ -158,6 +172,11 @@ pub struct CursorShape {
     pub cursor: PenCursor,
     /// Physical pixels per logical pixel.
     pub scale: f32,
+    /// The interface scale's factor, for the body's own size: `1.0` at 100%, `2.0` at 200%.
+    ///
+    /// The nib mark is deliberately *not* multiplied by this: it previews the ink's width, and ink
+    /// does not follow the interface scale (see `doc/DESIGN.md` §7.5).
+    pub unit: f32,
     /// The colour the ghost's *mark* is drawn in, as `0xRRGGBB`: the ink the ghost is a ghost of.
     pub colour: u32,
     /// The colour of the soft edge under the mark, and of the nib's bloom.
@@ -190,13 +209,23 @@ pub struct CursorShape {
 /// window is still created, and the ghost is still drawn, at the size one physical pixel per
 /// logical pixel would have given it.
 pub fn surface_span(scale: f32) -> i32 {
+    let scale = sane_scale(scale);
+
+    ((REACH * 2.0 * scale).ceil() as i32).max(16) | 1
+}
+
+/// The side of the overlay's window at a platform scale **and** an interface scale.
+///
+/// The body grows with [`Screen::unit`], so the window has to grow with it or a leaning pen's far
+/// end is clipped. `unit` is the factor of the interface scale, not the display's density.
+pub fn surface_span_at(scale: f32, unit: f32) -> i32 {
     let scale = if scale.is_finite() && scale > 0.0 {
         scale
     } else {
         1.0
     };
 
-    ((REACH * 2.0 * scale).ceil() as i32).max(16) | 1
+    ((reach(unit) * 2.0 * scale).ceil() as i32).max(16) | 1
 }
 
 /// Where the overlay's window goes so that the nib lands on the centre of its surface, in screen
@@ -299,6 +328,7 @@ impl Surface {
     /// here rather than by the caller: the reading is the input and the pixels are the output.
     pub fn draw(&mut self, shape: &CursorShape, nib: [f32; 2], band: Band) {
         let scale = sane_scale(shape.scale);
+        let unit = sane_unit(shape.unit);
         let colour = rgb_of(shape.colour);
         let halo = rgb_of(shape.halo);
         let origin = shape.cursor.position();
@@ -311,8 +341,9 @@ impl Surface {
 
         // The body is absent for a pen with no tilt sensor, and for one held straight up: it fades
         // in as the lean grows, so the threshold is not a shape appearing out of nothing.
-        if let Some(body) = shape.cursor.body_shape() {
+        if let Some(body) = shape.cursor.body_shape_at(unit) {
             let fade = shape.cursor.body_fade();
+            let drop = [BODY_SHADOW_DROP[0] * unit, BODY_SHADOW_DROP[1] * unit];
 
             // Three passes over one shape, widest and faintest first — the order the page's own shadow
             // is painted in, and the whole of what makes the rod findable. The shadow is the same body
@@ -320,8 +351,13 @@ impl Surface {
             // this app knows can be seen on the paper in front; the edge is that colour too, so the two
             // read as one soft shadow around the body rather than as an outline with a line beside it.
             for (grow, shift, alpha, tint) in [
-                (0.0, BODY_SHADOW_DROP, BODY_SHADOW_ALPHA * fade, halo),
-                (BODY_HALO_GROW, [0.0, 0.0], BODY_HALO_ALPHA * fade, halo),
+                (0.0, drop, BODY_SHADOW_ALPHA * fade, halo),
+                (
+                    BODY_HALO_GROW * unit,
+                    [0.0, 0.0],
+                    BODY_HALO_ALPHA * fade,
+                    halo,
+                ),
                 (0.0, [0.0, 0.0], BODY_ALPHA * fade, colour),
             ] {
                 let shifted = |p: [f32; 2]| map([p[0] + shift[0], p[1] + shift[1]]);
@@ -339,7 +375,7 @@ impl Surface {
         // be written and where.
         let mark = sane_radius(shape.nib_radius);
         for (radius, alpha, tint) in [
-            (mark + NIB_BLOOM_SPREAD, NIB_BLOOM_ALPHA, halo),
+            (mark + NIB_BLOOM_SPREAD * unit, NIB_BLOOM_ALPHA, halo),
             (mark, NIB_ALPHA, colour),
         ] {
             self.fill_disc(nib, radius * scale, band, alpha, tint);
@@ -632,6 +668,15 @@ fn sane_scale(scale: f32) -> f32 {
     }
 }
 
+/// An interface scale that can be multiplied by, and by 1.0 when it cannot.
+fn sane_unit(unit: f32) -> f32 {
+    if unit.is_finite() && unit > 0.0 {
+        unit
+    } else {
+        1.0
+    }
+}
+
 /// A nib mark's radius that can be draw with, held between the two the shape declares.
 ///
 /// [`note_ui::cursor::nib_radius_for_width`] already clamps what the app sends, so this is the *drawing's* own
@@ -684,6 +729,7 @@ fn cursor_for(sample: Reading, screen: &Screen) -> Option<(Reading, CursorShape)
     let shape = CursorShape {
         cursor,
         scale: screen.scale,
+        unit: screen.unit,
         colour: screen.colour,
         halo: screen.halo,
         nib_radius: screen.nib_radius,
@@ -969,7 +1015,7 @@ impl Overlay {
             corner.y as f32 + sample.pixel.y,
         ];
 
-        let span = surface_span(shape.scale);
+        let span = surface_span_at(shape.scale, shape.unit);
         self.resize(span)?;
 
         let origin = window_origin(nib_screen, span);
@@ -1221,6 +1267,7 @@ mod tests {
     fn screen() -> Screen {
         Screen {
             scale: 1.0,
+            unit: 1.0,
             colour: 0x00_00_00,
             halo: 0x00_00_00,
             nib_radius: note_ui::cursor::nib_radius_for_width(4.5),
@@ -1466,6 +1513,17 @@ mod tests {
             "a scale factor that cannot be multiplied by is treated as one"
         );
         assert_eq!(surface_span(f32::NAN), surface_span(1.0));
+
+        assert!(
+            surface_span_at(1.0, 2.0) > surface_span_at(1.0, 1.0),
+            "a larger interface gets a larger ghost window"
+        );
+        assert_eq!(
+            surface_span_at(1.0, 0.0),
+            surface_span_at(1.0, 1.0),
+            "an interface scale that cannot be multiplied by is treated as one"
+        );
+        assert_eq!(surface_span_at(1.0, f32::NAN), surface_span_at(1.0, 1.0));
     }
 
     /// Placing the window and drawing the nib in it is lossless: the fraction the floor left over is

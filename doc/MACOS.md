@@ -250,13 +250,14 @@ so a scroll taken past the end of a sheet leaves no invisible offset for the nex
 
 ## 5. The seam change the port needed
 
-Only one addition above the seam turned out to be necessary, and it is defaulted so the Windows build is
-unchanged:
+One addition above the seam was needed for a while, and is now gone:
 
-* **`Platform::unit_scale`** is a number rather than a method: the factor a length designed in 96-DPI
-  logical pixels is multiplied by to be the same physical size here. macOS answers `0.75` (a point is
-  four thirds of a Windows logical pixel) and `PaletteGeometry` reads it, so the palette is the same size
-  in the hand as on Windows. Windows answers `1.0`, and nothing it draws changes.
+* **`Platform::unit_scale`** was a per-platform factor that scaled the palette down by three quarters
+  on the Mac, so that a point and a Windows logical pixel produced the same physical size. It has been
+  removed: the design module ([DESIGN.md](DESIGN.md)) now owns one interface scale for every length, so
+  the two platforms lay out the same *logical* interface, and the different physical size of a point
+  and a 96-DPI logical pixel is left to the operating system's own density. `PaletteGeometry` reads the
+  frame's `ScaleStep`, exactly like the bar beside it.
 
 The change the earlier draft anticipated — an `InkSurface::paints_in_frame` default, to let the frame
 paint a canvas that lived *inside* it — was **not needed**: the Mac chose the `CAMetalLayer` (option B in

@@ -1,16 +1,17 @@
 //! What a note remembers: every choice there is to make, and the row each one is written in.
 //!
-//! ## There is no global state
+//! ## There is no global state, except the interface's size
 //!
-//! Everything a person can choose belongs to the **note it was chosen in** — the paper, the ruling, the
-//! colours, the pen, the zoom, how the pen *feels* in the hand, whether the bar is shown, and where that
-//! note was last written out. Nothing is remembered for the app as a whole, so a sketchbook in grid
-//! written with a marker and a diary in rules written with a fine pen open as themselves, and neither
-//! hands the other its sheet, its pen or its switches.
+//! Everything a person can choose *about a note* belongs to the **note it was chosen in** — the paper,
+//! the ruling, the colours, the pen, the zoom, how the pen *feels* in the hand, whether the bar is
+//! shown, and where that note was last written out. Nothing else is remembered for the app as a whole,
+//! so a sketchbook in grid written with a marker and a diary in rules written with a fine pen open as
+//! themselves, and neither hands the other its sheet, its pen or its switches.
 //!
-//! The one file the app keeps outside a note is the *index* of what has been opened (see
-//! the app's `recent` index), and it is not a setting: it is a cache of the notes folder — which notes are
-//! there, and what is in them — and it says nothing about how any of them is written on.
+//! Two files live outside a note. The *index* of what has been opened is a cache of the notes folder,
+//! not a setting (see the app's `recent` module). The interface's size is a setting, but it is the
+//! *person's* and the machine's rather than a note's, so it lives beside the notes in `prefs.json`
+//! (see the app's `prefs` module, and [DESIGN.md](../../doc/DESIGN.md) §7.2).
 //!
 //! **A blank sheet that is closed on loses the choice made on it.** With no note open there is nowhere
 //! to write an answer: the app starts on the shipped sheet, and a note made from a blank page is told

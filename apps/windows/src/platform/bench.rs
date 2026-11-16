@@ -338,7 +338,7 @@ fn page(strokes: usize) -> Canvas {
         origin: (MARGIN, MARGIN),
         zoom: 1.0,
         paper: SHEET,
-        visible: [0.0, 0.0, SHEET.0, SHEET.1],
+        visible: [0.0, 0.0, SHEET.0, SHEET.1].into(),
         revision: 1,
         ..Default::default()
     };
@@ -358,7 +358,7 @@ fn page(strokes: usize) -> Canvas {
             points,
             color: 0x1B_1B_1F,
             outline: Vec::new(),
-            bounds: [0.0; 4],
+            bounds: [0.0; 4].into(),
         };
         stroke.close();
         list.push(Arc::new(stroke));

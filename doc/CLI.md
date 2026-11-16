@@ -117,6 +117,26 @@ hand-off", and **`frame` is the figure to compare across platforms**, not `prese
 
 The macOS table says so on its own summary line rather than leaving a reader to find out.
 
+### `warm` on macOS has a floor, and it is the display's clock
+
+`warm` on macOS does not measure the renderer alone: it cannot fall below one refresh interval, because
+the frame's first act is to ask `CAMetalLayer` for a drawable and that call waits when the layer's few
+buffers are all still with the compositor. Measured on an arm64 laptop, `warm` sits at **8.2–8.5 ms for
+every page from 0 to 8 182 strokes** — 8.33 ms is a 120 Hz tick — while `present` grows with the page
+(0.66 ms at 0 strokes, 4.8 ms at 8 182). A sampler attributes **98.3 % of the main thread's samples to
+`IOSurface`** and 0.3 % to this app: the thread is parked in the drawable call, not drawing.
+
+Two things follow, and both are worth knowing before reading the table as a renderer's report:
+
+* **`warm` says nothing about the ink.** A page with no strokes and a page with 8 182 cost the same
+  `warm`, because what is being timed is the wait for the next tick. Comparing `warm` across pages, or
+  across machines with different panels, compares refresh rates rather than code.
+* **`warm` missed by a lot is still the real signal.** A frame whose own work exceeds the interval runs
+  over into the next, so a `warm` of, say, 25 ms is the renderer plus one wait and is not a tie.
+
+`present` and `rebuild` are the figures that respond to the page, so a claim about drawing cost should
+rest on those. `--frames` does not change the floor: 10, 100 and 400 warm frames all read 8.1–8.3 ms.
+
 The default counts are 0, 29, 316, 1 000 and 8 182 strokes, and both platforms default to 30 warm
 frames. The first three counts are the ones the older measurements used, and 8 182 is the page the macOS
 figures in `doc/WINDOWS.md` were taken on — it is in the list because the question this benchmark exists

@@ -309,6 +309,24 @@ pen, and stay unchecked in the repository because they need the hardware in hand
 | a release crash says nothing | `panic = "abort"` drops the message of a panic inside an AppKit callback | `std::panic::set_hook` in `main` prints it before the abort (and a backtrace with `RUST_BACKTRACE`) |
 | scrolling stuttered | baking the origin into the triangles re-tessellated the page per trackpad reading | bake in the paper's units, place with a uniform (§4.4) |
 | the ghost eased instead of tracking | a layer animates `frame`/`contents` by default | `CATransaction.setDisableActions(true)` (§4.3) |
+| the benchmark's `warm` looked page-independent | the frame's first act is asking `CAMetalLayer` for a drawable, which waits for the display when the layer's buffers are still out; `warm` therefore cannot fall below one refresh interval (8.2–8.5 ms at 120 Hz, for 0 strokes and 8 182 alike) | read `present` and `rebuild` for drawing cost; `doc/CLI.md` says so under the table. A sampler puts 98.3 % of the main thread in `IOSurface` and 0.3 % in this app — the thread is parked, not drawing |
+
+### Profiling a release build
+
+`[profile.release-sym]` in the root `Cargo.toml` inherits the release profile and adds `debug = 1` — line
+tables and function names, with `lto` and `codegen-units` untouched, because a profile of a differently
+inlined binary points at code that is not the code that ships. It is never bundled.
+
+```sh
+cargo build --profile release-sym -p cheap-note-macos
+samply record --save-only -o /tmp/warm.json.gz -- ./target/release-sym/cheap-note --bench --format json --strokes 316 --frames 400
+```
+
+Check that the profiled binary reproduces the release `warm` before believing a profile: the same
+8.16 ms on both is what makes the samples worth reading. `samply` writes addresses rather than names for
+frames inside the dyld shared cache (`IOSurface`, `Metal`), which is why the method behind them is named
+by what the stack is doing rather than by a symbol.
+
 
 ## 9. Where the pieces are
 

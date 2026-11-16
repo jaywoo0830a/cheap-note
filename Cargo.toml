@@ -35,6 +35,17 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 
+# The release build with its symbols kept, for profiling only — never shipped.
+#
+# `[profile.release]` strips nothing but `lto = "thin"` + `codegen-units = 1` do inline across crates, so a
+# sampler's stack has names only if the binary keeps its own. `debug = 1` is line tables alone: enough for
+# `samply` to say which function a sample landed in, at a fraction of full debug info's size. Inlining is
+# left exactly as the release build has it, because a profile of a differently-optimised binary would
+# point at code that is not the code that runs.
+[profile.release-sym]
+inherits = "release"
+debug = 1
+
 # One dependency is vendored because a published release broke an assumption this platform's
 # canvas is built on. `gpui-pre-windows` 0.3.12 moved GPUI's DirectComposition target from the
 # window's topmost layer to its non-topmost one; Windows has only those two layers, and the canvas

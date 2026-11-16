@@ -1,140 +1,158 @@
-2026년 11월 기준으로 네 가지 플랫폼의 Rust 런타임 성능 극한 최적화 옵션을 정리했습니다. 이 시점의 핵심 변화는 **LLVM 22 기반 Rust 1.95+** 가 보편화되면서 **Apple M5/A19**까지 `target-cpu`로 공식 지정할 수 있게 되었고, **BOLT는 여전히 Linux/ELF 전용**이라 Windows와 macOS에서는 **PGO만** 사용할 수 있다는 점입니다.
+# COMPILE.md — 빌드 전략 (이 저장소에서 측정한 것만)
+
+이 문서는 **실측 결과**만 적습니다. 아래 측정 환경이 아니면 다른 숫자와 비교하지 마세요.
+원본 초안(일반론)은 `git show 82dd868:COMPILE.md`로 볼 수 있었으나, 이 환경에서 틀린 전제가 여럿이라
+검증 결과로 대체했습니다.
+
+## 측정 환경
+
+| 항목 | 값 |
+|---|---|
+| 칩 | **Apple M6** (초안은 M5를 최신이라 했으나 이 머신은 M6) |
+| 디스플레이 | 2560×1600, **120 Hz** → `warm`의 하한 = 8.33 ms |
+| rustc | **1.99.1** (초안은 1.95+) |
+| LLVM | **23.1.1** (초안은 22) |
+| 호스트 타겟 | `aarch64-apple-darwin` |
+
+**측정 지표는 `rebuild`입니다.** `warm`은 디스플레이 대기라 잉크와 무관합니다
+(`doc/CLI.md` §"`warm` on macOS has a floor"). 방법은 base/PGO **교대 실행** 후 중앙값 + 95% CI.
 
 ---
 
-## 🪟 Windows 11 · Intel
-
-### `target-cpu` 선택
-2026년 11월 기준 주력은 **Arrow Lake(Core Ultra 200S)** 와 **Lunar Lake(Core Ultra 200V)** 입니다. Rust 1.95+의 LLVM 22는 `arrowlake`와 `lunarlake`를 인식하지만, 툴체인에 따라 아직 `alderlake`로 폴백되는 경우가 있습니다. **가장 안전하게 최대 성능을 내려면 `native`를 사용**하는 것이 좋습니다.
-
-```bash
-# 빌드 머신 = 실행 머신일 때 (권장)
-RUSTFLAGS="-C target-cpu=native -C target-feature=+avx2,+fma" cargo build --release
-```
-
-배포 대상 CPU를 특정하고 싶다면:
-```bash
-RUSTFLAGS="-C target-cpu=arrowlake -C target-feature=+avx2,+fma" cargo build --release
-```
-Arrow Lake는 AVX-512를 지원하지 않으므로 `+avx512f` 등을 추가하면 `Illegal Instruction`이 발생합니다.
-
-### 링커 및 프로필
-Windows MSVC 타겟(`x86_64-pc-windows-msvc`)에서는 **LLD**를 사용할 수 있습니다. `Cargo.toml`에 `panic = "abort"`, `lto = "fat"`, `codegen-units = 1`을 설정하세요.
+## 1. 지금 적용되어 있는 것
 
 ```toml
 [profile.release]
 opt-level = 3
-lto = "fat"
+lto = "thin"
 codegen-units = 1
 panic = "abort"
+strip = "symbols"     # 27.0 MB → 22.3 MB, 성능 변화 없음
 ```
 
-### PGO / BOLT
-**BOLT는 Windows에서 사용할 수 없습니다**. **PGO만** 적용 가능하며, `cargo-pgo`로 프로파일 수집 → 최적화 빌드 순으로 진행합니다.
+`strip`은 심볼 4.6 MB를 지웁니다. 벤치 수치에 영향 없음을 확인했습니다 (`82dd868`).
 
-```bash
+---
+
+## 2. 효과 **있음**: PGO
+
+### `rebuild` @8,182 — **-7.6 %**, 20/20 전부 개선
+
+| | 중앙값 |
+|---|---|
+| base | 65.05 ms |
+| PGO | **60.28 ms** |
+| 차이 | **-4.95 ms**, 95% CI **-7.90 .. -4.00** |
+
+CI가 0을 포함하지 않으므로 노이즈가 아닙니다. 페이지별(7회 중앙값):
+
+| strokes | base | PGO | 차이 |
+|---|---|---|---|
+| 0 | 8.26 | 8.30 | — |
+| 29 | 8.76 | 8.86 | — |
+| 316 | 14.22 | 13.28 | -6.6 % |
+| 1 000 | 20.11 | 19.86 | -1.2 % |
+| 8 182 | 77.19 | **72.99** | **-5.4 %** |
+
+**부수 효과: 바이너리가 20.19 MB.** base(22.34 MB)보다 **2 MB 작습니다.**
+
+```sh
+# 0) 준비
 cargo install cargo-pgo
-cargo pgo instrument build --release
-./target/release/your_app < representative_workload
-cargo pgo optimize build --release
+rustup component add llvm-tools-preview
+
+# 1) 계측 빌드
+cargo pgo instrument build -- -p cheap-note-macos
+
+# 2) 대표 워크로드로 프로파일 수집 — 페이지 크기를 골고루 돌려야 한다
+B=target/aarch64-apple-darwin/release/cheap-note
+for s in 0 29 316 1000 8182; do $B --bench --format json --strokes $s --frames 30 >/dev/null; done
+
+# 3) 최적화 빌드 (llvm-profdata가 PATH에 필요)
+export PATH="$HOME/.rustup/toolchains/1.99.1-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin:$PATH"
+cargo pgo optimize build -- -p cheap-note-macos
 ```
+
+**프로파일은 칩에 종속됩니다.** M6에서 모은 것을 다른 모델에 배포하면 이득이 사라집니다(손해는 아님).
 
 ---
 
-## 🪟 Windows 11 · AMD
+## 3. 효과 **없음** — 다시 시도하지 말 것
 
-### `target-cpu` 선택
-Zen 5 기반 CPU(Ryzen 9000, EPYC 9005)는 **`znver5`** 로 지정합니다. `znver5`는 AVX-512를 포함한 Zen 5의 전체 명령어 세트를 활성화합니다.
+### `-C target-cpu=native` — **6 % 느려짐**
 
-```bash
-RUSTFLAGS="-C target-cpu=znver5 -C link-arg=-fuse-ld=lld" cargo build --release
-```
+반직관적이라 여러 번 확인했습니다: 8회 연속, 15회 중 13회, 최종 20회 중 18회에서 일관되게 느림.
 
-Zen 4 이하라면 `znver4`(또는 `znver3`)를 사용하세요. `native`는 빌드 머신과 실행 머신이 같을 때만 사용하는 것이 안전합니다.
+| | 중앙값 (`rebuild` @8,182) |
+|---|---|
+| base | 69.73 ms |
+| `native` | **74.09 ms** |
 
-### 링커 및 프로필
-Intel과 동일하게 **LLD**를 사용하고, 프로필에 `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`를 설정합니다.
+원인 분해:
 
-### PGO / BOLT
-**BOLT는 Windows에서 불가**합니다. **PGO만** 적용하세요. AMD Zen 아키텍처는 분기 예측 특성상 PGO의 효과가 큰 편입니다.
+| 실험 | 결과 |
+|---|---|
+| `RAYON_NUM_THREADS=1` | 격차 그대로 → 병렬화 문제 아님 |
+| 코드 크기 | `native`가 오히려 작음(13.49 vs 13.71 MB) → 캐시 문제 아님 |
+| `-mte` 제거 | 그대로 → `mte` 원인 아님 |
+| `-mte,-bti,-i8mm,-bf16` (기본과 동일한 기능 집합) | **여전히 느림** |
 
-```bash
-cargo pgo instrument build --release
-./target/release/your_app < workload
-cargo pgo optimize build --release
-```
+마지막 줄이 결정적입니다. 기능 집합을 기본값과 똑같이 맞춰도 `native`를 주면 느립니다.
+**`native`의 코드 생성(스케줄링) 자체가 이 워크로드에 불리합니다.** LLVM 23 + M6 조합의 특성.
 
----
+참고로 기본 타겟은 이미 `aes`, `sha2`, `sha3`, `dotprod`, `fp16`, `lse`, `neon` 등 **29개 기능**을 켭니다.
+`native`가 추가하는 것은 `bf16`, `bti`, `i8mm`, `mte` **4개뿐**이고, 그 4개가 이득을 주지 않습니다.
 
-## 🍎 Mac · Apple Silicon (M 시리즈)
+### `lto = "fat"` — 이득 없음, 빌드만 느려짐
 
-### `target-cpu` 선택
-2026년 11월 기준 최신 칩은 **M5**이며, LLVM 22에 `apple-m5`가 공식 정의되어 있습니다. Rust 1.95+를 사용한다면 **`apple-m5`를 직접 지정**할 수 있습니다. M4 이하라면 `apple-m4` 또는 `native`를 사용하세요.
+| | 크기 | 클린 빌드 | 성능 |
+|---|---|---|---|
+| `thin` (현재) | 22.34 MB | 72 s | — |
+| `fat` | 21.02 MB | **111 s** | 변화 없음 |
 
-```bash
-# M5 (Rust 1.95+, LLVM 22)
-RUSTFLAGS="-C target-cpu=apple-m5 -C target-feature=+aes,+sha2,+sha3,+fp16" \
-cargo build --release
-```
+### `opt-level = "s"` — **2배 느려짐**
 
-`+fp16`은 반정밀도 부동소수점을, `+aes`/`+sha2`/`+sha3`는 암호화 하드웨어 가속을 활성화합니다. M 시리즈는 NEON(ASIMD)을 기본 지원하므로 별도 지정이 필요 없습니다.
+| | 크기 | `rebuild` @8,182 |
+|---|---|---|
+| `3` | 22.34 MB | 91 ms |
+| `"s"` | 20.56 MB | **188 ms** |
 
-### 링커 및 프로필
-macOS에서는 시스템 링커(`ld64`)가 기본이지만, **`ld64.lld`** 를 사용하면 링크 시간이 단축됩니다. `panic = "abort"`와 `lto = "fat"`를 적용하세요.
+테셀레이션 루프가 벡터화를 못 받습니다. 1.8 MB 아끼려고 쓰기 지연을 2배로 만드는 건 손해입니다.
 
-```toml
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-```
+### `ld64.lld` — 이 환경에 없음
 
-### PGO / BOLT
-**BOLT는 macOS(Mach-O)에서 사용할 수 없습니다** . **PGO만** 적용하세요. Apple Silicon은 PGO 프로파일이 아키텍처에 종속되므로, 대상 기기와 동일한 칩에서 프로파일을 수집해야 합니다.
+`which ld64.lld` → 없음, Homebrew LLVM도 미설치. 링크 시간이 문제가 된 적이 없어 도입할 이유도 없습니다.
 
-```bash
-cargo pgo instrument build --release --target aarch64-apple-darwin
-./target/aarch64-apple-darwin/release/your_app < workload
-cargo pgo optimize build --release --target aarch64-apple-darwin
-```
+### BOLT — macOS(Mach-O)에서 불가
+
+초안이 맞습니다. 검증 대상도 아닙니다.
 
 ---
 
-## 📱 Mac · Apple 모바일 (A 시리즈)
+## 4. 권장 전략
 
-### `target-cpu` 선택
-iOS 기기용 빌드는 **`aarch64-apple-ios`** 타겟을 사용합니다. 2026년 11월 기준 최신 칩은 **A19**(아이폰 17 시리즈)이며, LLVM 22에 `apple-a19`가 정의되어 있습니다. A18 이하라면 `apple-a18`을 사용하세요.
+배포는 지금 그대로: `apps/macos/bundle.sh`.
 
-```bash
-# A19 (Rust 1.95+, LLVM 22)
-RUSTFLAGS="-C target-cpu=apple-a19 -C target-feature=+aes,+sha2,+sha3,+fp16" \
-cargo build --release --target aarch64-apple-ios
-```
+PGO는 배포 형태로 판단합니다:
 
-`target-cpu`를 지정하지 않으면 `aarch64-apple-ios`의 기본값은 여전히 `apple-a7`(A7 이후 전체 호환)이므로, **A19/A18 전용 앱이라면 반드시 명시적으로 지정**해야 성능 이득을 볼 수 있습니다.
+| 배포 형태 | PGO |
+|---|---|
+| 이 머신에서만 사용 | **적용 권장** (-7.6 %, 2 MB 감소) |
+| 같은 칩 기기를 여럿 | **적용** — 같은 M6에서 프로파일 수집 |
+| 불특정 다수에게 배포 | **선택** — 칩 종속이라 이득이 사라질 수 있음 |
 
-### 링커 및 프로필
-iOS도 Mach-O이므로 시스템 링커 또는 `ld64.lld`를 사용합니다. `panic = "abort"`와 `lto = "fat"`를 적용하세요.
-
-### PGO / BOLT
-**BOLT는 iOS에서 불가**합니다. **PGO만** 가능하며, 실제 기기(또는 시뮬레이터)에서 프로파일을 수집해야 합니다.
-
-```bash
-cargo pgo instrument build --release --target aarch64-apple-ios
-# Xcode를 통해 앱을 기기에 설치하고 대표 워크로드 실행
-cargo pgo optimize build --release --target aarch64-apple-ios
-```
+**`RUSTFLAGS`로 플래그를 넣지 마세요.** `target-cpu=native`은 이 조합에서 손해이고, 나머지 후보는
+이득이 없거나 빌드 비용만 늘립니다. 현재 `[profile.release]`가 측정상 최적점입니다.
 
 ---
 
-## 💎 네 플랫폼 요약
+## 5. 남은 병목
 
-| 플랫폼 | 권장 `target-cpu` | 핵심 `target-feature` | PGO | BOLT | 링커 |
-|---|---|---|---|---|---|
-| **Win11 · Intel** | `native` (또는 `arrowlake`) | `+avx2,+fma` | ✅ | ❌ | LLD |
-| **Win11 · AMD** | `znver5` | (CPU 모델에 내장) | ✅ | ❌ | LLD |
-| **Mac · M 시리즈** | `apple-m5` (또는 `native`) | `+aes,+sha2,+sha3,+fp16` | ✅ | ❌ | `ld64.lld` |
-| **Mac · A 시리즈** | `apple-a19` (또는 `apple-a18`) | `+aes,+sha2,+sha3,+fp16` | ✅ | ❌ | `ld64.lld` |
+`rebuild`(= `build_detail` 테셀레이션) 하나뿐입니다.
 
-공통적으로 `Cargo.toml`의 `[profile.release]`에 **`opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`** 를 설정하고, 빌드 후 **`cargo pgo optimize`** 로 PGO를 적용하는 것이 2026년 11월 기준 Windows와 macOS에서 도달할 수 있는 실질적인 성능 상한입니다. BOLT가 필요하다면 Linux/ELF 환경으로 빌드 파이프라인을 분리해야 합니다.
+- `rayon` 이미 적용 (8,182 strokes에서 23.6 → 5.0 ms, `doc/VIEW.md`)
+- 현재 8,182 strokes에서 73–77 ms → **stroke당 약 9 μs**
+- `present`는 GPU 시간이라 크레이트·플래그로 줄일 수 없음
+
+컴파일 플래그로 짜낼 여지는 여기서 끝입니다. 남은 것은 **알고리즘**(재계산 범위, 캐시 적중률)이고,
+먼저 `rebuild` 구간만 따로 프로파일링해야 합니다.

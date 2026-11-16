@@ -1502,7 +1502,10 @@ fn a_stroke_outside_the_view_is_not_visible() {
         "overlapping counts"
     );
     assert!(!stroke.visible_in(Bounds::new((0.0, 0.0), (100.0, 100.0))));
-    assert!(!stroke.visible_in(Bounds::new((600.0, 0.0), (700.0, 100.0))), "beside it");
+    assert!(
+        !stroke.visible_in(Bounds::new((600.0, 0.0), (700.0, 100.0))),
+        "beside it"
+    );
 }
 
 /// Ending a stroke must not copy the page's ink.

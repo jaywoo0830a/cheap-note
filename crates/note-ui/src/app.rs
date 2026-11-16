@@ -553,7 +553,9 @@ impl Sheet {
         // corner of the plane.
         corners
             .iter()
-            .fold(crate::ink::Bounds::NOTHING, |box_, at| box_.covering(at.0, at.1))
+            .fold(crate::ink::Bounds::NOTHING, |box_, at| {
+                box_.covering(at.0, at.1)
+            })
     }
 }
 

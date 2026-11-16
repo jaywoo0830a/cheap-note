@@ -37,11 +37,15 @@ fn a_refusal_keeps_the_sentence_it_was_given() {
 #[test]
 fn a_refusal_a_caller_can_act_on_has_a_kind() {
     assert_eq!(
-        Variant::Damaged.said("a page of this note is damaged").variant(),
+        Variant::Damaged
+            .said("a page of this note is damaged")
+            .variant(),
         Some(Variant::Damaged)
     );
     assert_eq!(
-        Variant::NewerBuild.said("this note is from tomorrow").variant(),
+        Variant::NewerBuild
+            .said("this note is from tomorrow")
+            .variant(),
         Some(Variant::NewerBuild)
     );
     assert_eq!(
@@ -90,8 +94,14 @@ fn a_damaged_chunk_arrives_as_damage() {
     let mut data = encoded.data.clone();
     data[0] ^= 0xff;
 
-    let refused = note_format::chunk::decode(&data, encoded.raw_len as usize, encoded.codec, 1, encoded.crc32)
-        .expect_err("a corrupted blob");
+    let refused = note_format::chunk::decode(
+        &data,
+        encoded.raw_len as usize,
+        encoded.codec,
+        1,
+        encoded.crc32,
+    )
+    .expect_err("a corrupted blob");
 
     assert_eq!(refused.variant(), Some(Variant::Damaged));
     assert!(refused.is_damage());

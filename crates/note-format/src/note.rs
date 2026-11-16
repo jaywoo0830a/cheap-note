@@ -1038,7 +1038,9 @@ mod tests {
             .expect("a compact is queued");
         drop(jobs);
 
-        reader.join().expect("the reader stops when the queue closes");
+        reader
+            .join()
+            .expect("the reader stops when the queue closes");
 
         assert_eq!(
             *received.lock().expect("the log"),

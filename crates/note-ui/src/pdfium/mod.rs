@@ -44,6 +44,19 @@
 //! * [`render`] — the bitmap, the pause callback, and the progressive render, with every handle
 //!   released by `Drop`.
 //!
+//! ## The unsafe code is here, and nowhere else
+//!
+//! Item 16 of *Effective Rust* asks that unsafe code live in one wrapper, with the rest of the
+//! program written as ordinary Rust against it. This module is that wrapper for Pdfium: every
+//! `unsafe` block that touches a Pdfium handle is inside it, the type that crosses the boundary is
+//! [`Document`] rather than a raw handle, and nothing above it can dereference a Pdfium pointer.
+//!
+//! Each block carries a `// SAFETY:` comment naming the invariant it relies on — that a handle is
+//! the one Pdfium gave for this object, that a buffer is live and long enough, that a page outlives
+//! its document. They are the local half of the proof; the module-level half is the paragraphs
+//! above, which are why the handles have the lifetimes they do. When something involving Pdfium goes
+//! wrong, this module is the first suspect — which is the other reason to keep it small.
+//!
 //! ## Threading
 //!
 //! Pdfium is not thread-safe. [`Document`] and [`RenderJob`] are deliberately `!Send` and `!Sync`

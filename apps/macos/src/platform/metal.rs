@@ -30,11 +30,11 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
+use note_format::ink::Bounds;
 use note_ui::cursor::{
     BODY_ALPHA, BODY_HALO_ALPHA, BODY_HALO_GROW, NIB_ALPHA, NIB_BLOOM_ALPHA, NIB_BLOOM_SPREAD,
     NIB_RADIUS_MAX, NIB_RADIUS_MIN,
 };
-use note_format::ink::Bounds;
 use note_ui::ink_layer::canvas::Rect;
 use note_ui::ink_layer::{ink_colour, Canvas};
 use note_ui::paint::drawn_of_paper;
@@ -307,6 +307,13 @@ fn pipeline(
 
     // Source over destination, in the sRGB values the app's colours are written in — the same arithmetic
     // Core Graphics did, so a highlighter over a page looks the way it looked before.
+    //
+    // SAFETY: the attachment came from the descriptor above, which is alive for the length of this
+    // function, and `objectAtIndexedSubscript(0)` returned a borrowed reference to it rather than a
+    // new object — so `&*attachment` is that live reference, not a dangling one, and the six
+    // `msg_send!` writes go to the attachment the pass will render into. Each selector is one the
+    // `MTLRenderPipelineColorAttachmentDescriptor` protocol declares, and the values are the
+    // documented enum ordinals for source-over.
     unsafe {
         let attachment = &*attachment;
         let _: () = objc2::msg_send![attachment, setBlendingEnabled: true];

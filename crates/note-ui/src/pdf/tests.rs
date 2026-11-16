@@ -625,6 +625,36 @@ fn a_slice_with_no_budget_renders_nothing() {
     assert!(view.rendering(), "and the job is still there to carry on");
 }
 
+/// A view with no render in flight answers "no" and has no request, rather than panicking.
+///
+/// What this pins is the shape rather than a reachable failure: `render` is one `Option`, so the job
+/// and its request cannot disagree, and the `expect`s that used to read "the request that goes with
+/// this job" are gone. The two-field version could not have failed *this* way either — `begin` needs
+/// a document, so a render in flight always had one — which is exactly the point: the panic was
+/// unreachable only by an argument spread across four methods, and now it is unreachable because the
+/// type has no such state.
+#[test]
+fn a_view_with_no_render_in_flight_has_no_request() {
+    let mut view = PdfDocumentView::default();
+
+    assert!(!view.rendering(), "nothing is in flight");
+    assert_eq!(view.job_request(), None, "and nothing is being asked for");
+    assert_eq!(
+        view.advance(Duration::from_millis(1)),
+        Progress::Unfinished,
+        "advancing with nothing in flight is not a panic"
+    );
+    assert!(!view.rendering(), "and it stays that way");
+
+    view.abandon();
+    assert!(!view.rendering(), "abandoning nothing is harmless");
+    assert_eq!(
+        view.stats().cancelled,
+        0,
+        "and is not counted as a cancellation"
+    );
+}
+
 /// Abandoning a render in flight releases it, and says so.
 #[test]
 fn an_abandoned_render_is_counted_and_forgotten() {

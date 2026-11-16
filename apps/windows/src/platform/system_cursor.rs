@@ -36,6 +36,15 @@
 //! It does not render anything: the pen's ghost cursor is what replaces the pointer, and it is drawn
 //! by [`crate::cursor_overlay`] — in a window of its own, so that a cursor does not wait for a frame.
 //! This module only takes the platform's pointer out of the way.
+//!
+//! ## SAFETY: module-wide
+//!
+//! The `unsafe` blocks here are `SetCursor`, the subclass calls, and the raw `HWND` built from the
+//! window handle GPUI gave us. They rest on two things: **the window outlives the subclass**, because
+//! the hook is installed and removed on the same window within one install, and **the window
+//! procedure does not unwind**, which is what crossing into comctl32 requires. The `HWND` is a
+//! pointer to a window this process owns for as long as the app runs, so it cannot dangle while the
+//! hook is installed.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

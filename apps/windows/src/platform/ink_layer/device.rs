@@ -35,6 +35,20 @@
 //!
 //! Not this module's business: it makes the device, the swap chain and the visual, and hands the
 //! current buffer to whatever draws a frame (see [`crate::ink_layer::render`]).
+//!
+//! ## SAFETY: module-wide
+//!
+//! These are Direct3D 11, DXGI and DirectComposition calls, and each rests on an invariant the
+//! `Device` type keeps: **every pointer handed out is borrowed from an object the device still
+//! owns.** The device creates the D3D device, the composition device, the swap chain, the visual and
+//! the target bitmap, in that order, and drops them in the reverse; the buffer a frame draws into is
+//! a reference into the swap chain, which is never resized while it is held — the one call that
+//! could invalidate it (`ResizeBuffers`) happens only between frames, and the buffer is re-fetched
+//! afterwards.
+//!
+//! The three requirements a composition swap chain has are checked once, at creation, rather than
+//! at each use, because that is where a violation is fixable and where [`InkLayer::install`] can
+//! report it in a sentence.
 
 use anyhow::{anyhow, Context, Result};
 use windows::core::Interface as _;

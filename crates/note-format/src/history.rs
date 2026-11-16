@@ -542,9 +542,7 @@ fn open_strokes(read: &mut Reading<'_>, expected: Option<usize>) -> Result<Vec<A
     let blob = read.rest();
 
     if blob.is_empty() {
-        return Err(Variant::Misfiled.said(
-            "an edit of this note's history holds no ink",
-        ));
+        return Err(Variant::Misfiled.said("an edit of this note's history holds no ink"));
     }
 
     let strokes = chunk::open_sealed(blob, expected.unwrap_or(1))?;
@@ -583,9 +581,8 @@ impl<'a> Reading<'a> {
     fn number(&mut self) -> Result<u32> {
         let end = self.at + 4;
         if end > self.bytes.len() {
-            return Err(Variant::Truncated.said(
-                "a history row of this note ends in the middle of a number",
-            ));
+            return Err(Variant::Truncated
+                .said("a history row of this note ends in the middle of a number"));
         }
 
         let value = u32::from_le_bytes(self.bytes[self.at..end].try_into().expect("four bytes"));

@@ -40,6 +40,24 @@
 //! is built for: it starts, draws, writes ink, and refuses to open a PDF with a message naming
 //! where the library belongs rather than crashing.
 //!
+//! ## The one invariant every call below shares
+//!
+//! This workspace's rule (see `tests/unsafe_code.rs`) is that every `unsafe` block carries a
+//! `SAFETY` comment. The blocks in `pdfium` are unusual in that they nearly all rest on the *same*
+//! invariant rather than on a fresh one each, so it is stated once here and each block refers to it:
+//!
+//! > **The handle invariant.** A `unsafe` call in this module passes a handle that (a) was returned
+//! > by Pdfium for the object named by the receiver's type, (b) has not been closed, and (c) outlives
+//! > the call. Each is kept by a type rather than by the call site: [`FpdfDocument`] lives in
+//! > `DocumentInner`, which closes it in `Drop`; [`FpdfPage`] lives in `Page`, which holds an `Arc`
+//! > of the document's inner state so the document cannot close first and closes the page in its own
+//! > `Drop`; [`FpdfBitmap`] lives in `Bitmap`, closed in `Drop` before its buffer is released. So a
+//! > block that says "the handle invariant" is saying: *this call is on the object this type owns,
+//! > and both are alive because the types say so* — which is the whole of what the FFI call needs.
+//!
+//! A block that relies on something more than that — a buffer of a given length, a callback that
+//! must not unwind, a pointer whose lifetime is not a field of a type — says so itself.
+//!
 //! ## One loader, three platforms
 //!
 //! `libloading` is the loader, and it is the whole of what makes this file portable: it is
@@ -247,6 +265,10 @@ pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
 fn load_api() -> Result<Api> {
     let library = open_library()?;
 
+    // SAFETY: `resolve` is the only unsafe thing in this block, and it is safe here for the reason
+    // it states at its own definition: every `T` is the exact signature the vendored header declares
+    // for that name, and the library the pointers come from is moved into the `Api` this block
+    // builds, so it outlives every call through them.
     unsafe {
         let api = Api {
             init_library: resolve(&library, "FPDF_InitLibraryWithConfig")?,
@@ -321,8 +343,9 @@ fn open_library() -> Result<Library> {
             continue;
         }
 
-        // The whole of the `unsafe` is this call: the code the loader maps is kept for the life of
-        // the process (the handle lives in `Api`), so no pointer taken from it can outlive it.
+        // SAFETY: the whole of the `unsafe` is this call. The code the loader maps is kept for the
+        // life of the process — the handle lives in `Api` — so no pointer taken from it can outlive
+        // it. `Library::new` runs the library's own initialisers, which is why it is unsafe at all.
         match unsafe { Library::new(&candidate) } {
             Ok(library) => return Ok(library),
             Err(error) => tried.push(format!("{}: {error}", candidate.display())),
@@ -395,6 +418,10 @@ fn candidates_for(executable: Option<&Path>, working_directory: Option<&Path>) -
 /// to the library it came from, which is why the copy happens here: what leaves this function is a
 /// plain function pointer, and the library it points into is held by [`Api`] for the process.
 unsafe fn resolve<T: Copy>(library: &Library, name: &str) -> Result<T> {
+    // SAFETY: `T` is the type the vendored header gives this symbol, which is what makes
+    // `libloading`'s unchecked cast sound; the caller's own `unsafe` block is where that promise is
+    // made. The symbol is immediately dereferenced into a plain function pointer, so nothing here
+    // outlives `library` — and `library` is held by [`Api`] for the process.
     match unsafe { library.get::<T>(name.as_bytes()) } {
         Ok(symbol) => Ok(*symbol),
         Err(_) => Err(AppError::PdfiumLibrary(format!(

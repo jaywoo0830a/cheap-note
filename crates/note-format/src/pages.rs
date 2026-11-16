@@ -54,7 +54,9 @@ pub enum Page {
 /// four values that can be made. Reading a value that is not one of them — from a note somebody
 /// edited, or from a `u8` this build did not write — is [`Self::from_turns`]'s job, and it wraps
 /// rather than refuses, which is the same rule [`turned`] follows for a command that turns a page.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[repr(transparent)]
 pub struct Quarters(u8);
 
@@ -138,7 +140,6 @@ pub fn turned(rotation: Quarters, turns: i32) -> Quarters {
 pub fn swaps_axes(rotation: Quarters) -> bool {
     rotation.swaps_axes()
 }
-
 
 /// One page of a note: what it shows, and which way up it is.
 ///
@@ -546,10 +547,7 @@ mod tests {
             Quarters::from_turns(1),
             "a whole turn leaves the page where it was"
         );
-        assert_eq!(
-            turned(Quarters::from_turns(2), 9),
-            Quarters::from_turns(3)
-        );
+        assert_eq!(turned(Quarters::from_turns(2), 9), Quarters::from_turns(3));
 
         assert!(
             !Quarters::UPRIGHT.swaps_axes(),
@@ -583,9 +581,7 @@ mod tests {
         assert_eq!(pages.rotation(1), Quarters::from_turns(1));
         assert_eq!(pages.rotation(2), Quarters::UPRIGHT);
 
-        let turns = |pages: &Pages| {
-            [0, 1, 2].map(|index| pages.rotation(index).turns())
-        };
+        let turns = |pages: &Pages| [0, 1, 2].map(|index| pages.rotation(index).turns());
 
         pages.turn_all(1);
         assert_eq!(

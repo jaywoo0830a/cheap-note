@@ -33,6 +33,19 @@
 //! 150% display, a rectangle asked for in physical pixels would be drawn one and a half times too
 //! large. This canvas works in the surface's own pixels and nothing else, so the context is pinned
 //! to 96 — one unit, one pixel — and the window's own scale is a number the canvas carries.
+//!
+//! ## SAFETY: module-wide
+//!
+//! Every `unsafe` block here is a call into Direct2D through the `windows` crate's typed wrappers,
+//! and each rests on the same invariant: **the object a call is made on was created by the factory
+//! this renderer owns, is still alive, and is dropped after its children.** `Factory` owns the
+//! factory, the device context and the brushes; the geometry and the path it opens live in the
+//! scope that opened them and are closed before it ends; and the render target is a bitmap this
+//! module created for this frame and resets at the end of it.
+//!
+//! `BeginDraw`/`EndDraw` is the other half: between them the context holds the target, and the
+//! target is only unbound after `EndDraw` has returned, which is why the target's release is the
+//! first thing after it.
 
 use std::cell::Cell;
 use std::ffi::c_void;

@@ -1688,7 +1688,14 @@ fn touch_bounds(conn: &Connection, id: i64, strokes: &[Stroke]) -> Result<()> {
                         bbox_max_y = COALESCE(MAX(bbox_max_y, ?4), ?4),
                         updated_at = ?5
                   WHERE id = ?6",
-                params![bounds.min.0, bounds.min.1, bounds.max.0, bounds.max.1, now_millis(), id],
+                params![
+                    bounds.min.0,
+                    bounds.min.1,
+                    bounds.max.0,
+                    bounds.max.1,
+                    now_millis(),
+                    id
+                ],
             )
             .map_err(sql)?;
         }

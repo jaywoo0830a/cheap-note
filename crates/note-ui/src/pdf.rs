@@ -37,6 +37,19 @@ use note_format::paper::MemoryMode;
 /// What one slice of a render did, re-exported because it is part of this module's own API.
 pub use crate::pdfium::Progress;
 
+/// A render in flight: the Pdfium job, and the request whose cache key it will be filed under.
+///
+/// The two belong together — a job is *always* for a request, and the request is what the finished
+/// bitmap is stored against — so they travel as one value. Keeping them as two fields of
+/// [`PdfDocumentView`] allowed a job with no request (or a request with no job), which the reader
+/// then had to `expect` away in `advance`; this type says the same thing where it cannot be broken.
+struct Render {
+    /// The Pdfium job, advanced a slice at a time.
+    job: RenderJob,
+    /// What it is rendering, for the cache key it will be filed under.
+    request: PageRequest,
+}
+
 /// Which page, at what size, with which render options.
 ///
 /// Everything a rendered bitmap depends on, in one value. This is the *cache key*, and the rule
@@ -269,14 +282,22 @@ fn ratio(pixels: u32, wanted: u32) -> f32 {
 
 /// The document the user is annotating, if one is open.
 pub struct PdfDocumentView {
-    /// The render in flight, if any.
+    /// The render in flight, if any — the job and the request it will be filed under, as one value.
     ///
     /// Declared *first* so cancellation is the first thing that happens when the view is dropped.
     /// It is not a safety requirement: a render job keeps the document it came from alive itself
     /// (see [`crate::pdfium::RenderJob`]), so either field order would close in a valid order.
-    job: Option<RenderJob>,
-    /// What the job in flight is rendering, for the cache key it will be filed under.
-    job_request: Option<PageRequest>,
+    ///
+    /// One `Option` rather than two (Item 18 of *Effective Rust*). A job and the request it is for
+    /// are either both present or both absent; as separate `Option`s that invariant was a promise
+    /// between four methods, and [`Self::advance`] had to `expect` it — twice, on values a caller
+    /// could contradict. [`Render`] makes "a job with no request" a state the type cannot hold.
+    ///
+    /// What the type cannot express, it also does not need to check: since the only way to build a
+    /// [`Render`] is [`Self::begin`], and `begin` refuses without a document, a render in flight
+    /// implies an open document. That is why the remaining question — "what key does this page file
+    /// under?" — is still answered by an `Option` from `key_for` and handled rather than asserted.
+    render: Option<Render>,
     /// The open document.
     document: Option<Document>,
     /// Rendered pages, keyed by everything their pixels depend on.
@@ -347,8 +368,7 @@ const CACHE_BUDGET_BYTES: u64 = MemoryMode::Room.cache_budget_bytes();
 impl Default for PdfDocumentView {
     fn default() -> Self {
         PdfDocumentView {
-            job: None,
-            job_request: None,
+            render: None,
             document: None,
             cache: HashMap::new(),
             order: Vec::new(),
@@ -526,8 +546,7 @@ impl PdfDocumentView {
             },
             request.annotations,
         )?;
-        self.job_request = Some(request);
-        self.job = Some(job);
+        self.render = Some(Render { job, request });
         Ok(())
     }
 
@@ -537,21 +556,26 @@ impl PdfDocumentView {
     /// render: this is where a sliced render becomes a bitmap the frames can use. The budget is what
     /// keeps the call short — Pdfium checks the pause callback between the pieces of a page, so the
     /// slice ends on time rather than on the page.
+    ///
+    /// The request comes back out of [`Render`] with the job, so there is nothing left to `expect`:
+    /// the old version took the job and then asked the struct for "the request that goes with it",
+    /// which is a question whose only answer was a panic.
     pub fn advance(&mut self, budget: Duration) -> Progress {
-        let Some(mut job) = self.job.take() else {
+        let Some(mut render) = self.render.take() else {
             return Progress::Unfinished;
         };
 
-        let progress = job.advance(budget);
+        let progress = render.job.advance(budget);
 
         match progress {
             Progress::Finished => {
-                let request = self.job_request.take().expect("a job always has a request");
-                let key = self
-                    .key_for(request)
-                    .expect("a job is only started for an open document");
+                // A document that closed mid-render answers `None`: the page cannot be filed, and
+                // dropping the job releases Pdfium's state just as abandoning it would.
+                let Some(key) = self.key_for(render.request) else {
+                    return Progress::Unfinished;
+                };
 
-                match self.page_from_job(&job, request) {
+                match self.page_from_job(&render.job, render.request) {
                     Ok(page) => {
                         self.stats.rendered += 1;
                         self.insert(key, page);
@@ -559,10 +583,10 @@ impl PdfDocumentView {
                     Err(error) => return Progress::Failed(error.to_string()),
                 }
             }
-            Progress::Unfinished => self.job = Some(job),
-            Progress::Failed(_) => {
-                self.job_request = None;
-            }
+            Progress::Unfinished => self.render = Some(render),
+            // Nothing to clear: the whole `Render` was taken out of the view and is dropped here,
+            // which is what tells Pdfium to stop.
+            Progress::Failed(_) => {}
         }
 
         progress
@@ -575,20 +599,21 @@ impl PdfDocumentView {
     /// has to be signalled, because a render only runs inside [`Self::advance`] — so between calls,
     /// "not wanted any more" and "never advanced again" are the same thing.
     pub fn abandon(&mut self) {
-        if self.job.take().is_some() {
+        // One `take` of one value: the job and its request cannot come apart, so there is no second
+        // field to remember to clear.
+        if self.render.take().is_some() {
             self.stats.cancelled += 1;
         }
-        self.job_request = None;
     }
 
     /// Whether a render is in flight.
     pub fn rendering(&self) -> bool {
-        self.job.is_some()
+        self.render.is_some()
     }
 
     /// What the render in flight is for, if there is one.
     pub fn job_request(&self) -> Option<PageRequest> {
-        self.job_request
+        self.render.as_ref().map(|render| render.request)
     }
 
     /// Turns a finished job's pixels into a page the frames can draw.
@@ -726,7 +751,9 @@ impl PdfDocumentView {
             document: self.document_id,
             page: request.page,
             pixels: request.pixels.max(1),
-            rotation: self.effective_rotation(request.page, request.rotation).into(),
+            rotation: self
+                .effective_rotation(request.page, request.rotation)
+                .into(),
             annotations: request.annotations,
             colour: request.colour,
         })

@@ -124,4 +124,3 @@ impl Error {
 
 /// `Result` with this format's [`enum@Error`].
 pub type Result<T> = std::result::Result<T, Error>;
-

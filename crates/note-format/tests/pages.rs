@@ -94,7 +94,11 @@ fn turns_wrap_and_swap_the_axes() {
         );
         assert_eq!(turned(rotation, 1), turned(rotation, -3));
         assert_eq!(swaps_axes(rotation), rotation.turns() % 2 == 1);
-        assert_eq!(rotation.swaps_axes(), swaps_axes(rotation), "one answer, two spellings");
+        assert_eq!(
+            rotation.swaps_axes(),
+            swaps_axes(rotation),
+            "one answer, two spellings"
+        );
     }
 
     assert_eq!(

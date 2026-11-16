@@ -20,6 +20,14 @@
 //! file, because the two commands write different measurements: `cheap-note-memory-report.txt` and
 //! `cheap-note-bench.txt`. The exit code is the command's own either way, so a CI job sees the verdict
 //! even when it redirected the output itself.
+//!
+//! ## SAFETY: module-wide
+//!
+//! Four `unsafe` calls, all console state rather than memory: `AttachConsole`, `GetConsoleOutputCP`
+//! and two `SetConsoleOutputCP`. Each takes and returns a plain integer, holds no pointer and
+//! borrows nothing, so the only thing they can get wrong is leaving the console in a state it was
+//! not in — which is why the code page read before the change is put back afterwards. They run on
+//! the process's first thread, where a console attachment belongs.
 
 use std::io::Write;
 use std::path::PathBuf;

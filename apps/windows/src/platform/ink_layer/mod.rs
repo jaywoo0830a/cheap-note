@@ -38,6 +38,23 @@
 //! window itself, since GPUI asks for the same device and has no software path either. What
 //! [`InkLayer::install`] reports in that case is why, once, at startup.
 //!
+//! ## Where the unsafe code is
+//!
+//! Every call this module makes into Direct3D, Direct2D, DirectComposition and the window
+//! manager is `unsafe`, because each takes a raw handle at an FFI boundary. Item 16 of
+//! *Effective Rust* asks that such code be confined and commented rather than scattered:
+//!
+//! * it is confined to this module and its two children — [`device`] (the swap chain and the
+//!   composition), [`render`] (the Direct2D factory, brushes and geometry) — and nothing above the
+//!   platform layer sees a COM pointer or a `HWND`;
+//! * individual blocks are short and land on one call, so a mistake has one place to be, and the
+//!   framebuffer-shaped blocks — the bitmap copy, the layered-window update — carry a `// SAFETY:`
+//!   comment naming the register, span or buffer invariant they depend on.
+//!
+//! The rest is ordinary Rust against `windows`' typed wrappers: `CreateDevice`, `SetDpi`,
+//! `BeginDraw` are safe to *call* and unsafe only in that the OS may fault — which is the vendor's
+//! boundary, not this project's invariant.
+//!
 //! ## What it draws
 //!
 //! Everything the note screen's canvas is: the desk, the page's shadow, the sheet, the ruling, the

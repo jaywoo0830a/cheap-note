@@ -21,6 +21,18 @@
 //! is not decoration: Pdfium keeps resources for a progressive render until it is called, whether
 //! the render finished or was abandoned, and a job that skipped it would leak them on every
 //! cancelled zoom.
+//!
+//! ## SAFETY: module-wide
+//!
+//! Every `unsafe` block here is one call through `super::api` on a handle this module owns, and each
+//! rests on the invariant stated in [`super::api`]: *the handle is the one Pdfium returned for this
+//! object, it has not been closed, and it outlives the call.* The paragraph above is why: the job
+//! owns the page, the bitmap and the pause interface, and its `Drop` closes them in the order that
+//! keeps the document last.
+//!
+//! Two blocks are not of that kind and carry their own note: the `from_raw_parts` over the bitmap's
+//! pixels, which needs a length and a fully-written buffer, and the `IFSDK_PAUSE` callback, which
+//! crosses into C and must not unwind.
 
 use std::ffi::c_int;
 use std::time::{Duration, Instant};
@@ -197,6 +209,24 @@ impl Bitmap {
         let length = stride.checked_mul(height)?;
         let target_row = width.checked_mul(4)?;
         let mut pixels = Vec::with_capacity(target_row.checked_mul(height)?);
+        // SAFETY: `buffer` and `length` come from Pdfium for the bitmap this job created, and the
+        // checks above are exactly what makes the slice sound:
+        //
+        //   1. `buffer` is non-null and is Pdfium's own buffer for `FPDFBitmap` — `bitmap_buffer`
+        //      earlier in this method returned it, and it is the bitmap `RenderJob::new` made and
+        //      keeps alive until `Drop` (which calls `render_page_close`/`bitmap_destroy`). It is
+        //      therefore valid for reads for as long as `self` lives, which is longer than this
+        //      method.
+        //   2. `length` is `stride * height`, computed with `checked_mul` so it cannot wrap, and both
+        //      factors are Pdfium's own reported geometry for that bitmap. So the slice covers
+        //      exactly the bitmap, never past it.
+        //   3. Every byte in that range is initialised: Pdfium wrote the whole bitmap before
+        //      reporting the render finished, which is the state `Self::pixels` requires (the
+        //      `State::Finished` check above). Reading uninitialised bytes would be the one way this
+        //      could be wrong, and a partial render never reaches here.
+        //
+        // `u8` has no alignment requirement, so no alignment invariant is involved. The slice is not
+        // mutated: it is read row by row into a fresh `Vec` and dropped at the end of the method.
         let bytes = unsafe { std::slice::from_raw_parts(buffer, length) };
 
         for line in bytes.chunks_exact(stride) {

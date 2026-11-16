@@ -187,10 +187,14 @@ pub fn decode(
     let raw = match codec {
         Codec::Raw => data.to_vec(),
         Codec::Lz4 => lz4_flex::decompress(data, raw_len).map_err(|error| {
-            Variant::Truncated.said(format!("a chunk of this note could not be unpacked: {error}"))
+            Variant::Truncated.said(format!(
+                "a chunk of this note could not be unpacked: {error}"
+            ))
         })?,
         Codec::Zstd => zstd::bulk::decompress(data, raw_len).map_err(|error| {
-            Variant::Truncated.said(format!("a chunk of this note could not be unpacked: {error}"))
+            Variant::Truncated.said(format!(
+                "a chunk of this note could not be unpacked: {error}"
+            ))
         })?,
     };
 
@@ -229,9 +233,8 @@ pub fn seal(encoded: &Encoded) -> Vec<u8> {
 /// The strokes of one sealed chunk (see [`seal`]), which must hold exactly `strokes` of them.
 pub fn open_sealed(blob: &[u8], strokes: usize) -> Result<Vec<Stroke>> {
     if blob.len() < 9 {
-        return Err(Variant::Truncated.said(
-            "a chunk of this note is stored in fewer bytes than its own header",
-        ));
+        return Err(Variant::Truncated
+            .said("a chunk of this note is stored in fewer bytes than its own header"));
     }
 
     let codec = Codec::from_id(u32::from(blob[0]))?;
@@ -360,9 +363,9 @@ fn read_arrays(raw: &[u8]) -> Result<Vec<Stroke>> {
 
     let colors = cursor.varint()? as usize;
     if colors > MAX_COLORS {
-        return Err(Variant::Misfiled.said(
-            "a chunk of this note names more colours than a chunk can hold",
-        ));
+        return Err(
+            Variant::Misfiled.said("a chunk of this note names more colours than a chunk can hold")
+        );
     }
     let mut palette = Vec::with_capacity(colors);
     for _ in 0..colors {
@@ -372,9 +375,8 @@ fn read_arrays(raw: &[u8]) -> Result<Vec<Stroke>> {
     // Both counts come from the blob, so neither is trusted with an allocation before the bytes that
     // would have to hold them are known to be there: a damaged header must not ask for a gigabyte.
     if count > raw.len() || points > raw.len() {
-        return Err(Variant::Misfiled.said(
-            "a chunk of this note claims more ink than its own bytes could hold",
-        ));
+        return Err(Variant::Misfiled
+            .said("a chunk of this note claims more ink than its own bytes could hold"));
     }
 
     let mut headers: Vec<(u32, usize)> = Vec::with_capacity(count);
@@ -543,9 +545,7 @@ impl<'a> Cursor<'a> {
             }
         }
 
-        Err(Variant::Misfiled.said(
-            "a chunk of this note holds a number that is not a number",
-        ))
+        Err(Variant::Misfiled.said("a chunk of this note holds a number that is not a number"))
     }
 }
 

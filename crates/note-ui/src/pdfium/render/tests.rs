@@ -74,8 +74,8 @@ fn a_job_keeps_its_document_open() {
     )
     .expect("the fixture opens");
 
-    let mut job =
-        RenderJob::new(&document, 0, 100, Quarters::UPRIGHT, Format::Bgra, false).expect("the page loads");
+    let mut job = RenderJob::new(&document, 0, 100, Quarters::UPRIGHT, Format::Bgra, false)
+        .expect("the page loads");
 
     // The caller's handle goes away before a single slice is rendered.
     drop(document);
@@ -110,8 +110,8 @@ fn a_slice_with_no_budget_leaves_the_page_without_pixels() {
         MappedBytes::solid(a_one_page_pdf()),
     )
     .expect("the fixture opens");
-    let mut job =
-        RenderJob::new(&document, 0, 100, Quarters::UPRIGHT, Format::Bgra, false).expect("the page loads");
+    let mut job = RenderJob::new(&document, 0, 100, Quarters::UPRIGHT, Format::Bgra, false)
+        .expect("the page loads");
 
     assert!(job.pixels().is_none(), "nothing has been rendered yet");
     assert_eq!(

@@ -336,6 +336,11 @@ impl Mapping {
 
         // The view keeps the section alive by itself; the handle is not needed after the map and is
         // closed here so that a long-lived document does not hold a second kernel handle open.
+        //
+        // SAFETY: `mapping` is the open section handle from this function — it has not been closed
+        // before this line, and after it the handle is not used again. Closing it is exactly what
+        // the documentation for `MapViewOfFile` requires once the view exists, because the view
+        // holds its own reference to the section.
         let _ = unsafe { win::close_handle(mapping) };
 
         if pointer.is_null() {

@@ -36,6 +36,24 @@
 //! window with no cursor at all. And it is not part of the note: nothing about the ghost is
 //! persisted, and the next launch starts with the system pointer.
 //!
+//! ## SAFETY: module-wide
+//!
+//! The `unsafe` blocks here are Win32 and GDI calls, plus one raw copy, and they rest on three
+//! invariants kept by the `Overlay` type this file is built around:
+//!
+//! * **One thread owns every handle.** The window, its device context and its bitmap are created on
+//!   the overlay's own thread and touched only there — `Overlay` is not `Send` — so no handle is used
+//!   from a thread that does not own it, which is what the Win32 calls assume.
+//! * **The device context always holds a bitmap it owns.** `resize` selects the new bitmap, and the
+//!   one the context came with is put back in `Drop` before `DeleteDC`; a bitseq is freed only after
+//!   it has been selected out, which is why the selection order is written out rather than implied.
+//! * **The bits belong to the current bitmap, and the surface matches it.** `resize` sets `bits`,
+//!   `span` and the surface's width and height from one argument, so the two are the same size; the
+//!   copy block below carries the fuller note, because that is where it matters.
+//!
+//! The window procedure crosses a C boundary and must not unwind; it is written to return without a
+//! panic, and `PostMessageW` is the only way it reaches the overlay's state.
+//!
 //! ## When it is not there
 //!
 //! Installing one is optional, and failing to install one is not an error — exactly as with the
@@ -972,6 +990,21 @@ impl Overlay {
         if self.bits.is_null() {
             return Ok(());
         }
+        // SAFETY: three things have to hold, and each is kept by the code above rather than assumed.
+        //
+        //   1. `self.bits` is valid for writes of `span * span` `u32`s. It is the pointer
+        //      `CreateDIBSection` filled in, for the bitmap this overlay made at `span` by `span`
+        //      (see `Self::resize`), and `CreateDIBSection` guarantees a non-null pointer is the
+        //      bits of the section it created, writable for the lifetime of that bitmap. The null
+        //      case is the early return above.
+        //   2. `self.surface` has the same extent: `resize` sets both the DIB's `span` and the
+        //      surface's width and height from the same argument, and `span` only changes there.
+        //   3. The two regions cannot overlap. `self.surface.pixels()` is a `Vec<u32>` owned by this
+        //      struct on the Rust heap; `self.bits` is a GDI section's memory. One is not an alias of
+        //      the other, which is what `copy_nonoverlapping` requires over `copy`.
+        //
+        // The copy is `len()` elements because (1) and (2) make the destination at least that long;
+        // writing past it would be the bug this invariant exists to prevent.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 self.surface.pixels().as_ptr(),

@@ -34,6 +34,13 @@
 //! The counts 0, 29 and 316 are the ones `doc/WINDOWS.md` §5 quotes; 8,182 is the page the macOS
 //! measurements used, and is included because the question this benchmark exists for is whether
 //! Windows is draw-bound on a page that size.
+//!
+//! ## SAFETY: module-wide
+//!
+//! Two Win32 calls — `CreateWindowExW` for the hidden window the benchmark draws into, and
+//! `DestroyWindow` when it is finished with. Both take plain values plus one string literal that
+//! outlives the call, so the invariant is the ordinary one: the window is created and destroyed on
+//! this thread, and the handle is not used after it is destroyed.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

@@ -20,6 +20,22 @@
 //! That is deliberate. A page's chars are read when the page is turned to, and an outline is read
 //! when the document is opened, so neither may hold a handle across frames — and a caller cannot
 //! accidentally keep one alive.
+//!
+//! ## SAFETY: module-wide
+//!
+//! Almost every `unsafe` block here is one call through `super::api` on a handle this module owns,
+//! and all of them rest on the invariant stated in [`super::api`]: *the handle is the one Pdfium
+//! returned for this object, it has not been closed, and it outlives the call.* The three types
+//! above are what keep it —
+//!
+//! * `DocumentInner::handle` is closed once, by its own `Drop`, and nothing else closes it;
+//! * `Page::handle` belongs to a `Page` that holds an `Arc` of the document's inner state, so the
+//!   document outlives every page and the page closes its handle in its own `Drop`;
+//! * the outline and text walkers take scratch handles from Pdfium and release each one before the
+//!   iteration moves on, so no handle outlives the loop that made it.
+//!
+//! Two blocks need more than that and say so themselves: the `load_memory_document` call, whose
+//! buffer belongs to a field the type keeps, and the `from_raw_parts` over that buffer.
 
 use std::ffi::{c_int, c_ulong};
 use std::marker::PhantomData;

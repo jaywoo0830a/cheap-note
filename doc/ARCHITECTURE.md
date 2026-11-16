@@ -439,6 +439,7 @@ the seam the platforms implement.
 | **The screens** | |
 | `home` | the screen the app opens on: the notes that were opened, and what a row can do |
 | **Cross-cutting** | |
+| `design` | the interface's one scale: four-unit design tokens to exact whole logical pixels — see [DESIGN.md](DESIGN.md) |
 | `keys` | the chords, written once per platform (`⌘` vs `Ctrl`) |
 | `status_log` | the status line: what the meters read, and the messages the writers report |
 | `timing` | what every hot path costs, measured rather than guessed |
@@ -626,6 +627,7 @@ The documents are meant to be read together:
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | this one: what runs where, and what may wait for what |
 | [VIEW.md](VIEW.md) | why the view is the way it is: the frame loop, the bar, the sheet, the gestures, the pen's rules |
+| [DESIGN.md](DESIGN.md) | the interface's one scale: design units, exact quarter steps, and how the view will consume them |
 | [STORE.md](STORE.md) | one stroke's journey to the disk and back |
 | [MACOS.md](MACOS.md) | the macOS port: what the seam gives you, and what only a Mac can do |
 

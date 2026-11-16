@@ -63,7 +63,8 @@
 //!
 //! [`doc/ARCHITECTURE.md`](../../doc/ARCHITECTURE.md) is the picture of the whole program: which
 //! thread owns what, what crosses a thread boundary, and what may wait for what.
-//! [`doc/VIEW.md`](../../doc/VIEW.md) is why the view is the way it is, and
+//! [`doc/VIEW.md`](../../doc/VIEW.md) is why the view is the way it is,
+//! [`doc/DESIGN.md`](../../doc/DESIGN.md) is the interface's one scale, and
 //! [`doc/STORE.md`](../../doc/STORE.md) follows one stroke to the disk and back.
 //!
 //! A note is a folder under the user's application data — a SQLite file, the document, and anything

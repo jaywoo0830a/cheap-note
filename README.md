@@ -80,6 +80,7 @@ platform adds its own (36 in `apps/macos`, 5 in `pen-macos`, 31 in `apps/windows
 |---|---|
 | [`doc/ARCHITECTURE.md`](doc/ARCHITECTURE.md) | the shape of the program: what runs where, which thread owns what, and what may wait for what |
 | [`doc/VIEW.md`](doc/VIEW.md) | why the view is the way it is: the frame loop, the bar, the sheet, the gestures, the pen's rules |
+| [`doc/DESIGN.md`](doc/DESIGN.md) | the interface's one scale: design units, exact quarter steps, and the contract for wiring it into the view |
 | [`doc/STATUS.md`](doc/STATUS.md) | how to read the status line: what each clause means, and which figure to look at when something feels wrong |
 | [`doc/CLI.md`](doc/CLI.md) | the measuring commands: `--memory-report` and `cheap-note-bench` — their arguments, output, exit codes, and what a platform has to provide to run them |
 | [`doc/STORE.md`](doc/STORE.md) | one stroke's journey to the disk and back — which is the format crate's story |

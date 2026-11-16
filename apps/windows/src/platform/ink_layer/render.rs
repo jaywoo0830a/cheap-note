@@ -481,7 +481,7 @@ impl Renderer {
             self.context.Clear(Some(std::ptr::from_ref(&transparent)));
         }
 
-        let drawn = self.draw_finished(canvas, [0.0, 0.0, paper.0, paper.1]);
+        let drawn = self.draw_finished(canvas, [0.0, 0.0, paper.0, paper.1].into());
         unsafe {
             self.context.SetTransform(&Matrix3x2::identity());
         }

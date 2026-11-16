@@ -23,6 +23,7 @@
 //! | ----------- | ------------------------------------------------------------------ |
 //! | [`input`]   | one pen reading in the app's own terms, and the queue it arrives through |
 //! | [`platform`]| the seam: what a platform lends the view                          |
+//! | [`design`]  | the one interface scale: design units to whole logical pixels      |
 //! | `keys`      | the chords, and how this platform writes them (`Ctrl+Z`, `⌘Z`)     |
 //! | [`pen_gesture`] | what a held key makes the pen do: space pans, option zooms      |
 //! | [`ink`]     | readings to strokes: edges, resampling, width, erasing             |
@@ -75,6 +76,7 @@
 //! opens that instead, and skips the list.
 
 pub mod cursor;
+pub mod design;
 pub mod error;
 pub mod ink_layer;
 pub mod input;

@@ -24,6 +24,7 @@
 //! | [`input`]   | one pen reading in the app's own terms, and the queue it arrives through |
 //! | [`platform`]| the seam: what a platform lends the view                          |
 //! | [`design`]  | the one interface scale: design units to whole logical pixels      |
+//! | `prefs`     | the interface scale itself, kept beside the notes (`prefs.json`)   |
 //! | `keys`      | the chords, and how this platform writes them (`Ctrl+Z`, `⌘Z`)     |
 //! | [`pen_gesture`] | what a held key makes the pen do: space pans, option zooms      |
 //! | [`ink`]     | readings to strokes: edges, resampling, width, erasing             |
@@ -98,6 +99,7 @@ mod pages;
 mod pdf;
 mod pdfium;
 mod pen_gesture;
+mod prefs;
 mod recent;
 pub mod report;
 mod settings;

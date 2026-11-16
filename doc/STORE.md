@@ -50,16 +50,20 @@ path, and that name *is* the note's identity: it is what makes importing the sam
 same note rather than a second copy of it. What a note is *called* — the name on the bar, and in the
 list — is a `meta` row, so a note carried to another machine arrives already named (§3).
 
-Beside the notes folder there is one small file, `%LOCALAPPDATA%\cheap-note\recent.json`: the list of
-what has been opened. It is a **cache of the notes folder, not a note** — deleting it costs the order of
-a list, and a folder it has never heard of is adopted by being there.
+Beside the notes folder are two small files. `%LOCALAPPDATA%\cheap-note\recent.json` is the list of
+what has been opened: a **cache of the notes folder, not a note** — deleting it costs the order of a
+list, and a folder it has never heard of is adopted by being there. `prefs.json` is the interface
+scale's index: the one preference that belongs to the machine rather than to a note, because it has to
+be the same before any note is open (see [DESIGN.md](DESIGN.md) §7.2).
 
 ### Two windows at once
 
-That file is the only thing two running copies of the app share, and it is shared safely because it is a
-cache: each copy **merges** what it holds with what is on disk before it writes (`recent::merge`), so the
-copy that started second cannot drop a note the other one opened, and a note taken out of the list in one
-copy is not put back by the other. The note itself is not shared: a note is a folder, and *one copy of the
+The recent index is the only thing two running copies of the app **merge**, and it is shared safely
+because it is a cache: each copy merges what it holds with what is on disk before it writes
+(`recent::merge`), so the copy that started second cannot drop a note the other one opened, and a note
+taken out of the list in one copy is not put back by the other. `prefs.json` is shared too, but it is a
+preference rather than a list: the last window to change the scale wins, because a value both windows
+read at startup has no history worth merging. The note itself is not shared: a note is a folder, and *one copy of the
 app owns one note while it is open*. Two windows on two different notes are therefore independent — the
 only thing they can disagree about is the order of the list — while two windows on the **same** note are
 not supported and would genuinely lose ink: each holds the page's shape (its chunks, their order, and the

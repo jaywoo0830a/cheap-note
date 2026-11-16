@@ -71,8 +71,6 @@ fn install(window: &mut Window) -> Platform {
         ink,
         ghost,
         pointer,
-        // The design's numbers are this platform's own: a Windows logical pixel is a 96-DPI one.
-        unit_scale: 1.0,
         // A desktop Windows machine scrolls with a wheel, and a wheel reports lines. Reading them
         // is what keeps a plugged-in mouse from being unable to move the sheet at all.
         wheel_pans: true,

@@ -440,6 +440,7 @@ the seam the platforms implement.
 | `home` | the screen the app opens on: the notes that were opened, and what a row can do |
 | **Cross-cutting** | |
 | `design` | the interface's one scale: four-unit design tokens to exact whole logical pixels — see [DESIGN.md](DESIGN.md) |
+| `prefs` | the one machine preference: the interface scale's index in `prefs.json` beside the notes |
 | `keys` | the chords, written once per platform (`⌘` vs `Ctrl`) |
 | `status_log` | the status line: what the meters read, and the messages the writers report |
 | `timing` | what every hot path costs, measured rather than guessed |
@@ -494,9 +495,10 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
    description, so they cannot drift.
 5. **One implementation per command.** A bar button and a keystroke end in the same method; the command
    is never implemented twice.
-6. **Every setting belongs to a note.** There is no global state at all: `recent.json` is a cache of the
-   notes folder, not a setting, and a choice made on a blank sheet is lost with it (the alternative is
-   handing one note's paper to another).
+6. **Every setting about a note belongs to the note.** The one machine preference is the interface
+   scale, kept in `prefs.json` beside the notes ([DESIGN.md](DESIGN.md) §7.2); `recent.json` is a
+   cache of the notes folder, not a setting. A choice made on a blank sheet is lost with it (the
+   alternative is handing one note's paper to another).
 7. **A note is a folder, and `Save` exports.** Nothing is *saved* by `Save`: the ink is already in the
    note, and what the button writes is the single file a person carries.
 8. **Ink is written as it is laid.** Nothing is ever held only in memory, so there is no unsaved state
@@ -627,7 +629,7 @@ The documents are meant to be read together:
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | this one: what runs where, and what may wait for what |
 | [VIEW.md](VIEW.md) | why the view is the way it is: the frame loop, the bar, the sheet, the gestures, the pen's rules |
-| [DESIGN.md](DESIGN.md) | the interface's one scale: design units, exact quarter steps, and how the view will consume them |
+| [DESIGN.md](DESIGN.md) | the interface's one scale: design units, exact quarter steps, and how the view consumes them |
 | [STORE.md](STORE.md) | one stroke's journey to the disk and back |
 | [MACOS.md](MACOS.md) | the macOS port: what the seam gives you, and what only a Mac can do |
 

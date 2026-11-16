@@ -76,10 +76,11 @@ pub const CONTROL_LARGE: DesignUnit = DesignUnit(40);
 pub const CONTROL_GAP: DesignUnit = DesignUnit(8);
 
 /// The large lengths that belong to the window's furniture rather than to an individual control.
-pub const LAYOUT: [DesignUnit; 6] = [
+pub const LAYOUT: [DesignUnit; 7] = [
     BAR_HEIGHT,
     BAR_MARGIN,
     PAGE_MARGIN,
+    SCREEN_MARGIN,
     FOOT_BAND,
     FOOT_SLACK,
     STATUS_DROP,
@@ -93,6 +94,13 @@ pub const BAR_MARGIN: DesignUnit = DesignUnit(12);
 
 /// The air between the sheet and the window's edges.
 pub const PAGE_MARGIN: DesignUnit = DesignUnit(24);
+
+/// The air between a full screen's content and the window's edges.
+///
+/// The home, bookmarks and contents screens are pages of their own rather than furniture over the
+/// sheet, so their margin is wider than [`PAGE_MARGIN`]: it is the width that makes a card on the
+/// desk read as a page rather than as a panel.
+pub const SCREEN_MARGIN: DesignUnit = DesignUnit(56);
 
 /// The height of the desk's row before a pill has been measured.
 pub const FOOT_BAND: DesignUnit = DesignUnit(72);

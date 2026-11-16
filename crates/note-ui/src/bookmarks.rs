@@ -38,7 +38,8 @@ use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::{ActiveTheme as _, Icon, IndexPath};
 use gpui_kit::*;
 
-use crate::app::NoteApp;
+use crate::app::{window_px, NoteApp};
+use crate::design::LayoutMetrics;
 use crate::keys;
 use crate::pages::Pages;
 
@@ -301,14 +302,20 @@ impl Marks {
     }
 
     /// The screen: the marked pages, and the way back to the note.
-    pub fn view(&self, title: &str, message: &str, cx: &mut Context<NoteApp>) -> AnyElement {
+    pub fn view(
+        &self,
+        title: &str,
+        message: &str,
+        metrics: LayoutMetrics,
+        cx: &mut Context<NoteApp>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let (desk, ink, card, hairline, radius) = (
             theme.background,
             theme.foreground,
             theme.title_bar,
             theme.border,
-            theme.radius_lg,
+            px(window_px(metrics.radius_large)),
         );
 
         v_flex()
@@ -322,14 +329,14 @@ impl Marks {
             .on_key_down(cx.listener(|app, event: &KeyDownEvent, window, cx| {
                 app.marks_key_down(event, window, cx)
             }))
-            .child(self.header(title, cx))
+            .child(self.header(title, metrics, cx))
             // The rows are a card on the desk, as they are on the home screen: one surface with a
             // hairline round it, so a list of places reads as a page rather than as another menu.
             .child(
                 div()
                     .flex_1()
                     .w_full()
-                    .px(px(crate::home::SIDE_MARGIN))
+                    .px(px(window_px(metrics.screen_margin)))
                     .child(
                         v_flex()
                             .size_full()
@@ -341,12 +348,12 @@ impl Marks {
                             .child(List::new(&self.list).size_full()),
                     ),
             )
-            .child(self.footer(message, cx))
+            .child(self.footer(message, metrics, cx))
             .into_any_element()
     }
 
     /// The top of the screen: what this list is, and how it is used.
-    fn header(&self, title: &str, cx: &mut Context<NoteApp>) -> AnyElement {
+    fn header(&self, title: &str, metrics: LayoutMetrics, cx: &mut Context<NoteApp>) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let count = self.count(cx);
@@ -369,8 +376,8 @@ impl Marks {
         };
 
         v_flex()
-            .gap_1()
-            .px(px(crate::home::SIDE_MARGIN))
+            .gap(px(window_px(metrics.space_1)))
+            .px(px(window_px(metrics.screen_margin)))
             .pt(px(40.0))
             .pb(px(18.0))
             .child(
@@ -383,15 +390,20 @@ impl Marks {
     }
 
     /// The bottom line: what a row's menu holds, and whatever the app last said.
-    fn footer(&self, message: &str, cx: &mut Context<NoteApp>) -> AnyElement {
+    fn footer(
+        &self,
+        message: &str,
+        metrics: LayoutMetrics,
+        cx: &mut Context<NoteApp>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let hairline = theme.border;
 
         let mut bar = StatusBar::new()
             .w_full()
-            .px(px(crate::home::SIDE_MARGIN))
-            .py(px(8.0))
+            .px(px(window_px(metrics.screen_margin)))
+            .py(px(window_px(metrics.space_2)))
             .bg(theme.transparent)
             .border_t_1()
             .border_color(hairline)

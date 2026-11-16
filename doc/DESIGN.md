@@ -5,10 +5,12 @@ turns a design length into a whole number of logical pixels, whatever platform t
 It is meant to be read beside [ARCHITECTURE.md](ARCHITECTURE.md) (what runs where) and
 [VIEW.md](VIEW.md) (why the view is arranged as it is).
 
-> **Status.** The module exists and is tested, but the view has not been moved onto it yet. The
-> lengths in `app.rs` are still the view's own constants. This document defines the scale and the
-> rules for the migration; where [VIEW.md](VIEW.md) or [MACOS.md](MACOS.md) still describe a
-> platform-specific palette factor, they describe the arrangement this module replaces.
+> **Status.** The view consumes the module. `NoteApp` holds one `LayoutMetrics` snapshot, the
+> window-furniture and full-screen lengths are read from it, the bar's **Scale** chooser replaces
+> the snapshot in one transaction, and `crates/note-ui/src/prefs.rs` stores `ScaleStep::index()` in
+> `prefs.json` beside the notes. The palette follows the same step. What still does not follow it
+> are the type ramp and the component library's own control heights; §7.5 and §7.6 say why those
+> are a separate ramp rather than four-unit tokens.
 
 If you read only one paragraph, read this one:
 
@@ -149,7 +151,7 @@ control.
 |---|---|
 | Spacing | `SPACE_1` 4, `SPACE_2` 8, `SPACE_3` 12, `SPACE_4` 16, `SPACE_6` 24, `SPACE_8` 32, `SPACE_12` 48, `SPACE_16` 64 |
 | Controls | `CONTROL_SMALL` 24, `CONTROL_MEDIUM` 32, `CONTROL_LARGE` 40, `CONTROL_GAP` 8 |
-| Window furniture | `BAR_HEIGHT` 148, `BAR_MARGIN` 12, `PAGE_MARGIN` 24, `FOOT_BAND` 72, `FOOT_SLACK` 12, `STATUS_DROP` 12 |
+| Window furniture | `BAR_HEIGHT` 148, `BAR_MARGIN` 12, `PAGE_MARGIN` 24, `SCREEN_MARGIN` 56, `FOOT_BAND` 72, `FOOT_SLACK` 12, `STATUS_DROP` 12 |
 | Radii | `RADIUS_SMALL` 4, `RADIUS_MEDIUM` 8, `RADIUS_LARGE` 16 |
 
 The names are the design's, not the framework's. `BAR_HEIGHT` is the estimate the view falls back to
@@ -189,6 +191,7 @@ step; this table is the shape of the arithmetic.
 | 16 | 8 | 12 | 16 | 20 | 24 | 28 | 32 |
 | 24 | 12 | 18 | 24 | 30 | 36 | 42 | 48 |
 | 32 | 16 | 24 | 32 | 40 | 48 | 56 | 64 |
+| 56 | 28 | 42 | 56 | 70 | 84 | 98 | 112 |
 | 148 | 74 | 111 | 148 | 185 | 222 | 259 | 296 |
 
 Every row is exactly the percentage of its 100% value, and every cell is an integer. That is the
@@ -199,8 +202,9 @@ property the module exists to make structural rather than accidental.
 It is a scale, not an application framework. Deliberately absent:
 
 * **A preference file.** `ScaleStep::index()` and `from_index()` are the persistence contract, but
-  loading and saving a machine preference belongs to the app. A preference should store the index,
-  never a floating-point percentage.
+  loading and saving a machine preference belongs to the app: `crates/note-ui/src/prefs.rs` keeps
+  the index in `prefs.json` beside the notes. The file holds the index, never a floating-point
+  percentage.
 * **A GPUI adapter.** `LayoutPx` is not a `Pixels` or a `Rems`. The conversion belongs at the window
   boundary, where the framework's current window and rem size are known.
 * **Platform calibration.** No DPI, no monitor identifier, no `cfg(target_os)`, and no per-platform
@@ -215,19 +219,22 @@ It is a scale, not an application framework. Deliberately absent:
 
 ## 7. The rules for wiring it in
 
-When the view starts consuming this module, the following rules keep the contract intact.
+The view consumes this module; the following rules keep the contract intact as it grows.
 
 ### 7.1 One source, one snapshot
 
 All layout lengths should come from `LayoutMetrics::at(step)`, not from local `px()` calls. The
-snapshot is computed once when the scale changes and passed to the render path. A per-call
-conversion would recreate the disagreement this module is meant to remove.
+snapshot is computed once when the scale changes and passed to the render path; `window_px` in
+`app.rs` is the one place it is opened into GPUI's logical pixels. A per-call conversion would
+recreate the disagreement this module is meant to remove. The home, bookmarks and contents screens
+read the same snapshot for their margins, card radii and spacing.
 
 ### 7.2 The preference stores an index
 
-The preference file should hold `ScaleStep::index()` as an integer. It should not hold `1.25`, a
-percentage string, or a platform factor. `from_index()` is the checked way back; an unknown index
-falls back to the shipped step.
+The preference file holds `ScaleStep::index()` as an integer. It does not hold `1.25`, a percentage
+string, or a platform factor. `from_index()` is the checked way back; an unknown index falls back
+to the shipped step. `crates/note-ui/src/prefs.rs` is that file's owner, and the bar's Scale chooser
+is the one control that changes it.
 
 ### 7.3 Change the scale in one transaction
 
@@ -243,6 +250,9 @@ Changing the scale has to do all of the following together:
 Step 4 is easy to miss. A measured line from the old scale is not wrong by a percentage; it is wrong
 by whatever the layout actually did, and it will remain the line the pen is judged by until the next
 frame measures it again.
+
+`NoteApp::set_interface_scale` is the one implementation of those five steps. The framework has no
+base size to tell: the adapter writes logical pixels into every length, so step 3 has nothing to do.
 
 ### 7.4 Convert only at the framework boundary
 
@@ -330,8 +340,9 @@ module boundary does not already provide.
 | [`crates/note-ui/src/design/scale.rs`](../crates/note-ui/src/design/scale.rs) | `ScaleStep`, `LayoutPx`, and `px()` |
 | [`crates/note-ui/src/design/metrics.rs`](../crates/note-ui/src/design/metrics.rs) | the resolved layout snapshot |
 | [`crates/note-ui/src/design/tests.rs`](../crates/note-ui/src/design/tests.rs) | the exhaustive tests |
+| [`crates/note-ui/src/prefs.rs`](../crates/note-ui/src/prefs.rs) | the machine preference: the step's index in `prefs.json` |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | where the modules run, and what may wait for what |
-| [VIEW.md](VIEW.md) | why the view is arranged as it is, including the lengths this module will replace |
+| [VIEW.md](VIEW.md) | why the view is arranged as it is, including the lengths this module owns |
 | [MACOS.md](MACOS.md) | the platform that made the old palette factor visible |
 
 One sentence to carry away:

@@ -173,6 +173,7 @@ fn metrics_are_the_tokens_at_the_same_scale() {
         assert_eq!(metrics.bar_height, px(BAR_HEIGHT, step));
         assert_eq!(metrics.bar_margin, px(BAR_MARGIN, step));
         assert_eq!(metrics.page_margin, px(PAGE_MARGIN, step));
+        assert_eq!(metrics.screen_margin, px(SCREEN_MARGIN, step));
         assert_eq!(metrics.foot_band, px(FOOT_BAND, step));
         assert_eq!(metrics.foot_slack, px(FOOT_SLACK, step));
         assert_eq!(metrics.status_drop, px(STATUS_DROP, step));
@@ -183,6 +184,14 @@ fn metrics_are_the_tokens_at_the_same_scale() {
         assert_eq!(metrics.radius_small, px(RADIUS_SMALL, step));
         assert_eq!(metrics.radius_medium, px(RADIUS_MEDIUM, step));
         assert_eq!(metrics.radius_large, px(RADIUS_LARGE, step));
+        assert_eq!(metrics.space_1, px(SPACE_1, step));
+        assert_eq!(metrics.space_2, px(SPACE_2, step));
+        assert_eq!(metrics.space_3, px(SPACE_3, step));
+        assert_eq!(metrics.space_4, px(SPACE_4, step));
+        assert_eq!(metrics.space_6, px(SPACE_6, step));
+        assert_eq!(metrics.space_8, px(SPACE_8, step));
+        assert_eq!(metrics.space_12, px(SPACE_12, step));
+        assert_eq!(metrics.space_16, px(SPACE_16, step));
     }
 }
 
@@ -194,6 +203,8 @@ fn the_default_metrics_are_the_shipped_design() {
     assert_eq!(metrics.scale, ScaleStep::P100);
     assert_eq!(metrics.bar_height.get(), 148);
     assert_eq!(metrics.page_margin.get(), 24);
+    assert_eq!(metrics.screen_margin.get(), 56);
     assert_eq!(metrics.control_medium.get(), 32);
     assert_eq!(metrics.radius_large.get(), 16);
+    assert_eq!(metrics.space_2.get(), 8);
 }

@@ -9,7 +9,7 @@
 use super::scale::{px, LayoutPx, ScaleStep};
 use super::tokens;
 
-/// Every layout length the interface's furniture needs, at one interface scale.
+/// Every layout length the interface needs, at one interface scale.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LayoutMetrics {
     /// The scale that produced these values.
@@ -20,6 +20,8 @@ pub struct LayoutMetrics {
     pub bar_margin: LayoutPx,
     /// The air between the sheet and the window's edges.
     pub page_margin: LayoutPx,
+    /// The air between a full screen's content and the window's edges.
+    pub screen_margin: LayoutPx,
     /// The estimated height of the desk's row.
     pub foot_band: LayoutPx,
     /// How far past a pill's edge a pen reading still belongs to the pill.
@@ -40,6 +42,22 @@ pub struct LayoutMetrics {
     pub radius_medium: LayoutPx,
     /// The large corner radius.
     pub radius_large: LayoutPx,
+    /// The first rung of the spacing ramp.
+    pub space_1: LayoutPx,
+    /// The second rung of the spacing ramp.
+    pub space_2: LayoutPx,
+    /// The third rung of the spacing ramp.
+    pub space_3: LayoutPx,
+    /// The fourth rung of the spacing ramp.
+    pub space_4: LayoutPx,
+    /// The sixth rung of the spacing ramp.
+    pub space_6: LayoutPx,
+    /// The eighth rung of the spacing ramp.
+    pub space_8: LayoutPx,
+    /// The twelfth rung of the spacing ramp.
+    pub space_12: LayoutPx,
+    /// The sixteenth rung of the spacing ramp.
+    pub space_16: LayoutPx,
 }
 
 impl LayoutMetrics {
@@ -54,6 +72,7 @@ impl LayoutMetrics {
             bar_height: px(tokens::BAR_HEIGHT, scale),
             bar_margin: px(tokens::BAR_MARGIN, scale),
             page_margin: px(tokens::PAGE_MARGIN, scale),
+            screen_margin: px(tokens::SCREEN_MARGIN, scale),
             foot_band: px(tokens::FOOT_BAND, scale),
             foot_slack: px(tokens::FOOT_SLACK, scale),
             status_drop: px(tokens::STATUS_DROP, scale),
@@ -64,6 +83,14 @@ impl LayoutMetrics {
             radius_small: px(tokens::RADIUS_SMALL, scale),
             radius_medium: px(tokens::RADIUS_MEDIUM, scale),
             radius_large: px(tokens::RADIUS_LARGE, scale),
+            space_1: px(tokens::SPACE_1, scale),
+            space_2: px(tokens::SPACE_2, scale),
+            space_3: px(tokens::SPACE_3, scale),
+            space_4: px(tokens::SPACE_4, scale),
+            space_6: px(tokens::SPACE_6, scale),
+            space_8: px(tokens::SPACE_8, scale),
+            space_12: px(tokens::SPACE_12, scale),
+            space_16: px(tokens::SPACE_16, scale),
         }
     }
 }

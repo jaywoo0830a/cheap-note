@@ -4,15 +4,16 @@ use super::{
     bar_line, confirmed, file_label, file_stem, held_by_cap, page_after_insert, page_of_write,
     page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face, palette_id,
     palette_in_hand, palette_point, parse_zoom, pdf_render_due, pen_cursor_shows,
-    pinch_zoom_factor, quantise_width, samples_vitals, screen_in_front, scroll_of, sheet_is_front,
-    sheet_matches, spun, touches_paper, zoom_text, Confirmation, Edge, EdgeSwipe, FootPills,
-    FootPlace, FootStrips, PaletteGeometry, PalettePart, PenGesture, Screens, Swipe, Turn,
-    BAR_HEIGHT, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX, PALETTE_HUB,
+    pinch_zoom_factor, quantise_width, samples_vitals, scale_label, screen_in_front, scroll_of,
+    sheet_is_front, sheet_matches, spun, touches_paper, window_px, zoom_text, Confirmation, Edge,
+    EdgeSwipe, FootPills, FootPlace, FootStrips, PaletteGeometry, PalettePart, PenGesture, Screens,
+    Swipe, Turn, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX, PALETTE_HUB,
     PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS,
     PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD,
     PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
+use crate::design::{LayoutMetrics, ScaleStep};
 use crate::ink::{Notes, Tool};
 use crate::pages::Pages;
 use gpui_kit::ElementId;
@@ -414,14 +415,14 @@ fn a_page_added_before_this_one_leaves_the_reader_where_they_were() {
 ///
 /// The row is full-width and the pills float in it, so the desk beside them is still desk: a reader
 /// may be writing on paper behind the gap between the two pills, and refusing the whole row would take
-/// that away. Each strip is the pill's own measured box grown by `FOOT_SLACK`.
+/// that away. Each strip is the pill's own measured box grown by the snapshot's `foot_slack`.
 #[test]
 fn the_foot_refuses_the_pills_and_not_the_row() {
     // The page pill measured at 400..600 and the zoom pill at 700..900, with 12 px of slack either side.
     let strips = FootPills::default()
         .measured(FootPlace::Page, 400.0, 600.0, 930.0)
         .measured(FootPlace::Zoom, 700.0, 900.0, 910.0)
-        .strips();
+        .strips(LayoutMetrics::default().foot_slack);
 
     let held = |x: f32, y: f32| strips.held((x, y), 900.0);
 
@@ -443,7 +444,9 @@ fn the_foot_refuses_the_pills_and_not_the_row() {
     );
 
     // An unmeasured pill is no strip at all: the pen is refused nowhere it cannot see a pill.
-    assert!(!FootPills::default().strips().held((500.0, 950.0), 900.0));
+    assert!(!FootPills::default()
+        .strips(LayoutMetrics::default().foot_slack)
+        .held((500.0, 950.0), 900.0));
 }
 
 /// Each pill's measured box becomes its strip, and the taller pill's top is the line — because a
@@ -462,7 +465,7 @@ fn the_foot_takes_the_tallest_pill_as_its_line() {
         "the taller pill is where the row really begins"
     );
 
-    let strips = measured.strips();
+    let strips = measured.strips(LayoutMetrics::default().foot_slack);
     assert_eq!(
         strips.page,
         Some((388.0, 612.0)),
@@ -487,7 +490,7 @@ fn the_arrow_is_the_cursor_over_the_bar_and_the_pills() {
     let strips = FootPills::default()
         .measured(FootPlace::Page, 400.0, 600.0, 930.0)
         .measured(FootPlace::Zoom, 700.0, 900.0, 910.0)
-        .strips();
+        .strips(LayoutMetrics::default().foot_slack);
     let shows = |x: f32, y: f32| pen_cursor_shows((x, y), bar, foot, strips);
 
     assert!(!shows(500.0, 50.0), "on the bar, the arrow is the cursor");
@@ -529,7 +532,7 @@ fn a_pill_laid_out_at_no_width_covers_only_its_own_point() {
     let strips = FootPills::default()
         .measured(FootPlace::Page, 626.0, 626.0, 752.0)
         .measured(FootPlace::Zoom, 1013.0, 1013.0, 752.0)
-        .strips();
+        .strips(LayoutMetrics::default().foot_slack);
 
     assert_eq!(
         (strips.page, strips.zoom),
@@ -555,13 +558,16 @@ fn the_two_pills_measure_themselves_one_after_the_other() {
 
     measured = measured.measured(FootPlace::Page, 400.0, 600.0, 930.0);
     assert!(
-        measured.strips().page.is_some(),
+        measured
+            .strips(LayoutMetrics::default().foot_slack)
+            .page
+            .is_some(),
         "one pill is enough for a strip"
     );
 
     measured = measured.measured(FootPlace::Zoom, 700.0, 900.0, 910.0);
 
-    let strips = measured.strips();
+    let strips = measured.strips(LayoutMetrics::default().foot_slack);
     assert!(strips.page.is_some(), "the page pill's strip");
     assert!(strips.zoom.is_some(), "and the zoom pill's");
 }
@@ -610,11 +616,11 @@ fn the_ring_reads_like_a_clock() {
     assert!(near(palette_point(middle, 100.0, 3, 12), [300.0, 200.0]));
 }
 
-/// The palette's geometry at the unit its design was written in: the numbers the palette's tests
-/// below were tuned at. The platform's own unit is what
-/// [`a_smaller_unit_scales_the_ring_and_the_reach_of_a_tap`] is about.
+/// The palette's geometry at the step its design was written at: the numbers the palette's tests
+/// below were tuned at. Another step is what
+/// [`a_smaller_step_scales_the_ring_and_the_reach_of_a_tap`] is about.
 fn design_palette() -> PaletteGeometry {
-    PaletteGeometry::of(1.0)
+    PaletteGeometry::at(ScaleStep::P100)
 }
 
 /// A tap belongs to the control it landed on, and to none of the ones it did not.
@@ -864,44 +870,45 @@ fn the_palette_is_kept_on_the_screen() {
     );
 }
 
-/// A platform's unit changes every length, and the reach of a tap with them.
+/// A smaller interface step changes every length, and the reach of a tap with them.
 ///
-/// The design is written in 96-DPI logical pixels and macOS measures in points, four thirds of one,
-/// so the palette there is drawn at three quarters of the design's size. What has to move with the
-/// drawing is the *answer to a tap*: a ring drawn smaller and hit-tested at the design's reach would
-/// take presses outside its discs, and one drawn at three quarters with a reach that stayed behind
-/// would refuse the edge of its own. Both are the same property at two scales, which is what this
-/// pins.
+/// The palette's numbers are the design's, and the step is the same one the window's furniture is
+/// laid out at. What has to move with the drawing is the *answer to a tap*: a ring drawn smaller and
+/// hit-tested at the design's reach would take presses outside its discs, and one drawn smaller with
+/// a reach that stayed behind would refuse the edge of its own. Both are the same property at two
+/// scales, which is what this pins.
 #[test]
-fn a_smaller_unit_scales_the_ring_and_the_reach_of_a_tap() {
+fn a_smaller_step_scales_the_ring_and_the_reach_of_a_tap() {
     let centre = [300.0, 300.0];
     let colours = INK_COLORS.len();
 
-    for unit in [1.0f32, 0.75] {
-        let geometry = PaletteGeometry::of(unit);
+    for step in [ScaleStep::P100, ScaleStep::P75] {
+        let geometry = PaletteGeometry::at(step);
         let on = palette_point(centre, geometry.ring(), 4, colours);
 
         assert_eq!(
             palette_at(geometry, centre, on, colours),
             Some(PalettePart::Colour(4)),
-            "the point on the ring is the colour, at a unit of {unit}"
+            "the point on the ring is the colour, at {}%",
+            step.percent()
         );
 
         // Further out than the reach allows — on the same spoke, so the nearest control is the
         // colour — is not that colour any more. Had the reach stayed at the design's number, this
-        // would still be inside it at 0.75.
+        // would still be inside it at 75%.
         let away = palette_point(centre, geometry.ring() + geometry.reach() * 1.5, 4, colours);
 
         assert_ne!(
             palette_at(geometry, centre, away, colours),
             Some(PalettePart::Colour(4)),
-            "a tap past the reach is not the colour, at a unit of {unit}"
+            "a tap past the reach is not the colour, at {}%",
+            step.percent()
         );
     }
 
-    // A unit a platform cannot mean is the design's own, rather than a palette of no size at all.
-    assert_eq!(PaletteGeometry::of(0.0), design_palette());
-    assert_eq!(PaletteGeometry::of(f32::NAN), design_palette());
+    // The shipped step is the design's own, and the closed step list has no invalid scale to fall
+    // back from.
+    assert_eq!(PaletteGeometry::at(ScaleStep::DEFAULT), design_palette());
 }
 
 /// A bar that is not there has no line, and a bar that is there has the edge a frame measured.
@@ -914,31 +921,83 @@ fn a_smaller_unit_scales_the_ring_and_the_reach_of_a_tap() {
 /// before the first measurement falls back to.
 #[test]
 fn a_hidden_bar_has_no_line_and_a_shown_one_has_the_measured_edge() {
+    let estimate = LayoutMetrics::default().bar_height;
+
     assert_eq!(
-        bar_line(false, Some(200.0)),
+        bar_line(false, Some(200.0), estimate),
         0.0,
         "a hidden bar is page, even where its switch was"
     );
     assert_eq!(
-        bar_line(false, None),
+        bar_line(false, None, estimate),
         0.0,
         "and it is page before it was ever measured"
     );
     assert_eq!(
-        bar_line(true, Some(133.0)),
+        bar_line(true, Some(133.0), estimate),
         133.0,
         "the edge the frame measured wins over the estimate"
     );
     assert_eq!(
-        bar_line(true, None),
-        BAR_HEIGHT,
+        bar_line(true, None, estimate),
+        window_px(estimate),
         "the estimate is only the frame before the first measurement"
     );
     assert_eq!(
-        bar_line(true, Some(0.0)),
-        BAR_HEIGHT,
+        bar_line(true, Some(0.0), estimate),
+        window_px(estimate),
         "a measurement of zero is no measurement: a bar that is up has some height"
     );
+}
+
+/// The chooser names every step once, in the order the file's indices use.
+///
+/// The preference stores the index, so the label is the only human-readable name a step has; a
+/// duplicate or a missing percentage would make a step unreachable from the bar even though the
+/// file could still name it.
+#[test]
+fn the_scale_chooser_names_the_seven_steps() {
+    let labels: Vec<String> = ScaleStep::ALL
+        .iter()
+        .map(|step| scale_label(*step))
+        .collect();
+
+    assert_eq!(
+        labels,
+        ["50%", "75%", "100%", "125%", "150%", "175%", "200%"]
+    );
+}
+
+/// The view's estimates are the design's tokens at the frame's one scale, not the 100% numbers.
+///
+/// A bar and a desk's row that fell back to the shipped lengths on a larger interface would put
+/// their first-frame lines at the wrong place by a whole step: ink would be refused outside the
+/// bar, or a dot would land on a pill that the frame had not measured yet. Both read
+/// [`LayoutMetrics`], and this is that they do.
+#[test]
+fn the_views_estimates_follow_the_layout_step() {
+    for step in ScaleStep::ALL {
+        let metrics = LayoutMetrics::at(step);
+
+        assert_eq!(
+            bar_line(true, None, metrics.bar_height),
+            window_px(metrics.bar_height),
+            "the bar's estimate at {}%",
+            step.percent()
+        );
+
+        let strips = FootPills::default()
+            .measured(FootPlace::Page, 400.0, 600.0, 900.0)
+            .strips(metrics.foot_slack);
+        let slack = window_px(metrics.foot_slack);
+
+        assert_eq!(
+            strips.page,
+            Some((400.0 - slack, 600.0 + slack)),
+            "the pill's slack at {}%",
+            step.percent()
+        );
+    }
 }
 
 /// Element ids address the whole tree, and the bar's swatches and the palette's discs are drawn at

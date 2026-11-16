@@ -421,9 +421,10 @@ puts it away, and nothing else a key means reaches the sheet or the bar under it
   tool is on the bar and for the same reason: an icon alone on a white field is a smudge. The hub is the
   colour the next stroke will be written in, and it is *not* a control, so it is set in a ring of white —
   the one filled circle in the middle that cannot be pressed does not look like the three that can. Its
-  measurements are in §12 with the rest of them — and they are the design's, in 96-DPI logical pixels, so
-  what is drawn is those numbers times `Platform::unit_scale`: a macOS point is four thirds of one, and
-  the same numbers there would be a third too large (`PaletteGeometry`).
+  measurements are in §12 with the rest of them — and they are the design's, in logical pixels, so what
+  is drawn is those numbers at the frame's `ScaleStep`: the palette and the bar beside it are one
+  interface scale, and the different physical size of a macOS point and a Windows logical pixel is the
+  operating system's layer (`PaletteGeometry`, [DESIGN.md](DESIGN.md) §1).
 
 The two list screens keep the app's own chords and nothing else: the arrows, Enter and Escape belong to
 the list that has the focus, and the same chords work there as on the note, because a person looking at
@@ -1064,15 +1065,29 @@ records the change.
 
 ## 12. The numbers, in one table
 
-| Constant | Value | What it decides |
+The window-furniture rows below — `PAGE_MARGIN`, `BAR_MARGIN`, `BAR_HEIGHT`, `SCREEN_MARGIN`,
+`FOOT_BAND`, `FOOT_SLACK` and `STATUS_DROP` — are the design module's tokens, and the view reads them
+from one `LayoutMetrics` snapshot rather than from constants of its own. The values below are the
+shipped 100% step; every one of them moves with the interface scale, and the seven together cannot
+disagree about what that scale is. The `SPACE_*` and `RADIUS_*` tokens are read from the same
+snapshot by the bar and the three full screens. The other rows are the view's own definitions: the
+`PALETTE_*` lengths follow the same step as one factor (`PaletteGeometry`), while the rest —
+fractions, intervals and the shadow — do not follow the interface scale at all.
+
+The **Scale** chooser on the bar's second row changes every window-furniture, spacing and radius
+token above together. It is the one machine preference rather than a note setting, so its index lives
+in `prefs.json` beside the notes (see [DESIGN.md](DESIGN.md) §7.2) and applies before any note is open.
+
+| Token | Value at 100% | What it decides |
 |---|---|---|
 | `PAGE_MARGIN` | 24 logical px | the margin between the sheet and the window's edges — the strip the floating bar covers |
+| `SCREEN_MARGIN` | 56 logical px | the air the home, bookmarks and contents screens keep from the window's edges: their card reads as a page rather than as a panel |
 | `BAR_MARGIN` | 12 logical px | how far the floating bar and the page pill sit from the window's edges: the desk showing in that gap is what makes the sheet read as paper on a desk |
 | `BAR_HEIGHT` | 148 logical px | the estimate `bar_edge` falls back to only on the frame before the bar has been measured; the *measured* edge is the one line ink, the ghost cursor and the system pointer all use |
 | `FOOT_BAND` | 72 logical px | the estimate `foot_edge` falls back to only until a frame has measured the pills at the desk's foot; an upper bound, so the first frame refuses a little more desk rather than writing on a pill |
 | `FOOT_SLACK` | 12 logical px | how far past a pill's own edge a reading still counts as a press on it: a nib that lands just beside a button is a press that missed, not a line |
 | `STATUS_PILL_WIDTH` | 0.6 | the fraction of the window the status pill may use; it wraps, and the fraction is what decides into how many lines |
-| `STATUS_DROP` | `BAR_MARGIN` (12 logical px) | how far below the bar's measured bottom edge the status pill hangs |
+| `STATUS_DROP` | 12 logical px at 100% | how far below the bar's measured bottom edge the status pill hangs — its own design token, resolved from the same snapshot |
 | `STATUS_REFRESH_INTERVAL` | 1 s | how often the status line's counters are rebuilt while a note is in front: a readout's pace, not a frame's |
 | `MEASURE_KEY` | `Ctrl+M` | the session's one key, for starting and for stopping: named once, and the line that reports on a session says it out loud |
 | `HOUSEKEEPING_INTERVAL` | 1 ms | the housekeeping pump's own clock: a fixed floor, not a rate taken from the display, and the shortest wait that still parks the task rather than spinning it |
@@ -1097,11 +1112,13 @@ records the change.
 | `FrameCap` (`frame_cap`) | `Unlimited` | the most frames a second the canvas draws, whatever the display can show: `60`, `144`, `180`, `240`, `360` or none. A ceiling on the canvas's own work, checked against the time since the last frame was handed over, and not a display mode — a display slower than the chosen rate simply draws at its own |
 | `vsync` | on | whether a frame waits for the display's clock before it is shown: `CAMetalLayer.displaySyncEnabled` on macOS, nothing on Windows, which presents at a sync interval of zero always. With no `frame_cap` of its own, the switch moves the rate by about forty percent — 177 draws/s off against 124 on, on a 144 Hz display — so it is a real pacer and not a cosmetic flag. A cap tighter than the display's rate binds first and hides it (§11) |
 
-Every `PALETTE_*` length above is a *design* number, in the 96-DPI logical pixels a Windows display
-measures in. The palette is drawn at those numbers times `Platform::unit_scale` — `1.0` on Windows and
-`0.75` on macOS, whose logical pixel is a point — so it is the same size in the hand on both
-(`PaletteGeometry`). The rings, the discs, the well, the margin and the reach of a tap all move by that
-one factor, which is what keeps the gaps the palette's tests pin proportional at either size.
+Every `PALETTE_*` length above is a *design* number, in the logical pixels the interface is laid out
+in. The palette is drawn at those numbers at the frame's `ScaleStep` (`PaletteGeometry`), the same step
+the window's furniture uses: the palette is not made of four-unit layout tokens, so it follows the step
+as one factor rather than through `px()`. The rings, the discs, the well, the margin and the reach of a
+tap all move by that one factor, which keeps the gaps the palette's tests pin proportional at every
+step. A platform's physical density is not part of it — the windowing system already owns that
+([DESIGN.md](DESIGN.md) §1).
 
 ### The hardware clause
 

@@ -32,7 +32,7 @@ impl DesignUnit {
     /// A value that is not a multiple of [`GRID`] is refused rather than rounded: rounding here
     /// would hide the mistake until two call sites rounded differently.
     pub const fn new(units: u16) -> Option<Self> {
-        if units % GRID == 0 {
+        if units.is_multiple_of(GRID) {
             Some(DesignUnit(units))
         } else {
             None

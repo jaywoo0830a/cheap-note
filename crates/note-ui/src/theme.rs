@@ -29,6 +29,10 @@
 //! a screenshot. [`install`] therefore asks the text system what it has afterwards, and says so on
 //! the console when the answer is not this font.
 //!
+//! The palette's `font.size` is the shipped 100% base. [`set_base_size`] replaces it with the
+//! interface scale's body size; GPUI Kit also reads that field as the window's rem size, which is
+//! why one value carries the rem-based text, icons and control padding.
+//!
 //! ## What is *not* here
 //!
 //! The ink and the paper are not theme: they are the user's own colours, they are saved with the
@@ -171,6 +175,19 @@ pub fn install(cx: &mut App) {
             "cheap-note: {FONT_FAMILY:?} did not register; text falls back to the system font"
         );
     }
+}
+
+/// Sets the base font size, which GPUI Kit also uses as the window's rem size.
+///
+/// One number is enough for the rem-based part of the interface: `text_sm`, `text_lg`, icons and
+/// the component library's own padding are all rem multiples, and the library's root copies the
+/// theme's font size into the window on the next prepare. The few sizes that are written in pixels
+/// read [`crate::design::TypeRamp`]'s roles instead.
+///
+/// `Theme::update` is the write path that refreshes every window; a direct field write would leave
+/// the already-laid-out frames on the old rem size.
+pub fn set_base_size(size: f32, cx: &mut App) {
+    Theme::update(cx, |theme| theme.font_size = px(size));
 }
 
 /// Registers the bundled font and reports whether the family is now one the text system knows.

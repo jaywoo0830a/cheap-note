@@ -29,13 +29,14 @@
 //! what makes the tests exhaustive: every token can be checked at every allowed scale without
 //! opening a window.
 //!
-//! Typography is not part of the layout grid yet. A type ramp is usually authored as a set of
-//! deliberate sizes for each scale rather than as a linear multiple, and it can be added here when
-//! the interface starts consuming the scale.
+//! Typography is deliberately separate: [`TypeRamp`] shares [`ScaleStep`] with the layout, but its
+//! sizes are authored for text rather than derived from the four-unit grid. Its base is what GPUI
+//! Kit uses as the window's rem size, so it also carries every rem-based text style and control.
 
 mod metrics;
 mod scale;
 mod tokens;
+mod type_ramp;
 
 #[cfg(test)]
 mod tests;
@@ -43,3 +44,4 @@ mod tests;
 pub use metrics::LayoutMetrics;
 pub use scale::{px, LayoutPx, ScaleStep};
 pub use tokens::*;
+pub use type_ramp::TypeRamp;

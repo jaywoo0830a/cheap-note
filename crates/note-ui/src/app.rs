@@ -36,7 +36,7 @@ use crate::canvas::{
     Swatch, HIGHLIGHTER_COLORS, INK_COLORS, PAPER_COLORS,
 };
 use crate::cursor::{nib_radius_for_width, PenCursor};
-use crate::design::{LayoutMetrics, LayoutPx, ScaleStep};
+use crate::design::{LayoutMetrics, LayoutPx, ScaleStep, TypeRamp};
 use crate::home::Home;
 use crate::ink::{paper_of_drawn, InkTransform, Notes, Stroke, Tool, HIGHLIGHTER_WIDTH};
 use crate::ink_layer::{Canvas, Ink, Page, Rect};
@@ -1017,7 +1017,13 @@ pub struct NoteApp {
     /// It is computed once from [`Self::prefs`] when the app starts and replaced in one transaction
     /// when the scale changes ([`Self::set_interface_scale`]); the step inside it is also what the
     /// palette is drawn at.
+    ///
+    /// The type sizes are a separate ramp at the same step (see [`TypeRamp`]): `metrics` is exact
+    /// whole logical pixels for layout, while typography is authored for text and carried by the
+    /// theme's rem size.
     metrics: LayoutMetrics,
+    /// The type sizes at the same step as [`Self::metrics`].
+    type_ramp: TypeRamp,
     /// Whether a wheel's line-based scroll moves the sheet (see [`crate::platform::Platform::wheel_pans`]).
     ///
     /// A wheel reports lines and a trackpad reports pixels; the view pans in pixels, so a platform
@@ -1214,6 +1220,11 @@ impl NoteApp {
         // It is read before the first frame, so the window opens at the size it was left at.
         let prefs = Prefs::load();
         let metrics = LayoutMetrics::at(prefs.scale());
+        let type_ramp = TypeRamp::at(prefs.scale());
+        // GPUI Kit makes the window's rem size the theme's font size, so this one value is what
+        // carries `text_sm`, `text_lg`, icons and the component library's own padding. It is set
+        // before the first frame, like the layout snapshot.
+        crate::theme::set_base_size(type_ramp.base, cx);
         let mut message = String::new();
 
         // The services, taken apart again. The pen's thread and the ghost's window are already
@@ -1368,6 +1379,7 @@ impl NoteApp {
             page_index: 0,
             scale: window.scale_factor(),
             metrics,
+            type_ramp,
             wheel_pans,
             view,
             desk: cx.theme().background,
@@ -2573,8 +2585,14 @@ impl NoteApp {
         let changed = self.prefs.set_scale(scale);
         self.metrics = LayoutMetrics::at(scale);
 
-        // There is no framework base size to tell: [`window_px`] writes every length into GPUI as
-        // a logical pixel, so the snapshot is the whole of the adapter.
+        // The type ramp shares the step but not the arithmetic. Its base is also the window's rem
+        // size (GPUI Kit copies the theme's font size there), so every rem-based text style, icon
+        // and control padding moves with it. The explicit pixel sizes in this file read the roles.
+        self.type_ramp = TypeRamp::at(scale);
+        crate::theme::set_base_size(self.type_ramp.base, cx);
+
+        // There is no other framework base size to tell: [`window_px`] writes every layout length
+        // into GPUI as a logical pixel, so the snapshot is the whole of the layout adapter.
 
         // Measurements at the old scale are old pixels: the bar's bottom edge and the pills' boxes
         // are re-measured by the next frame, and until then their estimates are the new scale's.
@@ -5669,10 +5687,14 @@ impl NoteApp {
             // chooses.
             .max_w(px(260.0))
             .text_color(if named { foreground } else { muted })
-            .child(div().text_size(px(15.0)).child(IconName::BookOpen))
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(px(self.type_ramp.title))
+                    .child(IconName::BookOpen),
+            )
+            .child(
+                div()
+                    .text_size(px(self.type_ramp.base))
                     .whitespace_nowrap()
                     .truncate()
                     .child(title),
@@ -5999,27 +6021,27 @@ impl NoteApp {
             .pt_2()
             .border_t_1()
             .border_color(hairline)
-            .child(control_label("Page", muted))
+            .child(control_label("Page", muted, self.type_ramp.micro))
             .child(self.page_controls(cx))
             .child(toolbar_divider(hairline))
-            .child(control_label("Sheet", muted))
+            .child(control_label("Sheet", muted, self.type_ramp.micro))
             .child(self.chooser("chooser-sheet", &self.sheet_select, cx))
             .child(toolbar_divider(hairline))
-            .child(control_label("Style", muted))
+            .child(control_label("Style", muted, self.type_ramp.micro))
             .child(self.chooser("chooser-rule", &self.rule_select, cx))
             .child(toolbar_divider(hairline))
-            .child(control_label("Paper", muted))
+            .child(control_label("Paper", muted, self.type_ramp.micro))
             .children(paper)
             .child(toolbar_divider(hairline))
-            .child(control_label("Ink", muted))
+            .child(control_label("Ink", muted, self.type_ramp.micro))
             .children(ink)
             .child(toolbar_divider(hairline))
-            .child(control_label("Weight", muted))
+            .child(control_label("Weight", muted, self.type_ramp.micro))
             .child(self.chooser("chooser-pen", &self.pen_select, cx))
             .child(toolbar_divider(hairline))
             // The canvas's own ceiling, beside the render option it is a sibling of: what it paces is the
             // canvas's work, not the display's. See [`FrameCap`].
-            .child(control_label("Frames", muted))
+            .child(control_label("Frames", muted, self.type_ramp.micro))
             .child(self.chooser("chooser-frames", &self.frame_select, cx))
             // The display's clock, beside the canvas's own ceiling, where the surface can honour it:
             // the two are the whole of what paces a frame (see [`Settings::vsync`]).
@@ -6052,12 +6074,12 @@ impl NoteApp {
             // rather than a switch because both answers have a name and a cost — `Room` spends what the
             // sheet is worth, `Lean` a quarter of it (see [`MemoryMode`]).
             .child(toolbar_divider(hairline))
-            .child(control_label("Memory", muted))
+            .child(control_label("Memory", muted, self.type_ramp.micro))
             .child(self.chooser("chooser-memory", &self.memory_select, cx))
             // How large the interface is drawn. A machine preference rather than the note's (see
             // [`Prefs`]), offered here because this row is where every other kind of size is chosen.
             .child(toolbar_divider(hairline))
-            .child(control_label("Scale", muted))
+            .child(control_label("Scale", muted, self.type_ramp.micro))
             .child(self.chooser("chooser-scale", &self.scale_select, cx))
             // The pen's own half of that row: a light hand writes pale as well as thin. Beside the weights it
             // belongs to, and after the page's options so that the pen's controls stay together at the end.
@@ -6285,7 +6307,7 @@ impl NoteApp {
                 ))
                 .child(
                     div()
-                        .text_size(px(13.0))
+                        .text_size(px(self.type_ramp.base))
                         .text_color(foreground)
                         .whitespace_nowrap()
                         .px_1()
@@ -6553,7 +6575,7 @@ impl NoteApp {
             .py(px(6.0))
             .rounded(theme.radius)
             .bg(theme.title_bar.opacity(0.92))
-            .text_size(px(11.0))
+            .text_size(px(self.type_ramp.caption))
             .text_color(theme.muted_foreground)
             .max_w(relative(STATUS_PILL_WIDTH))
             // A layer over the desk, like the bar: the pill is read *across* a page, and a page is ink of
@@ -6952,9 +6974,9 @@ fn toolbar_divider(color: Hsla) -> impl IntoElement {
 }
 
 /// A small muted caption in front of a group of controls.
-fn control_label(text: &'static str, color: Hsla) -> impl IntoElement {
+fn control_label(text: &'static str, color: Hsla, size: f32) -> impl IntoElement {
     div()
-        .text_size(px(10.0))
+        .text_size(px(size))
         .text_color(color)
         .mr_1()
         .child(text)

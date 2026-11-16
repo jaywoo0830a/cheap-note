@@ -439,7 +439,7 @@ the seam the platforms implement.
 | **The screens** | |
 | `home` | the screen the app opens on: the notes that were opened, and what a row can do |
 | **Cross-cutting** | |
-| `design` | the interface's one scale: four-unit design tokens to exact whole logical pixels — see [DESIGN.md](DESIGN.md) |
+| `design` | the interface's one scale: four-unit layout tokens to exact whole logical pixels, and the separate type ramp at the same step — see [DESIGN.md](DESIGN.md) |
 | `prefs` | the one machine preference: the interface scale's index in `prefs.json` beside the notes |
 | `keys` | the chords, written once per platform (`⌘` vs `Ctrl`) |
 | `status_log` | the status line: what the meters read, and the messages the writers report |

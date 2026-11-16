@@ -208,3 +208,40 @@ fn the_default_metrics_are_the_shipped_design() {
     assert_eq!(metrics.radius_large.get(), 16);
     assert_eq!(metrics.space_2.get(), 8);
 }
+
+/// The type ramp starts at the sizes the 100% design was drawn with.
+#[test]
+fn the_type_ramp_starts_at_the_shipped_sizes() {
+    let ramp = TypeRamp::default();
+
+    assert_eq!(ramp.base, 13.0);
+    assert_eq!(ramp.micro, 10.0);
+    assert_eq!(ramp.caption, 11.0);
+    assert_eq!(ramp.title, 15.0);
+    assert_eq!(ramp, TypeRamp::at(ScaleStep::P100));
+}
+
+/// Every type role is exactly its 100% size times the same quarter-step. The values are exact in
+/// binary floating point because every step is a quarter.
+#[test]
+fn every_type_step_is_the_same_proportion() {
+    for step in ScaleStep::ALL {
+        let factor = step.percent() as f32 / 100.0;
+        let ramp = TypeRamp::at(step);
+
+        assert_eq!(ramp.base, 13.0 * factor);
+        assert_eq!(ramp.micro, 10.0 * factor);
+        assert_eq!(ramp.caption, 11.0 * factor);
+        assert_eq!(ramp.title, 15.0 * factor);
+    }
+
+    assert_eq!(
+        TypeRamp::at(ScaleStep::P150),
+        TypeRamp {
+            base: 19.5,
+            micro: 15.0,
+            caption: 16.5,
+            title: 22.5,
+        }
+    );
+}

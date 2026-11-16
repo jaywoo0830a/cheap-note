@@ -1078,6 +1078,12 @@ The **Scale** chooser on the bar's second row changes every window-furniture, sp
 token above together. It is the one machine preference rather than a note setting, so its index lives
 in `prefs.json` beside the notes (see [DESIGN.md](DESIGN.md) §7.2) and applies before any note is open.
 
+Type follows the same step through a separate `TypeRamp`: 13px body, 10px micro labels, 11px
+captions and 15px title at 100%. The base is given to the theme, and GPUI Kit uses the theme's font
+size as the window's rem size — so `text_sm`, `text_lg`, icons and the component library's own
+padding scale without touching every call site. The other three roles are used only where a size is
+spelled in pixels: the bar's control names, the status pill and the title chip.
+
 | Token | Value at 100% | What it decides |
 |---|---|---|
 | `PAGE_MARGIN` | 24 logical px | the margin between the sheet and the window's edges — the strip the floating bar covers |

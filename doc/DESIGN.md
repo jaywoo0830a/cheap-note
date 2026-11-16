@@ -5,12 +5,13 @@ turns a design length into a whole number of logical pixels, whatever platform t
 It is meant to be read beside [ARCHITECTURE.md](ARCHITECTURE.md) (what runs where) and
 [VIEW.md](VIEW.md) (why the view is arranged as it is).
 
-> **Status.** The view consumes the module. `NoteApp` holds one `LayoutMetrics` snapshot, the
-> window-furniture and full-screen lengths are read from it, the bar's **Scale** chooser replaces
-> the snapshot in one transaction, and `crates/note-ui/src/prefs.rs` stores `ScaleStep::index()` in
-> `prefs.json` beside the notes. The palette follows the same step. What still does not follow it
-> are the type ramp and the component library's own control heights; §7.5 and §7.6 say why those
-> are a separate ramp rather than four-unit tokens.
+> **Status.** The view consumes the module. `NoteApp` holds one `LayoutMetrics` snapshot and one
+> `TypeRamp`, the window-furniture and full-screen lengths are read from the snapshot, the bar's
+> **Scale** chooser replaces both in one transaction, and `crates/note-ui/src/prefs.rs` stores
+> `ScaleStep::index()` in `prefs.json` beside the notes. The palette follows the same step. The
+> type ramp's base is the theme's font size, which GPUI Kit also uses as the window's rem size, so
+> rem-based text, icons and control padding follow too. What remains outside the scale is what §7.5
+> usually means: hairlines, ink, page zoom, and the library's own theme radii and shadows.
 
 If you read only one paragraph, read this one:
 
@@ -131,6 +132,7 @@ deliberately authored ramp — not a quiet change to this one.
 | `px()` | the conversion | `const fn`, integer-only, no platform or window input |
 | `LayoutPx` | an already-scaled whole logical pixel | the boundary marker between design units and a framework's length |
 | `LayoutMetrics` | every layout length at one scale | one snapshot, all fields from the same step |
+| `TypeRamp` | the type roles at one scale | shares the step, not the four-unit arithmetic |
 | token constants | the design's named lengths | every one is a multiple of `GRID` |
 
 `px()` is the rule; `LayoutMetrics::at()` is how a renderer should use it. A render pass holds one
@@ -138,8 +140,9 @@ snapshot and reads fields from it. It does not call `px()` at every use and it n
 already-scaled value again. That is what keeps a control and the gap beside it on the same scale even
 after a person changes the preference.
 
-`LayoutMetrics` is `Copy`, small, and independent of GPUI. An adapter that turns `LayoutPx` into
-GPUI's `Pixels` or `Rems` belongs outside the module, at the framework boundary.
+`LayoutMetrics` and `TypeRamp` are `Copy`, small, and independent of GPUI. An adapter that turns
+`LayoutPx` into GPUI's `Pixels` or `Rems` belongs outside the module, at the framework boundary;
+the theme receives the type ramp's base from the app, not from the design module.
 
 ## 4. The tokens
 
@@ -174,9 +177,10 @@ Some lengths must not follow this grid:
   stroke looks like on the paper.
 * **The page's zoom.** The zoom is a property of the view and the sheet, not of the controls around
   it. The interface scale and the page zoom are two different magnifications.
-* **Typography, while it is a ramp.** A type size such as 13 px is not on the four-unit grid. Type is
-  usually authored as a deliberate set of sizes per scale rather than as an exact linear multiple.
-  The module can grow a type ramp later; it should not pretend a 13 px font is a layout token.
+* **Typography, as a separate ramp.** A type size such as 13 px is not on the four-unit grid. Type is
+  authored as a deliberate set of sizes per scale rather than as an exact linear multiple, so it
+  lives in [`TypeRamp`](../crates/note-ui/src/design/type_ramp.rs) beside `LayoutMetrics` and shares
+  only the step. It should not pretend a 13 px font is a layout token.
 
 ## 5. The scale table
 
@@ -209,8 +213,9 @@ It is a scale, not an application framework. Deliberately absent:
   boundary, where the framework's current window and rem size are known.
 * **Platform calibration.** No DPI, no monitor identifier, no `cfg(target_os)`, and no per-platform
   multiplier. The OS owns physical density.
-* **Typography.** The type ramp described above is a separate concern. A font size can be scaled by a
-  future ramp without pretending it is a four-unit token.
+* **Typography.** The type ramp is a separate concern. `TypeRamp` supplies the authored sizes; the
+  app applies its base to the theme, and the library turns that into the window's rem size. The
+  module itself still knows nothing about fonts.
 * **A theme.** Colours, fonts, and shadows are not lengths. The module does not read or write the
   GPUI theme.
 * **The view's measured state.** The bar's real bottom edge and the pills' boxes are measured by the
@@ -251,8 +256,10 @@ Step 4 is easy to miss. A measured line from the old scale is not wrong by a per
 by whatever the layout actually did, and it will remain the line the pen is judged by until the next
 frame measures it again.
 
-`NoteApp::set_interface_scale` is the one implementation of those five steps. The framework has no
-base size to tell: the adapter writes logical pixels into every length, so step 3 has nothing to do.
+`NoteApp::set_interface_scale` is the one implementation of those five steps. Step 3 is
+`theme::set_base_size`: GPUI Kit takes the theme's font size as the window's rem size, so the type
+ramp's base reaches every rem-based style. Layout has no framework base size — `window_px` writes
+logical pixels into every length — so the layout snapshot needs nothing beyond step 2.
 
 ### 7.4 Convert only at the framework boundary
 
@@ -273,9 +280,15 @@ scale changes the furniture around the page, not the page's contents or the pen'
 
 ### 7.6 Keep the type ramp separate
 
-If the interface needs text to follow the scale, add a `TypeRamp` beside `LayoutMetrics` rather than
-putting font sizes into `DesignUnit`. The ramp may be authored per step, and its values do not need
-to divide by four. The two systems can share `ScaleStep` without sharing their arithmetic.
+Text follows the scale through `TypeRamp`, beside `LayoutMetrics` rather than inside `DesignUnit`.
+Its values do not divide by four, and the two systems share `ScaleStep` without sharing their
+arithmetic.
+
+The ramp's base is the important number. GPUI Kit copies `Theme::font_size` into the window's rem
+size, and its `text_sm`/`text_lg` utilities, icons and control paddings are rem multiples. Setting
+the base therefore carries every rem-based part of the interface in one go; only the few sizes
+written in pixels read `micro`, `caption` and `title` explicitly. The `Theme::update` call is what
+refreshes the already-laid-out windows, so the new rem size reaches the next frame.
 
 ## 8. What the tests pin
 
@@ -294,6 +307,8 @@ The module is pure, so the tests can be exhaustive instead of representative. Th
 | `the_scale_table_is_what_the_design_expects` | the golden values for the bar, page margin, gap, and radius |
 | `metrics_are_the_tokens_at_the_same_scale` | every `LayoutMetrics` field is the same scale's conversion |
 | `the_default_metrics_are_the_shipped_design` | `Default` is 100%, not an accidental zero |
+| `the_type_ramp_starts_at_the_shipped_sizes` | `TypeRamp::default()` is 13/10/11/15 px |
+| `every_type_step_is_the_same_proportion` | every type role is its 100% size times the step |
 
 The exactness test is the important one. It does not merely assert that the result “looks close”: it
 compares the integer result against the percentage written as an integer equation, so a change to
@@ -307,7 +322,7 @@ Run just this suite with:
 cargo test -p note-ui design
 ```
 
-At the time of writing the module adds ten tests, and the full `cargo test -p note-ui` suite passes.
+At the time of writing the module adds twelve tests, and the full `cargo test -p note-ui` suite passes.
 The module compiles as part of `note-ui`; there is no window, GPU, or platform setup in any of these
 tests.
 
@@ -339,6 +354,7 @@ module boundary does not already provide.
 | [`crates/note-ui/src/design/tokens.rs`](../crates/note-ui/src/design/tokens.rs) | the four-unit tokens |
 | [`crates/note-ui/src/design/scale.rs`](../crates/note-ui/src/design/scale.rs) | `ScaleStep`, `LayoutPx`, and `px()` |
 | [`crates/note-ui/src/design/metrics.rs`](../crates/note-ui/src/design/metrics.rs) | the resolved layout snapshot |
+| [`crates/note-ui/src/design/type_ramp.rs`](../crates/note-ui/src/design/type_ramp.rs) | the type roles at one scale |
 | [`crates/note-ui/src/design/tests.rs`](../crates/note-ui/src/design/tests.rs) | the exhaustive tests |
 | [`crates/note-ui/src/prefs.rs`](../crates/note-ui/src/prefs.rs) | the machine preference: the step's index in `prefs.json` |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | where the modules run, and what may wait for what |

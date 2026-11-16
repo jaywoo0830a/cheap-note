@@ -24,6 +24,8 @@ pub struct Mark {
     pub halo: u32,
     /// The nib's radius, in logical pixels: how thick the next line will be.
     pub nib_radius: f32,
+    /// The interface scale's factor: the ghost's body follows it, the nib mark does not.
+    pub unit: f32,
 }
 
 /// What the view last said about the screen, and where the pen last was.
@@ -95,6 +97,7 @@ impl Ghost {
             colour: screen.colour & 0x00FF_FFFF,
             halo: screen.halo & 0x00FF_FFFF,
             nib_radius: screen.nib_radius,
+            unit: screen.unit,
         })
     }
 

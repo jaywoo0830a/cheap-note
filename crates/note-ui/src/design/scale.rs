@@ -49,6 +49,15 @@ impl ScaleStep {
         }
     }
 
+    /// The step as a floating-point factor: `0.5` at 50%, `1.0` at 100%, `2.0` at 200%.
+    ///
+    /// Layout does not use this — [`px`] is the integer path. It is for the things that are not on
+    /// the four-unit grid and still follow the same scale: the type ramp, the palette's own
+    /// geometry, the cursor's body, and a colour swatch's chip and gap.
+    pub const fn factor(self) -> f32 {
+        self.percent() as f32 / 100.0
+    }
+
     /// The step's position in [`Self::ALL`].
     ///
     /// This is the number to persist in a preference file: it is stable, small, and cannot name a

@@ -123,8 +123,15 @@ const PALETTE_RING_RADIUS: f32 = 104.0;
 /// How far from the palette's centre the inner ring's tool chips are placed, in logical pixels.
 const PALETTE_TOOL_RADIUS: f32 = 54.0;
 
-/// The diameter of one colour disc, in logical pixels.
+/// The diameter of one colour disc, in logical pixels at 100%.
 const PALETTE_DISC: f32 = 30.0;
+
+/// The white gap between a colour disc and its selection ring, in logical pixels at 100%.
+const PALETTE_DISC_PAD: f32 = 2.0;
+
+/// The selection ring around a colour disc, in logical pixels. A ring is a mark rather than a
+/// proportion, so it is one of the few lengths that does not follow the interface scale.
+const PALETTE_DISC_RING: f32 = 2.0;
 
 /// The diameter of the chip one tool is drawn in, in logical pixels.
 ///
@@ -139,12 +146,14 @@ const PALETTE_TOOL_DISC: f32 = 38.0;
 /// the same in both places.
 const PALETTE_TOOL_ICON: f32 = 20.0;
 
-/// The size of the box one colour disc draws in: the disc, and the ring around it.
+/// The size of the box one colour disc draws in at 100%: the disc, the white gap and the ring around it.
 ///
 /// What a placement is measured in, because the ring is a border on the box rather than a disc under it
 /// (see [`palette_disc`]): placing by the disc's own size would put every ringed disc a hair off centre.
-/// The eight is that ring and the white gap inside it, two pixels each.
-const PALETTE_DISC_BOX: f32 = PALETTE_DISC + 8.0;
+/// The drawing uses [`PaletteGeometry::disc_box`], which follows the interface scale; this is the
+/// 100% value the palette's own design tests are written against.
+#[cfg(test)]
+const PALETTE_DISC_BOX: f32 = PALETTE_DISC + (PALETTE_DISC_PAD + PALETTE_DISC_RING) * 2.0;
 
 /// The diameter of the hub: the colour the next stroke is written in, at the middle of the palette.
 const PALETTE_HUB: f32 = 44.0;
@@ -178,6 +187,53 @@ const PALETTE_PAD: f32 = 14.0;
 /// The radius of the square the whole palette fits in: the outer ring, half a disc, and that white.
 const PALETTE_RADIUS: f32 = PALETTE_RING_RADIUS + PALETTE_DISC / 2.0 + PALETTE_PAD;
 
+/// The bar's colour swatches at one interface scale.
+///
+/// The palette's geometry is its own because a palette is a ring; the bar's swatches are a row, but
+/// they are the same kind of thing and they must not stay 16 px while the buttons beside them grow.
+/// The chip, the white gap and the corners follow the step; the hairline edge and the selection ring
+/// are marks and do not (see `doc/DESIGN.md` §7.5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SwatchGeometry {
+    unit: f32,
+}
+
+impl SwatchGeometry {
+    /// The swatches at `scale`.
+    fn at(scale: ScaleStep) -> Self {
+        SwatchGeometry {
+            unit: scale.factor(),
+        }
+    }
+
+    /// The diameter of the colour itself.
+    fn chip(self) -> f32 {
+        SWATCH_CHIP * self.unit
+    }
+
+    /// The white gap between the colour and its selection ring.
+    fn pad(self) -> f32 {
+        SWATCH_PAD * self.unit
+    }
+
+    /// The corner of a square swatch: paper is a page, and a page has corners.
+    fn corner(self) -> f32 {
+        SWATCH_CORNER * self.unit
+    }
+
+    /// The corner of the colour inside the square: a little tighter than the button's own.
+    fn chip_corner(self) -> f32 {
+        SWATCH_CHIP_CORNER * self.unit
+    }
+}
+
+/// The bar's colour chip at 100%, the space around it, and its two corners: the button's ring and the
+/// colour's own square inside it.
+const SWATCH_CHIP: f32 = 16.0;
+const SWATCH_PAD: f32 = 2.0;
+const SWATCH_CORNER: f32 = 6.0;
+const SWATCH_CHIP_CORNER: f32 = 4.0;
+
 /// The palette's measurements at one interface scale.
 ///
 /// Every number above is the *design's*, in the logical pixels the interface is laid out in. The
@@ -200,7 +256,7 @@ impl PaletteGeometry {
     /// The geometry at `scale`.
     fn at(scale: ScaleStep) -> Self {
         PaletteGeometry {
-            unit: scale.percent() as f32 / 100.0,
+            unit: scale.factor(),
         }
     }
 
@@ -226,11 +282,16 @@ impl PaletteGeometry {
 
     /// The box one colour disc draws in: the disc, plus the ring and the white gap around it.
     ///
-    /// The gap and the ring are a hairline's width and do not shrink with the palette — they are the
-    /// two pixels each side that [`PALETTE_DISC_BOX`] adds — so this is the disc at this unit plus
-    /// those, which is the size the element actually comes out at.
+    /// The white gap follows the interface scale with the disc; the selection ring does not, because
+    /// a ring is a mark rather than a proportion. This is the size the element actually comes out at,
+    /// which is what [`placed`] centres.
     fn disc_box(self) -> f32 {
-        self.disc() + (PALETTE_DISC_BOX - PALETTE_DISC)
+        self.disc() + self.disc_pad() * 2.0 + PALETTE_DISC_RING * 2.0
+    }
+
+    /// The white gap between a disc and its ring.
+    fn disc_pad(self) -> f32 {
+        PALETTE_DISC_PAD * self.unit
     }
 
     /// The diameter of the chip one tool is drawn in.
@@ -3232,6 +3293,9 @@ impl NoteApp {
 
         cursor.set_screen(Screen {
             scale: self.scale,
+            // The interface scale, for the ghost's body only. The nib mark is the ink's width, and
+            // ink does not follow the interface (see `doc/DESIGN.md` §7.5).
+            unit: self.metrics.scale.factor(),
             // The ghost's mark is the colour in hand: the dot says what the next stroke will be
             // written in, which is what a reader looks at it for. The *halo* is the app's answer for
             // the paper, so a mark that would vanish on it — white ink, a highlighter's pale yellow —
@@ -5664,7 +5728,7 @@ impl NoteApp {
         let title: AnyElement = if self.naming.is_some() {
             Input::new(&self.name_input)
                 .small()
-                .w(px(220.0))
+                .w(px(220.0 * self.metrics.scale.factor()))
                 .into_any_element()
         } else if named {
             Label::new(self.note_title.clone()).into_any_element()
@@ -5685,7 +5749,7 @@ impl NoteApp {
             // A long name is cut rather than wrapped or allowed to push the commands off the row: the
             // bar has a fixed height, and the name is the one piece of text here whose length the user
             // chooses.
-            .max_w(px(260.0))
+            .max_w(px(260.0 * self.metrics.scale.factor()))
             .text_color(if named { foreground } else { muted })
             .child(
                 div()
@@ -5760,7 +5824,7 @@ impl NoteApp {
                     .flex_col()
                     .gap(px(window_px(self.metrics.space_2)))
                     .p(px(window_px(self.metrics.space_4)))
-                    .w(px(360.0))
+                    .w(px(360.0 * self.metrics.scale.factor()))
                     .rounded(px(window_px(self.metrics.radius_large)))
                     .bg(surface)
                     .border_1()
@@ -5894,6 +5958,7 @@ impl NoteApp {
                 geometry.hub() - geometry.hub_ring() * 2.0,
                 colour_edge(in_hand, cx.theme()),
                 true,
+                0.0,
             ));
 
         div()
@@ -5941,6 +6006,7 @@ impl NoteApp {
 
         // Paper is a square — a page has corners — and ink is a circle, which is what a pen's
         // colour looks like on every writing app there is. Two shapes, one table of colours.
+        let swatches = SwatchGeometry::at(self.metrics.scale);
         let mut paper: Vec<AnyElement> = Vec::new();
         for swatch in PAPER_COLORS.iter() {
             paper.push(
@@ -5949,6 +6015,7 @@ impl NoteApp {
                     self.settings.page_color == swatch.color,
                     accent,
                     false,
+                    swatches,
                     cx,
                     |app, color, cx| app.set_paper_color(color, cx),
                 )
@@ -5969,6 +6036,7 @@ impl NoteApp {
                         self.settings.highlighter_color == swatch.color,
                         accent,
                         true,
+                        swatches,
                         cx,
                         |app, color, cx| app.set_highlighter_color(color, cx),
                     )
@@ -5983,6 +6051,7 @@ impl NoteApp {
                         self.settings.ink_color == swatch.color,
                         accent,
                         true,
+                        swatches,
                         cx,
                         |app, color, cx| app.set_ink_color(color, cx),
                     )
@@ -6111,7 +6180,7 @@ impl NoteApp {
     ) -> impl IntoElement {
         div()
             .id(id)
-            .w(px(112.0))
+            .w(px(112.0 * self.metrics.scale.factor()))
             .child(Select::new(state).small())
             // The box opens the list; it does not close it. `Select` attaches its own toggle *only* while the
             // list is shut (`allow_open`), so a second press on the box is not a press that closes it — and a
@@ -6358,7 +6427,7 @@ impl NoteApp {
         );
         controls.push(
             div()
-                .w(px(68.0))
+                .w(px(68.0 * self.metrics.scale.factor()))
                 .child(Input::new(&self.zoom_input).small())
                 .into_any_element(),
         );
@@ -6536,7 +6605,7 @@ impl NoteApp {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(2.0))
+            .gap(px(2.0 * self.metrics.scale.factor()))
             .children(controls)
     }
 
@@ -6570,10 +6639,14 @@ impl NoteApp {
     fn status_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
+        let unit = self.metrics.scale.factor();
+
         div()
-            .px(px(10.0))
-            .py(px(6.0))
-            .rounded(theme.radius)
+            .px(px(10.0 * unit))
+            .py(px(6.0 * unit))
+            // The theme's general radius is 10 px at 100%; the pill scales it with the text it holds
+            // rather than leaving a small corner around doubled text.
+            .rounded(px(10.0 * unit))
             .bg(theme.title_bar.opacity(0.92))
             .text_size(px(self.type_ramp.caption))
             .text_color(theme.muted_foreground)
@@ -7048,8 +7121,9 @@ fn colour_edge(color: u32, theme: &Theme) -> Hsla {
 ///
 /// Shared by the bar's swatches and the palette's discs, so that one colour cannot come out two colours
 /// depending on where it is drawn — and so the shape a colour has is chosen in one place: a page is a
-/// square, because a page has corners, and a pen's colour is a circle.
-fn colour_chip(color: u32, size: f32, edge: Hsla, circle: bool) -> Div {
+/// square, because a page has corners, and a pen's colour is a circle. `corner` is ignored by a circle
+/// and scaled by the caller for a square.
+fn colour_chip(color: u32, size: f32, edge: Hsla, circle: bool, corner: f32) -> Div {
     let chip = div()
         .w(px(size))
         .h(px(size))
@@ -7060,7 +7134,7 @@ fn colour_chip(color: u32, size: f32, edge: Hsla, circle: bool) -> Div {
     if circle {
         chip.rounded_full()
     } else {
-        chip.rounded(px(4.0))
+        chip.rounded(px(corner))
     }
 }
 
@@ -7085,7 +7159,7 @@ fn palette_disc(
         // A disc of colour says nothing to a screen reader, and nothing to anyone who cannot tell
         // "ivory" from "white" by eye: the name is what both need to hear or see.
         .aria_label(swatch.name)
-        .p(px(2.0))
+        .p(px(geometry.disc_pad()))
         .border_2()
         .border_color(if chosen { ring } else { none })
         .rounded_full()
@@ -7093,7 +7167,7 @@ fn palette_disc(
         .on_click(
             cx.listener(move |app, _, _, cx| app.palette_take(PalettePart::Colour(place), cx)),
         )
-        .child(colour_chip(swatch.color, geometry.disc(), edge, true))
+        .child(colour_chip(swatch.color, geometry.disc(), edge, true, 0.0))
 }
 
 /// One tool of the palette at the pen: a chip with the tool's icon in it, washed in the accent when the
@@ -7161,6 +7235,7 @@ fn swatch_button(
     in_use: bool,
     ring: Hsla,
     circle: bool,
+    geometry: SwatchGeometry,
     cx: &mut Context<NoteApp>,
     handler: impl Fn(&mut NoteApp, u32, &mut Context<NoteApp>) + 'static,
 ) -> impl IntoElement {
@@ -7175,7 +7250,7 @@ fn swatch_button(
         // A square of colour says nothing to a screen reader, and nothing to anyone who cannot tell
         // "ivory" from "white" by eye. The name is what both need to hear or see.
         .aria_label(swatch.name)
-        .p(px(2.0))
+        .p(px(geometry.pad()))
         .border_2()
         .border_color(if in_use { ring } else { none })
         .cursor_pointer()
@@ -7184,11 +7259,17 @@ fn swatch_button(
     button = if circle {
         button.rounded_full()
     } else {
-        button.rounded(px(6.0))
+        button.rounded(px(geometry.corner()))
     };
 
     // The chip is the shared one: the same colour, drawn by the same rule the palette's discs are.
-    button.child(colour_chip(color, 16.0, edge, circle))
+    button.child(colour_chip(
+        color,
+        geometry.chip(),
+        edge,
+        circle,
+        geometry.chip_corner(),
+    ))
 }
 
 #[cfg(test)]

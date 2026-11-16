@@ -40,7 +40,7 @@ impl TypeRamp {
     /// keep every value exact in binary floating point, so a role at 150% is exactly 1.5 times its
     /// 100% value rather than a rounded approximation.
     pub fn at(step: ScaleStep) -> Self {
-        let factor = step.percent() as f32 / 100.0;
+        let factor = step.factor();
 
         TypeRamp {
             base: 13.0 * factor,

@@ -1299,7 +1299,7 @@ mod tests {
                 ],
                 color: 0x1B_1B_1F,
                 outline: Vec::new(),
-                bounds: [0.0; 4],
+                bounds: [0.0; 4].into(),
             };
             stroke.close();
 
@@ -1314,7 +1314,7 @@ mod tests {
                 ink: Ink {
                     paper: (200.0, 200.0),
                     zoom: 1.0,
-                    visible: [0.0, 0.0, 200.0, 200.0],
+                    visible: [0.0, 0.0, 200.0, 200.0].into(),
                     strokes: Arc::new(vec![Arc::new(stroke)]),
                     ..Default::default()
                 },
@@ -1421,7 +1421,8 @@ mod tests {
 
         for (turns, (dx, dy)) in expected.iter().enumerate() {
             let turns = turns as u8;
-            let matrix = ink_matrix(scale, zoom, origin, paper, turns);
+            let quarter = Quarters::from_turns(turns as i32);
+            let matrix = ink_matrix(scale, zoom, origin, paper, quarter);
             let at = |point: (f32, f32)| {
                 (
                     point.0 * matrix.M11 + point.1 * matrix.M21 + matrix.M31,
@@ -1461,8 +1462,8 @@ mod tests {
     #[test]
     fn four_turns_of_the_transform_are_the_identity() {
         let paper = (600.0f32, 800.0f32);
-        let plain = ink_matrix(1.0, 1.0, (0.0, 0.0), paper, 0);
-        let round = ink_matrix(1.0, 1.0, (0.0, 0.0), paper, 4);
+        let plain = ink_matrix(1.0, 1.0, (0.0, 0.0), paper, Quarters::UPRIGHT);
+        let round = ink_matrix(1.0, 1.0, (0.0, 0.0), paper, Quarters::from_turns(4));
 
         assert_eq!(
             (round.M11, round.M12, round.M21, round.M22, round.M31, round.M32),
@@ -1478,7 +1479,7 @@ mod tests {
         let drawn = scale * zoom;
         let paper = (600.0f32, 800.0f32);
         let origin = (37.0f32, 11.0f32);
-        let plain = ink_matrix(scale, zoom, origin, paper, 0);
+        let plain = ink_matrix(scale, zoom, origin, paper, Quarters::UPRIGHT);
         let moved = shifted(plain, (10.0, -4.0), drawn);
 
         let at = |matrix: &Matrix3x2, point: (f32, f32)| {
@@ -1540,7 +1541,7 @@ mod tests {
                 points,
                 color: Stroke::DEFAULT_COLOR,
                 outline: Vec::new(),
-                bounds: [0.0; 4],
+                bounds: [0.0; 4].into(),
             };
             stroke.close();
             stroke.outline
@@ -1569,9 +1570,18 @@ mod tests {
     /// single stroke gets.
     #[test]
     fn a_chunk_is_culled_by_the_union_of_its_strokes() {
-        assert!(overlaps([0.0, 0.0, 10.0, 10.0], [5.0, 5.0, 20.0, 20.0]));
-        assert!(overlaps([0.0, 0.0, 10.0, 10.0], [-5.0, -5.0, 0.0, 0.0]));
-        assert!(!overlaps([0.0, 0.0, 10.0, 10.0], [10.1, 0.0, 20.0, 10.0]));
+        assert!(overlaps(
+            [0.0, 0.0, 10.0, 10.0].into(),
+            [5.0, 5.0, 20.0, 20.0].into()
+        ));
+        assert!(overlaps(
+            [0.0, 0.0, 10.0, 10.0].into(),
+            [-5.0, -5.0, 0.0, 0.0].into()
+        ));
+        assert!(!overlaps(
+            [0.0, 0.0, 10.0, 10.0].into(),
+            [10.1, 0.0, 20.0, 10.0].into()
+        ));
     }
 
     /// The flattening tolerance is in the paper's units, coarser than the default only where a paper

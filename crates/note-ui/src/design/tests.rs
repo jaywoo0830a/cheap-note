@@ -51,6 +51,7 @@ fn the_steps_are_the_seven_quarter_steps() {
 
     for (index, (step, percent)) in ScaleStep::ALL.iter().zip(expected).enumerate() {
         assert_eq!(step.percent(), percent);
+        assert_eq!(step.factor(), percent as f32 / 100.0);
         assert_eq!(step.index(), index);
         assert_eq!(ScaleStep::from_index(index), Some(*step));
     }

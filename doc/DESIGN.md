@@ -10,8 +10,10 @@ It is meant to be read beside [ARCHITECTURE.md](ARCHITECTURE.md) (what runs wher
 > **Scale** chooser replaces both in one transaction, and `crates/note-ui/src/prefs.rs` stores
 > `ScaleStep::index()` in `prefs.json` beside the notes. The palette follows the same step. The
 > type ramp's base is the theme's font size, which GPUI Kit also uses as the window's rem size, so
-> rem-based text, icons and control padding follow too. What remains outside the scale is what §7.5
-> usually means: hairlines, ink, page zoom, and the library's own theme radii and shadows.
+> rem-based text, icons and control padding follow too. The bar's colour swatches and the ghost
+> cursor's body follow through `ScaleStep::factor`. What remains outside the scale is what §7.5
+> usually means: hairlines and selection rings, ink (including the cursor's nib mark), page zoom, and
+> the library's own theme radii and shadows.
 
 If you read only one paragraph, read this one:
 
@@ -128,7 +130,7 @@ deliberately authored ramp — not a quiet change to this one.
 |---|---|---|
 | `DesignUnit` | a length on the design grid, at 100% | construct only through `new`, which refuses off-grid values; constants are written directly on the grid |
 | `GRID` | 4 design units | the quantum that makes quarter steps exact |
-| `ScaleStep` | one of the seven allowed scales | `percent()` for display, `index()` / `from_index()` for persistence |
+| `ScaleStep` | one of the seven allowed scales | `percent()` for display, `factor()` for non-grid geometry, `index()` / `from_index()` for persistence |
 | `px()` | the conversion | `const fn`, integer-only, no platform or window input |
 | `LayoutPx` | an already-scaled whole logical pixel | the boundary marker between design units and a framework's length |
 | `LayoutMetrics` | every layout length at one scale | one snapshot, all fields from the same step |
@@ -277,6 +279,9 @@ integer-only and framework-free.
 
 Hairlines, ink widths, page zoom, and PDF rasterisation do not move to this grid. The interface
 scale changes the furniture around the page, not the page's contents or the pen's physical mark.
+The same distinction splits the ghost cursor: its **body** is furniture and follows the scale, while
+its **nib mark** previews the ink's width and keeps that width. A selection ring is a mark too, which
+is why a colour swatch's ring stays two pixels while the colour, its gap and its corners scale.
 
 ### 7.6 Keep the type ramp separate
 

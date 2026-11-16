@@ -72,14 +72,19 @@ pub use crate::timing::Vitals;
 
 /// What the frame publishes about the screen the ghost is drawn on: everything a reading cannot say.
 ///
-/// These five numbers are the whole of what the view knows and the overlay does not. `suppressed`
-/// means "there is nothing to draw a ghost for here" — the home list is up, or the app is asking a
-/// question the pen must not write under — and it is published rather than inferred because only the
-/// frame knows it.
+/// These numbers are the whole of what the view knows and the overlay does not. `suppressed` means
+/// "there is nothing to draw a ghost for here" — the home list is up, or the app is asking a question
+/// the pen must not write under — and it is published rather than inferred because only the frame
+/// knows it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Screen {
     /// Physical pixels per logical pixel, as the frame laid the window out.
     pub scale: f32,
+    /// The interface scale's factor: `1.0` at 100%, `0.5` at 50%, `2.0` at 200%.
+    ///
+    /// Distinct from [`Self::scale`], which is the platform's density. The ghost's *body* follows
+    /// this — it is an interface hint — while the nib mark keeps the ink's own width.
+    pub unit: f32,
     /// The colour the ghost's mark is drawn in, as `0xRRGGBB`.
     pub colour: u32,
     /// The colour of the soft edge under it, and of the nib's bloom.
@@ -133,6 +138,7 @@ impl Default for Screen {
     fn default() -> Self {
         Screen {
             scale: 1.0,
+            unit: 1.0,
             colour: 0x00_00_00,
             halo: 0x00_00_00,
             nib_radius: crate::cursor::NIB_RADIUS_MIN,
@@ -153,7 +159,8 @@ impl Default for Screen {
 pub trait GhostFeed: Send + Sync {
     /// Offers the newest batch, from the pen thread.
     fn offer(&self, readings: &[Reading]);
-    /// Publishes what the frame knows about the screen: its scale, its colours, the bar's edge.
+    /// Publishes what the frame knows about the screen: its display and interface scales, its colours,
+    /// the bar's edge.
     fn set_screen(&self, screen: Screen);
     /// Whether the ghost's own window is still there to draw into.
     fn is_alive(&self) -> bool;

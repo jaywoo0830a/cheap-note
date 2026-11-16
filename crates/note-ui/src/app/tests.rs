@@ -7,10 +7,10 @@ use super::{
     pinch_zoom_factor, quantise_width, samples_vitals, scale_label, screen_in_front, scroll_of,
     sheet_is_front, sheet_matches, spun, touches_paper, window_px, zoom_text, Confirmation, Edge,
     EdgeSwipe, FootPills, FootPlace, FootStrips, PaletteGeometry, PalettePart, PenGesture, Screens,
-    Swipe, Turn, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX, PALETTE_HUB,
-    PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS,
-    PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD,
-    PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
+    SwatchGeometry, Swipe, Turn, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC_BOX,
+    PALETTE_DISC_PAD, PALETTE_DISC_RING, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN,
+    PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC,
+    PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
 use crate::design::{LayoutMetrics, ScaleStep};
@@ -740,6 +740,41 @@ fn the_palettes_zones_do_not_grow_into_each_other() {
         hub + PALETTE_HUB_RING <= tool_ring - tool,
         "the hub and the tools are not clear of each other"
     );
+}
+
+/// The palette's colour controls grow with the interface, and the white gap grows with them; the
+/// selection ring is a mark and stays two pixels at every step.
+#[test]
+fn the_palettes_colour_buttons_follow_the_scale() {
+    let one = PaletteGeometry::at(ScaleStep::P100);
+    let two = PaletteGeometry::at(ScaleStep::P150);
+
+    assert_eq!(one.disc(), 30.0);
+    assert_eq!(two.disc(), 45.0);
+    assert_eq!(one.disc_pad(), PALETTE_DISC_PAD);
+    assert_eq!(two.disc_pad(), PALETTE_DISC_PAD * 1.5);
+    assert_eq!(one.disc_box(), PALETTE_DISC_BOX);
+    assert_eq!(
+        two.disc_box(),
+        45.0 + PALETTE_DISC_PAD * 1.5 * 2.0 + PALETTE_DISC_RING * 2.0
+    );
+}
+
+/// The bar's swatches are the same kind of control: the colour, its gap and its corners follow the
+/// step, while the hairline edge and the selection ring do not.
+#[test]
+fn the_bars_colour_swatches_follow_the_scale() {
+    let one = SwatchGeometry::at(ScaleStep::P100);
+    let two = SwatchGeometry::at(ScaleStep::P150);
+
+    assert_eq!(one.chip(), 16.0);
+    assert_eq!(two.chip(), 24.0);
+    assert_eq!(one.pad(), 2.0);
+    assert_eq!(two.pad(), 3.0);
+    assert_eq!(one.corner(), 6.0);
+    assert_eq!(two.corner(), 9.0);
+    assert_eq!(one.chip_corner(), 4.0);
+    assert_eq!(two.chip_corner(), 6.0);
 }
 
 /// The keyboard walks the ring and wraps at both ends: a ring has no end, so no arrow is a key that

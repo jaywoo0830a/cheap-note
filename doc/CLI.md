@@ -1,8 +1,10 @@
 # The measuring commands
 
-Two things about this app cannot be seen by using it: whether it *gives memory back*, and whether a
-frame is *fast enough*. Both are questions with numeric answers, and both are answered by commands
-rather than by looking at a window.
+Three things about this app cannot be seen by using it: whether it *gives memory back*, whether a
+frame is *fast enough*, and whether a rebuild is worth its power. All three are questions with
+numeric answers, and all three are meant to be answered by commands rather than by looking at a
+window. The third is the newest, and its command is still a contract rather than code (see the
+`--power-report` section below).
 
 This document is the contract for those commands: what they accept, what they print, what they exit
 with, and what a platform has to provide to run them. It exists because the answers are meant to be
@@ -143,9 +145,287 @@ figures in `doc/WINDOWS.md` were taken on — it is in the list because the ques
 for is whether a platform is draw-bound at that page size. `--frames 60` is the longer run §6.4 of that
 document quotes.
 
+## `cheap-note --power-report` — what a rebuild costs, in joules (draft)
+
+**This section is a contract, not a description of shipped code.** The command is not in the tree
+yet: its parser, its workload and its meter reader are still to be written. It is written down first
+because the platform half — which counter exists, and what it may claim — is the part that has to be
+agreed before the arithmetic is worth writing. Everything below is the shape it will ship in.
+
+The bench answers *how long*. This answers *how many joules, and how many operations per joule* — the
+question a rung rebuild raises, and the one `--bench` cannot answer by itself. It is not a system
+power monitor, and it does not replace the bench's latency table.
+
+```sh
+cheap-note --power-report [--format table|json]
+    [--workload rung|frame|both] [--strokes 1000,8182]
+    [--repeats 20] [--warmup 2] [--threads N] [--frames 30]
+    [--energy-source auto|meter|platform|none] [--meter meter.csv] [--meter-offset 0]
+    [--require-energy] [--max-ms N] [--max-joules-per-op N] [--min-ops-per-joule N]
+```
+
+`--help` prints a usage block and exits `0`; an unknown flag, a missing value, or two flags that
+contradict each other exits `2`.
+
+The command runs the whole workload **in one process**, as the memory report does: a meter around
+two processes would answer a question about the operating system. No note is opened or written; the
+page is synthetic and lives in memory, and a run leaves the app's own settings and pool alone.
+
+On Windows the buffered report goes through the same `platform::console` route the other two use: a
+console when it can attach to one, and `cheap-note-power.txt` beside the executable when it cannot.
+
+### The two workloads
+
+`--workload rung` (the default) measures the view's half of a detail rung: the request and the build
+that `InkDocument::set_zoom` performs when a zoom crosses a rung (`ink.rs`: `request_detail`,
+`build_detail`). It is the workload `measures_the_rung_costs` already takes, made repeatable and
+given an energy window.
+
+It builds a synthetic page of `--strokes` strokes — the same 40-point, 2 px-apart strokes
+`written_page` writes — at the page's initial rung, then alternates between two rungs, `1.0` and
+`2.25`, for `--repeats` timed rebuilds. `--warmup` rebuilds in each direction run first and are
+discarded; the page is built before the window opens and dropped after it closes. Before every timed
+rebuild, one `Arc` clone of the page's finished list is held the way a frame's description holds one;
+that is what makes the rebuild pay the `Arc::make_mut` copy it pays in the app, rather than measuring
+an unshared page as a lower bound.
+
+The default counts are `1 000` and `8 182` strokes, because below a thousand the rebuild is already
+under a millisecond and a joule reading of it is mostly the meter's own noise; pass `--strokes` for
+the bench's smaller pages.
+
+This is **the view's half only.** On Windows a rung also rebakes the canvas's realizations, which is
+the bench's `rebuild` column (134–140 ms for 8,182 strokes in `doc/WINDOWS.md` §6.4). That is a
+platform renderer's cost and belongs to `--bench`; the two reports are kept separate so the seam
+stays visible.
+
+`--workload frame` measures a **warm** frame of the same synthetic page through the platform's
+canvas, reusing the bench's surface and its `--frames` count (default 30). The first frame, which
+bakes every realization, is warmup; the measured frames are the steady drawing cost a pan or a still
+page pays. It is the bench's `frame` figure — warm draw plus present — not `warm` alone: the present
+is part of what the window costs. The bench remains the contract for `first`, `rebuild` and `pan`;
+this command does not repeat them.
+
+`--workload both` runs the rung phase first and the frame phase second for each stroke count, and
+records one row per phase.
+
+### What one row is
+
+Every number in a row is **per operation** except `count` and `strokes`:
+
+| Field | Meaning |
+|---|---|
+| `strokes` | the page's stroke count |
+| `phase` | `rung` or `frame` |
+| `threads` | the Rayon pool size the phase used; absent for `frame` |
+| `count` | how many operations were timed (`repeats` for `rung`, `frames` for `frame`) |
+| `wall` | mean wall-clock time per operation, ms |
+| `median` | median wall-clock time per operation, ms |
+| `worst` | the slowest operation, ms — a mean hides the one a hand would feel |
+| `cpu` | mean process CPU time per operation, ms of **core-time** (all threads summed) |
+| `joules_per_op` | mean energy per operation, J; absent when no energy source |
+| `ops_per_joule` | operations per joule, `1 / joules_per_op`; absent with it |
+
+`cpu` is **core-time, not power**: a row whose `wall` is 10.6 ms and whose `cpu` is 42.0 ms ran
+about four cores' worth of work. It is reported even when a meter is available, because the meter
+measures the machine and `cpu` measures the process.
+
+### Where the joules come from
+
+`--energy-source` chooses the source, and the report always says which one it used:
+
+| Source | What it is | Where it exists |
+|---|---|---|
+| `meter` | an external wall meter or smart plug, read from a CSV (`--meter`) | every platform |
+| `platform` | the platform's own counter: `powermetrics` on macOS, RAPL on Linux | macOS (root), Linux (readable RAPL only) — **not Windows** |
+| `none` | no energy at all; `wall` and `cpu` only | every platform |
+| `auto` (default) | `meter` if `--meter` was given, else `platform` when it exists, else `none` | — |
+
+An explicit `--energy-source` wins over `auto`; `--meter` is meaningful only with `meter` (or `auto`),
+and `--require-energy` together with `none` is a usage error — the two flags ask for opposite things.
+`--energy-source meter` without `--meter` is a usage error too.
+
+The meter file is the one source that is the same on every platform, so the contract is written
+around it:
+
+```csv
+epoch_s,watts
+1720000000.000,12.4
+1720000000.100,13.1
+```
+
+Timestamps are Unix epoch seconds and must be monotonic; the meter's clock must be the machine's
+clock, and `--meter-offset` (seconds, default 0) is added to every sample for a meter that keeps its
+own. The command integrates the samples over the measurement window with the trapezoid rule. It
+requires **at least two samples inside the window**: one sample is a fact about a moment, not an
+integral, and a window with fewer than two is `skipped` (`meter-window-too-short`). A sample that is
+negative, NaN, or out of order is `skipped` (`meter-invalid`), and so is a window whose integrated
+energy is zero: a zero joule count is not an infinite efficiency. A meter run needs enough repeats
+to span the meter's own sample interval — a rung is milliseconds, not seconds, so `--repeats 20` is
+a CPU-time run and `--repeats 2000` is a meter run.
+
+The platform counter is optional, and Windows has none: there is no standard user-mode API for
+package energy there, so `platform` is `unavailable` and never `0`. On macOS `powermetrics` needs
+root; without it the readings are `permission-denied`, and with `--require-energy` the run is
+`skipped`. On Linux, `intel-rapl`'s `energy_uj` is read when it is readable, its
+`max_energy_range_uj` wrap is honoured, and a counter that crossed zero is a `null` rather than a
+guess.
+
+**CPU time is never reported as energy.** `cpu` is a proxy for work and the summary says so
+(`basis: "cpu-time"`); `joules_per_op` and `ops_per_joule` are `null` when no energy source was read.
+`--require-energy` turns that absence into a `skipped` run, because a command whose purpose is joules
+cannot pass without one.
+
+### The window, the repeats and the build
+
+- The page, the surface and the warmup are **outside** the window; teardown is after it. The window
+  covers the timed operations only.
+- Energy is integrated over the same window as CPU time and wall time. `wall` is `Instant` around
+  each operation; `cpu` is the process's CPU-time delta over the phase divided by `count`.
+- `--repeats` is at least 3, because a median of one is a mean and a mean of one is a guess. The
+  default is 20; the default warmup is 2.
+- A wall meter and a platform counter use the system clock for their window. If the clock moves
+  backwards during a run, the integration is `skipped` (`meter-clock-jumped`) rather than guessed.
+- The command runs in release builds only. A debug build exits `2` (`debug-build`) with a note: a
+  debug number is not a measurement of the code that ships.
+
+### Threads
+
+`--threads N` runs the rung workload under a scoped `rayon` pool of N threads; the global pool is
+left exactly as it was, and the summary says `threads_source: "flag"`. Without the flag the process's
+global pool is used and the source is `"global"`. The frame phase does not use the pool, so its
+`threads` cell is absent with `not-parallel`.
+
+This is the flag the rung question needed: the same page, the same rungs, at 2, 6 and 12 threads,
+with `joules_per_op` and `ops_per_joule` in the same row. A measurement never reaches into a running
+note or changes the app's own pool.
+
+### What the report carries
+
+The report is the same envelope as the other two commands — `command`, `platform`, `tool`, `columns`,
+`rows`, `summary`, `verdict`, `exit_code`, `note`, `measured`, `unmeasured` — with two additions to
+the value vocabulary: a **text** value (for `phase` and for named summary facts) and a
+**joules/ratio** value (for the energy columns). The columns are fixed and in this order:
+
+```
+strokes, phase, threads, count, wall, median, worst, cpu, joules_per_op, ops_per_joule
+```
+
+A cell the platform cannot fill is absent with its own reason; `unmeasured` names a column only when
+no row could fill it, as in the other reports. The column stays in `columns` either way.
+
+Summary fields, named in the JSON when they apply (text unless noted):
+
+| Field | Meaning |
+|---|---|
+| `threads`, `threads_source` | the pool and why it is that size (`flag`, `global`, `not-parallel`) |
+| `repeats`, `warmup`, `frames` | what the run was asked to do |
+| `build` | `release` or `debug` |
+| `power_plan` | the active plan (`powercfg`, `pmset`, `scaling_governor`) or `unknown` |
+| `power_source` | `ac`, `battery`, `unknown` |
+| `energy_source` | `meter`, `powermetrics`, `rapl`, `none` |
+| `energy_scope` | `system`, `package`, `cpu`, `gpu`, `unknown` — what the joules cover |
+| `basis` | `meter`, `platform`, `cpu-time` |
+| `meter_samples`, `meter_span_ms` | what the integration saw, when a meter was used |
+| `energy_total_j` (number) | `sum(joules_per_op × count)` over the rows; absent unless every row has energy |
+
+`energy_scope` is `system` for a meter, `package`/`cpu`/`gpu` for a platform counter as that counter
+reports, and `unknown` when no energy was read. For `--workload both`, `meter_samples` and
+`meter_span_ms` are the run's totals; a single-phase run reports that phase's own.
+
+### A table and an object
+
+```
+strokes  phase  threads  count    wall   median   worst     cpu   J/op?   ops/J?
+   8182   rung       12     20   10.60   10.40   12.10   42.00       —       —
+ok · release · AC · high performance · 12 threads · energy not measured (no platform counter; cpu is a proxy)
+```
+
+```json
+{
+  "command": "power-report",
+  "platform": "windows",
+  "tool": "note-ui rung rebuild · 8182 strokes · 12 threads",
+  "measured": ["strokes", "phase", "threads", "count", "wall", "median", "worst", "cpu"],
+  "unmeasured": [["joules_per_op", "no-platform-counter"], ["ops_per_joule", "no-platform-counter"]],
+  "columns": ["strokes", "phase", "threads", "count", "wall", "median", "worst", "cpu", "joules_per_op", "ops_per_joule"],
+  "rows": [
+    {
+      "label": "8182 strokes · rung",
+      "strokes": 8182,
+      "phase": "rung",
+      "threads": 12,
+      "count": 20,
+      "wall": 10.60,
+      "median": 10.40,
+      "worst": 12.10,
+      "cpu": 42.00,
+      "joules_per_op": null,
+      "ops_per_joule": null
+    }
+  ],
+  "summary": {
+    "threads": 12,
+    "threads_source": "flag",
+    "repeats": 20,
+    "warmup": 2,
+    "build": "release",
+    "power_plan": "high performance",
+    "power_source": "ac",
+    "energy_source": "none",
+    "energy_scope": "unknown",
+    "basis": "cpu-time",
+    "energy_total_j": null
+  },
+  "verdict": "ok",
+  "exit_code": 0,
+  "note": "energy not measured: no platform counter on this platform; cpu is core-time, not power"
+}
+```
+
+Durations are milliseconds as floats; energy is joules as floats. `null` is a measurement that was
+not taken; `0` is a measurement of zero.
+
+### Exit codes and the budget flags
+
+The three words and the three codes are the ones the other measuring commands use — `ok`/`0`,
+`failed`/`1`, `skipped`/`2`:
+
+- `0` — every requested phase was measured, and no budget was exceeded;
+- `1` — a budget was given and exceeded: `--max-ms`, `--max-joules-per-op`, `--min-ops-per-joule`;
+- `2` — the run could not measure: no release build, no surface, an invalid meter, a window too short,
+  permission denied for `powermetrics`, **or an energy budget while no energy was measured**.
+
+The last clause is the one a CI gate needs: `--require-energy` and an energy budget both turn "no
+joules" into a skip, never a pass. A budget on a quantity that was not measured is not a success.
+
+A budget applies to every row and one row over it fails the run. `--max-ms` is compared against
+`worst`, not `wall`, for the reason the `worst` column exists; the energy budgets are compared
+against the row's `joules_per_op` and `ops_per_joule`.
+
+### What this is not
+
+- **Not a system power monitor.** It measures one workload's window; it does not report temperatures,
+  frequencies, per-core power, or the rest of the machine.
+- **Not a cross-machine comparison.** A meter covers the machine and a package counter covers a
+  package; a number is comparable only on the same machine, build, power plan and AC/battery state.
+  The summary carries those fields so a script can refuse a comparison it should not make.
+- **Not a replacement for `--bench`.** The bench remains the frame-latency contract; this is the
+  joules contract.
+- **Not a control.** It does not change the power plan, the frame cap, or the global Rayon pool; it
+  reports what it found and measures a scoped pool when asked.
+
+### What would implement it
+
+A new `Command::PowerReport` and two value kinds — text, and a float with a unit (joules or
+operations per joule) — in the shared report, a portable workload core in `note-ui` (the synthetic
+page, the rung alternation, the scoped pool and the arithmetic), and a platform half per app: process
+CPU time, an optional energy counter, and the power plan/AC state. The platform halves are the same
+seam the memory report and the bench already use; a platform with no energy counter still builds and
+still reports `wall` and `cpu`.
+
 ## What a platform has to provide
 
-Neither command is a platform feature that some platforms have and others lack. They are **one
+No measuring command is a platform feature that some platforms have and others lack. They are **one
 portable core** (`crates/note-ui`) plus a small set of measurements a platform supplies. A platform
 that supplies none of them still builds, still runs, and says so.
 
@@ -155,13 +435,18 @@ that supplies none of them still builds, still runs, and says so.
 | graphics ledger | `IOSurface` via `task_vm_info` | none — the column is `—` | — |
 | a console to print to | inherited `stdout` | attach to the parent console, or a file | inherited `stdout` |
 | frame timing | Metal, waited for with `waitUntilCompleted` | Direct2D + swap chain | — |
+| process CPU time | `task_info` | `GetProcessTimes` | `getrusage` |
+| an energy counter (optional) | `powermetrics`, as root | none — a meter or CPU time | RAPL `energy_uj`, when readable |
+| AC/battery and the active plan | `pmset -g`, `pmset -g batt` | `GetSystemPowerStatus`, `powercfg` | `/sys/class/power_supply`, `scaling_governor` |
 
 The graphics column is the model for how to be honest: Windows **has no** `surface_bytes`, so the
-field is `null` / `—` rather than `0`. A zero would be a claim about an empty GPU.
+field is `null` / `—` rather than `0`. A zero would be a claim about an empty GPU. The energy row is
+the same shape: Windows has no standard package-energy counter, so the power report reads a meter or
+reports CPU time as the proxy it is.
 
 ## Adding Linux
 
-Linux is not a rewrite; it is four small pieces behind seams that already exist.
+Linux is not a rewrite; it is five small pieces behind seams that already exist.
 
 1. **Counters.** Implement `platform::SystemStats` in a new `apps/linux/src/platform/vitals.rs`:
    resident memory from `/proc/self/statm`, or `smaps_rollup` for a finer figure. The graphics ledger
@@ -174,6 +459,8 @@ Linux is not a rewrite; it is four small pieces behind seams that already exist.
 4. **The workspace.** `apps/linux` is a workspace member like the other two, so
    `cargo test --workspace` builds and tests it on **every** platform — the same way the Windows stub
    is tested today.
+5. **The power report.** CPU time from `getrusage`; energy from RAPL when it is readable, and `null`
+   when it is not. No RAPL is not a zero, for the same reason no graphics ledger is not a zero.
 
 Nothing in `note-ui` should change for any of that. If it has to, the seam was in the wrong place.
 
@@ -183,8 +470,12 @@ A measurement is a claim, and a claim has to say what it measured and what it co
 
 - `null` is printed where a platform cannot measure, never `0`;
 - the allowance is sized to a known fixed cost and named in the source, so it can be argued with;
-- a build that cannot measure exits `1` rather than passing;
-- the fields are the same everywhere, so a script does not need to know the platform to read them.
+- a build that cannot measure does not pass: it exits `2` (`skipped`) or `1` (`failed`), never `0`;
+- the fields are the same everywhere, so a script does not need to know the platform to read them;
+- `cpu` is never printed as a joule: core-time is a proxy for work and joules are a measurement;
+- a meter says how many samples it integrated, and fewer than two inside the window is a skip;
+- a budget on energy is skipped when energy was not measured, because an unmeasured quantity cannot
+  meet a budget.
 
 ## Machine-readable output
 
@@ -246,12 +537,19 @@ The benchmark's object is the same shape:
 Durations are **milliseconds as floats** — one unit everywhere — because the human table is free to
 choose a unit per row and a script is not.
 
+The power report's object is the same envelope, with one text column (`phase`) and two energy columns
+(`joules_per_op`, `ops_per_joule`) that are `null` together when no energy source was read. Its
+section above has the object; the only new value kinds are text and a float with a joules/ratio
+unit — numbers stay numbers, and absence stays `null`.
+
 ## Where this document and the code part company
 
-Everything above is implemented on both platforms, and the exit codes, field names and platform table
-are what the tests pin (`crates/note-ui/src/report.rs`, `crates/note-ui/src/memory_report.rs`,
-`apps/macos/src/platform/bench.rs`, `apps/windows/src/platform/bench.rs`,
-`apps/windows/src/platform/report.rs`). Two honest limits remain:
+Everything above except `--power-report` is implemented on both platforms, and the exit codes, field
+names and platform table (the shipped rows) are what the tests pin (`crates/note-ui/src/report.rs`,
+`crates/note-ui/src/memory_report.rs`, `apps/macos/src/platform/bench.rs`,
+`apps/windows/src/platform/bench.rs`, `apps/windows/src/platform/report.rs`). The power report is a
+contract only: no parser, no workload and no meter reader is in the tree yet; its section says what
+it will accept and print. Two honest limits remain about the shipped commands:
 
 - **The two `present` columns measure different things** (see above), so `frame` is the comparable figure.
 - **`surface_bytes` on macOS reports zero in a headless run.** The graphics column is therefore

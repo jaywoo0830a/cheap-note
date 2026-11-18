@@ -193,8 +193,27 @@ came from somewhere.
 **Only when the status log could not be opened.** The app still works; this is the only place the failure
 would otherwise be seen.
 
-## 9. Reading `CHEAP_NOTE_TRACE`
+### The library's sentences
 
+The two home-screen buttons that act on *every* note say what they did in the same place every other
+message lands — the `message` at the right of the line. They are worth knowing because each one is the
+answer to a question a person asked by pressing a button:
+
+| Message | When |
+|---|---|
+| `writing every note as one file…` | the backup has started; it runs off the UI thread and may take a few seconds on a large library |
+| `backed up <n> notes to cheap-note-library.zip` | done, and that is the file on the desktop (the folder is the one §4 of [LIBRARY.md](LIBRARY.md) chose) |
+| `nothing was backed up: <reason>` | the backup failed; the reason is the operating system's, and last week's library is untouched |
+| `there are no notes to back up yet` | pressed on a machine with no notes — a library of nothing is not written |
+| `a backup is already being written` | pressed again within 30 s of the last one |
+| `restored <n> notes, with a library made <age> from <file> — this machine had no notes of its own` | the automatic restore on a fresh machine ([LIBRARY.md](LIBRARY.md) §5.1) |
+| `<n> notes arrived from the library` | *Restore a library…* finished, replacing the notes it names |
+| `the library on the desktop was not restored: <reason>` | a library was there, on a machine with no notes, and was refused — the reason names which rule ([LIBRARY.md](LIBRARY.md) §6) |
+
+A message is **not** the status line's own clause set: it replaces the previous message and stays until
+the next one. The clauses in §1 keep describing the note in front regardless.
+
+## 9. Reading `CHEAP_NOTE_TRACE`
 Set `CHEAP_NOTE_TRACE` in the environment and the line grows a few more clauses. None of them is a fact about
 the note — they are what the platform's own capture says about itself — which is why they are behind the
 variable, and why the line is otherwise the same sentence on every OS.

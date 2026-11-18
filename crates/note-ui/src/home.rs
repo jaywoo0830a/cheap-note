@@ -811,6 +811,18 @@ impl Home {
         self.recents.entries()
     }
 
+    /// Reads the index again, because notes were placed under it.
+    ///
+    /// A restore writes folders the list has never heard of: the index is unchanged, so the screen has
+    /// nothing to show until the next scan adopts them. This makes the screen look again on the next
+    /// frame, and the scan that runs there is what fills the rows.
+    pub fn reload(&mut self, cx: &mut Context<NoteApp>) {
+        self.recents = Recents::load();
+        self.dirty = true;
+        self.scanning = false;
+        cx.notify();
+    }
+
     /// Records that something was opened, and writes the index out.
     ///
     /// The write is one small file at a human-speed event, so it is made here rather than queued:
@@ -962,11 +974,14 @@ impl Home {
             .into_any_element()
     }
 
-    /// The two ways out of the list, and the one way forward.
+    /// The two ways out of the list, and the two ways forward.
     ///
     /// *Open* is first because it is what a person with nothing to reopen needs, and *New blank
     /// sheet* is there because writing on nothing at all is a thing this app does rather than a
-    /// fallback: the first stroke makes the note.
+    /// fallback: the first stroke makes the note. *Back up* and *Restore* are the library
+    /// ([`crate::library`]): one press writes every note as one zip on the desktop, and the other takes
+    /// a library from anywhere back in. The backup is not primary — writing is — but it is the one
+    /// button that keeps the writing when the machine does not.
     fn actions(&self, metrics: LayoutMetrics, cx: &mut Context<NoteApp>) -> AnyElement {
         h_flex()
             .items_center()
@@ -986,6 +1001,20 @@ impl Home {
                     .icon(IconName::SquarePen)
                     .label("New blank sheet")
                     .on_click(cx.listener(|app, _, _, cx| app.new_blank_sheet(cx))),
+            )
+            .child(
+                Button::new("home-backup")
+                    .ghost()
+                    .icon(IconName::Archive)
+                    .label("Back up everything")
+                    .on_click(cx.listener(|app, _, _, cx| app.back_up_everything(cx))),
+            )
+            .child(
+                Button::new("home-restore")
+                    .ghost()
+                    .icon(IconName::FolderInput)
+                    .label("Restore a library\u{2026}")
+                    .on_click(cx.listener(|app, _, _, cx| app.restore_library(cx))),
             )
             .into_any_element()
     }

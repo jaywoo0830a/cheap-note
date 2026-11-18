@@ -430,6 +430,18 @@ twice is one note, not two. The format itself is portable in the boring way that
 are byte-order independent, so x86 and ARM machines read each other's notes. What is *this app's* is the
 chunk encoding, and its version travels in the database (§9).
 
+### The whole library, as one file on the desktop
+
+*Save* carries **one note**. The home screen's *Back up everything* button carries **all of them**: one
+zip on the desktop named `cheap-note-library.zip`, laid out as the same three names a note is —
+`notes/<folder>/note.db`, `source.pdf`, `attachments/` — with a `library.json` at its root. A second
+machine that has never seen a note takes the file in by itself when the app is started; a machine that has
+notes restores it through *Restore a library…*.
+
+Each note in it is vacuumed exactly as the export below is, so this section's rule applies to every note in
+a library: the copy is of what SQLite has committed, never of the three files an open database is. **The
+operation, the layout, the two buttons and what the container refuses are [LIBRARY.md](LIBRARY.md).**
+
 ---
 
 ## 9. Versioning, integrity, and old notes
@@ -488,11 +500,12 @@ write. That is the boundary: a note's shape is portable, a reader's timing is no
 | `crates/note-format/src/chunk.rs` | the blob format: encode, decode, integrity, chunk boundaries, the sealed frame a dirty row and an edit share |
 | `crates/note-format/src/history.rs` | what an edit *is*: apply and revert, a page's history, and the bytes the note's log holds |
 | `crates/note-format/src/settings.rs` | every setting a note remembers, and the row each one is written in |
-| `crates/note-format/src/note.rs` | the note folder, the writer thread and its job queue, the zip container |
+| `crates/note-format/src/note.rs` | the note folder, the writer thread and its job queue, the zip container, and the library — every note as one file, and every note of it back |
 | `crates/note-format/src/ink.rs` | the ink itself: a point, a stroke, its colour, and the geometry derived from it |
 | `crates/note-format/src/pages.rs`, `paper.rs` | the page list and its rotations; the sheet sizes and styles a note can be written on |
 | `crates/note-ui/src/ink.rs` | the page in memory: the tools, the eraser, the lasso, undo, and the document a reader turns |
 | `crates/note-ui/src/recent.rs`, `crates/note-ui/src/home.rs` | the index of what has been opened, and the list that shows it |
+| `crates/note-ui/src/library.rs` | where a backup of every note goes, and the guard on restoring one without being asked |
 | `crates/note-ui/src/app.rs` | when to write: the batch clock, page close, the checkpoint rule, and the UI |
 
 The view's `crates/note-ui/src/store.rs`, `note.rs`, `pages.rs`, `settings.rs` and `history.rs` are
@@ -517,6 +530,7 @@ has never seen this code, so the tests that matter most are the ones that preten
 | `NoteStore::export` | `VACUUM INTO` |
 | `NoteStore::read_settings` / `set_settings` | the note's rows and the app's type: a setting's whole schema |
 | `Note::placed_from` | import: a zip, a PDF, or a folder → a working copy |
+| `note::write_library` / `note::place_library` | every note as one zip; every note of one zip back |
 | `NoteWriter::spawn` | the writing thread and its queue |
 | `NoteApp::persist` | the rule that decides *when* ink is handed over |
 | `NoteApp::load_page_ink` | the read that happens when you turn a page |

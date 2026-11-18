@@ -631,6 +631,7 @@ The documents are meant to be read together:
 | [VIEW.md](VIEW.md) | why the view is the way it is: the frame loop, the bar, the sheet, the gestures, the pen's rules |
 | [DESIGN.md](DESIGN.md) | the interface's one scale: design units, exact quarter steps, and how the view consumes them |
 | [STORE.md](STORE.md) | one stroke's journey to the disk and back |
+| [LIBRARY.md](LIBRARY.md) | all of the notes at once: the one file on the desktop, its two buttons, and restoring it on a machine that has never seen a note |
 | [MACOS.md](MACOS.md) | the macOS port: what the seam gives you, and what only a Mac can do |
 
 

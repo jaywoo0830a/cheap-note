@@ -530,3 +530,228 @@ fn a_note_that_has_its_document_is_not_adopted_again() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Two notes, each with ink, ready to be selected between.
+fn two_notes(root: &Path) -> (PathBuf, PathBuf) {
+    let notes = root.join("notes");
+    let first = notes.join("chapter-3-9f2a1c44");
+    let second = notes.join("blank-1712345678901");
+
+    let mut one = Note::open(&first).expect("a note");
+    one.put_document("chapter-3.pdf", &a_pdf())
+        .expect("a document");
+    one.store_mut()
+        .rewrite(
+            1,
+            &[
+                stroke(4, 0.0, 10.0, 0x1B_1B_1F),
+                stroke(4, 40.0, 10.0, 0xCC_22_22),
+            ],
+            &plain(2),
+        )
+        .expect("ink");
+    one.store_mut().checkpoint().expect("a checkpoint");
+
+    let mut other = Note::open(&second).expect("a note");
+    other
+        .store_mut()
+        .rewrite(1, &[stroke(6, 10.0, 20.0, 0x1B_1B_1F)], &plain(1))
+        .expect("ink");
+    other.store_mut().checkpoint().expect("a checkpoint");
+
+    (first, second)
+}
+
+/// A selection of several notes is one zip with `notes/<folder>/` in front of every entry, and every one
+/// of them comes back whole — the ink, the document, and the folder name that is the note's identity.
+#[test]
+fn a_selection_of_several_notes_travels_as_one_zip() {
+    let root = scratch("selection-many");
+    let (first, second) = two_notes(&root);
+
+    let carried = root.join("chosen.zip");
+    let written = note::export_selection(&[first.clone(), second.clone()], &carried)
+        .expect("the selection is written");
+    assert_eq!(written.len(), 2, "both notes are in it");
+
+    // The zip says what it holds, in the names it holds them under.
+    let listed = note::read_selection(&carried).expect("a listing");
+    assert!(listed.contains(&PathBuf::from("chapter-3-9f2a1c44")));
+    assert!(listed.contains(&PathBuf::from("blank-1712345678901")));
+
+    // And it unpacks into two note folders that are the two notes.
+    let elsewhere = root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("a notes folder");
+    let placed = note::place_selection(&carried, &elsewhere).expect("the selection is placed");
+    assert_eq!(placed.len(), 2);
+
+    let arrived = Note::open(&elsewhere.join("chapter-3-9f2a1c44")).expect("the note");
+    assert_eq!(arrived.store().load(1).expect("a page").len(), 2);
+    assert!(elsewhere
+        .join("chapter-3-9f2a1c44")
+        .join(NOTE_PDF)
+        .is_file());
+
+    let blank = Note::open(&elsewhere.join("blank-1712345678901")).expect("the note");
+    assert_eq!(blank.store().load(1).expect("a page").len(), 1);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The entry names inside a zip, in order.
+fn entry_names(path: &Path) -> Vec<String> {
+    let file = std::fs::File::open(path).expect("a zip");
+    let mut archive = zip::ZipArchive::new(file).expect("a zip archive");
+    (0..archive.len())
+        .map(|index| {
+            archive
+                .by_index(index)
+                .expect("an entry")
+                .name()
+                .expect("a name")
+                .to_string()
+        })
+        .collect()
+}
+
+/// A selection of one note is written *flat*, so it is the shape of an ordinary export: the same entry
+/// names, and a file *Open* already reads.
+#[test]
+fn a_selection_of_one_is_an_ordinary_export() {
+    let root = scratch("selection-one");
+    let (first, second) = two_notes(&root);
+
+    // The note with no document, so that "the same names" is the narrowest case as well as the widest.
+    let selected = root.join("chosen.zip");
+    note::export_selection(std::slice::from_ref(&second), &selected).expect("the selection");
+
+    let single = root.join("saved.zip");
+    let note = Note::open(&second).expect("the note");
+    note::export(note.store(), note.dir(), &single).expect("an export");
+
+    assert_eq!(
+        entry_names(&selected),
+        entry_names(&single),
+        "one note is written flat, under the names an export has"
+    );
+
+    // A note with a document carries it under the same flat name too.
+    let with_document = root.join("chosen-document.zip");
+    note::export_selection(std::slice::from_ref(&first), &with_document).expect("the selection");
+    assert!(
+        entry_names(&with_document).contains(&String::from(NOTE_PDF)),
+        "the document sits at the root, as it does in an export"
+    );
+
+    // And it opens the way a saved note does.
+    let elsewhere = root.join("elsewhere");
+    Note::placed_from(&selected, &elsewhere).expect("a selection of one opens as a note");
+    assert!(elsewhere.join(NOTE_DB).is_file());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Restoring replaces the notes it names and leaves the ones it does not name alone: a selection is a
+/// copy of *those* notes, not a statement about the others.
+#[test]
+fn a_selection_replaces_what_it_names_and_nothing_else() {
+    let root = scratch("selection-restore");
+    let (first, second) = two_notes(&root);
+    let untouched_folder = root.join("notes").join("untouched-1712345678999");
+    Note::open(&untouched_folder).expect("a third note");
+
+    // A selection of two, so the file is the multi-note shape; the third note is not in it.
+    let carried = root.join("chosen.zip");
+    note::export_selection(&[first.clone(), second.clone()], &carried).expect("the selection");
+
+    // Both notes in the file change after the snapshot was taken; so does the one that is not in it.
+    let mut one = Note::open(&first).expect("the note");
+    one.store_mut()
+        .rewrite(1, &[stroke(3, 0.0, 30.0, 0x22_66_CC)], &plain(1))
+        .expect("ink");
+    one.store_mut().checkpoint().expect("a checkpoint");
+
+    let mut other = Note::open(&second).expect("the note");
+    other.store_mut().set_title("kept").expect("a name");
+    other.store_mut().checkpoint().expect("a checkpoint");
+
+    let mut third = Note::open(&untouched_folder).expect("the note");
+    third
+        .store_mut()
+        .rewrite(1, &[stroke(2, 50.0, 50.0, 0x1B_1B_1F)], &plain(1))
+        .expect("ink");
+    third.store_mut().checkpoint().expect("a checkpoint");
+
+    note::place_selection(&carried, &root.join("notes")).expect("the restore");
+
+    // The note in the file is the file's copy again.
+    let back = Note::open(&first).expect("the note");
+    assert_eq!(
+        back.store().load(1).expect("a page").len(),
+        2,
+        "the copy in the file is the copy that is restored"
+    );
+
+    // The second note in the file is restored too, name and all.
+    let restored = Note::open(&second).expect("the note");
+    assert_eq!(
+        restored.store().title().expect("a name"),
+        None,
+        "the name written after the snapshot is gone, because the file's copy won"
+    );
+
+    // The note the file does not name is not touched at all.
+    let untouched = Note::open(&untouched_folder).expect("the note");
+    assert_eq!(
+        untouched.store().load(1).expect("a page").len(),
+        1,
+        "a note the file does not name keeps its ink"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A zip that is not a selection places nothing at all, and an entry that climbs out of its note is
+/// refused at the listing rather than written.
+#[test]
+fn a_zip_that_is_not_a_selection_places_nothing() {
+    let root = scratch("selection-refused");
+    let notes = root.join("notes");
+    std::fs::create_dir_all(&notes).expect("a notes folder");
+
+    // A zip holding only a document: not a note, and not a selection.
+    let plain_zip = root.join("photos.zip");
+    zip_of(&plain_zip, &[("holiday.jpg", b"not a note")]);
+    assert!(note::place_selection(&plain_zip, &notes).is_err());
+    assert!(note::read_selection(&plain_zip)
+        .expect("a listing")
+        .is_empty());
+
+    // An entry that points outside its note is refused at the listing, before anything is written.
+    let climbing = root.join("climbing.zip");
+    zip_of(
+        &climbing,
+        &[
+            ("notes/good/note.db", b"a database"),
+            ("notes/good/../../../escape.txt", b"outside"),
+        ],
+    );
+    assert!(
+        note::read_selection(&climbing).is_err(),
+        "refused at the listing"
+    );
+    assert!(
+        note::place_selection(&climbing, &notes).is_err(),
+        "and nothing is placed"
+    );
+    assert!(
+        !root.join("escape.txt").exists(),
+        "the entry outside the note was never written"
+    );
+    assert!(
+        !notes.join("good").exists(),
+        "and not even the note that was fine"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

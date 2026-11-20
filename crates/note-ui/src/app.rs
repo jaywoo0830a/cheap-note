@@ -394,6 +394,15 @@ fn sheet_matches(written: (f32, f32), current: (f32, f32)) -> bool {
     (written.0 - current.0).abs() <= 1.0 && (written.1 - current.1).abs() <= 1.0
 }
 
+/// The word for `count` notes, for a message about them: "1 note", "3 notes".
+fn notes_word(count: usize) -> &'static str {
+    if count == 1 {
+        "note"
+    } else {
+        "notes"
+    }
+}
+
 /// The file name of a path, for a message about it.
 fn file_label(path: &Path) -> String {
     path.file_name()
@@ -5064,6 +5073,195 @@ impl NoteApp {
         cx.notify();
     }
 
+    /// Ticks or unticks the note in `folder` on the home screen's list.
+    ///
+    /// The tick is the home screen's, not a note's: nothing is written to a note, and nothing is
+    /// remembered beyond the moment the file it is about has been written. See [`crate::home`].
+    pub(crate) fn set_note_ticked(&mut self, folder: &Path, ticked: bool, cx: &mut Context<Self>) {
+        self.home.set_ticked(folder, ticked, cx);
+        self.touch_status();
+        cx.notify();
+    }
+
+    /// Exports the ticked notes as one file, asking where it should go.
+    ///
+    /// The *Export* button: one press, one file, the notes that are ticked. A selection of one note is
+    /// written exactly as the note's own transfer file is (see [`note::export_selection`]), so a person
+    /// who ticks one row gets the ordinary one-note zip.
+    ///
+    /// With nothing ticked the press is a sentence rather than a disabled button: a person who pressed
+    /// something deserves to be told why nothing happened.
+    ///
+    /// The page in hand is written first, so the note on the sheet is on disk before its copy is taken.
+    pub(crate) fn export_selection(&mut self, cx: &mut Context<Self>) {
+        let folders = self.home.ticked(cx);
+        if folders.is_empty() {
+            self.report(String::from(
+                "nothing is ticked: tick the notes you want to export",
+            ));
+            cx.notify();
+            return;
+        }
+
+        self.persist(Instant::now(), true);
+
+        let count = folders.len();
+        let suggested = if count == 1 {
+            // The ticked note's own name, not the open note's: a person may be ticking a row that is not
+            // the one on the sheet, and a file named after somebody else's note would be a surprise.
+            let stem = folders[0]
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| String::from("note"));
+            format!("{stem}.zip")
+        } else {
+            format!("cheap-note-selection-{count}.zip")
+        };
+
+        let directory = self
+            .settings
+            .export_dir
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        let receiver = cx.prompt_for_new_path(&directory, Some(&suggested));
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = receiver.await {
+                this.update(cx, |app, cx| app.write_export(folders, path, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Writes the ticked notes to `path`, then clears the ticks and says what was written.
+    ///
+    /// On the background executor rather than the writer's queue: that queue belongs to the one note that
+    /// is open, and a selection is about notes nothing has opened.
+    fn write_export(&mut self, folders: Vec<PathBuf>, path: PathBuf, cx: &mut Context<Self>) {
+        let count = folders.len();
+        self.message = format!(
+            "exporting {count} {} to {}",
+            notes_word(count),
+            file_label(&path)
+        );
+        self.touch_status();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let destination = path.clone();
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { note::export_selection(&folders, &destination) })
+                .await;
+
+            this.update(cx, |app, cx| {
+                match outcome {
+                    Ok(written) => {
+                        // Where the file went is a *setting*, and settings are the note's: the directory is
+                        // written into the note on the sheet, so the next export is offered there.
+                        app.settings.export_dir = path.parent().map(|parent| parent.to_path_buf());
+                        app.save_note_state();
+                        app.home.clear_ticks(cx);
+                        app.message = format!(
+                            "wrote {} {} to {}",
+                            written.len(),
+                            notes_word(written.len()),
+                            file_label(&path)
+                        );
+                    }
+                    Err(error) => {
+                        app.message = format!("nothing was exported: {error}");
+                    }
+                }
+
+                app.touch_status();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks for a file made by *Export* and places every note in it, replacing the notes it names.
+    ///
+    /// The other half of the pair. Unlike *Open*, this is explicitly an **import**: a person who chooses
+    /// the file is saying its copy is the one they want, so a note that is already there is replaced (see
+    /// [`note::place_selection`]). A file holding one note is the ordinary transfer file and is placed the
+    /// way one is.
+    pub(crate) fn import_selection(&mut self, cx: &mut Context<Self>) {
+        let options = PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose a file exported from this app".into()),
+        };
+        let receiver = cx.prompt_for_paths(options);
+
+        cx.spawn(async move |this, cx| {
+            // The platform relays the choice through a oneshot channel; a cancelled prompt and a platform
+            // error both mean "nothing was chosen", as they do for opening a note.
+            if let Ok(Ok(Some(paths))) = receiver.await {
+                if let Some(path) = paths.into_iter().next() {
+                    this.update(cx, |app, cx| app.place_import_file(path, cx))
+                        .ok();
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Places what a chosen selection holds, and puts the list back in front of the result.
+    fn place_import_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // A file holding one note is written flat, so it is an ordinary transfer file and *Open*'s own
+        // path reads it — there is no second rule for "one".
+        let found = match note::read_selection(&path) {
+            Ok(found) => found,
+            Err(error) => {
+                self.report(error.to_string());
+                self.touch_status();
+                cx.notify();
+                return;
+            }
+        };
+
+        let placed = if found.is_empty() {
+            match Note::placed_from(&path, &note::root().join(note::folder_name(&path))) {
+                Ok(folder) => vec![folder.dir().to_path_buf()],
+                Err(error) => {
+                    self.report(error.to_string());
+                    self.touch_status();
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            match note::place_selection(&path, &note::root()) {
+                Ok(placed) => placed,
+                Err(error) => {
+                    self.report(error.to_string());
+                    self.touch_status();
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+
+        // The note that was open may have just been replaced on disk. It is let go of rather than left
+        // open over a folder that is no longer the one it was opened from, and the next thing opened is
+        // the copy that arrived rather than the one still in memory.
+        self.close_page();
+        self.note = None;
+        self.writer = None;
+        self.home.reload(cx);
+        self.start_scan(cx);
+
+        let count = placed.len();
+        self.message = format!("{} {} imported", count, notes_word(count));
+        self.touch_status();
+        cx.notify();
+    }
+
     /// The name a note about the open document should suggest.
     fn note_stem(&self) -> String {
         let named = file_stem(&self.note_title);
@@ -5694,8 +5892,9 @@ impl NoteApp {
             );
         }
 
-        // And the file: what was opened, and what is written out. Pushed after the page's own commands, which
-        // is where they sit in the row.
+        // And the file: what was opened. Notes are written out from the home screen's list, by ticking
+        // them and pressing *Save* there — one door for one note and for many (see
+        // [`note::export_selection`]), so the note screen has no button for it.
         actions.push(
             icon_button(
                 "open-note",
@@ -5704,17 +5903,6 @@ impl NoteApp {
                 true,
                 cx,
                 |app, cx| app.prompt_for_pdf(cx),
-            )
-            .into_any_element(),
-        );
-        actions.push(
-            icon_button(
-                "save-note",
-                IconName::Save,
-                "Save the note",
-                true,
-                cx,
-                |app, cx| app.save(cx),
             )
             .into_any_element(),
         );

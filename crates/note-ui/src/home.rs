@@ -47,6 +47,14 @@
 //! Nothing is destructive behind a menu item that does not say so: *Forget* takes a line out of this
 //! list and touches no note.
 //!
+//! ## The tick
+//!
+//! A checkbox on every row is the whole of a selection: it says which notes *Export* is about, and the
+//! count is in that button's own label (`Export (3)`). A tick is a statement about the file, never about
+//! the note — nothing is written into a note, and the ticks clear the moment the file is written. One
+//! ticked note is a perfectly ordinary export, so the row that is the only note in the list can be
+//! exported the same way as forty.
+//!
 //! ## Names
 //!
 //! A note's name is the *note's* (see [`crate::store::META_TITLE`]), not this list's: renaming writes
@@ -58,19 +66,21 @@
 //! importing the same PDF twice find the same note. An empty name is a legitimate answer and the
 //! normal state — the row then shows the name the list derives.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyTitle};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::label::Label;
 use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::{ActiveTheme as _, Icon, IndexPath, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IndexPath, Sizable as _};
 use gpui_kit::*;
 
 use crate::app::{window_px, NoteApp};
@@ -242,6 +252,23 @@ fn row_menu(menu: PopupMenu, app: WeakEntity<NoteApp>, entry: Recent) -> PopupMe
     )
 }
 
+/// The ticked notes' folders, in the order the list shows them.
+///
+/// The list's order rather than the order they were clicked: two exports of the same three notes should
+/// be the same file, and a person ticking rows from bottom to top has not asked for a different order
+/// from one ticking them from the top down. A row whose note is no longer on disk is left out — there is
+/// nothing to pack — rather than being an error at the last moment.
+///
+/// A free function over the entries rather than a method, so the rule is testable without a window: the
+/// delegate needs a list and an input field, and the rule needs neither.
+fn ticked_in_list_order(entries: &[Recent], ticked: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
+    entries
+        .iter()
+        .filter(|entry| ticked.contains(&entry.folder) && !entry.gone)
+        .map(|entry| entry.folder.clone())
+        .collect()
+}
+
 /// What the list draws: one row per note the app remembers, narrowed by what has been typed.
 ///
 /// The list asks this for a count, for a row, and for what a confirmation means. It owns everything
@@ -270,6 +297,16 @@ pub struct RecentsDelegate {
     /// One field rather than one per row, because a virtualised list draws rows that come and go, and
     /// a field that scrolled out of the window would take the half-typed name with it.
     name_input: Entity<InputState>,
+    /// The notes whose rows are ticked, by folder.
+    ///
+    /// A folder rather than a row index, because a row index is a position in a list that searches and
+    /// rescans: a tick that survived a search would be a tick on whatever row happened to land at that
+    /// number. The folder is the note's identity everywhere else in the app (see [`crate::recent`]), so a
+    /// tick means the note rather than the place it was drawn.
+    ///
+    /// Ticking is a *statement about an export* and nothing else: nothing here is written to a note, and
+    /// the set is cleared the moment the file it was about has been written.
+    ticked: BTreeSet<PathBuf>,
     /// The app, for the one thing a confirmation does. Weak: this does not own the app.
     app: WeakEntity<NoteApp>,
 }
@@ -296,8 +333,33 @@ impl RecentsDelegate {
             last_click: None,
             renaming: None,
             name_input,
+            ticked: BTreeSet::new(),
             app,
         }
+    }
+
+    /// Ticks or unticks the note in `folder`.
+    pub fn set_ticked(&mut self, folder: &Path, ticked: bool) {
+        if ticked {
+            self.ticked.insert(folder.to_path_buf());
+        } else {
+            self.ticked.remove(folder);
+        }
+    }
+
+    /// How many notes are ticked.
+    pub fn ticked_count(&self) -> usize {
+        self.ticked.len()
+    }
+
+    /// The ticked notes' folders, in the order the list shows them.
+    pub fn ticked_folders(&self) -> Vec<PathBuf> {
+        ticked_in_list_order(&self.all, &self.ticked)
+    }
+
+    /// Clears every tick, which is what a finished export does.
+    pub fn clear_ticks(&mut self) {
+        self.ticked.clear();
     }
 
     /// Records a click on a row, for [`Self::confirm`] to read a moment later.
@@ -471,6 +533,7 @@ impl ListDelegate for RecentsDelegate {
         let name = entry.shown_title();
         let age = entry.age(recent::now_ms());
         let renaming = self.renaming.as_deref() == Some(entry.folder.as_path());
+        let ticked = self.ticked.contains(&entry.folder);
 
         // The name in the row is either the name a person gave the note or the one the list derives
         // from the folder — and while it is being renamed it is a field, in place, holding whichever
@@ -519,6 +582,22 @@ impl ListDelegate for RecentsDelegate {
                 h_flex()
                     .items_center()
                     .gap_3()
+                    // The tick, which is what a selection is made of. It sits before the mark rather than
+                    // over the row, so a click on it can never be mistaken for the click that opens the
+                    // note: the row's own click is on its parent, and this element stops the event.
+                    .child({
+                        let folder = entry.folder.clone();
+                        let app = self.app.clone();
+                        Checkbox::new(ElementId::Name(format!("note-tick-{}", ix.row).into()))
+                            .checked(ticked)
+                            .disabled(entry.gone)
+                            .on_change(move |checked, _, cx| {
+                                app.update(cx, |app, cx| {
+                                    app.set_note_ticked(&folder, *checked, cx)
+                                })
+                                .ok();
+                            })
+                    })
                     .child(Icon::new(mark).text_color(mark_color))
                     .child(
                         v_flex()
@@ -811,6 +890,35 @@ impl Home {
         self.recents.entries()
     }
 
+    /// The ticked notes' folders, in the list's order.
+    ///
+    /// Read out of the list rather than kept beside it: the list is where a tick is made, and a second
+    /// copy of the set here would be a second thing to keep in step.
+    pub fn ticked(&self, cx: &mut Context<NoteApp>) -> Vec<PathBuf> {
+        self.list.read(cx).delegate().ticked_folders()
+    }
+
+    /// How many notes are ticked.
+    pub fn ticked_count(&self, cx: &mut Context<NoteApp>) -> usize {
+        self.list.read(cx).delegate().ticked_count()
+    }
+
+    /// Ticks or unticks the note in `folder`.
+    pub fn set_ticked(&self, folder: &Path, ticked: bool, cx: &mut Context<NoteApp>) {
+        self.list.update(cx, |state, cx| {
+            state.delegate_mut().set_ticked(folder, ticked);
+            cx.notify();
+        });
+    }
+
+    /// Clears every tick, which is what a finished export does.
+    pub fn clear_ticks(&self, cx: &mut Context<NoteApp>) {
+        self.list.update(cx, |state, cx| {
+            state.delegate_mut().clear_ticks();
+            cx.notify();
+        });
+    }
+
     /// Reads the index again.
     ///
     /// The index is a cache, and a folder that appeared under the notes root is one the next scan
@@ -871,12 +979,21 @@ impl Home {
     }
 
     /// What the status line says about the list.
-    pub fn status(&self) -> String {
+    /// The bottom line's own sentence: what the list holds, what is missing, and how many are ticked.
+    ///
+    /// The tick clause is written first among the *facts* because it is the one that changes what the
+    /// person can do next: with something ticked there is a button above the line that was not there
+    /// before, and this is the place that says why.
+    pub fn status(&self, cx: &mut Context<NoteApp>) -> String {
         let total = self.entries().len();
         let gone = self.entries().iter().filter(|entry| entry.gone).count();
+        let ticked = self.ticked_count(cx);
 
         let mut parts = vec![format!("{total} note{}", if total == 1 { "" } else { "s" })];
 
+        if ticked > 0 {
+            parts.push(format!("{ticked} ticked \u{b7} Export writes them"));
+        }
         if gone > 0 {
             parts.push(format!("{gone} not on disk"));
         }
@@ -974,12 +1091,22 @@ impl Home {
             .into_any_element()
     }
 
-    /// The two ways forward.
+    /// The ways forward, and the two file verbs.
     ///
-    /// *Open* is first because it is what a person with nothing to reopen needs, and *New blank
-    /// sheet* is there because writing on nothing at all is a thing this app does rather than a
-    /// fallback: the first stroke makes the note.
+    /// *Open* and *New blank sheet* are what a person with nothing to reopen needs. *Export* carries the
+    /// ticked notes out and *Import* takes such a file back in, replacing the notes it names; the tick is
+    /// on the rows (see the module docs). Nothing about Export hides when nothing is ticked: a press with
+    /// an empty selection is answered with a sentence, the way the backup button's own empty case was.
     fn actions(&self, metrics: LayoutMetrics, cx: &mut Context<NoteApp>) -> AnyElement {
+        let ticked = self.ticked_count(cx);
+        let export = if ticked == 0 {
+            String::from("Export")
+        } else if ticked == 1 {
+            String::from("Export (1)")
+        } else {
+            format!("Export ({ticked})")
+        };
+
         h_flex()
             .items_center()
             .gap(px(window_px(metrics.space_2)))
@@ -998,6 +1125,24 @@ impl Home {
                     .icon(IconName::SquarePen)
                     .label("New blank sheet")
                     .on_click(cx.listener(|app, _, _, cx| app.new_blank_sheet(cx))),
+            )
+            // The two file verbs, named the way every other app names them. *Export* carries the ticked
+            // notes out — one note is the ordinary transfer file — and *Import* takes such a file back in.
+            // The count is in the Export button's label, because that is the whole of what a tick does:
+            // it says which notes the press is about.
+            .child(
+                Button::new("home-export")
+                    .ghost()
+                    .icon(IconName::Archive)
+                    .label(export)
+                    .on_click(cx.listener(|app, _, _, cx| app.export_selection(cx))),
+            )
+            .child(
+                Button::new("home-import")
+                    .ghost()
+                    .icon(IconName::FolderInput)
+                    .label("Import\u{2026}")
+                    .on_click(cx.listener(|app, _, _, cx| app.import_selection(cx))),
             )
             .into_any_element()
     }
@@ -1020,7 +1165,7 @@ impl Home {
             .bg(theme.transparent)
             .border_t_1()
             .border_color(hairline)
-            .left(Label::new(self.status()).text_sm().text_color(muted));
+            .left(Label::new(self.status(cx)).text_sm().text_color(muted));
 
         if !message.is_empty() {
             bar = bar.right(Label::new(message.to_string()).text_sm().text_color(muted));

@@ -10,14 +10,15 @@ If you read only one paragraph, read this one:
 > in batches, on a background thread — nothing waits for a *Save*. Strokes are not stored as JSON but
 > as compressed structure-of-arrays blobs, so a page costs a few kilobytes rather than a few hundred.
 > *Save* does not "save" anything: it writes one portable file (a zip) you can carry to another
-> machine.
+> machine. It is on the home screen's list — tick the notes and save them — so the note screen has no
+> button for it (the `⌘S`/`Ctrl+S` chord still writes the note on the sheet).
 
 ---
 
 ## 1. What a note is on disk
 
 A note is one folder in the app's own state directory, and the same three names make up the single file
-a person carries — this is what the *Save* button writes:
+a person carries — this is what saving writes, from the home screen's list:
 
 ```text
 %LOCALAPPDATA%\cheap-note\notes\chapter-3-9f2a1c44\
@@ -430,6 +431,33 @@ twice is one note, not two. The format itself is portable in the boring way that
 are byte-order independent, so x86 and ARM machines read each other's notes. What is *this app's* is the
 chunk encoding, and its version travels in the database (§9).
 
+### Several notes at once: a selection
+
+A person who wants to carry more than one note can tick rows on the home screen and press *Save the
+ticked notes*. The file is one zip again, and the rule that makes it readable is the note's own: **a
+note is a folder holding a `note.db`**, wherever it is in the zip.
+
+```text
+cheap-note-selection-3.zip
+    notes/chapter-3-9f2a1c44/note.db        each note, vacuumed exactly as an export's
+    notes/chapter-3-9f2a1c44/source.pdf
+    notes/blank-1712345678901/note.db
+```
+
+**A selection of one is written flat** — `note.db`, `source.pdf` at the root, no `notes/` prefix — so
+ticking one row gives exactly the file *Save* would have written, and *Open* already reads it. There is
+no manifest, no version and no list of what is inside: the zip's entry list is the list.
+
+*Restore a selection…* places every note in such a file, **replacing** the notes it names and touching
+nothing else. Each note is unpacked into a temporary folder beside its destination and renamed onto it,
+so an interrupted restore leaves either the old note or the new one and never the two mixed. Everything
+is refused before the first note is written: a zip that is not a selection, and an entry that climbs out
+of its note, place nothing at all.
+
+What a tick is *not*: it is not a property of the note (nothing is written into one), not remembered
+after the file is written (the ticks clear), and not a way to back up the library as a whole — the
+selection is a statement about **this file**, made in front of the list.
+
 ---
 
 ## 9. Versioning, integrity, and old notes
@@ -517,6 +545,7 @@ has never seen this code, so the tests that matter most are the ones that preten
 | `NoteStore::export` | `VACUUM INTO` |
 | `NoteStore::read_settings` / `set_settings` | the note's rows and the app's type: a setting's whole schema |
 | `Note::placed_from` | import: a zip, a PDF, or a folder → a working copy |
+| `note::export_selection` / `note::place_selection` | several notes as one zip; several notes of one zip back |
 | `NoteWriter::spawn` | the writing thread and its queue |
 | `NoteApp::persist` | the rule that decides *when* ink is handed over |
 | `NoteApp::load_page_ink` | the read that happens when you turn a page |

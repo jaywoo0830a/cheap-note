@@ -560,6 +560,360 @@ pub fn export(store: &NoteStore, dir: &Path, target: &Path) -> Result<()> {
     result
 }
 
+/// The prefix that makes a zip hold *several* notes instead of one.
+///
+/// A selection is one zip with `notes/<folder>/` in front of the entry names a single note has. A
+/// selection of one note is written flat — `note.db`, `source.pdf` — so it *is* an ordinary export and
+/// is read by [`unpack`]; a selection of two or more is written under this prefix and read by
+/// [`read_selection`]. One rule, stated once: **a note is a folder holding a [`NOTE_DB`], wherever it is
+/// in the zip**, which is why the reader can decide between the two by looking at the entry names and
+/// nothing else.
+///
+/// There is deliberately no manifest, no version and no list of what is inside: the zip's own entry list
+/// *is* the list, and a second copy of it would be a second thing to keep in step.
+pub const SELECTION_NOTES: &str = "notes";
+
+/// Whether `folder` is a name a note folder can have: no separators, no `.`/`..`, and not empty.
+fn is_folder_name(folder: &str) -> bool {
+    !folder.is_empty()
+        && folder != "."
+        && folder != ".."
+        && !folder.contains('/')
+        && !folder.contains('\\')
+        && !folder.contains(':')
+}
+
+/// Whether `path` is a path inside a note rather than out of one.
+///
+/// Relative, and made of ordinary names: an absolute path with a drive letter, a `..` anywhere, or an
+/// empty segment is not a file sitting inside a note folder.
+fn is_note_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains("..")
+        && !path.contains(':')
+        && path
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != ".")
+}
+
+/// Writes several notes into one zip at `target`: the export of a selection.
+///
+/// Each note is vacuumed exactly as [`export`] does it and packed with the same three names, so a note in
+/// a selection is the note it would have been on its own — the only difference between them is the
+/// prefix. One note is written *flat*, which makes a selection of one an ordinary export: a person who
+/// ticks one row and saves gets exactly the file *Save* would have written, and the reader does not have
+/// to know which door it came from.
+///
+/// The zip is built beside `target` and renamed onto it, so a failed selection leaves the file that was
+/// there rather than half of the new one — the same rule as [`export`], for the same reason.
+///
+/// Returns the folders written, in the order they were packed, which is what a caller counts.
+pub fn export_selection(folders: &[PathBuf], target: &Path) -> Result<Vec<String>> {
+    // Every temporary this function makes, removed by whichever path leaves it.
+    struct Temps(Vec<PathBuf>);
+
+    impl Temps {
+        fn keep(&mut self, path: PathBuf) -> PathBuf {
+            self.0.push(path.clone());
+            path
+        }
+    }
+
+    impl Drop for Temps {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    let mut temps = Temps(Vec::new());
+    let staging =
+        temps.keep(target.with_file_name(format!(".tmp-{}.selection.zip", std::process::id())));
+
+    let mut entries = Vec::new();
+    let mut written = Vec::new();
+
+    // Flat when there is one note, so that a selection of one is the shape of an export.
+    let flat = folders.len() == 1;
+
+    for folder in folders {
+        let name = folder
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| String::from("note"));
+
+        // The name an entry is written under: the note's own, or the same name behind the prefix.
+        let inside = |entry: String| {
+            if flat {
+                entry
+            } else {
+                format!("{SELECTION_NOTES}/{name}/{entry}")
+            }
+        };
+
+        // The vacuum goes inside the note's own folder, on the volume the note is on, and is deleted
+        // whether the selection is written or not.
+        let vacuum = temps.keep(folder.join(EXPORT_TMP));
+        let _ = std::fs::remove_file(&vacuum);
+        let store = NoteStore::open(&folder.join(NOTE_DB))?;
+        store.export(&vacuum)?;
+
+        entries.push((
+            inside(String::from(NOTE_DB)),
+            vacuum,
+            CompressionMethod::Stored,
+        ));
+
+        let document = folder.join(NOTE_PDF);
+        if document.exists() {
+            entries.push((
+                inside(String::from(NOTE_PDF)),
+                document,
+                CompressionMethod::Stored,
+            ));
+        }
+
+        for (attachment, path) in folder_contents(&folder.join(ATTACHMENTS))? {
+            entries.push((
+                inside(format!("{ATTACHMENTS}/{attachment}")),
+                path,
+                CompressionMethod::Deflated,
+            ));
+        }
+
+        written.push(name);
+    }
+
+    write_zip(&staging, &entries)?;
+
+    std::fs::rename(&staging, target).map_err(|error| {
+        Error::Note(format!(
+            "{} could not be written: {error}",
+            target.display()
+        ))
+    })?;
+
+    // The zip is the file it was asked for; every temporary has done its part.
+    std::mem::forget(temps);
+    for path in entries.iter().map(|(_, path, _)| path) {
+        let _ = std::fs::remove_file(path);
+    }
+
+    Ok(written)
+}
+
+/// Reads a zip that holds several notes: every `notes/<folder>/` entry, grouped by folder.
+///
+/// This is the *listing* half of [`export_selection`]: what is in the file, said before anything is
+/// written, so a restore can be described to a person ("three notes") before three folders appear. A
+/// folder is a note when it carries a [`NOTE_DB`], exactly as a folder under the notes root is; an entry
+/// under `notes/` that is not one is somebody's stray file and is not a note.
+///
+/// An entry whose path climbs out of its note is refused **here, at the listing**, so that nothing is ever
+/// placed from a zip that asked to write outside the folder it is about.
+pub fn read_selection(source: &Path) -> Result<Vec<PathBuf>> {
+    let file = std::fs::File::open(source)
+        .map_err(|error| Error::Note(format!("{} could not be read: {error}", source.display())))?;
+
+    let mut archive = ZipArchive::new(std::io::BufReader::new(file)).map_err(|error| {
+        Error::Note(format!(
+            "{} is not a zip file this app can read: {error}",
+            source.display()
+        ))
+    })?;
+
+    let mut found: Vec<PathBuf> = Vec::new();
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|error| {
+            Error::Note(format!(
+                "{} holds an entry it could not open: {error}",
+                source.display()
+            ))
+        })?;
+        if entry.is_dir() {
+            continue;
+        }
+
+        let name = entry
+            .name()
+            .map_err(|error| {
+                Error::Note(format!("{} could not be read: {error}", source.display()))
+            })?
+            .replace('\\', "/");
+
+        let prefix = format!("{SELECTION_NOTES}/");
+        let Some(rest) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+
+        // `<folder>/note.db` and nothing else makes a folder a note; the rest of the entry is the note's
+        // own, and is refused if it climbs out rather than skipped.
+        let Some((folder, inside)) = rest.split_once('/') else {
+            continue;
+        };
+
+        if !is_folder_name(folder) || !is_note_path(inside) {
+            return Err(Error::Note(format!(
+                "{} holds an entry that points outside its note: {name}",
+                source.display()
+            )));
+        }
+
+        if inside == NOTE_DB {
+            let folder = PathBuf::from(folder);
+            if !found.contains(&folder) {
+                found.push(folder);
+            }
+        }
+    }
+
+    Ok(found)
+}
+
+/// Places every note a selection holds into `notes_root`: the other half of [`export_selection`].
+///
+/// Each note is unpacked into a folder of its own under `notes_root`, named as it was carried, so a note
+/// that arrives is the note it was where it was saved: the same folder, the same ink, the same name. A
+/// note that is already there is **replaced** — a selection is a copy a person chose to keep, and
+/// restoring one means its copy is the true copy of every note it holds.
+///
+/// Each note is unpacked into a temporary folder beside its destination and then renamed onto it, so an
+/// interrupted restore leaves either the old note or the new one and never the two mixed, and a note that
+/// fails to write leaves nothing behind at all.
+///
+/// Everything is refused **before the first note is written**: a zip that is not a selection, and a
+/// selection holding an entry that climbs out of its note, place nothing at all. A person restoring four
+/// notes should not find the first three laid down and the fourth refused.
+///
+/// Returns the folder of every note placed — which is what a caller counts and opens.
+pub fn place_selection(source: &Path, notes_root: &Path) -> Result<Vec<PathBuf>> {
+    // The listing first: what is in the file, and whether every entry in it is safe. A refusal here has
+    // written nothing.
+    let folders = read_selection(source)?;
+    if folders.is_empty() {
+        return Err(Variant::NotANote.said(format!(
+            "{} is not a selection: it holds no {SELECTION_NOTES}/<note>/{NOTE_DB}",
+            source.display()
+        )));
+    }
+
+    let mut placed = Vec::new();
+    for folder in folders {
+        let destination = notes_root.join(&folder);
+
+        // Beside the destination, so the rename onto it is on one volume.
+        let staging = notes_root.join(format!(".tmp-{}.{}", std::process::id(), folder.display()));
+
+        let written = unpack_selection_note(source, &folder, &staging);
+        if let Err(error) = written {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+
+        // `rename` will not replace a directory that already exists, so the old note is moved aside first
+        // and put back if the rename fails — the old note is never lost to a failed restore.
+        let aside = notes_root.join(format!(".old-{}.{}", std::process::id(), folder.display()));
+        let _ = std::fs::remove_dir_all(&aside);
+
+        let had_old = destination.exists();
+        if had_old {
+            std::fs::rename(&destination, &aside).map_err(|error| {
+                let _ = std::fs::remove_dir_all(&staging);
+                Error::Note(format!(
+                    "{} could not be replaced: {error}",
+                    destination.display()
+                ))
+            })?;
+        }
+
+        if let Err(error) = std::fs::rename(&staging, &destination) {
+            // Put the note that was there back, so a failed restore is a restore that did not happen.
+            if had_old {
+                let _ = std::fs::rename(&aside, &destination);
+            }
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(Error::Note(format!(
+                "{} could not be written: {error}",
+                destination.display()
+            )));
+        }
+
+        let _ = std::fs::remove_dir_all(&aside);
+        placed.push(destination);
+    }
+
+    Ok(placed)
+}
+
+/// Unpacks one note of a selection — the entries under `notes/<folder>/` — into `dir`.
+///
+/// The same three names a note is, written flat into `dir`, which is what makes the destination a note
+/// folder rather than a copy of one. [`read_selection`] has already refused every entry that climbs out,
+/// so the only names this reads are the note's own.
+fn unpack_selection_note(source: &Path, folder: &Path, dir: &Path) -> Result<()> {
+    let file = std::fs::File::open(source)
+        .map_err(|error| Error::Note(format!("{} could not be read: {error}", source.display())))?;
+
+    let mut archive = ZipArchive::new(std::io::BufReader::new(file)).map_err(|error| {
+        Error::Note(format!(
+            "{} is not a zip file this app can read: {error}",
+            source.display()
+        ))
+    })?;
+
+    let prefix = format!("{SELECTION_NOTES}/{}/", folder.display());
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir)
+        .map_err(|error| Error::Note(format!("{} could not be made: {error}", dir.display())))?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| {
+            Error::Note(format!(
+                "{} holds an entry it could not open: {error}",
+                source.display()
+            ))
+        })?;
+        if entry.is_dir() {
+            continue;
+        }
+
+        let name = entry
+            .name()
+            .map_err(|error| {
+                Error::Note(format!("{} could not be read: {error}", source.display()))
+            })?
+            .replace('\\', "/");
+
+        let Some(inside) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+
+        let destination = dir.join(inside);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                Error::Note(format!("{} could not be made: {error}", parent.display()))
+            })?;
+        }
+
+        let mut out = std::fs::File::create(&destination).map_err(|error| {
+            Error::Note(format!(
+                "{} could not be written: {error}",
+                destination.display()
+            ))
+        })?;
+        std::io::copy(&mut entry, &mut out).map_err(|error| {
+            Error::Note(format!(
+                "{} could not be written: {error}",
+                destination.display()
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
 /// Unpacks a note zip into a working copy.
 ///
 /// A zip with no [`NOTE_DB`] in it is not a note this app can open, and it is refused *before*

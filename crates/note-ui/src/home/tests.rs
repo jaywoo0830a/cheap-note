@@ -1,9 +1,10 @@
 // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into scope
 // and shadow the attribute this module needs.
-use super::{matches, opens_on_click, scan, visible_indices};
+use super::{matches, opens_on_click, scan, ticked_in_list_order, visible_indices};
 use crate::ink::{InkPoint, Stroke};
 use crate::note::{self, Note};
 use crate::recent::{Recent, Stamp};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// A folder in the temp directory, removed first so a test starts from nothing.
@@ -188,4 +189,42 @@ fn a_scan_reads_only_the_notes_that_changed() {
     assert_eq!(changed[0].2.summary.pages, 1);
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A tick is about a note, and the file it makes is in the list's order rather than the click's.
+///
+/// Two things are pinned here: ticking two rows from the bottom up gives the same file as ticking them
+/// from the top down, and a row whose note is no longer on disk is left out rather than packed.
+#[test]
+fn ticks_are_packed_in_the_lists_order() {
+    let mut first = entry("first", None, None);
+    first.folder = PathBuf::from("C:/notes/first-1");
+    let mut second = entry("second", None, None);
+    second.folder = PathBuf::from("C:/notes/second-2");
+    let mut vanished = entry("vanished", None, None);
+    vanished.folder = PathBuf::from("C:/notes/vanished-3");
+    vanished.gone = true;
+
+    let entries = vec![first.clone(), second.clone(), vanished.clone()];
+
+    // Ticked bottom-up, as a person scrolling down the list might.
+    let ticked: BTreeSet<PathBuf> = [second.folder.clone(), first.folder.clone()]
+        .into_iter()
+        .collect();
+
+    assert_eq!(
+        ticked_in_list_order(&entries, &ticked),
+        vec![first.folder.clone(), second.folder.clone()],
+        "the list's order, not the order they were ticked"
+    );
+
+    // A note that is not on disk has nothing to pack, so a tick on it is not an error at the end.
+    let with_vanished: BTreeSet<PathBuf> = [vanished.folder.clone()].into_iter().collect();
+    assert!(
+        ticked_in_list_order(&entries, &with_vanished).is_empty(),
+        "a tick on a note that is gone packs nothing"
+    );
+
+    // And nothing ticked is nothing to write.
+    assert!(ticked_in_list_order(&entries, &BTreeSet::new()).is_empty());
 }

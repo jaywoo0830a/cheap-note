@@ -1511,7 +1511,7 @@ impl NoteApp {
         // What the app was asked to open on the command line, if anything: an argument is a
         // *request*, and a request that fails is reported like any other.
         if let Some(path) = start {
-            match app.open_or_place(&path) {
+            match app.open_or_place(&path, cx) {
                 Ok(opened) => app.message = opened,
                 Err(error) => app.message = error.to_string(),
             }
@@ -4243,7 +4243,7 @@ impl NoteApp {
 
     /// Opens whatever the user chose: a saved note, or a bare PDF to write on.
     fn open_any(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        match self.open_or_place(&path) {
+        match self.open_or_place(&path, cx) {
             Ok(message) => self.message = message,
             Err(error) => self.report(error.to_string()),
         }
@@ -4253,15 +4253,54 @@ impl NoteApp {
     }
 
     /// Opens what was chosen, preferring the note that already exists over placing a new one.
-    fn open_or_place(&mut self, path: &Path) -> Result<String> {
+    fn open_or_place(&mut self, path: &Path, cx: &mut Context<Self>) -> Result<String> {
         if path.is_file() {
             let folder = note::root().join(note::folder_name(path));
             if folder.join(note::NOTE_DB).is_file() {
                 return self.open_folder(&folder, Some(path));
             }
+
+            // The same document at a different path. A note's folder is named after *where its document
+            // was* when it was placed, so a PDF that has moved — into `Downloads`, out of a sync folder,
+            // off a stick — is a new name and would otherwise be a second, empty note about the same
+            // pages, while the first one sits with no document and opens as a blank sheet. Found here
+            // instead, and the document is put back where the ink is (`note::adopt_document`).
+            if let Some(adopted) = self.adopt_moved_document(path, cx) {
+                return Ok(adopted);
+            }
         }
 
         self.place_note(path)
+    }
+
+    /// Puts a document back on the note it belongs to, when the document has moved, and answers the
+    /// sentence a person is shown. `None` when no note claims this file, which is the ordinary case of
+    /// a new PDF.
+    fn adopt_moved_document(&mut self, path: &Path, cx: &mut Context<Self>) -> Option<String> {
+        let folder = note::matching_note(&note::root(), path).ok().flatten()?;
+
+        // A note that is the one already open is opened, plainly: the document here is the one it was
+        // opened from, and saying "the document was put back" about a note that never lost it would be
+        // a sentence about nothing.
+        if !folder.join(note::NOTE_PDF).exists() {
+            match note::adopt_document(&folder, path) {
+                Ok(_) => {
+                    // The list draws each note from its own facts, and one of them has just changed:
+                    // its document is back, which is what the thumbnail and the page count come from.
+                    self.home.reload(cx);
+                    let opened = self.open_folder(&folder, Some(path)).ok()?;
+                    return Some(format!(
+                        "the document was put back on {opened} — the ink in that note was kept"
+                    ));
+                }
+                Err(error) => {
+                    self.report(format!("the document could not be put back: {error}"));
+                    return None;
+                }
+            }
+        }
+
+        self.open_folder(&folder, Some(path)).ok()
     }
 
     /// Places a note in the app's own directory and opens it: the import path.

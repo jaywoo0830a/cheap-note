@@ -291,12 +291,47 @@ that was already in that folder exactly as it was.
 
 ---
 
-## 7. Known limits
+## 7. A document that moves is still the same document
+
+The one failure that cost a person their pages, and the rule that came out of it.
+
+A note's folder is named after **the path** of the PDF it was placed from (`folder_name`: a readable
+stem, then a digest of the full path). That is what makes opening the same PDF twice open the same note
+— and it is also what breaks when the PDF *moves*: the same pages at a new path are a new folder name, so
+opening the file again made a **second, empty note**, while the first one sat with no `source.pdf` and
+could only ever open as a blank sheet. The ink and the pages it was written on were split apart by
+nothing more than where the file happened to be.
+
+Three things together close that:
+
+* **Every note made from a document records a fingerprint of it** — `document_fingerprint` in `meta`,
+  written as `<size>-<crc32>` (`note::fingerprint`). It is taken from the note's own copy of the
+  `source.pdf`, so the two are the same bytes by construction, and it survives a backup and restore
+  (`record_document_name` fills it in for a note arriving from a library written before it existed).
+* **`note::matching_note` asks two questions in order**: the same path (the ordinary case), then the same
+  *bytes* at any path — a note that is missing its `source.pdf` and whose fingerprint is the file's. A note
+  written before fingerprints uses its document's *name* as the weaker fallback. Two notes that both fit is
+  answered as no match at all: a guess between them is how the wrong pages end up under a person's ink.
+* **`note::adopt_document` puts the document back where the ink is**, and copies *only* the document —
+  `source.pdf`, the name it has, the path it is now at, its fingerprint. Not a stroke, not a page, not a
+  title. A note that still has its document is refused: replacing one with a file that merely looks like
+  it is a decision for a person, not a guess made while they were opening a PDF.
+
+The app does this in `NoteApp::open_or_place` before it would place a new note, and says so: *the document
+was put back on chapter-3 — the ink in that note was kept*.
+
+What this does **not** do: find a document a person never opens again, or repair a note whose file is gone
+from the disk entirely. The fingerprint says *which* note a file belongs to; only the file can bring the
+pages back.
+
+---
+
+## 8. Known limits
 
 Said out loud, because each one is a decision rather than an oversight:
 
 * **Nothing backs up on its own.** There is no timer and no on-quit backup today; the same
-  `note::write_library` call is what an automatic one would use (§9).
+  `note::write_library` call is what an automatic one would use (§10).
 * **The automatic restore only fires on an empty machine.** A machine with notes shows nothing when a
   library is put on its desktop — that is the guard, and the answer there is *Restore a library…*.
 * **The backup is made in one pass**, so on a large library the press takes a few seconds. The UI is not
@@ -307,20 +342,25 @@ Said out loud, because each one is a decision rather than an oversight:
   for you.
 * **Uploading the file somewhere** is the obvious next step, and it is a *syncing* problem rather than a
   backup one: it would need an account, and therefore the bill this feature exists to avoid.
+* **A document that moved is found when it is opened again** (§7). Between the move and the next open,
+  the note is still the blank sheet it was — the app cannot search the disk for a file it has never been
+  told about.
 
 ---
 
-## 8. Where the code is
+## 9. Where the code is
 
 | Where | What |
 |---|---|
-| `crates/note-format/src/note.rs` | `write_library`, `read_library`, `place_library`; `LibraryManifest`; `LIBRARY_MANIFEST` / `LIBRARY_NOTES` / `LIBRARY_VERSION`; the shared `write_zip` (with the Info-ZIP Unicode Path field), `folder_name`, `is_note_path`, `is_folder_name`, `record_document_name` |
-| `crates/note-format/src/store.rs` | `set_source` (written with forward slashes, so a path carried to another platform is one it can read) |
+| `crates/note-format/src/note.rs` | `write_library`, `read_library`, `place_library`; `LibraryManifest`; `LIBRARY_MANIFEST` / `LIBRARY_NOTES` / `LIBRARY_VERSION`; the shared `write_zip` (with the Info-ZIP Unicode Path field), `folder_name`, `is_note_path`, `is_folder_name`, `record_document_name`; **`fingerprint`, `matching_note`, `adopt_document`** (§7) |
+| `crates/note-format/src/store.rs` | `set_source` (written with forward slashes, so a path carried to another platform is one it can read); **`set_document_fingerprint` / `document_fingerprint` and `META_FINGERPRINT`** |
 | `crates/note-ui/src/library.rs` | the application's half: `LIBRARY_FILE`, `backup_target`, `desktop_folder`, `home_folder`, `is_empty`, `describe` — pure functions of paths, so they are tested without a window |
-| `crates/note-ui/src/app.rs` | `back_up_everything` (the button), `restore_library` (the chooser), `place_library_file`, `restore_on_start`, `BACKUP_MIN_INTERVAL` |
+| `crates/note-ui/src/app.rs` | `back_up_everything` (the button), `restore_library` (the chooser), `place_library_file`, `restore_on_start`, `open_or_place` / `adopt_moved_document` (§7), `BACKUP_MIN_INTERVAL` |
 | `crates/note-ui/src/home.rs` | the two buttons in `actions`, and `Home::reload` after a restore |
 | `crates/note-ui/src/recent.rs` | `Recent::same_file_as` and `merge`: a list never takes the other machine's spelling of a note's source |
 | `crates/note-format/tests/library.rs` | the container from outside: the layout and manifest read with a zip reader and a JSON parser, a restore's ink and document coming back, attachments, **the UTF-8 flag and Unicode Path field a Windows tool reads**, a Korean folder and document name surviving the restore, the refusals, and a refused restore leaving the note that was there |
+| `crates/note-format/tests/note.rs` | **a document that moved leads back to the note made about it** (with its ink kept), a different document with the same name is not the same document, and a note that has its document is not given another (§7) |
+| `crates/note-format/tests/store.rs` | the fingerprint is the bytes and not the path |
 | `crates/note-ui/src/library/tests.rs` | where a backup goes and the fallback order, the guard on the automatic restore, and the words the status line shows |
 | `crates/note-ui/src/recent/tests.rs` | the merge, including that a note carried to another machine keeps *this* machine's source |
 
@@ -334,7 +374,7 @@ The two rules a change has to keep:
 
 ---
 
-## 9. If anything is added
+## 10. If anything is added
 
 * **Automatic backup** (on quit, or once a day) is the same function called from `NoteApp`'s close path —
   nothing in the format changes.

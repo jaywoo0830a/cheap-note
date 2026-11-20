@@ -374,3 +374,159 @@ fn a_listing_finds_the_notes_and_only_the_notes() {
         .expect("no notes")
         .is_empty());
 }
+
+/// The root cause, as a test: a document that has **moved** is still the same document.
+///
+/// This is the failure a person actually hit. A PDF opened from one folder made a note named after that
+/// path; the file later turned up in `Downloads`; opening it there made a *second*, empty note, while the
+/// first sat with no `source.pdf` and opened as a blank sheet. The ink and the document had been split
+/// apart by nothing more than where the file happened to be.
+#[test]
+fn a_document_that_moved_leads_back_to_the_note_made_about_it() {
+    let root = scratch("moved-document");
+    let notes = root.join("notes");
+
+    // The note as it was made: on a PDF in one folder, with ink on its first page.
+    let first_home = root.join("sync-folder");
+    std::fs::create_dir_all(&first_home).expect("a folder");
+    let original = first_home.join("effective-rust.pdf");
+    std::fs::write(&original, a_pdf()).expect("the document");
+
+    let folder = notes.join(note::folder_name(&original));
+    {
+        let mut note = Note::placed_from(&original, &folder).expect("a note on the document");
+        let ink = vec![stroke(6, 10.0, 20.0, 0xff00_00ff)];
+        note.store_mut()
+            .append(0, &ink, &plain(1))
+            .expect("the ink");
+        note.store().checkpoint().expect("a checkpoint");
+    }
+
+    // The document moves: same bytes, new path — what a person sees when a file lands in `Downloads`
+    // rather than where they first opened it.
+    let moved = root.join("Downloads");
+    std::fs::create_dir_all(&moved).expect("a folder");
+    let moved_to = moved.join("effective-rust.pdf");
+    std::fs::copy(&original, &moved_to).expect("the move");
+    std::fs::remove_file(&original).expect("the old file gone");
+
+    // The new path would be a different folder name — the thing that used to split the note.
+    let would_be = notes.join(note::folder_name(&moved_to));
+    assert_ne!(
+        would_be, folder,
+        "a new path is a new folder name: this is exactly why the note was lost"
+    );
+
+    // But the moved file is recognised as the note's own document, and answers *that* folder — even
+    // though the note still holds its own copy: the bytes are what it is about.
+    let found = note::matching_note(&notes, &moved_to).expect("a search");
+    assert_eq!(
+        found,
+        Some(folder.clone()),
+        "the same bytes lead back to the note made about them"
+    );
+
+    // --- The failure as it actually happened: the note *lost* its copy of the document. (A restore, or a
+    // backup taken after the original had gone, is how the folder ends up holding the ink without the
+    // pages.) Opening the file from its new home now puts the document back, and leaves the ink alone.
+    std::fs::remove_file(folder.join(NOTE_PDF)).expect("the document gone from the note");
+    assert!(
+        Note::open(&folder)
+            .expect("the note")
+            .document()
+            .expect("a document")
+            .is_none(),
+        "the note can only open as a blank sheet before the repair"
+    );
+
+    let before = Note::open(&folder)
+        .expect("the note")
+        .store()
+        .load(0)
+        .expect("the ink before");
+    note::adopt_document(&folder, &moved_to).expect("the document put back");
+    let after = Note::open(&folder).expect("the note");
+
+    assert_eq!(
+        after.document().expect("a document").expect("one").0,
+        "effective-rust.pdf",
+        "the note is about the document again, by the name it has"
+    );
+    assert_eq!(
+        after.store().load(0).expect("the ink after"),
+        before,
+        "and not one stroke moved"
+    );
+    assert_eq!(
+        after.store().source().expect("a source"),
+        Some(moved_to.to_string_lossy().replace('\\', "/")),
+        "and it remembers where the file is now"
+    );
+
+    assert!(
+        !would_be.exists(),
+        "no second note was made under the new path's name"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A different document with the same name is **not** taken to be the same document.
+///
+/// A note with a fingerprint is matched by its bytes, not by what the file is called: two `chapter-3.pdf`s
+/// from two books are two documents, and putting one on the note made about the other would be the
+/// opposite of the repair above — the note would open with someone else's pages under its ink.
+#[test]
+fn a_different_document_with_the_same_name_is_not_the_same_document() {
+    let root = scratch("different-document");
+
+    let notes = root.join("notes");
+    let one = root.join("book-one");
+    std::fs::create_dir_all(&one).expect("a folder");
+    let first = one.join("chapter-3.pdf");
+    std::fs::write(&first, a_pdf()).expect("a document");
+    let folder = notes.join(note::folder_name(&first));
+    Note::placed_from(&first, &folder).expect("a note");
+
+    // The document goes missing, and somebody opens a *different* chapter-3.pdf: same name, other bytes.
+    std::fs::remove_file(folder.join(NOTE_PDF)).expect("the document gone");
+    let two = root.join("book-two");
+    std::fs::create_dir_all(&two).expect("a folder");
+    let other = two.join("chapter-3.pdf");
+    std::fs::write(&other, b"%PDF-1.4 not the same pages at all").expect("another document");
+
+    assert_eq!(
+        note::matching_note(&notes, &other).expect("a search"),
+        None,
+        "different bytes are a different document, however they are named"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A note that *has* its document is never given another one: a file that looks like it is not evidence
+/// enough to replace the pages its ink was written on.
+#[test]
+fn a_note_that_has_its_document_is_not_adopted_again() {
+    let root = scratch("adopt-refused");
+    let notes = root.join("notes");
+
+    let document = a_document(&root);
+    let folder = notes.join(note::folder_name(&document));
+    Note::placed_from(&document, &folder).expect("a note");
+
+    let copy = root.join("copy.pdf");
+    std::fs::copy(&document, &copy).expect("a copy");
+
+    assert!(
+        note::adopt_document(&folder, &copy).is_err(),
+        "a note with its document is not given another"
+    );
+    assert_eq!(
+        std::fs::read(folder.join(NOTE_PDF)).expect("the document"),
+        a_pdf(),
+        "and the one it has is the one it keeps"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

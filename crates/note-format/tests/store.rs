@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use note_format::history::{Edit, HistoryUpdate};
 use note_format::ink::Stroke;
+use note_format::note;
 use note_format::pages::{Page, PageEntry};
 use note_format::settings::{PenWeight, Settings};
 use note_format::store::{NoteStore, SCHEMA_VERSION};
@@ -470,4 +471,42 @@ fn a_note_from_another_build_is_refused_in_both_directions() {
             .expect("the stamp still there");
         assert_eq!(after, i64::from(stamp), "a refused note is not rewritten");
     }
+}
+
+/// The fingerprint of a document is the same answer for the same bytes, wherever the file is — which is
+/// the whole point of it being recorded: a document that moved is still the same document.
+#[test]
+fn a_documents_fingerprint_is_its_bytes_and_not_its_path() {
+    let root = scratch("fingerprint");
+    std::fs::create_dir_all(&root).expect("a folder");
+
+    let one = root.join("a.pdf");
+    std::fs::write(&one, b"%PDF-1.4 the same pages").expect("a document");
+    let two = root.join("elsewhere.pdf");
+    std::fs::copy(&one, &two).expect("a copy");
+
+    let first = note::fingerprint(&one).expect("a fingerprint");
+    assert_eq!(
+        Some(first.clone()),
+        note::fingerprint(&two),
+        "the same bytes at another path are the same document"
+    );
+    assert!(
+        first.starts_with(&format!("{}-", b"%PDF-1.4 the same pages".len())),
+        "and the size is part of the answer: {first}"
+    );
+
+    // One byte different is a different document, and a size difference is caught even before the CRC.
+    let three = root.join("other.pdf");
+    std::fs::write(&three, b"%PDF-1.4 the same pagez").expect("another document");
+    assert_ne!(
+        Some(first),
+        note::fingerprint(&three),
+        "a document that differs by one byte is a different document"
+    );
+
+    // A file that is not there has no fingerprint — an absence, not a value.
+    assert_eq!(note::fingerprint(&root.join("never.pdf")), None);
+
+    let _ = std::fs::remove_dir_all(&root);
 }

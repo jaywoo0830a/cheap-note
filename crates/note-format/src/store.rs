@@ -146,6 +146,17 @@ pub const META_DOCUMENT: &str = "document";
 /// another machine still knows where it came from. Nothing about the ink depends on it — a note
 /// carries its own copy of the document — so a note whose original file has gone is still whole.
 pub const META_SOURCE: &str = "source";
+/// The fingerprint of the document the note was placed from: `<size>-<crc32>`, as UTF-8.
+///
+/// What it is *for*: a document that has moved is still the same document. The fingerprint is how
+/// [`note::matching_note`] finds the note a file now at a new path belongs to, so that opening the file
+/// again *opens* that note — it does not make a second one about the same pages, and it does not leave
+/// the first one waiting for a document that is never coming back (see [`note::adopt_document`]).
+///
+/// A note written before this row existed has no fingerprint, and that is not a mistake: it is a note
+/// this app cannot recognise a moved document by, and the only cost is that the fallback — the document
+/// name — is used instead. Every note written from now on has one.
+pub const META_FINGERPRINT: &str = "document_fingerprint";
 
 /// The name a person gave the note, as UTF-8.
 ///
@@ -1322,6 +1333,27 @@ impl NoteStore {
     /// The file the note was placed from, if it remembers one.
     pub fn source(&self) -> Result<Option<String>> {
         Ok(row_text(&self.conn, META_SOURCE)?.filter(|path| !path.is_empty()))
+    }
+
+    /// Records the fingerprint of the document the note was placed from: its size and a CRC-32 of its
+    /// bytes, as `<size>-<crc32, eight hex digits>`.
+    ///
+    /// This is what tells *the same document* apart from *a different file at the same path*. A note's
+    /// folder is named after the path it was placed from ([`folder_name`]), so a file that moved — into
+    /// `Downloads`, out of a sync folder, off a USB stick — would otherwise become a second note about
+    /// the same pages, and the first note would wait forever for a file that is never coming back.
+    ///
+    /// Not a hash for security: CRC-32 is already a dependency of this crate (zip's own), it is fast
+    /// enough to read a large PDF for, and a chance collision of 1 in 2³² is a footnote for a check that
+    /// only ever *adds* the document to a note that is missing one. The size is alongside it because a
+    /// collision of both is the thing that would actually matter.
+    pub fn set_document_fingerprint(&mut self, fingerprint: &str) -> Result<()> {
+        put_row(&self.conn, META_FINGERPRINT, fingerprint)
+    }
+
+    /// The fingerprint of the document the note was placed from, if it remembers one.
+    pub fn document_fingerprint(&self) -> Result<Option<String>> {
+        Ok(row_text(&self.conn, META_FINGERPRINT)?.filter(|print| !print.is_empty()))
     }
 
     /// Gives the note a name, or takes its name away.

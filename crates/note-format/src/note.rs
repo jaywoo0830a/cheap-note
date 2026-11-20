@@ -194,6 +194,162 @@ pub fn folder_name(source: &Path) -> String {
     format!("{cleaned}-{:08x}", digest as u32)
 }
 
+/// The fingerprint of a file as a note records it: `<size>-<crc32>`.
+///
+/// Read a block at a time rather than whole, so that a 400 MB PDF fingerprintes the same way a 4 KB one
+/// does — the note's own copy is mapped, but the file being *opened* may be anywhere. `None` for a file
+/// that cannot be read, because a fingerprint that could not be taken is the absence of one and not a
+/// value: a caller deciding whether two files are the same document must not be told "yes" by an error.
+pub fn fingerprint(path: &Path) -> Option<String> {
+    use std::io::Read as _;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+
+    let mut crc = crc32fast::Hasher::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        crc.update(&buffer[..read]);
+    }
+
+    Some(format!("{size}-{:08x}", crc.finalize()))
+}
+
+/// Fills in the document of a note that has lost it, from a file that is the same document.
+///
+/// The failure this repairs: a note's folder is named after the path of the PDF it was placed from, so a
+/// PDF that moved — into `Downloads` when it was opened from a sync folder, out of a temporary folder,
+/// off a stick — is a *different path*, and so a different folder name. Opening the moved file made a
+/// second, empty note about the same pages, while the first note sat with no `source.pdf` and could only
+/// ever open as a blank sheet: the document and the ink about it had been split between two folders.
+///
+/// Here the document is put back where the ink is. Only the document is copied — `source.pdf`, the name
+/// it is called, the path it is now at, and its fingerprint — and never a stroke, a page, or a title: the
+/// ink in that folder is the writing this exists to keep. The note answers its facts afterwards, which is
+/// what a screen showing the note redraws from.
+///
+/// Refuses a note that already has its document: replacing one with a file that merely looks like it is
+/// a decision for a person, not a guess made while they were opening a PDF.
+pub fn adopt_document(folder: &Path, from: &Path) -> Result<Facts> {
+    let mut note = Note::open(folder)?;
+
+    if folder.join(NOTE_PDF).is_file() {
+        return Err(Error::Note(format!(
+            "{} already has its document",
+            folder.display()
+        )));
+    }
+
+    let name = note.copy_document(from)?;
+
+    if let Some(print) = fingerprint(from) {
+        note.store_mut().set_document_fingerprint(&print)?;
+    }
+
+    note.store_mut().set_source(Some(from))?;
+    note.store().checkpoint()?;
+
+    let facts = note.store().facts()?;
+
+    // Said so that a reader of the code knows what is deliberately *not* here: no `set_title`, no page
+    // list, no blob. The document arrived; the ink did not move.
+    let _ = &name;
+
+    Ok(facts)
+}
+
+/// The note a document belongs to: the one whose document is the same file, at any path it may have
+/// had when it was placed.
+///
+/// Two answers, in order, and the first one that stands decides:
+///
+/// 1. **The same path** — `folder_name(source)` is a note, and it is opened. This is the ordinary case,
+///    and it is why the folder name exists: the same file opened twice is the same note.
+/// 2. **The same document at another path** — a note that was placed from a *different* path, is
+///    missing its `source.pdf`, and says either the same fingerprint as the file (size and CRC-32) or,
+///    for a note written before fingerprints, the same document *name*.
+///
+/// The second is the repair of the split described in [`adopt_document`], and it is deliberately narrow:
+/// a note that still *has* its document is not a candidate, so nothing that already looks whole is
+/// considered; and two notes that both fit are answered as no match at all, because a guess between them
+/// is how the wrong pages get a person's ink. `None` means "this is a new document", and the caller
+/// places a new note.
+pub fn matching_note(root: &Path, source: &Path) -> Result<Option<PathBuf>> {
+    let exact = root.join(folder_name(source));
+    if exact.join(NOTE_DB).is_file() {
+        return Ok(Some(exact));
+    }
+
+    let Ok(wanted) = std::fs::metadata(source) else {
+        return Ok(None);
+    };
+
+    if !wanted.is_file() {
+        return Ok(None);
+    }
+
+    let wanted_fingerprint = fingerprint(source);
+    let wanted_name = source
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string());
+
+    let mut candidates = Vec::new();
+
+    for folder in notes_in(root)? {
+        let Ok(store) = NoteStore::open(&folder.join(NOTE_DB)) else {
+            continue;
+        };
+
+        let held = store.document_fingerprint().ok().flatten();
+
+        match (&wanted_fingerprint, &held) {
+            (Some(wanted), Some(held)) => {
+                // The note's own copy of its document: what the note *is* about, whether or not the
+                // original is still there. Two notes about identical bytes are one document, so this is
+                // a candidate — the "a note with its document is not adopted" rule is about a document
+                // that *differs*, and `adopt_document` refuses to replace one that is still there.
+                if wanted != held {
+                    continue;
+                }
+
+                // The same bytes: the note is about this document. Whether it still holds its copy or
+                // not is the caller's question — `adopt_document` fills in a missing document and
+                // refuses to replace one that is there, so both answers lead to the right place.
+                candidates.push(folder);
+            }
+            // A note written before fingerprints were recorded: its document's *name* is the only thing
+            // it can be recognised by, and a name is a weaker answer than a size and a CRC — which is why
+            // the fingerprint is asked first, and this is the fallback and not the rule. A note that still
+            // has a `source.pdf` is not a fallback candidate: nothing is missing, so nothing is repaired.
+            (Some(_), None) => {
+                if folder.join(NOTE_PDF).exists() {
+                    continue;
+                }
+
+                let same_name = matches!(
+                    (&wanted_name, store.document()),
+                    (Some(wanted), Ok(Some(held))) if *wanted == held
+                );
+
+                if same_name {
+                    candidates.push(folder);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    match candidates.len() {
+        1 => Ok(candidates.pop()),
+        // None is a new document; more than one is a question this will not guess an answer to.
+        _ => Ok(None),
+    }
+}
+
 /// Every note in a given folder: the same listing, for a test or another location.
 ///
 /// A folder without a `note.db` in it is not a note — an attachments folder, or a directory someone
@@ -493,6 +649,10 @@ fn unpack(source: &Path, dir: &Path) -> Result<()> {
 }
 
 /// Starts a note on a document: the PDF is copied in, and the ink starts empty.
+///
+/// The document's fingerprint is recorded here, with the document, so that every note made from now on
+/// can be recognised if its file moves: see [`matching_note`] and [`adopt_document`]. The fingerprint is
+/// taken from the *copy* in the note, not from `source`, so the two are the same bytes by construction.
 fn start_on_document(source: &Path, dir: &Path) -> Result<()> {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir)
@@ -500,6 +660,11 @@ fn start_on_document(source: &Path, dir: &Path) -> Result<()> {
 
     let mut note = Note::open(dir)?;
     note.copy_document(source)?;
+
+    if let Some(print) = fingerprint(&dir.join(NOTE_PDF)) {
+        note.store_mut().set_document_fingerprint(&print)?;
+    }
+
     note.store().checkpoint()?;
 
     Ok(())
@@ -1171,6 +1336,17 @@ fn unpack_note(zip: &mut ZipArchive<std::fs::File>, note: &LibraryNote, dir: &Pa
 /// is the thing that records that.
 fn record_document_name(dir: &Path) -> Result<()> {
     let mut store = NoteStore::open(&dir.join(NOTE_DB))?;
+
+    // The fingerprint goes in whenever it is missing and the document is here, whether or not the row
+    // that says what the document is *called* is already there: a note restored from a library written by
+    // an older build has the name and not the fingerprint, and the fingerprint is what lets the note be
+    // recognised if the document is later opened from a different folder.
+    if store.document_fingerprint()?.is_none() {
+        if let Some(print) = fingerprint(&dir.join(NOTE_PDF)) {
+            store.set_document_fingerprint(&print)?;
+            store.checkpoint()?;
+        }
+    }
 
     if store.document()?.is_some() || !dir.join(NOTE_PDF).is_file() {
         return Ok(());

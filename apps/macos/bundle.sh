@@ -8,9 +8,12 @@
 #
 # Run from anywhere; it works from the repository root it finds itself in:
 #
-#     apps/macos/bundle.sh            → dist/Cheap Note.app
+#     apps/macos/bundle.sh            → dist/Cheap Note.app  and  dist/CheapNote-0.1.0-macos-arm64.zip
 #     apps/macos/bundle.sh --binary target/aarch64-apple-darwin/release/cheap-note
-#                                     → the same, with a PGO build instead of a plain one (COMPILE.md)
+#                                     → the same, with a PGO build instead of a plain one (COMPILE.md),
+#                                       packed as dist/CheapNote-0.1.0-macos-arm64-pgo.zip
+#
+# Two things come out of it: the `.app` to open on this machine, and the zip to carry to another one.
 #
 # The signature is ad-hoc (`-`): enough for this machine to run what it built, and not a claim about
 # distribution. A build that will be handed to someone else needs a Developer ID and a notarisation step,
@@ -88,6 +91,34 @@ fi
 echo "— signing (ad-hoc)"
 codesign --force --sign - "$APP" >/dev/null 2>&1 || echo "! codesign refused; the app may need it to run"
 
+# The file that is handed to somebody else.
+#
+# A zip, because that is what goes on a download page or into a chat, and made by `ditto` rather than by
+# `zip` for the reason an app bundle is not a folder of files: Finder-launched apps carry extended
+# attributes and resource forks, and the executable's permission bits are part of whether the app runs
+# at all. `ditto -c -k --sequesterRsrc` keeps what Apple's Archive Utility would, in the layout it
+# expects, and is the archiver Apple recommends for a bundle. The name is the one the releases have
+# always used: `<name>-<version>-macos-<arch>[-pgo].zip`.
+#
+# Nothing is deleted: the `.app` stays in `dist/` to open, and the zip is the copy to carry. The zip is
+# *ad-hoc signed app* too — it will run on the machine that built it, and on another Mac it needs
+# Right-click → Open (or `xattr -dr com.apple.quarantine`) because it is not notarised (see the top of
+# this file).
+VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist" 2>/dev/null || echo 0.0.0)
+ARCH=$(uname -m)
+PROFILE=""
+case "$BINARY" in
+    *aarch64-apple-darwin*|*x86_64-apple-darwin*) PROFILE="-pgo" ;;
+esac
+ZIP="dist/CheapNote-$VERSION-macos-$ARCH$PROFILE.zip"
+
+echo "— packing $ZIP"
+rm -f "$ZIP"
+ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+
 echo "— done: $APP"
 du -sh "$APP" | cut -f1 | xargs -I{} echo "  {} on disk"
 echo "  launch it with: open \"$APP\""
+echo "— done: $ZIP"
+du -sh "$ZIP" | cut -f1 | xargs -I{} echo "  {} to carry"
+echo "  check it with: ditto -x -k \"$ZIP\" /tmp/cheap-note-check && open \"/tmp/cheap-note-check/Cheap Note.app\""

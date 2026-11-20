@@ -92,7 +92,6 @@ mod history;
 mod home;
 mod ink;
 mod keys;
-mod library;
 pub mod memory_report;
 mod note;
 mod outline;

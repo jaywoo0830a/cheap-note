@@ -32,13 +32,6 @@ members: run the one your machine is. `cargo test --workspace` builds and tests 
 platform — the app for the other platform compiles to a stub and runs no tests, so the same command works
 on Windows and on a Mac. (See [doc/MACOS.md](doc/MACOS.md) §2 for the Mac commands.)
 
-**Every note, as one file.** The home screen's *Back up everything* writes all of them to
-`cheap-note-library.zip` on the desktop (one zip, each note vacuumed, plus a `library.json`); a second
-machine with no notes of its own that is started with that file on its desktop takes it in on its own, and
-*Restore a library…* does the same for a machine that already has notes. There is no server and no
-account: the backup is a file you can move with a USB stick, and `doc/STORE.md` §8 describes exactly what
-is in it.
-
 Pdfium is not in the repository: it is downloaded into `vendor/` (see `vendor/README.md`), and a build
 copies it next to the executable. A fresh clone starts, draws and writes ink without it; only opening a
 PDF needs it.
@@ -91,7 +84,6 @@ platform adds its own (36 in `apps/macos`, 5 in `pen-macos`, 41 in `apps/windows
 | [`doc/STATUS.md`](doc/STATUS.md) | how to read the status line: what each clause means, and which figure to look at when something feels wrong |
 | [`doc/CLI.md`](doc/CLI.md) | the measuring commands: `--memory-report` and `cheap-note-bench` — their arguments, output, exit codes, and what a platform has to provide to run them |
 | [`doc/STORE.md`](doc/STORE.md) | one stroke's journey to the disk and back — which is the format crate's story |
-| [`doc/LIBRARY.md`](doc/LIBRARY.md) | every note at once: the one file on the desktop, the two buttons, restoring on a second machine, and what the container refuses |
 | [`doc/MACOS.md`](doc/MACOS.md) | the macOS build: what the seam gives you, how each platform service is implemented, and what only a Mac can do |
 | [`doc/WINDOWS.md`](doc/WINDOWS.md) | the Windows build's counterpart: which tuning reached it, which platform behaviours still differ (and silently break a gesture), and what is worth optimising here only |
 

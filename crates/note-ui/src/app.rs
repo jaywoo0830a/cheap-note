@@ -44,7 +44,6 @@ use crate::input::PenBatch;
 use crate::input::PenInbox;
 use crate::input::Reading;
 use crate::keys;
-use crate::library;
 use crate::note::{self, Note, NoteWriter, Report};
 use crate::outline::{Outline, OutlinePages};
 use crate::pages::{swaps_axes, Pages, Quarters};
@@ -389,13 +388,6 @@ const CHECKPOINT_QUIET_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The least time between two checkpoints, however quiet the pen has been.
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(300);
-
-/// How long after a backup has been asked for a second press is still the first one being written.
-///
-/// A library is every note vacuumed in one pass, which on a full library is seconds rather than
-/// milliseconds — so this is generous on purpose. It is a guard against a press that lands twice (a
-/// pen's tap and the click under it), not a limit on how often a person may back up.
-const BACKUP_MIN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Whether a note was written on the sheet in use.
 fn sheet_matches(written: (f32, f32), current: (f32, f32)) -> bool {
@@ -1197,13 +1189,6 @@ pub struct NoteApp {
     measured: Option<Measurement>,
     /// The last thing worth telling the user.
     message: String,
-    /// When a backup of every note was last asked for, if one was ever asked for in this session.
-    ///
-    /// The button writes one file over another ([`crate::library::LIBRARY_FILE`]), and a backup is the
-    /// one thing in this app that reads every note's database in one pass: a second press while the
-    /// first is still running would vacuum every note twice at once. The stamp is what makes the second
-    /// press a sentence rather than a second job.
-    backing_up: Option<Instant>,
     /// What the note on the sheet is called — its own name, or one the list would derive.
     note_title: String,
     /// The window's title as last set, so that it is set when it *changes* rather than every frame.
@@ -1504,7 +1489,6 @@ impl NoteApp {
             memory_select,
             scale_select,
             chooser_open: false,
-            backing_up: None,
             home: Home::open(window, cx),
         };
 
@@ -1516,10 +1500,6 @@ impl NoteApp {
                 Err(error) => app.message = error.to_string(),
             }
         }
-
-        // A library that came from another machine and has not yet been taken in: the last thing the
-        // constructor does, because a restore replaces what the line above may have said.
-        app.restore_on_start(cx);
 
         // What a chooser reports is the label that was showing, so a label is what has to become a
         // setting again. A `Confirm` with no choice behind it — the box has been cleaned — is not
@@ -5082,214 +5062,6 @@ impl NoteApp {
 
         self.touch_status();
         cx.notify();
-    }
-
-    /// Writes every note out as one file, on the desktop.
-    ///
-    /// The home screen's *Back up everything* button, and the whole of what a person has to do to keep
-    /// their writing somewhere else: one press, one file beside their other files, every note in it.
-    /// Nothing is asked, because the question ("where?") would be a dialog in the middle of a button
-    /// that means "put it where I will find it"; a desktop that is not reported falls back, and the
-    /// status line names whichever folder was used (see [`crate::library::backup_target`]).
-    ///
-    /// It runs on the background executor rather than the writer's queue: that queue belongs to the one
-    /// note that is open, and a library is about all of them — including the ones nothing has opened.
-    pub(crate) fn back_up_everything(&mut self, cx: &mut Context<Self>) {
-        let now = Instant::now();
-
-        // One at a time: a second press while the first is in flight would vacuum every note again
-        // and race the first for the same file.
-        if let Some(started) = self.backing_up {
-            if now.saturating_duration_since(started) < BACKUP_MIN_INTERVAL {
-                self.report(String::from("a backup is already being written"));
-                cx.notify();
-                return;
-            }
-        }
-
-        // The page in hand, on the disk, before the copy is taken: a stroke still in memory would be a
-        // stroke the backup does not have, and the backup is the copy a person trusts.
-        self.persist(now, true);
-
-        // A library of no notes is a file that restores nothing, so the answer is a sentence rather
-        // than a very small zip. Said here rather than by disabling the button: a person who presses it
-        // on a fresh install should be told why nothing happened.
-        if note::notes_in(&note::root())
-            .map(|found| found.is_empty())
-            .unwrap_or(true)
-        {
-            self.report(String::from("there are no notes to back up yet"));
-            cx.notify();
-            return;
-        }
-
-        self.backing_up = Some(now);
-
-        let notes = note::root();
-        let target =
-            library::backup_target(library::desktop_folder(), library::home_folder(), &notes);
-
-        cx.spawn(async move |this, cx| {
-            let written = target.clone();
-            let notes_for_backup = notes.clone();
-            let destination = target.clone();
-
-            let outcome = cx
-                .background_executor()
-                .spawn(async move {
-                    note::write_library(&notes_for_backup, &destination, recent::now_ms())
-                })
-                .await;
-
-            this.update(cx, |app, cx| {
-                app.backing_up = None;
-
-                match outcome {
-                    Ok(folders) => {
-                        let count = folders.len();
-                        app.message = format!(
-                            "backed up {count} {} to {}",
-                            if count == 1 { "note" } else { "notes" },
-                            file_label(&written)
-                        );
-                    }
-                    Err(error) => {
-                        app.message = format!("nothing was backed up: {error}");
-                    }
-                }
-
-                app.touch_status();
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-
-        self.message = String::from("writing every note as one file\u{2026}");
-        self.touch_status();
-        cx.notify();
-    }
-
-    /// Asks for a library and places every note in it, replacing the notes it holds.
-    ///
-    /// The manual half of the restore: a person who already has notes and holds a file from another
-    /// machine chooses it, and the sentence afterwards says how many notes arrived. Unlike the
-    /// automatic restore (see [`Self::restore_on_start`]) this one *does* replace — a library is a
-    /// backup, and a person who chooses one is saying that its copy is the one they want.
-    pub(crate) fn restore_library(&mut self, cx: &mut Context<Self>) {
-        let options = PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Choose a cheap-note library to restore".into()),
-        };
-        let receiver = cx.prompt_for_paths(options);
-
-        cx.spawn(async move |this, cx| {
-            // The platform relays the choice through a oneshot channel; a cancelled prompt and a
-            // platform error both mean "nothing was chosen", as they do for opening a note.
-            if let Ok(Ok(Some(paths))) = receiver.await {
-                if let Some(path) = paths.into_iter().next() {
-                    this.update(cx, |app, cx| app.place_library_file(path, cx))
-                        .ok();
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// Places what a chosen library holds, and puts the list back in front of the result.
-    fn place_library_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        match note::place_library(&path, &note::root()) {
-            Ok(placed) => {
-                let count = placed.len();
-
-                // The note that was open has just been replaced on disk. It is let go of rather than
-                // left open over a folder that is no longer the one it was opened from: the writer's
-                // checkpoint on the way out is harmless, and the next thing opened is the copy that
-                // arrived rather than the one still in memory.
-                self.close_page();
-                self.note = None;
-                self.writer = None;
-                self.home.reload(cx);
-
-                self.report(if count == 1 {
-                    String::from("1 note arrived from the library")
-                } else {
-                    format!("{count} notes arrived from the library")
-                });
-            }
-            Err(error) => self.report(error.to_string()),
-        }
-
-        self.touch_status();
-        cx.notify();
-    }
-
-    /// Takes in a library that came from another machine, if this one has nothing of its own.
-    ///
-    /// What makes a backup a *backup* rather than an export: the file is put on a second machine's
-    /// desktop, the app is started, and the writing is there — no menu, no account, no server. It is
-    /// guarded twice over, because it is the only thing this app does without being asked: nothing may
-    /// have been opened on the command line, and the app's own library must be empty, both as a list and
-    /// as a folder (see [`crate::library::is_empty`]). A machine with notes is never touched.
-    ///
-    /// The file is *left* on the desktop rather than moved: it is somebody's only backup, and one that
-    /// has just been carried through a mail client is not a file to delete. The guard is what keeps it
-    /// from being taken in twice — after the first restore the machine has notes, so it has something to
-    /// lose and asks rather than acts.
-    fn restore_on_start(&mut self, cx: &mut Context<Self>) {
-        // Both halves of the question: nothing open, and nothing of the person's own in the app — not
-        // in the list, and not in the notes folder, which is where a lost index would have left it.
-        if self.note.is_some() || !library::is_empty(self.home.entries(), &note::root()) {
-            return;
-        }
-
-        let Some(desktop) = library::desktop_folder() else {
-            return;
-        };
-
-        // A desktop on a path that is not one is not a desktop: the folder is *asked* whether it is
-        // there, because the platform's answer is a string this app has no other use for — and a
-        // backup written to a folder that does not exist would be an error nobody could act on.
-        if !desktop.is_dir() {
-            return;
-        }
-
-        let source = desktop.join(library::LIBRARY_FILE);
-        if !source.is_file() {
-            return;
-        }
-
-        match note::place_library(&source, &note::root()) {
-            Ok(placed) => {
-                // The list has never heard of these folders, and adopting them is what the scan the
-                // list runs anyway does — so the screen that is up is told to run it now.
-                self.home.reload(cx);
-                self.start_scan(cx);
-
-                // What the library said about itself, read back rather than counted from what was
-                // placed: the manifest is the record, and a restore reports the record.
-                self.message = match note::read_library(&source) {
-                    Ok(contents) => format!(
-                        "restored {} from {} — this machine had no notes of its own",
-                        library::describe(&contents.manifest, recent::now_ms()),
-                        file_label(&source),
-                    ),
-                    Err(_) => format!(
-                        "restored {} {} from {}",
-                        placed.len(),
-                        if placed.len() == 1 { "note" } else { "notes" },
-                        file_label(&source),
-                    ),
-                };
-            }
-            Err(error) => {
-                self.message = format!("the library on the desktop was not restored: {error}");
-            }
-        }
-
-        self.touch_status();
     }
 
     /// The name a note about the open document should suggest.

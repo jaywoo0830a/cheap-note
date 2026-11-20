@@ -87,6 +87,15 @@ pub enum Variant {
     /// The path is not a note at all.
     #[error("this is not a note")]
     NotANote,
+
+    /// The note already has a document of its own, and a second one would be a different note's page
+    /// under this note's ink.
+    ///
+    /// The ink was written on the document that is there. Replacing it would move every stroke to a
+    /// different page of a different file, so the placement is refused and the caller says which note
+    /// it was about rather than overwriting what is on the page.
+    #[error("this note already has its own document")]
+    DocumentAlreadyPlaced,
 }
 
 impl Variant {

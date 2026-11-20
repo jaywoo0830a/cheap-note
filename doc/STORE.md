@@ -406,6 +406,33 @@ strokes would cost more in hand-offs than it saves. Two more things live in `pag
 ink: how many strokes the page holds, and its bounding box — kept up to date as ink is written, and
 there for the questions a future feature asks without loading a page.
 
+### A note that lost its document is repaired, not replaced
+
+`source.pdf` is the note's own copy, so a note opens whether or not the file it was made from still
+exists (§7, `doc/CLI.md`). When the copy itself is gone — the folder was made by an earlier build, a
+sync tool dropped one file, a `copy` was interrupted — the note still opens, and on a blank sheet: the
+ink is in `note.db` and is read as always, and only the page under it is missing.
+
+That is a state to come *back from*, and the way back is placing the original document again. The
+fingerprint recorded when the note was started (`meta.document_fingerprint`, size + CRC-32) is what
+finds the note the document belongs to ([`note::matching_note`]), and the document is put back beside
+the ink ([`note::adopt_document`]).
+
+**Placing a document never erases a note.** `start_on_document` used to open with `remove_dir_all`,
+so placing a PDF over a folder that was already a note wiped that note's ink and its own copy before
+anything asked whether it was empty — a blank sheet where a written page had been, with nothing on
+screen having said so. It now decides by what is in the folder:
+
+| what is in the folder | what placing a document does |
+|---|---|
+| no `note.db` | starts a note on the document (the ordinary case: a PDF from a file manager) |
+| `note.db` **and** `source.pdf` | **refused** ([`note::Variant::DocumentAlreadyPlaced`]) — the document the ink was written on is the one that stays |
+| `note.db`, no `source.pdf` | the document is **put back**; the ink does not move |
+
+The middle row is the one that matters for correctness rather than for loss: two files cannot both be
+one note's document, and replacing the one that is there would move every stroke to a different page of
+a different file. So the placement is refused and the sentence names the note.
+
 ---
 
 ## 8. Moving a note to another machine

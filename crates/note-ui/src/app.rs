@@ -4767,12 +4767,19 @@ impl NoteApp {
     }
 
     /// Opens what the list confirmed.
+    ///
+    /// A row whose folder is gone but whose document is still there is opened the way a document is
+    /// opened anywhere else ([`Self::open_any`]): the note it belongs to is found by fingerprint
+    /// ([`note::matching_note`]) and its document put back, rather than a second note started on the
+    /// same pages. `start_on_document` refuses to replace a note that still has its own document, so
+    /// this path cannot erase ink either way — but going through the same door means a note that
+    /// *lost* its document is repaired instead of being reported as basically gone.
     pub(crate) fn open_entry(&mut self, entry: Recent, cx: &mut Context<Self>) {
         let opened = if entry.folder.is_dir() {
             self.open_folder(&entry.folder, entry.source.as_deref())
         } else if let Some(source) = &entry.source {
             if source.is_file() {
-                self.place_note(source)
+                self.open_or_place(source, cx)
             } else {
                 Err(anyhow::anyhow!(
                     "{} is gone, and so is the note it was written on",

@@ -1005,10 +1005,40 @@ fn unpack(source: &Path, dir: &Path) -> Result<()> {
 /// The document's fingerprint is recorded here, with the document, so that every note made from now on
 /// can be recognised if its file moves: see [`matching_note`] and [`adopt_document`]. The fingerprint is
 /// taken from the *copy* in the note, not from `source`, so the two are the same bytes by construction.
+///
+/// ## A note that is already there is not started over
+///
+/// The folder is *not* wiped. This function used to begin with `remove_dir_all(dir)`, which meant that
+/// placing a document over a folder that was already a note erased that note's ink and its own copy of
+/// its document, and then put the new document down on empty tables. Nothing on screen asked to be
+/// erased, and the one thing a note is for — the writing on it — was the thing destroyed.
+///
+/// What happens instead depends on what is there:
+///
+/// * **no `note.db`** — a new note, written into the folder as it stands (a PDF placed from a file
+///   manager is usually a folder that does not exist yet, and this is the ordinary case);
+/// * **a `note.db`, with the note's own `source.pdf` beside it** — the note is *kept*, and its document
+///   is not replaced. Two files cannot both be one note's document, and the one that is already there
+///   is the one the ink was written on. This is refused rather than silently applied;
+/// * **a `note.db`, with no `source.pdf`** — the note has lost its document, which is the wound
+///   [`matching_note`] exists to close. The document is put back ([`adopt_document`]) and the ink stays
+///   where it is. This is what placing a moved PDF on its own note does.
 fn start_on_document(source: &Path, dir: &Path) -> Result<()> {
-    let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir)
         .map_err(|error| Error::Note(format!("{} could not be made: {error}", dir.display())))?;
+
+    // A folder that is already a note keeps what is in it. The question is only whether it still has a
+    // document, because a note without one is exactly what this function can put right.
+    if dir.join(NOTE_DB).is_file() {
+        if dir.join(NOTE_PDF).exists() {
+            return Err(Variant::DocumentAlreadyPlaced.said(format!(
+                "{} is already a note about its own document; the document here was not copied over it",
+                dir.display()
+            )));
+        }
+
+        return adopt_document(dir, source).map(|_| ());
+    }
 
     let mut note = Note::open(dir)?;
     note.copy_document(source)?;
@@ -1521,6 +1551,80 @@ mod tests {
             note.store().source().expect("a source").as_deref(),
             Some(document.to_string_lossy().as_ref()),
             "the note knows which file it was made from"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// Placing a document over a note that already has ink does not throw the ink away.
+    ///
+    /// This is the defect a note was found in: a note held a `document` row and a fingerprint, its own
+    /// `source.pdf` was gone, and the file it had been made from still sat where `source` said. Placing
+    /// that same file starts a new note — and `start_on_document` began with `remove_dir_all`, so the
+    /// note that was there was erased before anything asked whether it was empty. A note that is not a
+    /// *new* note is not replaced: the document is put back beside the ink instead.
+    #[test]
+    fn placing_a_document_over_a_note_keeps_its_ink() {
+        let scratch = scratch("keep-ink");
+        let document = scratch.join("chapter-3.pdf");
+        std::fs::write(&document, a_pdf()).expect("the document is written");
+
+        let folder = scratch.join("placed");
+        let mut note = Note::placed_from(&document, &folder).expect("a note");
+        note.store_mut().set_document("chapter-3.pdf").expect("a name");
+        note.store_mut()
+            .set_document_fingerprint(&fingerprint(&document).expect("a fingerprint"))
+            .expect("a fingerprint is recorded");
+        note.store_mut()
+            .append(0, &[stroke(3, 1.0)], &crate::history::HistoryUpdate::default())
+            .expect("a stroke");
+        note.store().checkpoint().expect("written");
+        drop(note);
+
+        // The note's own copy is gone, which is the state the defect was found in.
+        std::fs::remove_file(folder.join(NOTE_PDF)).expect("the copy is removed");
+
+        // Placing the same document again must not start over.
+        Note::placed_from(&document, &folder).expect("the note, not a new one");
+
+        let note = Note::open(&folder).expect("the note");
+        let (_, bytes) = note
+            .document()
+            .expect("the document")
+            .expect("the document is back");
+        assert_eq!(bytes, a_pdf(), "the document was put back");
+        assert_eq!(
+            note.store().pages().expect("pages"),
+            vec![0],
+            "the ink survived the placement"
+        );
+        assert_eq!(note.store().stroke_count(0).expect("strokes"), 1);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// Placing a document over a note that already has its own copy is refused, not applied.
+    ///
+    /// Two different files cannot both be a note's document. The one that is there was written with the
+    /// ink in it, so it is the one that stays, and the caller is told rather than silently overwritten.
+    #[test]
+    fn placing_a_second_document_over_a_note_is_refused() {
+        let scratch = scratch("refuse-second");
+        let first = scratch.join("first.pdf");
+        std::fs::write(&first, a_pdf()).expect("the document is written");
+        let second = scratch.join("second.pdf");
+        std::fs::write(&second, b"%PDF-1.4 another one").expect("the second is written");
+
+        let folder = scratch.join("placed");
+        Note::placed_from(&first, &folder).expect("a note");
+        let before = std::fs::read(folder.join(NOTE_PDF)).expect("the copy");
+
+        let refused = Note::placed_from(&second, &folder);
+        assert!(refused.is_err(), "a note is not replaced by placing over it");
+        assert_eq!(
+            std::fs::read(folder.join(NOTE_PDF)).expect("the copy"),
+            before,
+            "the document the ink was written on is the one that stays"
         );
 
         let _ = std::fs::remove_dir_all(&scratch);

@@ -258,6 +258,24 @@ impl Recent {
         age_label(now_ms.saturating_sub(self.opened_at))
     }
 
+    /// Whether two copies of one note were made from the same file: the same path, or both nothing.
+    ///
+    /// Windows and macOS spell one path differently — case, `/` against `\` — and a note carried to
+    /// another machine and back says what *that* machine called it. A merge compares folders to know
+    /// the two are one note ([`merge`]); this is the second question, asked of the entries that are,
+    /// and only a *no* here is written down.
+    pub fn same_file_as(&self, other: &Recent) -> bool {
+        match (&self.source, &other.source) {
+            (None, None) => true,
+            (Some(mine), Some(theirs)) => {
+                let mine = mine.to_string_lossy().replace('\\', "/").to_lowercase();
+                let theirs = theirs.to_string_lossy().replace('\\', "/").to_lowercase();
+                mine == theirs
+            }
+            _ => false,
+        }
+    }
+
     /// The second line of an entry: where the note came from.
     pub fn origin(&self) -> String {
         match &self.source {
@@ -323,6 +341,13 @@ impl Index {
 ///
 /// The one number that is *merged* rather than decided is `opened_at`: two windows both knowing a note, the later visit
 /// wins, because that is the sort key and the only thing about an entry a reader would notice being stale.
+///
+/// And the one *field* that is not taken from the later copy is `source`, when the two name different files:
+/// a note carried from another machine is the same folder, and what its `source` row says in the other copy
+/// is a path that machine had — `C:/notes/a.pdf` in a file this Mac is reading, `/Users/me/notes/a.pdf` in the
+/// entry this Mac has. Taking the later one would put the other machine's path in this one's list, where
+/// "open the original again" would look for a file that is not on this disk. The two are the same note and
+/// the later visit still wins; only the spelling this machine knows stays.
 fn merge(mut ours: Index, theirs: Index) -> Index {
     for entry in theirs.entries {
         // Asked before the list is borrowed mutably, and it is the *folder* that is asked about, so a push for
@@ -334,7 +359,13 @@ fn merge(mut ours: Index, theirs: Index) -> Index {
             .iter_mut()
             .find(|mine| mine.folder == entry.folder)
         {
-            Some(mine) if mine.opened_at < entry.opened_at => *mine = entry,
+            Some(mine) if mine.opened_at < entry.opened_at => {
+                let source = match mine.same_file_as(&entry) {
+                    true => entry.source,
+                    false => mine.source.take(),
+                };
+                *mine = Recent { source, ..entry };
+            }
             Some(_) => {}
             None if known => {}
             None => ours.entries.push(entry),

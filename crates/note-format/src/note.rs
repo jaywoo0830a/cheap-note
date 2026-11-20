@@ -44,7 +44,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use zip::write::SimpleFileOptions;
+use zip::write::{ExtendedFileOptions, FileOptions, SimpleFileOptions};
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use serde::{Deserialize, Serialize};
@@ -132,32 +132,66 @@ fn user_data() -> PathBuf {
 /// `/a/chapter-3.pdf` and `/b/chapter-3.pdf` are two notes rather than one that overwrites the
 /// other, and so that importing the same file twice lands in the same place — the second import
 /// updates the working copy a person is already used to.
+///
+/// ## One name, on every machine
+///
+/// The folder's name is a note's identity ([`crate::store`] §1), and a note carried to another
+/// machine keeps it — so the name this function hands out has to be one a *Windows*, a *macOS* and
+/// a *Linux* filesystem all accept, and the *same* string everywhere it is asked:
+///
+/// | The rule | Why | Where it bites |
+/// |---|---|---|
+/// | no character Windows reserves (`<>:"/\|?*`, the control characters) | a name with one of them cannot be created, so the note would not restore at all | Windows |
+/// | no `.`, ` ` or `-` at the end | Windows *silently strips* a trailing one, so the folder on disk is not the name the manifest, the library and the recent list all say | Windows |
+/// | ASCII letters, digits, `_` and `-` stay; every other run becomes one `-` | a Korean, Japanese or emoji stem becomes a name every filesystem and every zip tool shows the same way — and one that is still there when the file manager cannot decode names | everywhere |
+/// | the digest is over the path's UTF-8, not its `OsStr` | Windows paths are UTF-16 and everywhere else is bytes; the same path has to digest to the same number on both | a library read on another platform |
+///
+/// The digest is what keeps two Korean documents from becoming one note, which a name with only
+/// dashes for its stem would otherwise do: `보고서.pdf` and `계획.pdf` share a stem of `note`, and
+/// only their paths tell them apart.
 pub fn folder_name(source: &Path) -> String {
     let stem = source
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
         .unwrap_or_else(|| String::from("note"));
 
-    let cleaned: String = stem
-        .chars()
-        .map(|character| {
-            if character.is_alphanumeric() || character == '-' || character == '_' {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect();
+    // Every character that is unreserved *on every filesystem* — ASCII letters, digits, `_` and `-`
+    // — is kept as it is; every other run collapses to one dash, so `a b:c*d?` is `a-b-c-d` rather
+    // than `a-b-c-d-`, and a stem of only such characters is left empty for the fallback below.
+    let mut cleaned = String::with_capacity(stem.len());
+    let mut dash = false;
+    for character in stem.chars() {
+        if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+            cleaned.push(character);
+            dash = false;
+        } else if !dash && !cleaned.is_empty() {
+            cleaned.push('-');
+            dash = true;
+        }
+    }
 
-    // FNV-1a over the path as the user gave it, written as eight hex digits. Not a hash for
-    // security, only for a name that is stable and short.
+    while cleaned.ends_with('-') {
+        cleaned.pop();
+    }
+
+    // A name with no ASCII letters at all — a Korean title, an emoji, a file called `한글.pdf` — is
+    // named for what it is instead of for its stem, because the digest already makes it unique.
+    // Empty would be a folder called `-9f2a1c44`, and a leading dash is a name a shell — and one
+    // Windows API — read as an option rather than a file.
+    if cleaned.is_empty() {
+        cleaned = String::from("note");
+    }
+
+    // FNV-1a over the path's UTF-8 bytes, written as eight hex digits. Not a hash for security,
+    // only for a name that is stable and short — and UTF-8 rather than the platform's own encoding
+    // so that the same path digests to the same number wherever this is asked.
     let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in source.to_string_lossy().bytes() {
         digest ^= u64::from(byte);
         digest = digest.wrapping_mul(0x100_0000_01b3);
     }
 
-    format!("{}-{:08x}", cleaned.trim_matches('-'), digest as u32)
+    format!("{cleaned}-{:08x}", digest as u32)
 }
 
 /// Every note in a given folder: the same listing, for a test or another location.
@@ -510,6 +544,26 @@ fn pack(database: &Path, dir: &Path, target: &Path) -> Result<()> {
 ///
 /// The file is created rather than appended to, so writing over an export that is already there
 /// replaces it: what a person carries away is the copy that was made last, never two zips joined.
+///
+/// ## Names that survive the crossing
+///
+/// A zip carries its entry names in one of three encodings — ASCII, code page 437, or UTF-8 when the
+/// entry's language flag (bit 11) says so — and which one a tool *reads* is the tool's choice. There
+/// are two tools in the path of every note that crosses from a Mac to a Windows machine, and they
+/// disagree:
+///
+/// * **macOS's own `zip`, and most Unix tools**, read code page 437 unless bit 11 says UTF-8.
+/// * **Windows Explorer, and older WinZip / 7-Zip builds**, read code page 437 unless bit 11 says
+///   UTF-8 *and* the entry carries the Info-ZIP Unicode Path field (`0x7075`) — the same name again,
+///   UTF-8, beside the name in 437 — which is what APPNOTE 4.6.8 prescribes for exactly this.
+///
+/// So a Korean name is written the way both read it: the flag is set by the writer whenever the name
+/// is not ASCII (it is UTF-8 on the wire), and the field is added here. It costs a few bytes an entry
+/// and is written only when there is something to add — an ASCII name needs neither.
+///
+/// The stored name is UTF-8 rather than a 437 approximation because 437 cannot spell a note's name
+/// at all: a Korean stem has no code page 437 bytes, and a tool that guessed it would show a row of
+/// boxes where the name was.
 pub(crate) fn write_zip(
     target: &Path,
     entries: &[(String, PathBuf, CompressionMethod)],
@@ -524,9 +578,12 @@ pub(crate) fn write_zip(
     let mut zip = ZipWriter::new(std::io::BufWriter::new(file));
 
     for (name, path, method) in entries {
-        let options = SimpleFileOptions::default()
-            .compression_method(*method)
-            .unix_permissions(0o644);
+        let options: FileOptions<'static, 'static, ExtendedFileOptions> =
+            SimpleFileOptions::default()
+                .compression_method(*method)
+                .unix_permissions(0o644)
+                .into_full_options();
+        let options = with_unicode_path(options, name)?;
         add_file(&mut zip, name, path, options)?;
     }
 
@@ -537,12 +594,46 @@ pub(crate) fn write_zip(
     Ok(())
 }
 
+/// The Info-ZIP Unicode Path field's header id (APPNOTE 4.6.8).
+const UNICODE_PATH_FIELD: u16 = 0x7075;
+
+/// Adds the Info-ZIP Unicode Path field for `name`, unless the name is ASCII and needs none.
+///
+/// The payload is a version byte (`1`), the CRC-32 of the name as it is stored — the bytes a reader
+/// that ignores the field will see — and the name's UTF-8. A reader checks the CRC before using the
+/// field, so a field that did not match the stored name would be ignored by both kinds of tool rather
+/// than trusted by one.
+fn with_unicode_path(
+    mut options: FileOptions<'static, 'static, ExtendedFileOptions>,
+    name: &str,
+) -> Result<FileOptions<'static, 'static, ExtendedFileOptions>> {
+    if name.is_ascii() {
+        return Ok(options);
+    }
+
+    let stored = name.as_bytes();
+    let mut payload = Vec::with_capacity(5 + stored.len());
+    payload.push(1);
+    payload.extend_from_slice(&crc32fast::hash(stored).to_le_bytes());
+    payload.extend_from_slice(stored);
+
+    options
+        .add_extra_field(UNICODE_PATH_FIELD, payload, false)
+        .map_err(|error| {
+            Error::Note(format!(
+                "the note could not be written: {name} could not be recorded for a Windows reader: {error}"
+            ))
+        })?;
+
+    Ok(options)
+}
+
 /// Adds one file to a zip that is being written.
 fn add_file(
     zip: &mut ZipWriter<std::io::BufWriter<std::fs::File>>,
     entry: &str,
     path: &Path,
-    options: SimpleFileOptions,
+    options: FileOptions<'static, 'static, ExtendedFileOptions>,
 ) -> Result<()> {
     let mut file = std::fs::File::open(path)
         .map_err(|error| Error::Note(format!("{} could not be read: {error}", path.display())))?;
@@ -1061,6 +1152,32 @@ fn unpack_note(zip: &mut ZipArchive<std::fs::File>, note: &LibraryNote, dir: &Pa
             ))
         })?;
     }
+
+    record_document_name(dir)?;
+
+    Ok(())
+}
+
+/// Keeps the name the document had, in the note's own database, once it has been unpacked.
+///
+/// A note's folder carries the document as `source.pdf` whatever it was called, and the *name* it was
+/// called lives in the row a note writes about itself ([`NoteStore::set_document`]). On the machine
+/// that wrote the note that row is there; a note arriving in a **library** carries only the folder, so
+/// a restored PDF note would otherwise be called `source` by every list that reads it.
+///
+/// The row is filled in when it is missing and `source.pdf` is there, and nothing else is touched. A
+/// note that already says what its document was called keeps its answer: a document can have been
+/// replaced since the folder was named (`plate-7.pdf` in a folder named for `chapter-3`), and the row
+/// is the thing that records that.
+fn record_document_name(dir: &Path) -> Result<()> {
+    let mut store = NoteStore::open(&dir.join(NOTE_DB))?;
+
+    if store.document()?.is_some() || !dir.join(NOTE_PDF).is_file() {
+        return Ok(());
+    }
+
+    store.set_document(NOTE_PDF)?;
+    store.checkpoint()?;
 
     Ok(())
 }
@@ -1653,5 +1770,107 @@ mod tests {
         assert!(one
             .chars()
             .all(|character| character != ' ' && character != '/'));
+
+        // A run of characters that are not a letter or a digit is one dash, not one each, and
+        // nothing is left hanging off either end — a trailing dot or dash is a name Windows quietly
+        // rewrites, so the folder on disk would stop being the folder the lists name.
+        let run = folder_name(Path::new("/notes/a  :  b ....pdf"));
+        assert!(run.starts_with("a-b-"), "{run}");
+        assert!(run.is_ascii(), "{run}");
+    }
+
+    /// A note's folder is a name every filesystem will take, and the same name on every platform.
+    ///
+    /// The bug this pins: `is_alphanumeric` kept Korean letters on macOS but threw them away on
+    /// Windows and Linux, so `한글.pdf` was `한글-9f2a1c44` on one machine and `note-9f2a1c44` on the
+    /// next — the same note under two identities, and a `notes/한글-…/` entry a Windows machine
+    /// extracts with the name mangled. A stem that is not ASCII now becomes the same ASCII name
+    /// everywhere, suffixed with the digest that tells two such documents apart.
+    #[test]
+    fn a_folder_name_is_one_name_on_every_filesystem() {
+        let korean = folder_name(Path::new("/notes/한글 보고서.pdf"));
+        assert!(korean.starts_with("note-"), "{korean}");
+        assert!(
+            korean
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-'),
+            "{korean}"
+        );
+
+        // Two Korean documents are two notes, which a stem of only dashes would have made one.
+        let other = folder_name(Path::new("/notes/계획.pdf"));
+        assert_ne!(korean, other, "the digest keeps two names apart");
+        assert_eq!(
+            korean,
+            folder_name(Path::new("/notes/한글 보고서.pdf")),
+            "and the same file is still the same note"
+        );
+
+        // Windows refuses these characters outright, and strips a trailing dot, space or dash. A
+        // stem made only of them is the fallback rather than a folder called `---`.
+        let reserved = folder_name(Path::new("/notes/a<b>c:d\"e\\f?g*h.pdf"));
+        assert!(
+            !reserved.contains(['<', '>', ':', '"', '\\', '?', '*']),
+            "{reserved}"
+        );
+        assert!(!reserved.starts_with('-'), "{reserved}");
+        assert!(
+            !reserved.ends_with('.') && !reserved.ends_with(' '),
+            "{reserved}"
+        );
+
+        let nothing = folder_name(Path::new("/notes/???.pdf"));
+        assert!(nothing.starts_with("note-"), "{nothing}");
+
+        // An ASCII name is unchanged in shape: the folders this app has already written keep their
+        // names, so a note made before this rule is still found by the PDF it was made from.
+        assert!(folder_name(Path::new("/notes/chapter-3.pdf")).starts_with("chapter-3-"));
+        assert!(folder_name(Path::new("/notes/my_notes.PDF")).starts_with("my_notes-"));
+    }
+
+    /// A note restored from a library says what its document was called, rather than being called
+    /// `source` because that is the name the folder holds it under.
+    ///
+    /// A note's own database records the document's original name (`chapter-3.pdf`), and a library
+    /// carries only the folder — so without this the first list to read a restored note titles it
+    /// `source`. A note that already answers keeps its answer.
+    #[test]
+    fn a_restored_note_keeps_the_name_its_document_had() {
+        let scratch = scratch("document-name");
+        let dir = scratch.join("chapter-3-9f2a1c44");
+        std::fs::create_dir_all(&dir).expect("a note folder");
+
+        let note = Note::open(&dir).expect("a note");
+        note.store().checkpoint().expect("a checkpoint");
+        drop(note);
+        // The database a library carries: no document row, and `source.pdf` beside it.
+        std::fs::write(dir.join(NOTE_PDF), b"%PDF-1.4").expect("a document");
+
+        record_document_name(&dir).expect("a name recorded");
+        let note = Note::open(&dir).expect("the note again");
+        assert_eq!(
+            note.store().document().expect("a document").as_deref(),
+            Some(NOTE_PDF),
+            "the note knows the name a list will show"
+        );
+        drop(note);
+
+        // A note that already says what its document was called keeps its answer.
+        let mut note = Note::open(&dir).expect("the note again");
+        note.store_mut()
+            .set_document("plate-7.pdf")
+            .expect("a name");
+        note.store().checkpoint().expect("a checkpoint");
+        drop(note);
+
+        record_document_name(&dir).expect("no name to record");
+        let note = Note::open(&dir).expect("the note again");
+        assert_eq!(
+            note.store().document().expect("a document").as_deref(),
+            Some("plate-7.pdf"),
+            "a note that has been told its document's name is not told again"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }

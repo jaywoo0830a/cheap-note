@@ -243,6 +243,107 @@ fn a_library_carries_attachments() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A library written on one platform is read on another: a note folder with a non-ASCII name in it,
+/// and a document whose name is not ASCII, survive the crossing.
+///
+/// The bug this pins is the Mac-to-Windows one. A note's folder name used to keep Korean letters on
+/// macOS and drop them on Windows, so the same note was `한글-…` on one machine and `note-…` on the
+/// next — and a `notes/한글-…/note.db` entry a Windows machine extracts had its folder mangled, which
+/// left a note whose database was there and whose name was not.
+///
+/// The zip's own half is checked the way a Windows tool reads it, from outside this crate:
+///
+/// * the entry's *stored* name is UTF-8, and the entry's general-purpose flag says so (bit 11);
+/// * the entry carries the Info-ZIP Unicode Path extra field (`0x7075`) — a version byte, the CRC-32
+///   of the stored name, and then the name again in UTF-8. Windows Explorer and older WinZip builds
+///   read the name from that field, and a Mac's own tools read the flag; a file with both is read
+///   correctly by both.
+///
+/// The note's folder is built by hand rather than by `folder_name` (whose output is ASCII on every
+/// platform), because this is about reading a library *somebody else made* — a note from a build, or a
+/// person's hand, that named a folder in Korean.
+#[test]
+fn a_library_names_its_entries_so_any_platform_reads_them() {
+    let root = scratch("library-unicode");
+    let notes_root = root.join("notes");
+    let folder = "한글-보고서-9f2a1c44";
+
+    let mut note = a_note(&notes_root, folder);
+    note.put_document("한글 보고서.pdf", &a_pdf())
+        .expect("a document");
+    note.store().checkpoint().expect("a checkpoint");
+
+    let carried = root.join("library.zip");
+    note::write_library(&notes_root, &carried, 0).expect("a library");
+
+    let entry = format!("{LIBRARY_NOTES}/{folder}/{NOTE_DB}");
+    let file = std::fs::File::open(&carried).expect("a zip");
+    let mut zip = zip::ZipArchive::new(file).expect("a readable zip");
+    let held = zip.by_name(&entry).expect("the note is in the library");
+    assert_eq!(
+        held.name_raw(),
+        entry.as_bytes(),
+        "the name is stored as UTF-8"
+    );
+    assert!(
+        held.flags().as_u16() & 0x0800 != 0,
+        "the entry's language flag says its name is UTF-8: {:#06x}",
+        held.flags().as_u16()
+    );
+
+    let field = extra_field(&held, 0x7075).expect("the Info-ZIP Unicode Path field");
+    assert_eq!(field.first(), Some(&1), "the field's version byte");
+    assert_eq!(
+        &field[1..5],
+        crc32fast::hash(entry.as_bytes()).to_le_bytes(),
+        "the field's CRC is of the name it repeats"
+    );
+    assert_eq!(
+        &field[5..],
+        entry.as_bytes(),
+        "and the name itself, in UTF-8"
+    );
+
+    // And the other direction: a library an older build wrote — with the Korean name but no field —
+    // is still read and placed, with its folder and its document's name intact.
+    let second = root.join("second");
+    let placed = note::place_library(&carried, &second).expect("the library is placed");
+    assert_eq!(placed, vec![second.join(folder)]);
+
+    let arrived = Note::open(&second.join(folder)).expect("the restored note");
+    let (name, bytes) = arrived
+        .document()
+        .expect("a document")
+        .expect("the document came back");
+    assert_eq!(
+        name, "한글 보고서.pdf",
+        "the document keeps its Korean name"
+    );
+    assert_eq!(bytes, a_pdf());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A zip entry's extra field, by its header id, read the way APPNOTE describes it: a `u16` id, a
+/// `u16` length, and that many bytes.
+fn extra_field<R: std::io::Read + ?Sized>(
+    entry: &zip::read::ZipFile<'_, R>,
+    header: u16,
+) -> Option<Vec<u8>> {
+    let data = entry.extra_data()?;
+    let mut at = 0;
+    while at + 4 <= data.len() {
+        let id = u16::from_le_bytes([data[at], data[at + 1]]);
+        let len = usize::from(u16::from_le_bytes([data[at + 2], data[at + 3]]));
+        let body = data.get(at + 4..at + 4 + len)?;
+        if id == header {
+            return Some(body.to_vec());
+        }
+        at += 4 + len;
+    }
+    None
+}
+
 /// A zip that is not a library is refused, and nothing is written: a person who chose the wrong file
 /// must not end up with a notes folder half-filled from it. A library from a *newer* build is refused
 /// as newer rather than as broken — the file is fine, this build is old.

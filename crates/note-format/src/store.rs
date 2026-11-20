@@ -1302,9 +1302,19 @@ impl NoteStore {
     ///
     /// "There was none" is the row's *absence*, not an empty path: a note written on a blank sheet has
     /// nothing to remember, so there is nothing to store.
+    ///
+    /// The path is written with forward slashes. A note remembers where it came from so that "open the
+    /// original again" has somewhere to start, and a note is carried to another machine: `C:/notes/a.pdf`
+    /// is still a string a Mac can show and a person can read, where `C:\notes\a.pdf` — the form
+    /// `Path::display` gives on Windows — is one no Mac tool would ever accept as a path. Windows reads
+    /// either, so the one spelling is the one that travels.
     pub fn set_source(&mut self, path: Option<&Path>) -> Result<()> {
         match path {
-            Some(path) => put_row(&self.conn, META_SOURCE, path.display()),
+            Some(path) => put_row(
+                &self.conn,
+                META_SOURCE,
+                path.to_string_lossy().replace('\\', "/"),
+            ),
             None => drop_row(&self.conn, META_SOURCE),
         }
     }
@@ -2649,6 +2659,38 @@ mod tests {
             store.source().expect("a source"),
             None,
             "a blank sheet's note came from nowhere, and says so rather than naming an empty path"
+        );
+
+        cleanup(&path);
+    }
+
+    /// The file a note came from is kept with forward slashes, so the same note on a Mac and on a
+    /// Windows machine says where it came from in one spelling.
+    ///
+    /// A note's document travels *inside* the note, so this row decides nothing about opening one; it
+    /// is what a list shows and what "open the original again" starts from. The form a Windows machine
+    /// writes (`C:\notes\a.pdf`) is a path no Mac tool accepts, and a note carried across would show it
+    /// as a string with a backslash in it — so it is written the way both read it.
+    #[test]
+    fn the_file_a_note_came_from_is_written_portably() {
+        let (mut store, path) = store_for("source-portable");
+
+        store
+            .set_source(Some(Path::new(r"C:\notes\chapter-3.pdf")))
+            .expect("a source");
+        assert_eq!(
+            store.source().expect("a source").as_deref(),
+            Some("C:/notes/chapter-3.pdf"),
+            "a Windows path is kept in the one spelling every platform reads"
+        );
+
+        store
+            .set_source(Some(Path::new("/Users/me/Documents/한글 보고서.pdf")))
+            .expect("a source");
+        assert_eq!(
+            store.source().expect("a source").as_deref(),
+            Some("/Users/me/Documents/한글 보고서.pdf"),
+            "a path with a Korean name in it is kept as it was, slash and all"
         );
 
         cleanup(&path);

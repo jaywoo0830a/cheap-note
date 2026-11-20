@@ -85,6 +85,52 @@ full path, which is what makes importing the same PDF twice find the same note. 
 folders on the way in would turn one note into two on every restore. So a note arrives on the second
 machine under the name it had on the first, and opening the same PDF there still lands in that folder.
 
+### A name that means the same thing on every machine
+
+Keeping the name is only half of it: the name has to be one *every* filesystem will take, and the same
+one on all of them, or the note that arrives is not the note that left. `note::folder_name` therefore
+hands out a name from a rule that is the same on Windows, macOS and Linux:
+
+* ASCII letters, digits, `_` and `-` are kept; every other run — a space, a Korean vowel, an emoji, a
+  Windows-reserved character — becomes **one dash**, and nothing is left at either end. A stem with no
+  ASCII left at all (`한글 보고서.pdf`) becomes `note-<digest>`.
+* The digest is over the path's **UTF-8**, so the same path digests to the same number on a platform
+  that spells paths in UTF-16 and one that spells them in bytes.
+
+The two bugs this closes, both of them a Mac-to-Windows crossing:
+
+| Before | After |
+|---|---|
+| `is_alphanumeric` kept `한글` on macOS and threw it away on Windows, so one note was `한글-9f2a1c44` on one machine and `note-9f2a1c44` on the next | one ASCII name, the same string on every platform |
+| a trailing `.` or `-` was kept, and Windows *strips* it — the folder on disk stopped being the folder the manifest named | no name ends in `.`, ` ` or `-` |
+
+The digest is what keeps two such documents apart: `보고서.pdf` and `계획.pdf` share a stem of `note`,
+and only their paths do.
+
+### How a name is written into the zip
+
+A zip can carry its entry names as ASCII, as code page 437, or as UTF-8 with the entry's language flag
+(bit 11) set — and which one a tool *reads* is the tool's choice. The two tools in the way of a note
+that crosses from a Mac to a Windows machine disagree: a Mac's `zip` reads 437 unless the flag is set,
+while Windows Explorer and older WinZip builds read 437 unless the flag is set **and** the entry carries
+the Info-ZIP Unicode Path field (`0x7075`, APPNOTE 4.6.8) — the name again, in UTF-8, with the CRC-32 of
+the stored name in front of it. `note::write_zip` writes both: the flag (the `zip` crate sets it for any
+name that is not ASCII) and the field. `tests/library.rs` reads them back with a plain zip reader, the
+way a Windows tool would. So a library with `notes/한글-보고서-…/` in it unpacks to that folder name
+wherever it is opened.
+
+A note's **document** keeps its own name too, in the row a note writes about itself (`meta`'s
+`document`). A library carries the folder, not that row's source of truth — so `place_library` fills the
+row in from `source.pdf` when it is missing, and a restored PDF note is called `한글 보고서`, not
+`source`.
+
+The same rule applies to the note's own *source* row (the file it was made from, kept for "open the
+original again"): it is written with forward slashes, so `C:\notes\a.pdf` is stored as
+`C:/notes/a.pdf`, which every platform can read and which Windows accepts as well. And the recent list
+never takes the other machine's spelling of it: a merge of two windows' lists keeps the source this
+machine has when the two name different files (`recent::merge`).
+
+
 
 ---
 
@@ -268,12 +314,15 @@ Said out loud, because each one is a decision rather than an oversight:
 
 | Where | What |
 |---|---|
-| `crates/note-format/src/note.rs` | `write_library`, `read_library`, `place_library`; `LibraryManifest`; `LIBRARY_MANIFEST` / `LIBRARY_NOTES` / `LIBRARY_VERSION`; the shared `write_zip`, `is_note_path`, `is_folder_name` |
+| `crates/note-format/src/note.rs` | `write_library`, `read_library`, `place_library`; `LibraryManifest`; `LIBRARY_MANIFEST` / `LIBRARY_NOTES` / `LIBRARY_VERSION`; the shared `write_zip` (with the Info-ZIP Unicode Path field), `folder_name`, `is_note_path`, `is_folder_name`, `record_document_name` |
+| `crates/note-format/src/store.rs` | `set_source` (written with forward slashes, so a path carried to another platform is one it can read) |
 | `crates/note-ui/src/library.rs` | the application's half: `LIBRARY_FILE`, `backup_target`, `desktop_folder`, `home_folder`, `is_empty`, `describe` — pure functions of paths, so they are tested without a window |
 | `crates/note-ui/src/app.rs` | `back_up_everything` (the button), `restore_library` (the chooser), `place_library_file`, `restore_on_start`, `BACKUP_MIN_INTERVAL` |
 | `crates/note-ui/src/home.rs` | the two buttons in `actions`, and `Home::reload` after a restore |
-| `crates/note-format/tests/library.rs` | the container from outside: the layout and manifest read with a zip reader and a JSON parser, a restore's ink and document coming back, attachments, the refusals, and a refused restore leaving the note that was there |
+| `crates/note-ui/src/recent.rs` | `Recent::same_file_as` and `merge`: a list never takes the other machine's spelling of a note's source |
+| `crates/note-format/tests/library.rs` | the container from outside: the layout and manifest read with a zip reader and a JSON parser, a restore's ink and document coming back, attachments, **the UTF-8 flag and Unicode Path field a Windows tool reads**, a Korean folder and document name surviving the restore, the refusals, and a refused restore leaving the note that was there |
 | `crates/note-ui/src/library/tests.rs` | where a backup goes and the fallback order, the guard on the automatic restore, and the words the status line shows |
+| `crates/note-ui/src/recent/tests.rs` | the merge, including that a note carried to another machine keeps *this* machine's source |
 
 The two rules a change has to keep:
 
@@ -295,3 +344,8 @@ The two rules a change has to keep:
   already opens a file's notes, and `cheap-note <library.zip>` is the line it would take.
 * **Asking before an older library replaces newer notes** is `LibraryManifest::created_at_ms` against each
   note's `Stamp` — the figure is in the file for exactly that reason.
+* **A different naming scheme** is a change to `folder_name` and nothing else — but it changes a note's
+  *identity*, so the old names have to keep being found: an existing note is opened by the folder it is
+  already in, and only a *new* import asks `folder_name` (`app::open_or_place`). The rules §2 lays out
+  (ASCII-safe, the same on every platform, the digest over the path) are what a second machine relies on;
+  a name that breaks one of them arrives as a different note, or does not arrive at all.

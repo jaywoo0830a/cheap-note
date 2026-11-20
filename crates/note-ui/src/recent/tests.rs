@@ -129,6 +129,90 @@ fn two_windows_worth_of_list_are_merged() {
     );
 }
 
+/// A note that has been to the other machine and back keeps this machine's idea of where its file is.
+///
+/// The hazard: a note is the same folder on both machines, and the *source* row inside it says what
+/// that machine called the file — `C:/notes/chapter-3.pdf` on the Windows one, `/Users/me/notes/
+/// chapter-3.pdf` on the Mac. Opening it on the other machine writes that machine's path into the note
+/// and into this list; a later merge of two windows' lists then sees the same note with two sources,
+/// and taking the later visit wholesale would leave a path that is not on this disk under
+/// "open the original".
+///
+/// So the later copy still wins — it is the later visit, and its counts and name are newer — but the
+/// source this machine has is kept when the two name different files.
+#[test]
+fn a_merge_keeps_this_machines_source() {
+    let dir = folder("merge-source");
+
+    let ours = Index {
+        entries: vec![Recent::note(
+            dir.clone(),
+            Some(PathBuf::from("/Users/me/notes/chapter-3.pdf")),
+            String::from("chapter three"),
+            Some(String::from("chapter-3.pdf")),
+            100,
+        )],
+        forgotten: Vec::new(),
+    };
+    let theirs = Index {
+        entries: vec![Recent::note(
+            dir.clone(),
+            Some(PathBuf::from("C:/notes/chapter-3.pdf")),
+            String::from("chapter three"),
+            Some(String::from("chapter-3.pdf")),
+            300,
+        )],
+        forgotten: Vec::new(),
+    };
+
+    let merged = merge(ours, theirs);
+    let entry = merged
+        .entries
+        .iter()
+        .find(|entry| entry.folder == dir)
+        .expect("the note is still listed");
+
+    assert_eq!(
+        entry.opened_at, 300,
+        "the later visit is the one that counts"
+    );
+    assert_eq!(
+        entry.source.as_deref().map(Path::to_str),
+        Some(Some("/Users/me/notes/chapter-3.pdf")),
+        "and where *this* machine's copy of the file is, not the other machine's"
+    );
+
+    // One spelling of one path is one file: a Windows path written with slashes and with backslashes
+    // is the same file, and the later copy is taken whole.
+    let ours = Index {
+        entries: vec![Recent::note(
+            dir.clone(),
+            Some(PathBuf::from("C:/notes/chapter-3.pdf")),
+            String::from("chapter three"),
+            None,
+            100,
+        )],
+        forgotten: Vec::new(),
+    };
+    let theirs = Index {
+        entries: vec![Recent::note(
+            dir.clone(),
+            Some(PathBuf::from("c:\\notes\\Chapter-3.pdf")),
+            String::from("chapter three"),
+            None,
+            300,
+        )],
+        forgotten: Vec::new(),
+    };
+
+    let merged = merge(ours, theirs);
+    assert_eq!(
+        merged.entries[0].source.as_deref().map(Path::to_str),
+        Some(Some("c:\\notes\\Chapter-3.pdf")),
+        "the same file spelled two ways is one file, so the later entry is taken"
+    );
+}
+
 /// A missing index is an empty list, not an error.
 #[test]
 fn a_missing_index_is_an_empty_list() {

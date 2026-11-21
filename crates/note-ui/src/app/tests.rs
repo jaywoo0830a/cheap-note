@@ -7,7 +7,7 @@ use super::{
     pinch_zoom_factor, quantise_width, samples_vitals, scale_label, screen_in_front, scroll_of,
     sheet_is_front, sheet_matches, spun, touches_paper, window_px, zoom_text, Confirmation, Edge,
     EdgeSwipe, FootPills, FootPlace, FootStrips, PaletteGeometry, PalettePart, PenGesture, Screens,
-    SwatchGeometry, Swipe, Turn, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC,
+    SwatchGeometry, Swipe, Turn, WeightControl, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC,
     PALETTE_DISC_BOX, PALETTE_DISC_PAD, PALETTE_DISC_RING, PALETTE_HUB, PALETTE_HUB_RING,
     PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS,
     PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL,
@@ -798,6 +798,56 @@ fn the_keyboard_walks_the_ring_and_wraps() {
         0,
         "a ring with nothing on it has nowhere to walk"
     );
+}
+
+/// The weight control follows the tool in hand, and there is only ever one.
+///
+/// Two controls side by side — a pen's weight and a marker's width — read as two settings of one pen,
+/// and a reader with the pen up is then choosing a marker whose effect they cannot see. So each tool
+/// offers exactly the one it has an answer for, and the two tools that lay no ink offer none: a weight
+/// that changed nothing about the next stroke would be a control that does not work.
+#[test]
+fn the_weight_control_follows_the_tool_in_hand() {
+    assert_eq!(
+        WeightControl::of(Tool::Pen),
+        Some(WeightControl::Pen),
+        "the pen offers its weight"
+    );
+    assert_eq!(
+        WeightControl::of(Tool::Highlighter),
+        Some(WeightControl::Marker),
+        "the marker offers its width"
+    );
+    assert_eq!(
+        WeightControl::of(Tool::Eraser),
+        None,
+        "an eraser lays no ink, so it has no weight to choose"
+    );
+    assert_eq!(
+        WeightControl::of(Tool::Lasso),
+        None,
+        "and neither does a lasso"
+    );
+
+    // Never both: the two answers are different tools, so no tool may offer the other's control.
+    for tool in [Tool::Pen, Tool::Highlighter, Tool::Eraser, Tool::Lasso] {
+        let shown: Vec<WeightControl> = WeightControl::of(tool).into_iter().collect();
+
+        assert!(
+            shown.len() <= 1,
+            "{tool:?} offered more than one weight control: {shown:?}"
+        );
+    }
+}
+
+/// Each weight control is named for the tool it belongs to.
+///
+/// The word beside the chooser is the only thing that says which tool it changes, so it has to be that
+/// tool's own name — "Weight" beside the marker's chooser would be the confusion the whole rule is for.
+#[test]
+fn each_weight_control_is_named_for_its_tool() {
+    assert_eq!(WeightControl::Pen.label(), "Weight");
+    assert_eq!(WeightControl::Marker.label(), "Marker");
 }
 
 /// The ring is the palette of the tool in hand — and the *pen's* for the tools that have no palette

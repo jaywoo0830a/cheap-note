@@ -873,6 +873,39 @@ fn palette_colours(tool: Tool) -> &'static [Swatch] {
     }
 }
 
+/// The one weight control the bar shows, or none at all (see [`NoteApp::sheet_row`]).
+///
+/// A pen's weight and a marker's width are the same question — how thick is the next stroke — asked of
+/// two different tools, so the row shows the one the tool in hand has an answer for. Both at once read
+/// as two settings of one pen, and a reader with the pen up is then choosing a marker they cannot see
+/// the effect of. The eraser and the lasso lay no ink, so neither offers a weight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WeightControl {
+    /// The pen's: `PenWeight`, as a multiplier on a line that answers pressure.
+    Pen,
+    /// The marker's: `HighlighterWeight`, as the width of a band that does not.
+    Marker,
+}
+
+impl WeightControl {
+    /// Which control the tool in hand offers, if any.
+    fn of(tool: Tool) -> Option<WeightControl> {
+        match tool {
+            Tool::Pen => Some(WeightControl::Pen),
+            Tool::Highlighter => Some(WeightControl::Marker),
+            Tool::Eraser | Tool::Lasso => None,
+        }
+    }
+
+    /// What the bar calls it: the tool's name, because that is what the chooser beside it changes.
+    fn label(self) -> &'static str {
+        match self {
+            WeightControl::Pen => "Weight",
+            WeightControl::Marker => "Marker",
+        }
+    }
+}
+
 /// Where a colour sits in a palette, or the first place when the palette does not hold it.
 ///
 /// The colour in hand is in the ring for every tool whose palette the ring is (see [`palette_colours`]),
@@ -6296,7 +6329,13 @@ impl NoteApp {
     }
 
     /// The bar's second row: the page's commands, the sheet's size, its ruling, its two colours, and the
-    /// pen's weight.
+    /// weight of the tool in hand.
+    ///
+    /// **The weight control follows the tool.** A pen's weight and a marker's width are different answers
+    /// to the same question — how thick is the next stroke — so only the one in hand is shown. Both
+    /// side by side read as two settings of one pen: a reader who has the pen up is asked which marker
+    /// they want, which is the confusion this row exists to avoid (see [`Self::command_row`], which
+    /// already shows one palette per tool for the same reason).
     fn sheet_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (hairline, muted, accent) = (
@@ -6304,6 +6343,9 @@ impl NoteApp {
             theme.muted_foreground,
             theme.primary,
         );
+
+        // The tool in hand, read once: what the ink circle and the weight control both follow.
+        let tool = self.ink.mode();
 
         // Paper is a square — a page has corners — and ink is a circle, which is what a pen's
         // colour looks like on every writing app there is. Two shapes, one table of colours.
@@ -6329,7 +6371,7 @@ impl NoteApp {
         // a reader who has just picked up the marker should not have to pick a colour out of the pen's row to get
         // the marker they meant.
         let mut ink: Vec<AnyElement> = Vec::new();
-        if self.ink.mode() == Tool::Highlighter {
+        if tool == Tool::Highlighter {
             for swatch in HIGHLIGHTER_COLORS.iter() {
                 ink.push(
                     swatch_button(
@@ -6405,14 +6447,26 @@ impl NoteApp {
             .child(toolbar_divider(hairline))
             .child(control_label("Ink", muted, self.type_ramp.micro))
             .children(ink)
-            .child(toolbar_divider(hairline))
-            .child(control_label("Weight", muted, self.type_ramp.micro))
-            .child(self.chooser("chooser-pen", &self.pen_select, cx))
-            .child(toolbar_divider(hairline))
-            // The marker's own width, beside the pen's: the two tools in hand, each with the thickness
-            // it lays at. Named for the tool rather than "Width", since the row already has a weight.
-            .child(control_label("Marker", muted, self.type_ramp.micro))
-            .child(self.chooser("chooser-highlighter", &self.highlighter_select, cx))
+            // The weight of whatever is in hand, and only that: a pen's weight or a marker's width, never
+            // both. The label and the chooser swap together, so the row never shows a word beside a
+            // control that is not the one it names. See [`WeightControl`].
+            .children(match WeightControl::of(tool) {
+                Some(WeightControl::Pen) => vec![
+                    toolbar_divider(hairline).into_any_element(),
+                    control_label(WeightControl::Pen.label(), muted, self.type_ramp.micro)
+                        .into_any_element(),
+                    self.chooser("chooser-pen", &self.pen_select, cx)
+                        .into_any_element(),
+                ],
+                Some(WeightControl::Marker) => vec![
+                    toolbar_divider(hairline).into_any_element(),
+                    control_label(WeightControl::Marker.label(), muted, self.type_ramp.micro)
+                        .into_any_element(),
+                    self.chooser("chooser-highlighter", &self.highlighter_select, cx)
+                        .into_any_element(),
+                ],
+                None => Vec::new(),
+            })
             .child(toolbar_divider(hairline))
             // The canvas's own ceiling, beside the render option it is a sibling of: what it paces is the
             // canvas's work, not the display's. See [`FrameCap`].

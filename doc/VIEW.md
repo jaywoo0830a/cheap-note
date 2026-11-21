@@ -86,9 +86,17 @@ nothing to do, and a rasterisation can never delay a stroke.
 
 **Two rows and one surface.** The first row is what the reader is *doing* — the document, the tool in
 hand, and the commands that act on the note — and the second is what is being written *on*: the sheet's
-size, its ruling, the two colours, and the pen's weight. The second row wraps and the first does not.
-The bar floats for the reason §1 gives, and it is rounded and lifted off the desk because that is what
-makes the sheet underneath read as paper.
+size, its ruling, the two colours, and the weight of the tool in hand. The second row wraps and the first
+does not. The bar floats for the reason §1 gives, and it is rounded and lifted off the desk because that is
+what makes the sheet underneath read as paper.
+
+**The second row shows one tool's weight, never both.** The pen's weight and the marker's width are the
+same question — how thick is the next stroke — asked of two different tools, so the row carries only the
+one the tool in hand answers, and the eraser and the lasso carry none (they lay no ink). The label and the
+chooser swap together: `Weight` for the pen, `Marker` for the highlighter. Two controls side by side read
+as two settings of one pen, and a reader with the pen up would be choosing a marker whose effect they
+cannot see. The Ink row already follows the tool for exactly this reason — the marker's four colours
+replace the pen's twelve — and this is the same rule applied to thickness.
 
 Three details in it are load-bearing:
 

@@ -36,6 +36,7 @@
 //! | `erase_radius` | a number: logical pixels |
 //! | `ink_color`, `highlighter_color`, `page_color` | whole numbers, `0xRRGGBB` |
 //! | `pen_weight` | a name: `Fine`, `Light`, `Normal`, `Bold`, `Heavy` |
+//! | `highlighter_weight` | a number: the multiplier on the marker's tip (`0.5` … `2.0`) |
 //! | `canvas_size` | a name: `A4`, `A5`, `Letter`, `Legal`, `Square`, `Wide` |
 //! | `canvas_style` | a name: `Plain`, `Ruled`, `Grid`, `Dots` |
 //! | `page_display_width` | a number: logical pixels |
@@ -223,6 +224,123 @@ impl PenWeight {
 /// same pen: 0.585 mm and 0.584 mm both print as "0.58 mm", and both are the pen that is 0.5833 mm.
 const LABEL_TOLERANCE: f32 = 0.005;
 
+/// How wide the highlighter's band is.
+///
+/// A name rather than a width, for the same reason [`PenWeight`] is: a person chooses "a thin marker" or
+/// "a fat one", and the number that comes out of it is the app's business. What is *not* like the pen is
+/// what the number multiplies — the band has no pressure response to shape, so these are plain
+/// multiplies on one tip ([`HighlighterWeight::TIP`]), which is the thickness the app has always shipped.
+///
+/// The range is narrower than the pen's on purpose. A highlighter is read *through*, so a band much under
+/// the height of a line of writing stops being one (it underlines), and one much over it covers two lines
+/// and stops marking which one was meant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HighlighterWeight {
+    /// A thin marker: a single line, for marking a word rather than a sentence.
+    Fine,
+    /// The shipped marker: wide enough to sit under a line of writing.
+    Normal,
+    /// A wide marker, for marking in a small hand.
+    Bold,
+    /// The widest: a thick marker, for covering a heading.
+    Wide,
+}
+
+impl HighlighterWeight {
+    /// Every weight the bar offers, in the order it offers them.
+    pub const ALL: [HighlighterWeight; 4] = [
+        HighlighterWeight::Fine,
+        HighlighterWeight::Normal,
+        HighlighterWeight::Bold,
+        HighlighterWeight::Wide,
+    ];
+
+    /// The width of the shipped marker, in logical pixels.
+    ///
+    /// The one number the weights are multiples of, and the one the app drew every band at before the
+    /// weight existed — so [`HighlighterWeight::Normal`] is a band of exactly the width it always was,
+    /// and every highlight written by an earlier build keeps the thickness it was drawn at.
+    pub const TIP: f32 = 18.0;
+
+    /// What this weight multiplies the tip by.
+    ///
+    /// The values are exact in binary, like [`PenWeight::scale`]'s, so a row written from them reads back
+    /// as the same weight. The narrowest is not below the pen's heaviest line (10.1 logical px with the
+    /// shipped tuning), because a band that was is an underline rather than a highlight.
+    pub fn scale(self) -> f32 {
+        match self {
+            HighlighterWeight::Fine => 0.75,
+            HighlighterWeight::Normal => 1.0,
+            HighlighterWeight::Bold => 1.5,
+            HighlighterWeight::Wide => 2.0,
+        }
+    }
+
+    /// The width a band drawn with this marker is laid at, in logical pixels.
+    pub fn width(self) -> f32 {
+        Self::TIP * self.scale()
+    }
+
+    /// The weight a note's row stands for, from the multiplier the row holds.
+    pub fn from_scale(text: &str) -> Option<HighlighterWeight> {
+        let wanted: f32 = text.trim().parse().ok()?;
+
+        HighlighterWeight::ALL
+            .iter()
+            .copied()
+            .find(|weight| (weight.scale() - wanted).abs() < SCALE_TOLERANCE)
+    }
+
+    /// The label a chooser shows: how thick the band is, in millimetres.
+    ///
+    /// A measurement and not a name, for [`PenWeight::describe`]'s reason: five boxes reading "Thin,
+    /// Normal, Wide" say nothing about what they will draw, while the number says the one thing that
+    /// matters — and a reader comparing it with the pen's own label can see whether the band is three
+    /// times the line or thirty.
+    pub fn describe(self) -> String {
+        format!("{:.1} mm", self.width() / crate::paper::PIXELS_PER_MM)
+    }
+
+    /// The weight a chooser's label names.
+    ///
+    /// One decimal here rather than [`PenWeight::describe`]'s two: the bands are 13.5 to 36 logical
+    /// pixels, so a tenth of a millimetre is already close to the difference between two of them.
+    ///
+    /// Found by *nearest*, not by exact match: a label is a rounded number, and 18 logical px is
+    /// exactly 5.25 mm, which a label printing one decimal shows as "5.2 mm" or "5.3 mm" depending on
+    /// which way it rounds. Each weight's reach is therefore half the gap to its neighbours rather than
+    /// a fixed tolerance — a boundary this label lands on *exactly* (5.25 mm is the midpoint between
+    /// 5.2 and 5.3) is not a number a fixed tolerance can be trusted with.
+    ///
+    /// What the halfway rule cannot do is accept a number from somewhere else: a label outside the
+    /// whole range answers `None`, so text that is not one of these markers does not become one.
+    pub fn from_label(label: &str) -> Option<HighlighterWeight> {
+        let named = millimetres_from_label(label)?;
+        let widths: Vec<f32> = HighlighterWeight::ALL
+            .iter()
+            .map(|weight| weight.width() / crate::paper::PIXELS_PER_MM)
+            .collect();
+
+        // Outside every band's reach: not a marker this build has.
+        let lowest = widths.first()? - (widths.get(1)? - widths.first()?) / 2.0;
+        let highest = widths.last()? + (widths.last()? - widths.get(widths.len() - 2)?) / 2.0;
+
+        if !(lowest..=highest).contains(&named) {
+            return None;
+        }
+
+        // Every interior boundary is the midpoint between two neighbours, so the weight whose own
+        // measurement the number is nearest to is the one it names.
+        let nearest = widths
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| (*a - named).abs().total_cmp(&(*b - named).abs()))?
+            .0;
+
+        Some(HighlighterWeight::ALL[nearest])
+    }
+}
+
 /// How far a row's multiplier may sit from a weight's own and still be that weight.
 ///
 /// The values are exact in binary (0.5, 0.75, 1, 1.5, 2.25) so the tolerance is not doing arithmetic's work — it is
@@ -271,6 +389,16 @@ pub struct Settings {
     /// Beside the ink's colour on purpose: those two *are* the pen, and everything else in this struct
     /// is the paper it is writing on. See [`PenWeight`] for what the weight multiplies.
     pub pen_weight: PenWeight,
+
+    /// How wide the highlighter's band is.
+    ///
+    /// Beside the pen's weight because it is the same kind of answer for the other tool in hand: the
+    /// pen's weight multiplies a line that answers pressure, while this multiplies a band that does not
+    /// — one tip, drawn as wide as it is chosen to be (see [`HighlighterWeight`]).
+    ///
+    /// It is the note's rather than the app's, like the pen's weight and for the same reason: a note
+    /// written in a fat marker and one marked with a thin one are marked differently on purpose.
+    pub highlighter_weight: HighlighterWeight,
 
     /// The width a rendered PDF page is drawn at, in logical pixels.
     pub page_display_width: f32,
@@ -450,6 +578,9 @@ impl Default for Settings {
             // The tuning's own widths, untouched: the sheet the app ships with is written with the pen
             // it ships with.
             pen_weight: PenWeight::Normal,
+            // The marker the app has always drawn with: a band wide enough to sit under a line of
+            // writing. Every highlight written before this was a setting is exactly this width.
+            highlighter_weight: HighlighterWeight::Normal,
             // A4's own width at the application's scale, so the default sheet and the default
             // size agree: choosing the size that is already selected changes nothing.
             page_display_width: CanvasSize::A4.display_width(),
@@ -902,6 +1033,7 @@ mod tests {
             highlighter_color: 0x00_FF_00,
             page_color: 0xFF_F4_E0,
             pen_weight: PenWeight::Heavy,
+            highlighter_weight: HighlighterWeight::Wide,
             page_display_width: 900.0,
             canvas_size: CanvasSize::A5,
             canvas_style: CanvasStyle::Grid,
@@ -944,6 +1076,10 @@ mod tests {
             "the marker's colour"
         );
         assert_eq!(blank.pen_weight, shipped.pen_weight, "the pen's weight");
+        assert_eq!(
+            blank.highlighter_weight, shipped.highlighter_weight,
+            "the marker's width"
+        );
         assert_eq!(blank.min_width, shipped.min_width, "the pen's tuning");
         assert_eq!(blank.max_width, shipped.max_width, "the pen's tuning");
         assert_eq!(
@@ -979,5 +1115,74 @@ mod tests {
         );
         assert!(!blank.show_toolbar, "the bar stays as it was arranged");
         assert!(!blank.show_status, "and so does the status line");
+    }
+
+    /// Every marker weight is spelled out in millimetres, and a chooser's label names its weight back.
+    ///
+    /// The same pair of promises the pen's weights keep, for the same reason: the number is what a
+    /// person picks a marker by, so it has to be right, and a box has to name the weight it stands for
+    /// or choosing one would be a lottery.
+    #[test]
+    fn a_markers_width_is_spelled_out_in_millimetres() {
+        for weight in HighlighterWeight::ALL {
+            let label = weight.describe();
+
+            assert!(
+                label
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.' || c == ' ' || c == 'm'),
+                "the label is a number and its unit and nothing else: {label}"
+            );
+            assert_eq!(
+                HighlighterWeight::from_label(&label),
+                Some(weight),
+                "the chooser's label names the weight back: {label}"
+            );
+        }
+    }
+
+    /// The shipped marker is exactly the band the app drew before the width was a setting.
+    ///
+    /// The one thing that has to keep its value: every highlight in every note written by an earlier
+    /// build is a band of 18 logical pixels, and `Normal` is what a note that says nothing gets. If this
+    /// number moved, a note's old highlights and its new ones would be different widths with nothing
+    /// recording that they should be.
+    #[test]
+    fn the_normal_marker_is_the_band_earlier_builds_drew() {
+        assert_eq!(HighlighterWeight::TIP, 18.0);
+        assert_eq!(HighlighterWeight::Normal.width(), 18.0);
+        assert_eq!(
+            Settings::default().highlighter_weight,
+            HighlighterWeight::Normal
+        );
+    }
+
+    /// Every weight is wider than a line and the four are all different.
+    ///
+    /// A band that was narrower than the pen's heaviest line would be an underline, and two weights that
+    /// landed on the same width would be a chooser with a box that does nothing.
+    #[test]
+    fn every_marker_is_wider_than_a_line_and_they_are_all_different() {
+        let widest_line = Settings::default().max_width * PenWeight::Heavy.scale();
+
+        for weight in HighlighterWeight::ALL {
+            assert!(
+                weight.width() > widest_line,
+                "{weight:?} lays {} px, which is not wider than the heaviest line ({widest_line} px)",
+                weight.width()
+            );
+        }
+
+        let widths: Vec<f32> = HighlighterWeight::ALL
+            .iter()
+            .map(|weight| weight.width())
+            .collect();
+
+        for (index, width) in widths.iter().enumerate() {
+            assert!(
+                !widths[..index].contains(width),
+                "two weights lay the same width: {widths:?}"
+            );
+        }
     }
 }

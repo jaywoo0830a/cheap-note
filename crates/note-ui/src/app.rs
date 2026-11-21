@@ -38,7 +38,7 @@ use crate::canvas::{
 use crate::cursor::{nib_radius_for_width, PenCursor};
 use crate::design::{LayoutMetrics, LayoutPx, ScaleStep, TypeRamp};
 use crate::home::Home;
-use crate::ink::{paper_of_drawn, InkTransform, Notes, Stroke, Tool, HIGHLIGHTER_WIDTH};
+use crate::ink::{paper_of_drawn, InkTransform, Notes, Stroke, Tool};
 use crate::ink_layer::{Canvas, Ink, Page, Rect};
 use crate::input::PenBatch;
 use crate::input::PenInbox;
@@ -51,7 +51,7 @@ use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
 use crate::platform::{GhostFeed, InkSurface, PenSource, Platform, Screen, SystemPointer};
 use crate::prefs::Prefs;
 use crate::recent::{self, Recent};
-use crate::settings::{PenWeight, Settings};
+use crate::settings::{HighlighterWeight, PenWeight, Settings};
 use crate::status_log::StatusLog;
 use crate::timing::{measure, Measurement, Timings};
 use crate::view::{Fit, Viewport};
@@ -1234,6 +1234,11 @@ pub struct NoteApp {
     /// Its labels are *built* rather than spelled out, because each one is the pen's thickness in millimetres
     /// ([`PenWeight::describe`]) and that belongs to the note in hand: hence `String` rather than `&'static str`.
     pen_select: Entity<SelectState<Vec<String>>>,
+    /// The bar's highlighter-weight chooser: how wide a band the marker in hand lays.
+    ///
+    /// The pen's chooser's twin, and built the same way — each box is the band's thickness in millimetres
+    /// ([`HighlighterWeight::describe`]) rather than a word.
+    highlighter_select: Entity<SelectState<Vec<String>>>,
     /// The bar's frame-cap chooser: the most frames a second the canvas will draw.
     ///
     /// Not a display mode — see [`FrameCap`] — so it sits with the render options rather than with the
@@ -1355,6 +1360,19 @@ impl NoteApp {
 
         // The frame cap's labels are their own names — `60 Hz` and the rest — because the number *is* what
         // a person choosing one wants to know.
+        let highlighter_select = choice_of(
+            // The marker's boxes are measurements too, for the pen's reason: what a person choosing a
+            // highlighter wants to know is how wide the band will be (see [`HighlighterWeight::describe`]).
+            HighlighterWeight::ALL
+                .iter()
+                .map(|weight| weight.describe())
+                .collect(),
+            HighlighterWeight::ALL
+                .iter()
+                .position(|weight| *weight == settings.highlighter_weight),
+            window,
+            cx,
+        );
         let frame_select = choice_of(
             FrameCap::ALL
                 .iter()
@@ -1494,6 +1512,7 @@ impl NoteApp {
             sheet_select,
             rule_select,
             pen_select,
+            highlighter_select,
             frame_select,
             memory_select,
             scale_select,
@@ -1553,6 +1572,20 @@ impl NoteApp {
                         PenWeight::from_label(label, app.settings.no_pressure_width)
                     {
                         app.set_pen_weight(weight, cx);
+                    }
+                }
+            },
+        )
+        .detach();
+
+        cx.subscribe(
+            &app.highlighter_select,
+            |app, _, event: &SelectEvent<Vec<String>>, cx| {
+                app.chooser_toggled(false, cx);
+
+                if let SelectEvent::Confirm(Some(label)) = event {
+                    if let Some(weight) = HighlighterWeight::from_label(label) {
+                        app.set_highlighter_weight(weight, cx);
                     }
                 }
             },
@@ -3204,6 +3237,16 @@ impl NoteApp {
         self.finish_setting(cx);
     }
 
+    /// Changes how wide the highlighter's band is.
+    ///
+    /// The pen's weight's twin, and one thing is shared with it: nothing already written changes. A band
+    /// carries the width it was laid at in its own points, so the highlights a note already has keep
+    /// their thickness when the marker in hand is made thinner (see [`crate::ink`]).
+    fn set_highlighter_weight(&mut self, weight: HighlighterWeight, cx: &mut Context<Self>) {
+        self.settings.highlighter_weight = weight;
+        self.finish_setting(cx);
+    }
+
     /// Shows or hides the whole top bar.
     ///
     /// The line the ghost is drawn below and the pointer gives way above is the bar's, so the two are
@@ -3353,7 +3396,7 @@ impl NoteApp {
     /// what a lasso encloses would be a smear rather than a cursor.
     fn nib_width(&self) -> f32 {
         match self.ink.mode() {
-            Tool::Highlighter => HIGHLIGHTER_WIDTH,
+            Tool::Highlighter => self.settings.highlighter_weight.width(),
             Tool::Pen | Tool::Eraser | Tool::Lasso => self.settings.width_for_pressure(Some(1.0)),
         }
     }
@@ -6366,6 +6409,11 @@ impl NoteApp {
             .child(control_label("Weight", muted, self.type_ramp.micro))
             .child(self.chooser("chooser-pen", &self.pen_select, cx))
             .child(toolbar_divider(hairline))
+            // The marker's own width, beside the pen's: the two tools in hand, each with the thickness
+            // it lays at. Named for the tool rather than "Width", since the row already has a weight.
+            .child(control_label("Marker", muted, self.type_ramp.micro))
+            .child(self.chooser("chooser-highlighter", &self.highlighter_select, cx))
+            .child(toolbar_divider(hairline))
             // The canvas's own ceiling, beside the render option it is a sibling of: what it paces is the
             // canvas's work, not the display's. See [`FrameCap`].
             .child(control_label("Frames", muted, self.type_ramp.micro))
@@ -6470,6 +6518,10 @@ impl NoteApp {
             (
                 self.pen_select.clone(),
                 chosen_index(&PenWeight::ALL, pen_weight),
+            ),
+            (
+                self.highlighter_select.clone(),
+                chosen_index(&HighlighterWeight::ALL, self.settings.highlighter_weight),
             ),
             (
                 self.frame_select.clone(),

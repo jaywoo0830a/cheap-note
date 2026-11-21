@@ -326,7 +326,7 @@ Five facts about the ghost are decided here, and each of them is something a pen
 | where it is and how it leans | the pen's newest reading, in window coordinates, with no sign flip: lean right and the ghost extends right of the nib |
 | where it is *not* drawn | **only below the bar and off the desk's pills**: over the bar it would sit behind an opaque background where it cannot be seen, and over a pill it would point at a control the pen is pressing rather than at paper — and **never on a screen in front of the sheet**: the home list, the marked pages and the document's contents, none of which has a sheet to point at and all of which are meant to be pressed, **nor under a control that hangs over the page** (a chooser's list, the palette at the pen) |
 | the display scale, the interface scale, the colours on this paper, and where the bar ends | published to the overlay (`publish_screen`) on the frames where they change, so a new pen colour, paper or interface scale takes hold at once rather than at the next reading |
-| how **thick** the mark is | the same publication (`Screen::nib_radius`): half the width the tool in hand lays, which only the app knows — the pen's weight is a setting, and the marker's band is the tool's |
+| how **thick** the mark is | the same publication (`Screen::nib_radius`): half the width the tool in hand lays, which only the app knows — the pen's weight and the marker's width are both settings (`Settings::pen_weight`, `Settings::highlighter_weight`) |
 
 **The nib's dot is the colour in hand, and it is as wide as the line in hand.** The mark is drawn in the ink the next
 stroke will be written in — the pen's colour, or the marker's — because that is what a reader looks at the dot to know,
@@ -592,7 +592,7 @@ drawn as the ring it is — thin, over the ink, so the writing can be read throu
 ### The highlighter
 
 The marker is the pen's *sibling* rather than a fourth kind of gesture: it lays a **band** where the pen lays a
-line. Two numbers make it that — one fixed width, and a colour with an alpha in it — and both are stamped into the
+line. Two numbers make it that — a width, and a colour with an alpha in it — and both are stamped into the
 stroke when the nib goes down, exactly as the pen's colour and weight are. Nothing else in the app knows what a
 highlighter is: a highlight *is* an ordinary stroke, so it can be erased, taken in a lasso's loop, dragged, undone,
 and stored with the page, and no part of the file format had to change for it.
@@ -601,6 +601,19 @@ Its colours are a palette of their own, and the bar's ink row follows the tool: 
 read *through* — a pen's black at the same alpha would be a grey smear over the page. A band does not respond to
 pressure at all (a marker has one tip, and a translucent band that thinned under a light touch would show the
 writing through in stripes), and the eraser takes it like any other ink.
+
+**The band's width is the note's, and the stroke keeps it.** `highlighter_weight` says which marker is in
+hand — four tips from 13.5 to 36 logical pixels, the second of which is the 18 px band every earlier build
+drew — and the bar's `Marker` chooser sets it. It is stamped per point like any width, so a note marked in a
+fat marker and then marked again in a thin one holds both bands at the thickness each was laid at, exactly as
+a pen's weight leaves old lines alone. The narrowest tip is above the pen's heaviest line, because a band
+under it would be an underline rather than a highlight.
+
+**How a stroke knows it is a band.** The width it follows — one tip, or the hand's pressure — is read from
+the *stroke* rather than from the tool in hand, because the tool may have been changed since the stroke was
+begun. Three things say it is a band: its ink is translucent, its width is one of the marker's tips, and that
+width has not moved since the first point. The second is what tells a band from the pencil, which is
+translucent too (`PenWeight::Fine`).
 
 **The band is freehand, always.** It follows the nib exactly as a line does, over a document's text as much as over
 a blank sheet: what the hand draws is what is laid down, with no snapping to characters and no line-by-line

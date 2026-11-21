@@ -39,10 +39,10 @@
 //! Four, and each is a different thing to do to a page rather than a different setting of one pen:
 //!
 //! * **The pen** writes lines, in the colour and weight in hand (see [`crate::settings`]).
-//! * **The highlighter** lays a band: one fixed width, and a colour with an alpha in it, so that what it marks stays
-//!   readable through it (see [`HIGHLIGHTER_ALPHA`]). It is not a pen in disguise — it is the *same* stroke with
-//!   translucent ink, which is why a highlight can be erased, dragged, undone and stored like anything else, and
-//!   why nothing outside this module has to know what a highlighter is.
+//! * **The highlighter** lays a band: one tip's width (the note's `highlighter_weight`), and a colour with an
+//!   alpha in it, so that what it marks stays readable through it (see [`HIGHLIGHTER_ALPHA`]). It is not a pen in
+//!   disguise — it is the *same* stroke with translucent ink, which is why a highlight can be erased, dragged,
+//!   undone and stored like anything else, and why nothing outside this module has to know what a highlighter is.
 //! * **The eraser** removes the strokes the nib passes near, whatever they are.
 //! * **The lasso** takes the ink a loop encloses into the hand, to drag or delete.
 //!
@@ -102,7 +102,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::history::{Edit, History};
 use crate::pages::Quarters;
-use crate::settings::Settings;
+use crate::settings::{HighlighterWeight, Settings};
 
 /// The ink itself, from the format crate — and the geometry that is arithmetic over it.
 ///
@@ -345,12 +345,52 @@ pub enum Tool {
     Lasso,
 }
 
-/// How wide the highlighter's nib is, in logical pixels.
+/// How wide the highlighter's nib is when a note says nothing, in logical pixels.
 ///
-/// Not a setting, and deliberately: a marker has one tip, and everything a highlighter is for comes from the two
-/// numbers being *fixed* — a band wide enough to sit under a line of writing, and a colour light enough to read
-/// through. The pen's widths are the reader's because a hand varies; this one is the tool's.
-pub const HIGHLIGHTER_WIDTH: f32 = 18.0;
+/// Kept as the name the tests and the documentation use for "the shipped band"; the note's own answer
+/// is [`crate::settings::HighlighterWeight::width`], of which this is the plain one. Spelled out as
+/// [`crate::settings::HighlighterWeight::TIP`] rather than as `18.0`, so the two cannot drift apart.
+///
+/// `cfg(test)` because nothing in the app reads it any more: the band's width comes from the note
+/// (see [`is_band`] and the `Tool::Highlighter` branch of `consume`), and this is what those are
+/// checked against.
+#[cfg(test)]
+pub const HIGHLIGHTER_WIDTH: f32 = crate::settings::HighlighterWeight::TIP;
+
+/// Whether a stroke is a highlighter's band rather than a pen's line.
+///
+/// The question a stroke being added to has to answer, because a band lays every point at one width and
+/// a pen's line follows the pressure — and the tool in hand cannot answer it, since the tool may have
+/// been changed since the stroke was begun.
+///
+/// Three things say it, and all three are about the stroke:
+///
+/// * its ink is translucent (a highlighter's colour is stamped with [`HIGHLIGHTER_ALPHA`]);
+/// * **its width is one of the marker's tips** ([`HighlighterWeight::ALL`]). This is what the check used
+///   to be — equality with one constant — and it is kept as a *set* now that the tip is a setting. It is
+///   the part that tells a band from the pencil: a fine pen is translucent too (see
+///   [`crate::settings::PenWeight::alpha`]), and its own width is a pen's size, not a marker's;
+/// * **its width has not moved**. A band whose points had drifted apart would be one the hand was
+///   shaping, which is the one thing a marker does not do to its line.
+fn is_band(stroke: &Stroke) -> bool {
+    if alpha_of(stroke.color) >= 1.0 {
+        return false;
+    }
+
+    let Some(first) = stroke.points.first() else {
+        return false;
+    };
+
+    let on_a_tip = HighlighterWeight::ALL
+        .iter()
+        .any(|weight| (first.width - weight.width()).abs() < 1e-3);
+
+    on_a_tip
+        && stroke
+            .points
+            .iter()
+            .all(|point| (point.width - first.width).abs() < 1e-3)
+}
 
 /// How much of the page a highlighter's stroke lets through: the alpha its colour is stamped with.
 ///
@@ -997,15 +1037,18 @@ impl InkDocument {
 
                                 self.open = Some(Stroke::new(InkPoint::new(x, y, width), colour));
                             }
-                            // A highlighter is a pen stroke whose ink lets the page through: one fixed width, and a
-                            // colour with an alpha in it. Both are stamped in at the same moment the pen's are, so the
-                            // line carries what it was drawn with and nothing about the tool has to be remembered
-                            // afterwards — the *stroke* is wide, not the tool (see [`alpha_of`] and [`add_point`]).
+                            // A highlighter is a pen stroke whose ink lets the page through: one tip's width,
+                            // and a colour with an alpha in it. Both are stamped in at the same moment the pen's
+                            // are, so the line carries what it was drawn with and nothing about the tool has to
+                            // be remembered afterwards — the *stroke* is wide, not the tool (see [`alpha_of`]
+                            // and [`add_point`]). The width is the note's own answer for the marker in hand
+                            // (see [`crate::settings::HighlighterWeight`]), stamped per point like any width:
+                            // a band written with the thin marker keeps its tip when the next is drawn wide.
                             // It is freehand wherever it is drawn: a band follows the nib exactly as a line does.
                             Tool::Highlighter => {
                                 self.open_id = self.open_id.wrapping_add(1);
                                 self.open = Some(Stroke::new(
-                                    InkPoint::new(x, y, HIGHLIGHTER_WIDTH),
+                                    InkPoint::new(x, y, settings.highlighter_weight.width()),
                                     with_alpha(settings.highlighter_color, HIGHLIGHTER_ALPHA),
                                 ));
                             }
@@ -1509,21 +1552,16 @@ fn add_point(
     //
     // Being translucent is *not* what makes it a highlighter. A fine pen is translucent too — it is the pencil,
     // and a pencil that stopped answering pressure would be a thin marker (see `PenWeight::alpha`). What a
-    // highlighter has and a pen does not is a **fixed width**: its points are all laid at the one tip's
-    // thickness, which is the tool's rather than the hand's. So the question asked here is whether every point so
-    // far is at the highlighter's width, and a stroke whose width has ever varied is one the pressure is moving.
-    let fixed = alpha_of(stroke.color) < 1.0
-        && stroke
-            .points
-            .iter()
-            .all(|point| (point.width - HIGHLIGHTER_WIDTH).abs() < 1e-3);
+    // highlighter has and a pen does not is a **width the hand does not move**: its points are all laid at the
+    // one tip's thickness, whatever that tip was chosen to be. See [`is_band`].
+    let fixed = is_band(stroke);
 
     let width = if fixed {
         stroke
             .points
             .last()
             .map(|point| point.width)
-            .unwrap_or(HIGHLIGHTER_WIDTH)
+            .unwrap_or_else(|| settings.highlighter_weight.width())
     } else {
         match sample.applied_pressure() {
             Some(_) => settings.width_for_pressure(sample.applied_pressure()),

@@ -22,5 +22,8 @@ pub use note_format::ink::alpha_of;
 /// A colour with an alpha stamped into its top byte: `0xAARRGGBB`.
 pub use note_format::ink::with_alpha;
 
-/// How wide the highlighter's band is, in logical pixels: the tool's own number, not a setting.
+/// How much of the page a highlighter's band lets through: the alpha stamped into its colour.
+///
+/// The band's *width* is not a constant: it is the note's own answer for the marker in hand
+/// (`Settings::highlighter_weight`), and each stroke carries the tip it was laid with.
 pub use crate::ink::HIGHLIGHTER_ALPHA;

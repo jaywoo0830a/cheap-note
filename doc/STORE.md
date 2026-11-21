@@ -244,7 +244,10 @@ the hand — and nothing about a note is remembered anywhere but in the note. Th
 on purpose: `pen_weight` says *which* pen, as the multiplier on the nib's own line (`0.5` … `2.25` —
 `settings::PenWeight::scale`), while `min_width`, `max_width` and `no_pressure_width` say how *any* pen
 answers a hand, so a marker is fat at the lightest touch *and* at the heaviest and no weight can make a line
-that thins as it is pressed. What is already written is
+that thins as it is pressed. The highlighter has one row of its own for the same reason `pen_weight` exists:
+`highlighter_weight` says which marker is in hand, as the multiplier on its tip (`0.75` … `2.0`, where `1.0`
+is the 18 logical pixels every band was drawn at before the width was a setting —
+`settings::HighlighterWeight::scale`), and a band never answers pressure at all. What is already written is
 untouched: every point carries the width and the colour it was drawn with.
 
 ---

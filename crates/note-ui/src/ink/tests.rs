@@ -1,7 +1,7 @@
 use super::*;
 use crate::history::HISTORY_EDITS;
 use crate::input::{Phase, Point, Reading};
-use note_format::settings::PenWeight;
+use note_format::settings::{HighlighterWeight, PenWeight};
 
 /// A reading on a turned page is stored in the page's own coordinates, and reads back where it was
 /// written.
@@ -2896,12 +2896,93 @@ fn a_highlighter_lays_down_a_wide_translucent_band() {
         stroke
             .points
             .iter()
-            .all(|point| point.width == HIGHLIGHTER_WIDTH),
+            .all(|point| point.width == s.highlighter_weight.width()),
         "one width from the first point to the last: a marker has one tip"
     );
     assert!(
-        HIGHLIGHTER_WIDTH > s.max_width,
+        stroke.points[0].width > s.max_width,
         "and a band is wider than any line the pen draws"
+    );
+}
+
+/// The marker's band is as wide as the note says, and every point of it is that same width.
+///
+/// The pen's weight is a multiplier on a line whose *shape* the hand moves; this one is a multiplier on
+/// a tip that does not move at all, so the check is the same at every point. It is asked across the
+/// whole set of weights in one test because the property is the same for each of them — what would be
+/// wrong is any weight that laid its band at another weight's width, or that let the width drift with the
+/// hand as a line's does.
+#[test]
+fn the_band_is_as_wide_as_the_marker_in_hand() {
+    for weight in HighlighterWeight::ALL {
+        let mut s = settings();
+        s.highlighter_weight = weight;
+
+        let mut ink = InkDocument::default();
+        ink.set_mode(Tool::Highlighter);
+        // A light press, a heavy one and a lift, so a width that answered pressure would show it.
+        ink.consume(
+            &[reading(7, Phase::Down, 10.0, 10.0, Some(0.05))],
+            &id(),
+            &s,
+        );
+        ink.consume(
+            &[reading(7, Phase::Move, 40.0, 10.0, Some(0.95))],
+            &id(),
+            &s,
+        );
+        ink.consume(&[reading(7, Phase::Up, 70.0, 10.0, None)], &id(), &s);
+
+        let stroke = &ink.finished()[0];
+
+        assert!(
+            stroke
+                .points
+                .iter()
+                .all(|point| (point.width - weight.width()).abs() < 1e-3),
+            "{weight:?}: the band is not its own tip's width ({:?}): {:?}",
+            weight.width(),
+            stroke.points.iter().map(|p| p.width).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// A highlight keeps the width it was laid at when the marker is changed afterwards.
+///
+/// The reason the width is stamped per point rather than read from the setting at draw time: a note
+/// marked in a fat marker and then marked again in a thin one holds both, and the old bands do not thin
+/// out because the tool in hand changed. It is the same rule the pen's weight and its colour follow.
+#[test]
+fn a_highlight_keeps_the_width_it_was_laid_at() {
+    let mut s = settings();
+    s.highlighter_weight = HighlighterWeight::Wide;
+
+    let mut ink = InkDocument::default();
+    ink.set_mode(Tool::Highlighter);
+    ink.consume(&[reading(7, Phase::Down, 10.0, 10.0, None)], &id(), &s);
+    ink.consume(&[reading(7, Phase::Up, 60.0, 10.0, None)], &id(), &s);
+
+    // The same hand, the same note, a thinner marker.
+    s.highlighter_weight = HighlighterWeight::Fine;
+    ink.consume(&[reading(8, Phase::Down, 10.0, 40.0, None)], &id(), &s);
+    ink.consume(&[reading(8, Phase::Up, 60.0, 40.0, None)], &id(), &s);
+
+    let bands = ink.finished();
+
+    assert_eq!(bands.len(), 2, "two bands were laid");
+    assert!(
+        bands[0]
+            .points
+            .iter()
+            .all(|point| (point.width - HighlighterWeight::Wide.width()).abs() < 1e-3),
+        "the first band kept the wide tip it was laid with"
+    );
+    assert!(
+        bands[1]
+            .points
+            .iter()
+            .all(|point| (point.width - HighlighterWeight::Fine.width()).abs() < 1e-3),
+        "and the second was laid with the thin one"
     );
 }
 

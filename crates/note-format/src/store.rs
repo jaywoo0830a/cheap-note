@@ -93,7 +93,7 @@ use crate::error::{Error, Result, Variant};
 use crate::history::{Edit, History, HistoryUpdate};
 use crate::ink::{Bounds, Stroke};
 use crate::paper::{CanvasSize, CanvasStyle, FrameCap, MemoryMode};
-use crate::settings::{PenWeight, Settings};
+use crate::settings::{HighlighterWeight, PenWeight, Settings};
 
 /// The schema version this build writes, in `PRAGMA user_version`.
 ///
@@ -1202,6 +1202,12 @@ impl NoteStore {
             row_value(conn, "highlighter_color", into.highlighter_color, colour_of)?;
         into.page_color = row_value(conn, "page_color", into.page_color, colour_of)?;
         into.pen_weight = row_value(conn, "pen_weight", into.pen_weight, PenWeight::from_scale)?;
+        into.highlighter_weight = row_value(
+            conn,
+            "highlighter_weight",
+            into.highlighter_weight,
+            HighlighterWeight::from_scale,
+        )?;
         into.grayscale_pages = row_value(conn, "grayscale_pages", into.grayscale_pages, flag_of)?;
         into.frame_cap = row_value(conn, "frame_cap", into.frame_cap, FrameCap::from_label)?;
         into.memory_mode = row_value(
@@ -1271,6 +1277,11 @@ impl NoteStore {
         put_row(&tx, "highlighter_color", settings.highlighter_color)?;
         put_row(&tx, "page_color", settings.page_color)?;
         put_row(&tx, "pen_weight", settings.pen_weight.scale())?;
+        put_row(
+            &tx,
+            "highlighter_weight",
+            settings.highlighter_weight.scale(),
+        )?;
         put_flag(&tx, "grayscale_pages", settings.grayscale_pages)?;
         put_row(&tx, "frame_cap", settings.frame_cap.label())?;
         put_row(&tx, "memory_mode", settings.memory_mode.label())?;
@@ -2372,6 +2383,7 @@ mod tests {
             highlighter_color: 0xFF_8F_B1,
             page_color: 0xF5_F0_E6,
             pen_weight: PenWeight::Fine,
+            highlighter_weight: HighlighterWeight::Fine,
             grayscale_pages: true,
             memory_mode: MemoryMode::Lean,
             frame_cap: FrameCap::Hz60,
@@ -2398,6 +2410,7 @@ mod tests {
             highlighter_color: 0x7F_C4_FF,
             page_color: 0x20_20_24,
             pen_weight: PenWeight::Heavy,
+            highlighter_weight: HighlighterWeight::Bold,
             grayscale_pages: false,
             memory_mode: MemoryMode::Room,
             frame_cap: FrameCap::Hz240,

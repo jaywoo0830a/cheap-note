@@ -18,6 +18,10 @@
 //! whatever is in hand. The alternative is a global answer — the sheet somebody last chose, handed to a
 //! note that was written on another — and that is the thing this design exists to have none of.
 //!
+//! That rule is [`Settings::to_shipped`], called by the app whenever a blank sheet is started: keeping
+//! the shipped set *in* hand is what makes "told whatever is in hand" mean "told the shipped set". The
+//! three fields it keeps are named there, with the reason each is not the note's to choose.
+//!
 //! ## The rows are the schema
 //!
 //! A note keeps its settings in its own `meta` table, **one row per setting, named after the setting**
@@ -488,6 +492,33 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Back to the set the app ships with, keeping only what is not the note's to choose.
+    ///
+    /// This is what a *blank sheet* starts on. With no note open there is nowhere to have written an
+    /// answer, so a choice made on a blank sheet and then closed on is gone — handing it to the next
+    /// blank sheet is the global answer this design exists to have none of (see the module note).
+    ///
+    /// Two things are kept, and neither is about the sheet:
+    ///
+    /// * [`Self::export_dir`] — where the last export went is a fact about *where this person keeps
+    ///   files*, not about what is written. A new note exported to the directory the last one went to is
+    ///   the convenience that row exists for, and resetting it would send every new note back to the
+    ///   process's working directory.
+    /// * [`Self::show_toolbar`] and [`Self::show_status`] — the bar is how this person has arranged
+    ///   their *workspace*. A reader who hid the bar to write on a full sheet did not mean "the next
+    ///   note gets its bar back", and a bar that came back on every new note would be a switch that
+    ///   only holds until the next sheet.
+    pub fn to_shipped(&mut self) {
+        let export_dir = self.export_dir.clone();
+        let (show_toolbar, show_status) = (self.show_toolbar, self.show_status);
+
+        *self = Settings::default();
+
+        self.export_dir = export_dir;
+        self.show_toolbar = show_toolbar;
+        self.show_status = show_status;
+    }
+
     /// Whether a zoom *gesture* — a pinch, or a fit — may move the sheet.
     ///
     /// The lock's whole rule, in the one place it is asked, so that "locked" means one thing at every site that zooms
@@ -856,5 +887,97 @@ mod tests {
         };
 
         assert!(!locked.gestures_zoom(), "and a lock is a lock");
+    }
+
+    /// A blank sheet starts on the shipped set, and keeps only what is not the note's to choose.
+    ///
+    /// The rule the whole module states — a choice made on a blank sheet has nowhere to have been
+    /// written, so it is gone — is this function. It is checked field by field rather than in one
+    /// `assert_eq`, because the point is *which* fields survive: the two that are the person's
+    /// workspace rather than the sheet's.
+    #[test]
+    fn a_blank_sheet_starts_on_the_shipped_set() {
+        let chosen = Settings {
+            ink_color: 0xE0_25_2B,
+            highlighter_color: 0x00_FF_00,
+            page_color: 0xFF_F4_E0,
+            pen_weight: PenWeight::Heavy,
+            page_display_width: 900.0,
+            canvas_size: CanvasSize::A5,
+            canvas_style: CanvasStyle::Grid,
+            grayscale_pages: true,
+            memory_mode: MemoryMode::Lean,
+            frame_cap: FrameCap::Hz60,
+            vsync: false,
+            pen_jitter: false,
+            pressure_fades: false,
+            zoom: 2.0,
+            zoom_locked: true,
+            resample_spacing: 0.1,
+            smoothing_ms: 6.0,
+            min_width: 3.0,
+            max_width: 9.0,
+            no_pressure_width: 5.0,
+            erase_radius: 40.0,
+            // The three that are not the sheet's: kept on purpose.
+            export_dir: Some(PathBuf::from("/tmp/exports")),
+            show_toolbar: false,
+            show_status: false,
+        };
+
+        let mut blank = chosen.clone();
+        blank.to_shipped();
+
+        let shipped = Settings::default();
+
+        // Everything about the sheet, the pen and the view is back to what the app ships.
+        assert_eq!(blank.canvas_size, shipped.canvas_size, "the sheet");
+        assert_eq!(blank.canvas_style, shipped.canvas_style, "the ruling");
+        assert_eq!(blank.page_color, shipped.page_color, "the paper's colour");
+        assert_eq!(
+            blank.page_display_width, shipped.page_display_width,
+            "the width a sheet is drawn at"
+        );
+        assert_eq!(blank.ink_color, shipped.ink_color, "the pen's colour");
+        assert_eq!(
+            blank.highlighter_color, shipped.highlighter_color,
+            "the marker's colour"
+        );
+        assert_eq!(blank.pen_weight, shipped.pen_weight, "the pen's weight");
+        assert_eq!(blank.min_width, shipped.min_width, "the pen's tuning");
+        assert_eq!(blank.max_width, shipped.max_width, "the pen's tuning");
+        assert_eq!(
+            blank.no_pressure_width, shipped.no_pressure_width,
+            "the pen's tuning"
+        );
+        assert_eq!(
+            blank.resample_spacing, shipped.resample_spacing,
+            "how the readings are kept"
+        );
+        assert_eq!(blank.smoothing_ms, shipped.smoothing_ms, "the smoothing");
+        assert_eq!(blank.erase_radius, shipped.erase_radius, "the eraser");
+        assert_eq!(blank.zoom, shipped.zoom, "the zoom");
+        assert_eq!(blank.zoom_locked, shipped.zoom_locked, "the zoom's lock");
+        assert_eq!(
+            blank.grayscale_pages, shipped.grayscale_pages,
+            "the reading"
+        );
+        assert_eq!(blank.memory_mode, shipped.memory_mode, "the memory");
+        assert_eq!(blank.frame_cap, shipped.frame_cap, "the frame cap");
+        assert_eq!(blank.vsync, shipped.vsync, "vertical sync");
+        assert_eq!(blank.pen_jitter, shipped.pen_jitter, "the gesture's filter");
+        assert_eq!(
+            blank.pressure_fades, shipped.pressure_fades,
+            "the pencil's fade"
+        );
+
+        // And the three that are the person's rather than the sheet's.
+        assert_eq!(
+            blank.export_dir,
+            Some(PathBuf::from("/tmp/exports")),
+            "where exports go is not the sheet's to choose"
+        );
+        assert!(!blank.show_toolbar, "the bar stays as it was arranged");
+        assert!(!blank.show_status, "and so does the status line");
     }
 }

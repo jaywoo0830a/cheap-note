@@ -12,6 +12,7 @@ use note_format::history::{Edit, HistoryUpdate};
 use note_format::ink::Stroke;
 use note_format::note;
 use note_format::pages::{Page, PageEntry};
+use note_format::paper::{CanvasSize, CanvasStyle};
 use note_format::settings::{PenWeight, Settings};
 use note_format::store::{NoteStore, SCHEMA_VERSION};
 
@@ -298,6 +299,73 @@ fn the_settings_a_note_keeps_are_its_own() {
     store.read_settings(&mut read).expect("the settings back");
 
     assert_eq!(read, settings, "a note keeps every setting it is given");
+}
+
+/// A note that has never been told anything keeps the sheet that was already up.
+///
+/// Reading a note's settings fills in only what the note actually says (see [`NoteStore::read_settings`]).
+/// This is the *storage* half of that rule, and it is still the rule: opening a note must not clear
+/// settings the note has nothing to say about, because the note is read over what is in hand rather
+/// than replacing it wholesale.
+///
+/// What changed is the *app's* side of it. A blank sheet no longer starts on whatever the last note was
+/// written with — [`Settings::to_shipped`] is called when one is started — so what is in hand when a
+/// note is opened is the shipped set, and a note with no rows of its own keeps exactly that. The two
+/// rules together are what makes a new note start on the shipped sheet.
+#[test]
+fn a_note_that_has_never_been_told_anything_keeps_the_sheet_in_hand() {
+    let (store, _path) = note("untold-settings");
+
+    let in_hand = Settings {
+        canvas_size: CanvasSize::A5,
+        canvas_style: CanvasStyle::Grid,
+        page_display_width: 621.0,
+        ink_color: 0x00_00_00,
+        ..Settings::default()
+    };
+
+    // The note says nothing: a fresh note has an empty `meta`, and `read_settings` writes nothing either.
+    let mut read = in_hand.clone();
+    store.read_settings(&mut read).expect("the settings");
+
+    assert_eq!(
+        read, in_hand,
+        "a note with no settings rows of its own changed the sheet in hand"
+    );
+    assert_ne!(
+        in_hand.canvas_size,
+        Settings::default().canvas_size,
+        "the test's sheet is the shipped one, so it would prove nothing"
+    );
+}
+
+/// A note that *has* said something is read over what is in hand.
+///
+/// The other half of the same rule: the moment a note is told anything, its answer is what it gets. A
+/// note does not inherit the sheet of whoever was written in last — it inherits what is in hand, which
+/// is why `to_shipped` matters: with a blank sheet starting on the shipped set, a note that says nothing
+/// is a note on the shipped sheet, and a note that says something is itself.
+#[test]
+fn a_note_that_says_something_is_read_over_what_is_in_hand() {
+    let (mut store, _path) = note("told-settings");
+
+    let its_own = Settings {
+        canvas_size: CanvasSize::Square,
+        canvas_style: CanvasStyle::Ruled,
+        ink_color: 0x00_00_00,
+        ..Settings::default()
+    };
+    store.set_settings(&its_own).expect("the settings");
+
+    let in_hand = Settings {
+        canvas_size: CanvasSize::Legal,
+        canvas_style: CanvasStyle::Dots,
+        ..Settings::default()
+    };
+    let mut read = in_hand;
+    store.read_settings(&mut read).expect("the settings back");
+
+    assert_eq!(read, its_own, "the note's own answer did not win");
 }
 
 /// A setting this build no longer keeps is ignored, and left where it is.

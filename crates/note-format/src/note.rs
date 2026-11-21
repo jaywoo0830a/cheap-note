@@ -1571,12 +1571,18 @@ mod tests {
 
         let folder = scratch.join("placed");
         let mut note = Note::placed_from(&document, &folder).expect("a note");
-        note.store_mut().set_document("chapter-3.pdf").expect("a name");
+        note.store_mut()
+            .set_document("chapter-3.pdf")
+            .expect("a name");
         note.store_mut()
             .set_document_fingerprint(&fingerprint(&document).expect("a fingerprint"))
             .expect("a fingerprint is recorded");
         note.store_mut()
-            .append(0, &[stroke(3, 1.0)], &crate::history::HistoryUpdate::default())
+            .append(
+                0,
+                &[stroke(3, 1.0)],
+                &crate::history::HistoryUpdate::default(),
+            )
             .expect("a stroke");
         note.store().checkpoint().expect("written");
         drop(note);
@@ -1620,7 +1626,10 @@ mod tests {
         let before = std::fs::read(folder.join(NOTE_PDF)).expect("the copy");
 
         let refused = Note::placed_from(&second, &folder);
-        assert!(refused.is_err(), "a note is not replaced by placing over it");
+        assert!(
+            refused.is_err(),
+            "a note is not replaced by placing over it"
+        );
         assert_eq!(
             std::fs::read(folder.join(NOTE_PDF)).expect("the copy"),
             before,

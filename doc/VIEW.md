@@ -847,12 +847,21 @@ notes in one session are two notes rather than one overwriting the other.
 The note that is made takes over what is in hand: the page list, the sheet the ink is written on, every
 setting, and which page is open — plus the marks that were made on the sheet *before* there was a note to
 keep them in, since a blank sheet exists only once something is written on it and a mark is one of the
-things that makes it exist. Reading a note's settings fills in only what the note actually says, so a note
-that has never been told anything keeps the sheet and the pen already up — which is how a blank page, or a
-PDF just placed, continues what is in hand instead of snapping back to the shipped set. The whole set is
-then written straight back, so from that moment the answers travel with *that note* and not with whoever
-was written in last. A choice made on a blank sheet and then thrown away is gone: there is nowhere to have
-written it.
+things that makes it exist.
+
+**A blank sheet starts on the set the app ships with.** With no note open there is nowhere to have
+written an answer, so a sheet, a pen or a zoom chosen on the blank sheet before this one is gone —
+`new_blank_sheet` calls `Settings::to_shipped`, which is `Settings::default()` kept for the three fields
+that are not the sheet's to choose: where exports go (a fact about the machine and the person, not about
+what is written), and whether the bar and its status line are shown (how the workspace is arranged — a
+bar that came back on every new sheet would be a switch that only holds until the next one). The whole
+set is written into the note the moment the first stroke makes it, so from that moment the answers travel
+with *that note* and not with whoever was written in last.
+
+Reading a note's settings fills in only what the note actually says, which is why this matters rather than
+being automatic: a note with no rows of its own would otherwise inherit whatever was in hand. It is the
+shipped set that is in hand, so a new note is a note on the shipped sheet, and a note that has been told
+something is itself.
 
 **Opening** prefers the *folder* to the file: the note that already exists is opened, and a file is only
 placed when there is no note for it. Placing a file again is how a note is lost — what was written in the

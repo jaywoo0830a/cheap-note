@@ -4323,9 +4323,10 @@ impl NoteApp {
         // [`Self::pdf_render_pixel_width`]) and the zoom is where the reader was.
         //
         // `read_settings` fills in only what the note actually says, so a note that has never been told
-        // anything keeps the sheet and the pen already up — which is how a blank page, or a PDF just
-        // placed, continues what is in hand. The whole set is then written back, so from here the answers
-        // travel with *it* and not with whoever was written in last.
+        // anything keeps what is in hand — which is why a blank sheet starts on the shipped set (see
+        // [`Settings::to_shipped`] and [`Self::new_blank_sheet`]): a note made from one inherits the
+        // shipped set rather than the last note's. The whole set is then written back, so from here the
+        // answers travel with *it* and not with whoever was written in last.
         note.store().read_settings(&mut self.settings)?;
         note.store_mut().set_settings(&self.settings)?;
 
@@ -4803,6 +4804,12 @@ impl NoteApp {
     }
 
     /// Starts a blank sheet: a note that does not exist until the first stroke.
+    ///
+    /// A blank sheet starts on **the set the app ships with**, not on whatever the last note was
+    /// written with. There is no note here to have written an answer in, so a sheet, a pen or a zoom
+    /// chosen on the sheet before this one is gone — the alternative is a global answer handed from one
+    /// note to another, which is the one thing [`crate::settings`] exists to have none of. See
+    /// [`Settings::to_shipped`] for the two things kept anyway, and why each is not the note's to choose.
     pub(crate) fn new_blank_sheet(&mut self, cx: &mut Context<Self>) {
         self.close_page();
 
@@ -4821,6 +4828,19 @@ impl NoteApp {
         self.rewritten.clear();
         self.ink.go_to(0);
         self.loaded.insert(0);
+
+        // The paper, the pen and the view go back to the shipped set, and the view is rebuilt around
+        // them: the zoom the last note was read at means nothing on a sheet nobody has looked at.
+        self.settings.to_shipped();
+        self.view = Viewport::new(self.settings.zoom);
+        // A place remembered for the last note's page 4 is a position in *its* list, not a place on this
+        // sheet (see [`Self::turn_to`]) — the same reason opening a note clears them.
+        self.pans.clear();
+        // The surface is told the new answer now rather than at the next note: vertical sync is the
+        // setting the layer holds rather than the view, so a blank sheet with it switched off would
+        // keep presenting the other way until something else opened (see [`Self::apply_vsync`]).
+        self.apply_vsync();
+
         self.home.hide();
         // Three screens were put away at once, on a keypress: the ghost comes back now (see
         // [`Self::publish_cursor`]).

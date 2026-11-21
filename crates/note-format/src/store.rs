@@ -1187,9 +1187,10 @@ impl NoteStore {
     /// [`Self::set_settings`], and not deleted: it is simply not ours to touch (see [`crate::settings`]).
     ///
     /// `into` is the answer for everything the note does not say. The caller passes the settings in
-    /// hand, so a note that has never been told anything keeps the sheet and the pen that are already
-    /// up — which is how a PDF just placed continues the page it was placed on instead of snapping back
-    /// to the shipped defaults. A note that does say something is read over it.
+    /// hand, so a note that has never been told anything keeps what is already up. That is the reason a
+    /// *blank sheet* starts on the shipped set (see [`Settings::to_shipped`]): the note that the first
+    /// stroke makes inherits what is in hand, and what is in hand is the shipped set rather than the
+    /// last note's answers. A note that does say something is read over it.
     ///
     /// A row that is there and cannot be understood is an error, not a default: something wrote it, and
     /// quietly replacing a person's answer is worse than saying the note cannot be read.

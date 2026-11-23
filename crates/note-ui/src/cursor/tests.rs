@@ -94,9 +94,12 @@ fn a_lean_on_both_axes_points_between_them() {
 }
 
 /// A pen standing straight up has no body to draw: an upright stick projects to a point.
+///
+/// The noise floor is the only lean exempt, and it is a hair: two degrees is the least a digitizer's own jitter can be
+/// told from a hand. A pen a fraction off vertical is *not* exempt — see `a_slight_lean_still_draws_a_body`.
 #[test]
 fn an_upright_pen_shows_no_body() {
-    for tilt in [(0.0, 0.0), (2.0, -1.0)] {
+    for tilt in [(0.0, 0.0), (1.5, -0.5)] {
         let cursor = cursor(Phase::Hover, Some(tilt)).expect("a hovering pen has a cursor");
 
         assert!(
@@ -110,6 +113,27 @@ fn an_upright_pen_shows_no_body() {
             "and an upright pen's body has no weight to fade in from"
         );
     }
+}
+
+/// A pen held only a little off vertical is the ordinary grip, so it draws a body — faintly, as the ramp's first step,
+/// but a body. The floor used to sit at four degrees, which is past what a hand actually does.
+#[test]
+fn a_slight_lean_still_draws_a_body() {
+    let cursor = cursor(Phase::Hover, Some((2.0, -1.0))).expect("a hovering pen has a cursor");
+
+    assert!(
+        cursor.lean_degrees() > MIN_LEAN_DEGREES,
+        "this is above the noise floor"
+    );
+    let body = cursor
+        .body_shape()
+        .expect("a pen a hair off vertical still has a body to draw");
+    assert!(body.length > 0.0, "however short");
+    assert!(
+        cursor.body_fade() < 0.25,
+        "and it arrives as a faint stub rather than at full weight: {}",
+        cursor.body_fade()
+    );
 }
 
 /// A pen that reports no tilt at all still gets a cursor: the nib mark does not depend on it.
@@ -256,28 +280,89 @@ fn the_soft_edge_wraps_the_body() {
     );
 }
 
-/// The body arrives with the lean rather than popping into being at the threshold.
+/// The body is faint while the pen hovers and heavier the moment it lands — so hovering is legible at the weight it is
+/// drawn at, and touching down is a change in the rod rather than in a dot nobody can see.
+///
+/// The nib mark cannot report either of those. It is filled in the ink's own colour, so the moment the pen touches down
+/// the dot stops being a marker and becomes the ink's own edge, which on a page of ink is no change at all. The rod is
+/// the part of the ghost that changes, and these two weights are the whole of the change.
 #[test]
-fn the_body_arrives_as_its_lean_grows() {
+fn the_body_darkens_when_the_pen_lands() {
+    // Read into bindings rather than compared in place: these are constants, and a comparison the compiler folds is one
+    // clippy rejects as an assertion on nothing.
+    let (air, paper, nib) = (BODY_AIR_ALPHA, BODY_ALPHA, NIB_ALPHA);
+
+    assert!(
+        air < paper,
+        "the rod gets heavier as the pen lands: {air} in the air against {paper} on the paper"
+    );
+    assert!(
+        paper - air > paper / 3.0,
+        "and the two are far enough apart to be told apart at a glance: {air} then {paper}"
+    );
+    assert!(
+        air >= 0.3,
+        "a hovering pen's rod is still a rod a reader can find, not a rumour: {air}"
+    );
+    assert!(
+        paper > (air + paper) / 2.0,
+        "the landed weight is the stronger of the two, by most of the way — that is the landing"
+    );
+    assert!(
+        paper < nib,
+        "and the landed rod still never takes the nib mark's place: {paper} against {nib}"
+    );
+
+    // The state is read from the reading, so it is decided on a reading and never on a timer.
+    let in_air = cursor(Phase::Hover, None).expect("a hovering pen has a cursor");
+    let entering = cursor(Phase::Enter, None).expect("a pen arriving has a cursor");
+    assert!(!in_air.is_touching(), "a hover is not a landing");
+    assert!(
+        !entering.is_touching(),
+        "nor is a pen that has only arrived"
+    );
+    assert_eq!(in_air.body_alpha(), BODY_AIR_ALPHA);
+    assert_eq!(entering.body_alpha(), BODY_AIR_ALPHA);
+
+    // Every reading of a stroke is on the paper, so the rod stays heavy for as long as the pen is down.
+    for phase in [Phase::Down, Phase::Move] {
+        let on_paper = cursor(phase, None).expect("a landing pen has a cursor");
+        assert!(on_paper.is_touching(), "{phase:?} is the nib on the paper");
+        assert_eq!(on_paper.body_alpha(), BODY_ALPHA);
+    }
+
+    // `Up` reports where the pen *left*, which is a point that is no longer on the paper.
+    let leaving = cursor(Phase::Up, None).expect("a pen lifting has a cursor");
+    assert!(!leaving.is_touching());
+    assert_eq!(leaving.body_alpha(), BODY_AIR_ALPHA);
+}
+
+/// A pen is almost never held more than a little off vertical, so the body has to be at its weight by then — a ramp that
+/// only resolved at sixteen degrees left an ordinary grip drawn at half strength.
+#[test]
+fn an_ordinary_grip_draws_a_body_at_its_full_weight() {
     let fade = |lean: f32| {
         cursor(Phase::Hover, Some((lean, 0.0)))
             .expect("a hovering pen has one")
             .body_fade()
     };
 
-    // The lean is measured through `tan`/`atan`, so the ends of the ramp are compared within a
-    // hair rather than exactly: what is pinned is the ramp, not the last bit of a float.
-    assert!(fade(MIN_LEAN_DEGREES) < 1e-4, "a body not drawn yet");
-    assert!(
-        (fade(FULL_LEAN_DEGREES) - 1.0).abs() < 1e-4,
-        "and one fully drawn"
-    );
-    assert_eq!(fade(80.0), 1.0, "a pen laid flat is no stronger than that");
+    for lean in [8.0, 12.0, 20.0, 45.0] {
+        assert_eq!(fade(lean), 1.0, "a lean of {lean} degrees is a full body");
+    }
 
-    let steps: Vec<f32> = [5.0, 8.0, 11.0, 14.0].into_iter().map(fade).collect();
+    // And the smallest lean still arrives gradually rather than appearing: the first step off the noise floor is a
+    // stub at a fraction of the weight, not a pen at all of it.
+    assert_eq!(fade(MIN_LEAN_DEGREES), 0.0);
+    let steps: Vec<f32> = [2.5, 4.0, 6.0].into_iter().map(fade).collect();
     assert!(
         steps.windows(2).all(|pair| pair[1] > pair[0]),
-        "the weight grows with the lean: {steps:?}"
+        "the weight still grows with the lean: {steps:?}"
+    );
+    assert!(
+        steps[0] > 0.0 && steps[0] < 0.25,
+        "and a one-hair lean is a faint stub rather than a full rod: {}",
+        steps[0]
     );
 }
 
@@ -293,15 +378,17 @@ fn the_body_arrives_as_its_lean_grows() {
 fn the_soft_layers_are_fainter_than_what_they_sit_under() {
     let (bloom_spread, bloom_alpha) = (NIB_BLOOM_SPREAD, NIB_BLOOM_ALPHA);
     let (halo_grow, halo_alpha) = (BODY_HALO_GROW, BODY_HALO_ALPHA);
-    let (nib_alpha, body_alpha) = (NIB_ALPHA, BODY_ALPHA);
+    // `BODY_AIR_ALPHA` is the fainter of the body's two weights, so if the edge is fainter than *that*, it is fainter
+    // than the body whichever state the rod is painted in.
+    let (nib_alpha, air_alpha) = (NIB_ALPHA, BODY_AIR_ALPHA);
     let (radius_min, radius_max) = (NIB_RADIUS_MIN, NIB_RADIUS_MAX);
 
     assert!(bloom_spread > 0.0, "the bloom reaches past the mark");
     assert!(bloom_alpha < nib_alpha, "and is the fainter copy");
     assert!(halo_grow > 0.0, "the body's edge reaches outward");
-    assert!(halo_alpha < body_alpha, "and is fainter than the body");
+    assert!(halo_alpha < air_alpha, "and is fainter than the body");
     assert!(
-        body_alpha < nib_alpha,
+        air_alpha < nib_alpha,
         "the body never competes with the nib"
     );
     assert!(
@@ -309,7 +396,7 @@ fn the_soft_layers_are_fainter_than_what_they_sit_under() {
         "the mark has a range of sizes to move in"
     );
 
-    for alpha in [nib_alpha, bloom_alpha, body_alpha, halo_alpha] {
+    for alpha in [nib_alpha, bloom_alpha, air_alpha, halo_alpha] {
         assert!(
             (0.0..1.0).contains(&alpha),
             "{alpha} is not an opacity a shape can be painted with"

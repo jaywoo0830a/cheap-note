@@ -32,8 +32,8 @@ use std::sync::Arc;
 
 use note_format::ink::Bounds;
 use note_ui::cursor::{
-    BODY_ALPHA, BODY_HALO_ALPHA, BODY_HALO_GROW, NIB_ALPHA, NIB_BLOOM_ALPHA, NIB_BLOOM_SPREAD,
-    NIB_RADIUS_MAX, NIB_RADIUS_MIN,
+    BODY_HALO_ALPHA, BODY_HALO_GROW, NIB_ALPHA, NIB_BLOOM_ALPHA, NIB_BLOOM_SPREAD, NIB_RADIUS_MAX,
+    NIB_RADIUS_MIN,
 };
 use note_ui::ink_layer::canvas::Rect;
 use note_ui::ink_layer::{ink_colour, Canvas};
@@ -883,6 +883,9 @@ fn cursor_vertices(vertices: &mut Vec<Vertex>, mark: &Mark, scale: f32) {
     let position = mark.cursor.position();
     let nib = (position[0] * scale, position[1] * scale);
     let fade = mark.cursor.body_fade();
+    // The state's weight under the lean's own: faint in the air, heavier on the paper. This is the whole of what
+    // says the pen has landed, because the nib's dot cannot — it is the ink's own colour in both states.
+    let weight = mark.cursor.body_alpha();
 
     if let Some(body) = mark.cursor.body_shape_at(unit) {
         // Shadow, soft edge, body: the order and the colours the Windows overlay uses. The body
@@ -893,21 +896,21 @@ fn cursor_vertices(vertices: &mut Vec<Vertex>, mark: &Mark, scale: f32) {
             &shifted(body.outline(0.0), drop),
             scale,
             mark.halo,
-            BODY_SHADOW_ALPHA * fade,
+            BODY_SHADOW_ALPHA * weight * fade,
         );
         polygon(
             vertices,
             &body.outline(BODY_HALO_GROW * unit),
             scale,
             mark.halo,
-            BODY_HALO_ALPHA * fade,
+            BODY_HALO_ALPHA * weight * fade,
         );
         polygon(
             vertices,
             &body.outline(0.0),
             scale,
             mark.colour,
-            BODY_ALPHA * fade,
+            weight * fade,
         );
     }
 

@@ -341,8 +341,13 @@ impl Surface {
 
         // The body is absent for a pen with no tilt sensor, and for one held straight up: it fades
         // in as the lean grows, so the threshold is not a shape appearing out of nothing.
+        //
+        // Its *weight* is the state's too: a pen in the air is drawn faintly and one on the paper heavily,
+        // because that is the only place a landing can be seen — the nib mark is the ink's own colour in
+        // both states, so the dot that has started a stroke looks exactly like the dot that is about to.
         if let Some(body) = shape.cursor.body_shape_at(unit) {
             let fade = shape.cursor.body_fade();
+            let weight = shape.cursor.body_alpha();
             let drop = [BODY_SHADOW_DROP[0] * unit, BODY_SHADOW_DROP[1] * unit];
 
             // Three passes over one shape, widest and faintest first — the order the page's own shadow
@@ -351,14 +356,14 @@ impl Surface {
             // this app knows can be seen on the paper in front; the edge is that colour too, so the two
             // read as one soft shadow around the body rather than as an outline with a line beside it.
             for (grow, shift, alpha, tint) in [
-                (0.0, drop, BODY_SHADOW_ALPHA * fade, halo),
+                (0.0, drop, BODY_SHADOW_ALPHA * weight * fade, halo),
                 (
                     BODY_HALO_GROW * unit,
                     [0.0, 0.0],
-                    BODY_HALO_ALPHA * fade,
+                    BODY_HALO_ALPHA * weight * fade,
                     halo,
                 ),
-                (0.0, [0.0, 0.0], BODY_ALPHA * fade, colour),
+                (0.0, [0.0, 0.0], weight * fade, colour),
             ] {
                 let shifted = |p: [f32; 2]| map([p[0] + shift[0], p[1] + shift[1]]);
                 flatten(&body.outline(grow), &shifted, &mut self.outline);

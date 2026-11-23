@@ -357,6 +357,22 @@ itself, widest and faintest first. The drop is what makes the rod read as lying 
 painted on it, and it is the layer an eye finds first on a page of writing; the halo alone thickens the body's own
 edge, which is no help at all when that edge and the paper are the same colour.
 
+**The body is where the state is read, and it is read by its weight.** A nib in the air is drawn `BODY_AIR_ALPHA` (0.34)
+and one on the paper `BODY_ALPHA` (0.80) — so the rod is *faint while hovering* and **heavier once the nib touches
+down**. That is the whole of the landing's feedback, and it has to be in the rod because the nib mark cannot give it: on
+the paper the mark stops being a marker and becomes the ink's own edge, the same dot in the same place as a page of
+writing is already in, so the mark looks identical in both states. The rod is what changes. A hovering pen is drawn
+faintly — legible, but clearly not yet writing — and the step to the darker weight *is* the moment of touching down. The
+air's weight is not the faintest the rod has ever been: it is still a rod a reader can find, which is what makes hovering
+something the eye can follow. All three passes (shadow, soft edge, body) are multiplied by the weight together, so the
+rod darkens as one shape rather than gaining a rim.
+
+**A pen is almost never more than a few degrees off vertical**, so the lean's ramp is short: the body is at its full
+weight by `FULL_LEAN_DEGREES` (8°), and draws nothing below `MIN_LEAN_DEGREES` (2°, about what a digitizer's own jitter
+looks like). The ramp used to resolve at 16° and start at 4°, which drew an ordinary grip at roughly half weight — a
+rod that was there and still could not be seen. The ramp still exists, because a body must arrive rather than appear,
+but it is now short enough that the lean a hand actually holds is at the top of it.
+
 **The body follows the interface scale; the nib mark does not.** The body, its soft edge and its cast shadow are a
 hint drawn for the reader, so `Screen::unit` multiplies their length, widths and offsets with the same step as the bar
 and the palette. The nib mark is a preview of the *ink*, and ink does not follow the interface (DESIGN.md §7.5): its

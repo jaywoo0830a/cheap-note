@@ -48,21 +48,21 @@
 //! ghost sits *in* the page rather than on top of it. That is the same trick the sheet's own shadow
 //! uses, in fewer steps, because this shape is small and is rebuilt on every reading the hand moves.
 //!
-//! The two shapes say different things, and are weighted for it: the nib mark is exact and nearly
-//! opaque, because it is where the ink will land *and how thick that ink will be* — it is drawn at
-//! the pen's own weight, so a heavier pen has a heavier dot (see [`nib_radius_for_width`]) — while
-//! the body is a hint about the angle, drawn faintly and no more strongly than the lean it is
-//! reporting. Its shadow is what makes a faint rod findable on paper that is nearly the colour of
-//! the rod itself.
+//! The two shapes say different things, and are weighted for it. The nib mark is exact and nearly opaque, because it
+//! is where the ink will land *and how thick that ink will be* — it is drawn at the pen's own weight, so a heavier pen
+//! has a heavier dot (see [`nib_radius_for_width`]). The body is where the **state** is read: a nib on the paper is
+//! filled in the ink's own colour, so once the pen is down the mark looks exactly as it did in the air, and the rod is
+//! what says which of the two the pen is doing ([`PenCursor::body_alpha`]). It is faint while the pen hovers and heavier
+//! once it lands, so touching down is visible in the rod. Its shadow is what makes a faint rod findable on paper that is
+//! nearly the colour of the rod itself.
 
 use crate::input::{Phase, Reading, Tilt};
 
 /// How long the drawn body is, in logical pixels at 100%, when the pen is laid flat.
 ///
 /// A real pen is about 140 mm, which at this sheet's scale is longer than a hand wants on screen,
-/// so the length is chosen for the eye and only the lean scales it. It is deliberately shorter than
-/// a pen *and* fainter than the nib mark: the body is a hint about the angle, and a long dark one
-/// competes with the page it is drawn on. The interface scale multiplies it; see
+/// so the length is chosen for the eye and only the lean scales it. Shorter than a real pen, because
+/// a long rod competes with the page it is drawn on. The interface scale multiplies it; see
 /// [`PenCursor::body_shape_at`].
 /// Public because the ghost cursor is no longer drawn by the frame: the window it is drawn in has
 /// to be big enough for the body, and that is the longest this number can be (see
@@ -71,16 +71,18 @@ pub const BODY_LENGTH: f32 = 88.0;
 
 /// The least lean that draws a body, in degrees.
 ///
-/// Below this the direction is dominated by the digitizer's own noise, and a stub of a pen that
-/// swings around the nib is worse than no body at all: the nib mark already says where the ink is.
-const MIN_LEAN_DEGREES: f32 = 4.0;
+/// Below this the direction is dominated by the digitizer's own noise, and a stub of a pen that swings around the nib is
+/// worse than no body at all: the nib mark already says where the ink is.
+const MIN_LEAN_DEGREES: f32 = 2.0;
 
 /// The lean at which the body is drawn at full strength, in degrees.
 ///
-/// Between [`MIN_LEAN_DEGREES`] and this the body gains its weight as it gains its length, so there
-/// is no lean at which a shape appears out of nothing: it arrives as the faintest of stubs and
-/// settles into a pen. See [`PenCursor::body_fade`].
-const FULL_LEAN_DEGREES: f32 = 16.0;
+/// Between [`MIN_LEAN_DEGREES`] and this the body gains its weight as it gains its length, so there is no lean at which
+/// a shape appears out of nothing: it arrives as the faintest of stubs and settles into a pen. The span is short
+/// because a pen is almost never more than a little off vertical in the hand, and a ramp that only resolved at 16
+/// degrees left an ordinary grip drawn at half its weight — which is the same thing as not being seen. See
+/// [`PenCursor::body_fade`].
+const FULL_LEAN_DEGREES: f32 = 8.0;
 
 /// How wide the drawn body is at the nib, in logical pixels at 100%.
 const BODY_NIB_WIDTH: f32 = 1.2;
@@ -158,11 +160,24 @@ pub const BODY_HALO_GROW: f32 = 1.4;
 /// a rescue, and the two together are what an eye finds a rod by on a page of writing.
 pub const BODY_HALO_ALPHA: f32 = 0.20;
 
-/// How opaque the body is, at the lean [`FULL_LEAN_DEGREES`] and beyond.
+/// How opaque the body is, at the lean [`FULL_LEAN_DEGREES`] and beyond, **while the nib is on the paper**.
 ///
-/// Fainter than the nib mark by a wide margin, because the two say different things: the nib mark
-/// says where the ink will land, and the body only says which way the pen is held.
-pub const BODY_ALPHA: f32 = 0.34;
+/// The pen is drawing, so the rod is the one part of the ghost that is really *there* — and, because a pen on the paper
+/// is what the hand is doing, it is the heavier of the two weights ([`BODY_AIR_ALPHA`] is the one it is compared with).
+/// It is the nib mark that cannot report the landing — on the paper it is filled in the ink's own colour, and over a page
+/// of ink that is no change at all — so the rod is where the landing is *seen*. See [`PenCursor::body_alpha`].
+///
+/// Still under [`NIB_ALPHA`]: the rod is a body, not a second cursor, and the mark at the nib is what says where the ink
+/// will land.
+pub const BODY_ALPHA: f32 = 0.80;
+
+/// How opaque the body is, at the lean [`FULL_LEAN_DEGREES`] and beyond, **while the nib is in the air**.
+///
+/// A hovering pen has written nothing yet. The rod is still what says where it is — that is the whole of what makes a
+/// hover legible, and the nib mark cannot do it (see [`PenCursor::body_alpha`]) — so it is drawn at a weight a reader can
+/// find without hunting for it. It is the fainter of the two weights, because the pen has not landed: the step from here
+/// to [`BODY_ALPHA`] is the landing itself.
+pub const BODY_AIR_ALPHA: f32 = 0.34;
 
 /// Where the pen is and how it leans: everything needed to draw a cursor for it.
 ///
@@ -176,6 +191,13 @@ pub struct PenCursor {
     y: f32,
     /// The lean, or `None` when the device reports no tilt.
     tilt: Option<Tilt>,
+    /// Whether the nib is on the paper, which is what the body's weight is drawn from.
+    ///
+    /// The nib mark cannot carry this: on the paper it is filled in the ink's own colour, so over a page of ink it looks
+    /// exactly as it did in the air. The rod can, and does — see [`Self::body_alpha`]. A `bool` rather than the reading's
+    /// phase, because two phases are all the drawing distinguishes and the pump — not the button — is what decides where
+    /// a press lands.
+    touching: bool,
 }
 
 impl PenCursor {
@@ -199,6 +221,7 @@ impl PenCursor {
                     x: sample.pixel.x / scale,
                     y: sample.pixel.y / scale,
                     tilt: sample.tilt,
+                    touching: sample.phase.is_touching(),
                 })
             }
         }
@@ -263,6 +286,26 @@ impl PenCursor {
         let lean = self.lean_degrees();
 
         ((lean - MIN_LEAN_DEGREES) / (FULL_LEAN_DEGREES - MIN_LEAN_DEGREES)).clamp(0.0, 1.0)
+    }
+
+    /// Whether the nib is on the paper for this cursor.
+    pub fn is_touching(self) -> bool {
+        self.touching
+    }
+
+    /// How strongly the body is drawn before the lean's own fade: [`BODY_AIR_ALPHA`] in the air, [`BODY_ALPHA`] on the
+    /// paper.
+    ///
+    /// This is where a landing is *seen*. The nib mark is exact about where the ink will go, but it cannot report the
+    /// touching down: on the paper it is filled in the ink's own colour, which over a page of ink is the same dot in
+    /// the same place. The rod answers for it instead — the same rod, heavier the moment the nib touches down — so a pen
+    /// on the page is told apart from one hovering over it at a glance. A caller multiplies this by [`Self::body_fade`].
+    pub fn body_alpha(self) -> f32 {
+        if self.touching {
+            BODY_ALPHA
+        } else {
+            BODY_AIR_ALPHA
+        }
     }
 
     /// The pen's body as a shape to draw at 100%, or `None` when the pen is too upright to show one.

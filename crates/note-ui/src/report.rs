@@ -525,6 +525,101 @@ impl Options {
     }
 }
 
+/// A frame-time budget, and the columns it is measured against.
+///
+/// ## Why `present` and not `frame` or `rebuild`
+///
+/// On macOS every warmed frame begins by asking `CAMetalLayer` for a drawable, and that call waits for
+/// the display while the compositor still holds the buffers. So any figure timed from the start of a
+/// draw carries **one refresh interval of waiting** on top of the work: `warm` reads 8.2–8.7 ms even for
+/// an empty page, and `rebuild` reads 8.2 ms for an empty page for the same reason — measured, the
+/// difference `rebuild - warm` is −0.09 ms at 0 strokes and 18.2 ms at 8 182. Gating either of them
+/// against a 120 Hz budget would fail an empty page, which is the app being blamed for the panel.
+///
+/// `present` is the one figure taken *after* the drawable is in hand: the GPU's share of the frame, with
+/// no wait in it. It is what remains of a frame's cost once the display's own clock is taken out, so it
+/// is what a budget can hold the app to.
+///
+/// ## The consequence, stated plainly
+///
+/// A budget here is a **GPU-work gate, not a latency gate**. It says the app's own drawing of a frame
+/// fits in the interval; it does not and cannot say the frame reached the glass within one tick, because
+/// that depends on the display's rate and the compositor. `frame` is the figure for latency, and it is
+/// deliberately not gated.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Budget {
+    /// The most a single frame may spend, in milliseconds.
+    pub max_ms: f64,
+}
+
+impl Budget {
+    /// The columns a [`Budget`] is judged on. One column, because it is the only one without the wait.
+    pub const COLUMNS: [&'static str; 1] = ["present"];
+
+    /// Reads `--max-ms`'s value.
+    pub fn from_name(text: &str) -> Result<Self, String> {
+        let max_ms = text
+            .parse::<f64>()
+            .map_err(|_| format!("--max-ms must be a number of milliseconds: {text}"))?;
+
+        if !max_ms.is_finite() || max_ms <= 0.0 {
+            return Err(format!(
+                "--max-ms must be a positive number of milliseconds: {text}"
+            ));
+        }
+
+        Ok(Budget { max_ms })
+    }
+
+    /// Checks every row against the budget, returning the verdict and the sentence that explains it.
+    ///
+    /// A column that is absent from a row is **not** a pass: a budget on a quantity nothing measured is
+    /// the unearned success the module's third rule forbids, so it skips.
+    pub fn judge(&self, columns: &[&'static str], rows: &[Row]) -> (Verdict, Option<String>) {
+        let mut over: Vec<String> = Vec::new();
+        let mut missing = false;
+
+        for row in rows {
+            for column in Self::COLUMNS {
+                match row.get(columns, column) {
+                    Some(Value::Millis(spent)) => {
+                        if *spent > self.max_ms {
+                            over.push(format!("{} {column} {spent:.2}", row.label));
+                        }
+                    }
+                    // The command reports the column but could not fill it, or does not report it at
+                    // all: either way nothing was measured, so nothing was earned.
+                    _ => missing = true,
+                }
+            }
+        }
+
+        if !over.is_empty() {
+            return (
+                Verdict::Failed,
+                Some(format!(
+                    "over the {:.2} ms budget: {}",
+                    self.max_ms,
+                    over.join(", ")
+                )),
+            );
+        }
+
+        if missing {
+            return (
+                Verdict::Skipped,
+                Some(format!(
+                    "a {:.2} ms budget was given but {} was not measured",
+                    self.max_ms,
+                    Self::COLUMNS.join(" and ")
+                )),
+            );
+        }
+
+        (Verdict::Ok, None)
+    }
+}
+
 /// Writes `report` to `out` in `format`, and returns the exit code it carries.
 ///
 /// Both commands end here, so an exit code cannot drift from the verdict in the table: it is read off
@@ -538,6 +633,72 @@ pub fn emit(report: &Report, format: Format, out: &mut impl std::io::Write) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A page over the gated column fails the run, and the sentence names the row.
+    #[test]
+    fn a_budget_names_the_row_that_broke_it() {
+        let columns = ["strokes", "present", "rebuild"];
+        let rows = vec![
+            Row::new(
+                "1000 strokes",
+                vec![Value::Count(1000), Value::Millis(2.5), Value::Millis(40.0)],
+            ),
+            Row::new(
+                "8182 strokes",
+                vec![Value::Count(8182), Value::Millis(9.4), Value::Millis(18.6)],
+            ),
+        ];
+
+        let budget = Budget { max_ms: 8.33 };
+        let (verdict, sentence) = budget.judge(&columns, &rows);
+
+        assert_eq!(verdict, Verdict::Failed);
+        let sentence = sentence.expect("a failure explains itself");
+        assert!(sentence.contains("8182 strokes"), "{sentence}");
+        assert!(sentence.contains("present"), "{sentence}");
+        // The row whose only excess was `rebuild` is not named: that figure carries the wait for the
+        // display, so gating it would fail a page for the panel's clock.
+        assert!(!sentence.contains("1000 strokes"), "{sentence}");
+    }
+
+    /// The gated figure has to be the one taken after the drawable is in hand. A `rebuild` over budget
+    /// on its own is not a failure, because `rebuild` is timed from the start of a draw and so contains
+    /// a refresh interval of waiting — an empty page reads 8.2 ms of it.
+    #[test]
+    fn the_wait_for_the_display_is_not_gated() {
+        let columns = ["present", "rebuild"];
+        let rows = vec![Row::new(
+            "0 strokes",
+            vec![Value::Millis(0.5), Value::Millis(8.42)],
+        )];
+
+        let (verdict, _) = Budget { max_ms: 8.33 }.judge(&columns, &rows);
+        assert_eq!(verdict, Verdict::Ok, "0.5 is the work; 8.42 is the tick");
+    }
+
+    /// A budget on a column nothing measured is a skip, never a pass — an unearned success is the one
+    /// failure mode a CI job stops looking at.
+    #[test]
+    fn a_budget_on_an_unmeasured_column_skips() {
+        let columns = ["present"];
+        let rows = vec![Row::new("a page", vec![Value::Absent("no-gpu-ledger")])];
+
+        let (verdict, sentence) = Budget { max_ms: 8.33 }.judge(&columns, &rows);
+
+        assert_eq!(verdict, Verdict::Skipped);
+        assert!(sentence.expect("skips explain").contains("not measured"));
+    }
+
+    /// `--max-ms` takes a positive number and refuses anything else by name.
+    #[test]
+    fn a_budget_reads_a_positive_number() {
+        assert_eq!(Budget::from_name("8.33").unwrap().max_ms, 8.33);
+
+        for bad in ["", "fast", "0", "-1", "NaN", "inf"] {
+            let error = Budget::from_name(bad).expect_err("not a budget");
+            assert!(error.contains("--max-ms"), "{bad}: {error}");
+        }
+    }
 
     fn sample() -> Report {
         let mut report = Report::new(Command::MemoryReport, "macos", "task_vm_info")

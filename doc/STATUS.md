@@ -364,14 +364,24 @@ The clause order and the exact wording of each clause live in `compose_status` i
 `crates/note-ui/src/timing.rs`, and the cache clause by `PdfStats::summary` in `crates/note-ui/src/pdf.rs`.
 This document describes them. If the two disagree, the code is right.
 
-### Known drift in `doc/CLI.md`
+### `--bench --max-ms` — the frame budget, and what it deliberately does not gate
 
-- **`--bench`'s budget flags are a contract, not code.** `doc/CLI.md` §"Exit codes and the budget flags"
-  documents `--max-ms`, `--max-joules-per-op`, `--min-ops-per-joule` and `--require-energy`, and says a
-  budget given by argument should fail the run at exit `1`. None of those flags is parsed anywhere in the
-  workspace: `cheap-note --bench --max-ms 16.6` exits `2` as an unrecognised argument. A CI job written
-  against that section would think it was gating the frame budget and would be gating nothing. Until the
-  flags exist, gate on the table's `worst` column by hand.
+`cheap-note --bench --max-ms 8.33` gates on `present` and exits `1` when a row exceeds it. Verified on
+macOS: `8.33` → `ok` / `0`; `3.0` → `FAILED — over the 3.00 ms budget: 8182 strokes present 5.55` / `1`;
+`--max-ms abc` → exit `2` with the usage.
+
+**It does not gate `frame` or `rebuild`, and this is a finding rather than a shortcut.** Both are timed
+from the start of a draw, whose first act is to ask `CAMetalLayer` for a drawable — a call that waits for
+the display. Measured, `rebuild` minus `warm` is −0.09 ms at 0 strokes and 18.2 ms at 8 182, and
+`rebuild` reads 8.2 ms on an empty page. A 120 Hz budget on either figure would therefore fail the app
+for the panel's clock.
+
+So the honest scope is: **`--max-ms` is a GPU-work gate, not a latency gate.** A frame that meets it can
+still miss a tick, because reaching the glass within 8.33 ms also depends on the display's rate and the
+compositor. `frame` remains the figure to read for latency and is reported ungated.
+
+The remaining budget flags (`--max-joules-per-op`, `--min-ops-per-joule`, `--require-energy`) are still
+documented as a future contract under `--power-report` and are not parsed; `doc/CLI.md` says so.
 
 
 

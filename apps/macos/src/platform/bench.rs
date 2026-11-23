@@ -43,7 +43,7 @@ use note_format::ink::InkPoint;
 use note_ui::ink_layer::canvas::{Canvas, Ink, Rect};
 
 use gpui_kit::{rgb, rgba, Hsla};
-use note_ui::report::{Command, Format, Report, Row, Value, Verdict};
+use note_ui::report::{Budget, Command, Format, Report, Row, Value, Verdict};
 
 use crate::platform::metal::Surface;
 
@@ -64,16 +64,19 @@ const DEFAULT_STROKES: [usize; 5] = [0, 29, 316, 1_000, 8_182];
 const DEFAULT_FRAMES: usize = 30;
 
 /// What the command line asked for.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Options {
     strokes: Vec<usize>,
     frames: usize,
+    /// `--max-ms`, when a gate was asked for.
+    budget: Option<Budget>,
 }
 
 impl Options {
     fn parse(args: &[String]) -> Result<Option<Self>, String> {
         let mut strokes = DEFAULT_STROKES.to_vec();
         let mut frames = DEFAULT_FRAMES;
+        let mut budget = None;
         let mut at = 0;
 
         while at < args.len() {
@@ -101,13 +104,27 @@ impl Options {
                     }
                     frames = count;
                 }
+                "--max-ms" => {
+                    at += 1;
+                    let value = args
+                        .get(at)
+                        .ok_or("--max-ms needs a number of milliseconds")?;
+                    budget = Some(Budget::from_name(value)?);
+                }
+                other if other.starts_with("--max-ms=") => {
+                    budget = Some(Budget::from_name(&other["--max-ms=".len()..])?);
+                }
                 other => return Err(format!("unknown argument: {other}")),
             }
 
             at += 1;
         }
 
-        Ok(Some(Options { strokes, frames }))
+        Ok(Some(Options {
+            strokes,
+            frames,
+            budget,
+        }))
     }
 }
 
@@ -138,9 +155,14 @@ fn parse_strokes(text: &str) -> Result<Vec<usize>, String> {
 pub fn print_usage() {
     println!(
         "usage: cheap-note --bench [--format table|json] [--strokes 0,29,316,1000,8182] [--frames 30]\n\
+         [--max-ms N]\n\
          \n\
          Draws a synthetic page through the same Metal canvas the app uses and reports the first,\n\
          warm, worst, rebuild and pan costs of a frame, with the GPU's own time waited for apart.\n\
+         \n\
+         --max-ms N fails the run (exit 1) when any row's `present` exceeds N ms; for\n\
+         120 Hz use 8.33. `frame` is not gated: it and `rebuild` both include the wait for the display, so a\n\
+         budget on them would measure the panel rather than the app.\n\
          \n\
          Run it in release: cargo run --release -p cheap-note-macos -- --bench"
     );
@@ -227,7 +249,17 @@ fn measure(options: &Options, format: Format) -> Result<i32, String> {
         Format::Json => None,
     };
 
-    let report = report.conclude(Verdict::Ok, note);
+    let report = report.conclude(Verdict::Ok, note.clone());
+
+    // A budget, when one was asked for, replaces the unconditional `ok` with its own verdict. It is
+    // applied last so the gate cannot be forgotten by a path that returns early.
+    let report = match options.budget {
+        None => report,
+        Some(budget) => {
+            let (verdict, sentence) = budget.judge(&report.columns, &report.rows);
+            report.conclude(verdict, sentence.or(note))
+        }
+    };
 
     Ok(note_ui::report::emit(
         &report,

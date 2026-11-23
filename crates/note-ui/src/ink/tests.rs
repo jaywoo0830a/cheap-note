@@ -3510,3 +3510,115 @@ fn the_prepared_loop_answers_what_a_plain_walk_answers() {
         loop_points.len()
     );
 }
+
+/// A note keeps a bounded number of pages, and the one it gives up is the one furthest behind.
+///
+/// Every page that has been written on is held in memory so a turn back to it is instant. Without a
+/// bound that is unbounded: the derived geometry is 71x a stroke's points at 1:1 and 5.6x that again at
+/// 8x, so a long note grows without limit (`doc/VIEW.md`, "What the note holds in memory"). The bound is
+/// [`PAGES_KEPT`], and what it gives up is the page left *longest ago* — never the one in front, and
+/// never one the reader is about to turn back to.
+///
+/// The page given up is not lost: it is in the note, and the app reads it back. This test pins the half
+/// that is the note's to get right — that it reports exactly which pages it let go of, so the app can
+/// forget they are loaded — and that the pages it *keeps* still hold their ink.
+#[test]
+fn a_note_keeps_a_bounded_number_of_pages_and_gives_up_the_furthest() {
+    let mut notes = Notes::new();
+    let s = settings();
+
+    // Write one stroke on each of `PAGES_KEPT + 3` pages, turning through them in order.
+    let written = PAGES_KEPT + 3;
+
+    for page in 0..written {
+        if page > 0 {
+            notes.go_to(page);
+        }
+
+        notes.consume(
+            &[reading(7, Phase::Down, 10.0 + page as f32, 10.0, Some(0.5))],
+            &id(),
+            &s,
+        );
+        notes.consume(
+            &[reading(7, Phase::Up, 30.0 + page as f32, 30.0, None)],
+            &id(),
+            &s,
+        );
+
+        assert_eq!(notes.page(), page);
+        assert_eq!(notes.stroke_count(), 1, "page {page} has its own stroke");
+    }
+
+    // Turning back through every page: each is either still held with its ink, or arrives blank because
+    // it was given up. A blank arrival is the contract the app relies on — it reads that page back.
+    let mut arrived_blank = Vec::new();
+
+    for page in (0..written).rev() {
+        let given_up_now = notes.go_to(page);
+
+        // Whatever this turn gave up must not include the page being turned to, or the page left.
+        assert!(
+            !given_up_now.contains(&page),
+            "the page turned to is never the one given up (page {page}): {given_up_now:?}"
+        );
+
+        // A page that comes back with no ink is one the note is no longer holding, and the app has to
+        // read it. That is the only way a kept page can be empty, since every page had a stroke.
+        if notes.stroke_count() == 0 {
+            arrived_blank.push(page);
+        } else {
+            assert_eq!(
+                notes.stroke_count(),
+                1,
+                "page {page} holds its own single stroke"
+            );
+        }
+    }
+
+    assert!(
+        !arrived_blank.is_empty(),
+        "past {PAGES_KEPT} pages the note gives some up, so a blank arrival must happen"
+    );
+    assert!(
+        arrived_blank.len() <= written - PAGES_KEPT,
+        "at most the pages past the budget are given up, saw {arrived_blank:?}"
+    );
+}
+
+/// What the note keeps is bounded, however many pages are written on.
+///
+/// The count is the one the memory is proportional to, so it is the one worth pinning: `taken` never
+/// grows past [`PAGES_KEPT`], whatever the note's length. A page given up is in the note and comes back
+/// on the next turn, which the app does by forgetting it is loaded — so this bound costs a read, never ink.
+#[test]
+fn a_notes_memory_does_not_grow_with_its_page_count() {
+    let mut notes = Notes::new();
+
+    let pages = PAGES_KEPT * 4;
+
+    for page in 0..pages {
+        if page > 0 {
+            notes.go_to(page);
+        }
+
+        notes.put_page(page, InkDocument::from_strokes(vec![curve()]));
+    }
+
+    assert_eq!(
+        notes.taken_len(),
+        PAGES_KEPT,
+        "{pages} pages are written on, and the note holds {PAGES_KEPT} of them"
+    );
+
+    // Every page in front of the reader is still readable — the ones given up arrive blank, and the
+    // note says so rather than handing back something empty that looks drawn on.
+    for page in 0..pages {
+        notes.go_to(page);
+
+        assert!(
+            notes.stroke_count() <= 1,
+            "page {page} never holds another page's ink"
+        );
+    }
+}

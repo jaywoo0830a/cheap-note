@@ -3821,7 +3821,13 @@ impl NoteApp {
     /// name, which is what put one page's writing on the next page's sheet.
     fn show_page(&mut self, page: usize) {
         self.page_index = page;
-        self.ink.go_to(page);
+
+        // The pages the note gave up to stay within its cache (see `ink::PAGES_KEPT`). They are in the
+        // note — a page is written before it is put away — so forgetting that they are loaded is all it
+        // takes for `load_page_ink` to read one back the next time it is turned to.
+        for given_up in self.ink.go_to(page) {
+            self.loaded.remove(&given_up);
+        }
 
         if let Err(error) = self.load_page_ink(page) {
             self.report(error.to_string());
@@ -4469,7 +4475,9 @@ impl NoteApp {
         self.loaded.clear();
         self.saved.clear();
         self.rewritten.clear();
-        self.ink.go_to(self.page_index);
+        // A fresh note has nothing to give up: `loaded` was just cleared, so there is no stale entry the
+        // answer could contradict.
+        let _ = self.ink.go_to(self.page_index);
 
         self.note = Some(note);
         self.writer = Some(writer);
@@ -4527,7 +4535,12 @@ impl NoteApp {
         let mut ink = crate::ink::InkDocument::from_strokes(stored.strokes);
         ink.set_history(stored.history);
 
-        self.ink.put_page(page, ink);
+        // Loading this page can push another out of the note's cache, and a page that is out of the note
+        // must not be remembered as loaded: the next turn to it has to read it back.
+        for given_up in self.ink.put_page(page, ink) {
+            self.loaded.remove(&given_up);
+        }
+
         self.saved.insert(page as u64, written);
         self.loaded.insert(page);
         Ok(())
@@ -4902,7 +4915,7 @@ impl NoteApp {
         self.loaded.clear();
         self.saved.clear();
         self.rewritten.clear();
-        self.ink.go_to(0);
+        let _ = self.ink.go_to(0);
         self.loaded.insert(0);
 
         // The paper, the pen and the view go back to the shipped set, and the view is rebuilt around

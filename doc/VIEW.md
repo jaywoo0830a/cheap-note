@@ -924,6 +924,75 @@ so the button writes the single file a person carries, which is why it asks wher
 suggestion is the note's own name turned into a file name: what Windows refuses becomes a dash, a run of
 whitespace becomes one space, and what a file system would quietly drop is dropped *visibly*.
 
+### What the note holds in memory
+
+**The page in front is in memory in full, and so are the eight most recently left.** `Notes` keeps the
+page being drawn in `current` and the others in `taken`, a `BTreeMap<usize, InkDocument>`, and turning to
+a page moves documents between the two rather than reading them again. Past
+[`PAGES_KEPT`](../crates/note-ui/src/ink.rs) (8) the page left longest ago is given up — its geometry
+*and* its points — and read back out of the note on the next turn to it, which is exactly what turning to
+a page never opened costs.
+
+The bound is there because the gap between what is written and what is drawn is large. A stroke stores its
+readings **once** and derives everything else from them. At 1:1, 200 readings:
+
+| What one stroke holds | Bytes | Elements | of the total |
+|---|---:|---:|---:|
+| `points` — the readings, and all that is saved | 2,400 | 200 | 1% |
+| `sides` — the two edges, per disc | 5,200 | 325 | 3% |
+| `discs` — one per densified reading | 3,900 | 325 | 2% |
+| `pieces` — the quads and fans the renderer fills | 117,000 | 3,250 | **69%** |
+| `outline` — the closed boundary | 43,648 | 5,456 | **26%** |
+| **total** | **172,148** | — | |
+
+The caches are **71x the points**, and the reason is two multiplications. First `densified` cuts every
+segment into pieces no longer than `FACET` (2 px) — up to `MAX_STEPS` (16) of them — turning 200 readings
+into 325 discs; then `FACETS` (8) cuts each disc into eight fans and every neighbouring pair adds a quad,
+so 325 discs become 3,250 pieces (2,600 fans + 324 quads). The zoom multiplies it again, because the
+detail *is* the zoom: the same page costs **5.6x at 8x zoom**.
+
+A stroke whose readings jump — a fast hand, a flicked scroll, a test that teleports the nib — reaches
+`MAX_STEPS` on every segment and costs **330x** its points instead of 71x. Both multipliers matter: the
+first is what handwriting does, the second is the ceiling.
+
+What that makes a note cost, measured from the allocator's live bytes rather than `ps`:
+
+| Pages written on | 1:1 | 8x zoom |
+|---|---:|---:|
+| 10 | 52.3 MB | 293.8 MB |
+| 20 | 52.2 MB | — |
+| 40 | 52.2 MB | 293.9 MB |
+
+**Flat in the page count**, and proportional only to the zoom — because the bound is a page count, so the
+memory it caps is (pages kept) x (a page at this zoom), not (pages written) x anything.
+
+Three things follow, and none of them is a leak:
+
+- **Nothing accumulates across note opens.** Forty open/close cycles of a twenty-page note left the
+  allocator holding freed blocks but never growing past its first peak, and live heap returned to zero on
+  every drop. Undo, redo and page turns are flat for the same reason — they move `Arc`s, they do not copy
+  strokes. Undo *keeps* what it took back (that is what makes it undoable), so erased ink stays in memory
+  until [`HISTORY_EDITS`](../crates/note-format/src/history.rs) (256 edits) pushes it out.
+- **What grows with a session is bounded by the zoom, not the note.** A reader who zooms to 8x and works
+  through forty pages sees the figure above stay put; the one thing that moves it is the zoom itself,
+  because a page detailed for 8x is 5.6x the page detailed for 1:1.
+- **The caches are derivable and already `#[serde(skip)]`**, which is what makes giving a page up safe:
+  nothing derived is ever the only copy. `pieces` and `outline` together are **93%** of a stroke's memory,
+  and both are read on the fill path — `pieces` is what is drawn, `outline` is the fallback for a stroke
+  written before pieces existed and is still checked as its "is there any ink" test.
+
+The one cost the bound adds is a **read and a rebuild** when a reader turns back more than eight pages to
+one they have not looked at since. That is the same work as opening a page they had never visited, and it
+happens off the frame that turns the page, in the same pass `put_page` already pays to detail a page for
+the current zoom.
+
+`--memory-report` will not see any of this: it measures opening and closing documents, one at a time,
+while the ink of a note you are writing on is held for as long as the note is open. These figures came
+from driving `Notes` directly and reading the allocator's own `size_in_use`. **Resident memory is the
+wrong instrument here** — a freed block stays resident and the next stroke reuses it, so 156 MB of live
+ink once read as `+0.1 MiB` in `ps`. Use `malloc_zone_statistics` (or Instruments' Allocations) to
+answer this kind of question, not RSS.
+
 ## 11. Painting the canvas
 
 A frame's canvas is *described* — `describe_canvas` — and the layer draws it, because the shadow's steps,

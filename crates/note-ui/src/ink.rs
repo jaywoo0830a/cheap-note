@@ -1694,14 +1694,42 @@ impl Loop {
 /// the zoom: turning a page is not reaching for a different pen, and it is not standing closer to the paper either.
 /// Every way a document comes to the front therefore goes through [`Self::show`], which is where the reader's state is
 /// carried across.
+/// How many pages a note keeps their drawn geometry for.
+///
+/// Every page that has been written on is held in memory, because a page turn that read the note back
+/// would be a pause on the way in and would lose that page's undo history (see [`Notes`]). The *points*
+/// are cheap — 2,400 bytes for a stroke of 200 readings — but the geometry derived from them is not: 71x
+/// the points for ordinary handwriting, and 5.6x that again at 8x zoom, so a page of thirty strokes is
+/// 5.8 MB at 1:1 and 33 MB at 8x (`doc/VIEW.md`, "What the note holds in memory").
+///
+/// So the geometry is what is bounded, and the pages themselves are not. Past this many, the page the
+/// reader has left longest ago is given up entirely — the points with the geometry — and read back out of
+/// the note on the next turn to it, which is what it would have paid for a page never opened.
+///
+/// Eight is chosen from the two costs it trades: 33 MB a page at 8x means this is at most ~260 MB for a
+/// note being read zoomed in, and the worst case it makes slow is a reader flicking backwards through
+/// more than eight pages they are not going to — each one a read and a rebuild, the same as opening it.
+pub const PAGES_KEPT: usize = 8;
+
 #[derive(Debug)]
 pub struct Notes {
     /// Which page [`Self::current`] is the ink of.
     page: usize,
     /// The ink of the page being written on.
     current: InkDocument,
-    /// The ink of every other page that has been written on.
+    /// The ink of every other page that has been written on, most recently left first out.
+    ///
+    /// Bounded: see [`PAGES_KEPT`] and [`Self::shed_pages`]. A page that has fallen out of it is not lost
+    /// — it is in the note, and the app reads it back on the next turn to it — but everything held for it
+    /// is gone until then.
     taken: BTreeMap<usize, InkDocument>,
+    /// When each page in [`Self::taken`] was last left, as a tick that only ever rises.
+    ///
+    /// The order [`Self::shed_pages`] sheds in: the page left longest ago is the one the reader is least
+    /// likely to turn back to.
+    visited: BTreeMap<usize, u64>,
+    /// The next tick [`Self::visited`] is stamped with.
+    ticks: u64,
     /// The zoom the sheet is drawn at, as the last frame drew it.
     ///
     /// Kept here rather than asked of each page, because the pages in `taken` are not being drawn and
@@ -1725,6 +1753,8 @@ impl Default for Notes {
             page: 0,
             current: InkDocument::blank(),
             taken: BTreeMap::new(),
+            visited: BTreeMap::new(),
+            ticks: 0,
             zoom: 1.0,
             mode: Tool::Pen,
         }
@@ -1819,10 +1849,14 @@ impl Notes {
     /// Moves to a page, taking the ink of the page being left behind with it.
     ///
     /// The page being moved to keeps its own ink, which is the whole point: what was drawn there is
-    /// still there on the way back.
-    pub fn go_to(&mut self, page: usize) {
+    /// still there on the way back — unless it was one of the pages beyond [`PAGES_KEPT`], in which case
+    /// it arrives blank and the caller reads it back out of the note.
+    ///
+    /// Returns the pages given up to stay within [`PAGES_KEPT`], which the caller must treat as not
+    /// loaded (see [`Self::shed_pages`]).
+    pub fn go_to(&mut self, page: usize) -> Vec<usize> {
         if page == self.page {
-            return;
+            return Vec::new();
         }
 
         let mut leaving = std::mem::take(&mut self.current);
@@ -1836,12 +1870,16 @@ impl Notes {
         // edit. Keeping it is what makes undo, turn the page, turn back, redo work.
         if !leaving.is_blank() || leaving.can_redo() {
             self.taken.insert(self.page, leaving);
+            self.stamp(self.page);
         }
 
         let arriving = self.taken.remove(&page).unwrap_or_else(InkDocument::blank);
+        self.visited.remove(&page);
 
         // The tool in hand is *not* part of what went into `taken`: it is the reader's, and they take it with them.
         self.show(arriving, page);
+
+        self.shed_pages()
     }
 
     /// Puts one page's ink into the note: what reading a page out of the file gives.
@@ -1855,19 +1893,73 @@ impl Notes {
     /// right if the sheet is about to be drawn at the size its paper asks for and a page of
     /// straightened pieces if it is not. It is detailed here instead, for the zoom in front of the
     /// reader, in one pass over the stroke list.
-    pub fn put_page(&mut self, page: usize, mut ink: InkDocument) {
+    ///
+    /// Returns the pages given up to stay within [`PAGES_KEPT`] (see [`Self::shed_pages`]).
+    pub fn put_page(&mut self, page: usize, mut ink: InkDocument) -> Vec<usize> {
         ink.set_zoom(self.zoom);
 
         if page == self.page {
             self.show(ink, page);
-            return;
+            return Vec::new();
         }
 
         if ink.is_blank() {
             self.taken.remove(&page);
+            self.visited.remove(&page);
         } else {
             self.taken.insert(page, ink);
+            self.stamp(page);
         }
+
+        self.shed_pages()
+    }
+
+    /// How many pages besides the one in front the note is holding.
+    ///
+    /// Bounded by [`PAGES_KEPT`] — that is the whole of what keeps a long note's memory flat — and read
+    /// by the tests that pin the bound.
+    #[cfg(test)]
+    pub fn taken_len(&self) -> usize {
+        self.taken.len()
+    }
+
+    /// Marks `page` as the most recently left, which is the order [`Self::shed_pages`] sheds in.
+    fn stamp(&mut self, page: usize) {
+        self.ticks += 1;
+        self.visited.insert(page, self.ticks);
+    }
+
+    /// Keeps [`Self::taken`] to [`PAGES_KEPT`] pages, giving up the ones furthest from the reader.
+    ///
+    /// A page that leaves keeps its place in the note — it is written before it is put away (see
+    /// `NoteApp::close_page`, which persists before the turn) — so giving one up loses nothing but the
+    /// work of reading it back. Returns the pages given up, which the app removes from its `loaded` set
+    /// so that the next turn to one reads it out of the note again (`NoteApp::load_page_ink`).
+    ///
+    /// **Nothing that is not already written is ever given up**: only a page the reader has *left* is in
+    /// `taken` at all, and leaving goes through the close that persists first. The page in front is in
+    /// `current` and is never a candidate.
+    ///
+    /// The furthest is the page left longest ago (see [`Self::visited`]), never the nearest.
+    fn shed_pages(&mut self) -> Vec<usize> {
+        let mut given_up = Vec::new();
+
+        while self.taken.len() > PAGES_KEPT {
+            let Some(furthest) = self
+                .visited
+                .iter()
+                .min_by_key(|(_, tick)| **tick)
+                .map(|(page, _)| *page)
+            else {
+                break;
+            };
+
+            self.taken.remove(&furthest);
+            self.visited.remove(&furthest);
+            given_up.push(furthest);
+        }
+
+        given_up
     }
 
     /// Makes room at `page` for a page being inserted there: every page from it onwards becomes the
@@ -1880,6 +1972,10 @@ impl Notes {
         self.taken = std::mem::take(&mut self.taken)
             .into_iter()
             .map(|(index, ink)| (if index >= page { index + 1 } else { index }, ink))
+            .collect();
+        self.visited = std::mem::take(&mut self.visited)
+            .into_iter()
+            .map(|(index, tick)| (if index >= page { index + 1 } else { index }, tick))
             .collect();
 
         if self.page >= page {
@@ -1895,6 +1991,7 @@ impl Notes {
     /// expected to be reversible.
     pub fn remove_at(&mut self, page: usize) {
         self.taken.remove(&page);
+        self.visited.remove(&page);
 
         if page == self.page {
             // The page in front of the reader is the one that followed the deleted page, or a blank
@@ -1903,6 +2000,7 @@ impl Notes {
                 .taken
                 .remove(&(page + 1))
                 .unwrap_or_else(InkDocument::blank);
+            self.visited.remove(&(page + 1));
 
             // The tool in hand comes across with the reader: the page that follows a deleted one is written on with
             // the pen that was already in hand, not with whatever the note's default is.
@@ -1914,6 +2012,10 @@ impl Notes {
         self.taken = std::mem::take(&mut self.taken)
             .into_iter()
             .map(|(index, ink)| (if index > page { index - 1 } else { index }, ink))
+            .collect();
+        self.visited = std::mem::take(&mut self.visited)
+            .into_iter()
+            .map(|(index, tick)| (if index > page { index - 1 } else { index }, tick))
             .collect();
     }
 

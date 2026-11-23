@@ -105,6 +105,54 @@ impl Band {
         band
     }
 
+    /// A band from a stroke's whole geometry: its pieces when it has any, and its outline when it is a
+    /// single disc.
+    ///
+    /// A pen that came down and lifted without moving leaves one disc, and the model answers that with
+    /// an **outline** rather than pieces — there is no tangent to cut between one reading and itself
+    /// (`note_format::ink::ribbon`). Drawing that as nothing is a dot nobody sees; drawing it as a fan
+    /// over the disc's rim is the mark (E6: the same union as every other stroke).
+    pub fn of_stroke(stroke: &note_format::ink::Stroke, place: &Placement) -> Self {
+        if !stroke.pieces.is_empty() {
+            return Band::of(&stroke.pieces, place);
+        }
+
+        if stroke.points.is_empty() {
+            return Band::empty();
+        }
+
+        // The disc the model left: where the readings are, and the nib's own half-width.
+        let mut centre = (0.0_f32, 0.0_f32);
+        for point in &stroke.points {
+            centre.0 += point.x;
+            centre.1 += point.y;
+        }
+
+        let count = stroke.points.len() as f32;
+        centre = (centre.0 / count, centre.1 / count);
+
+        // A fan round the rim: the boundary the model already computed, as triangles from the centre.
+        let outline: Vec<(f32, f32)> = stroke
+            .outline
+            .iter()
+            .map(|point| place.window_point(*point))
+            .collect();
+
+        let centre = place.to_window(centre);
+        let mut band = Band::empty();
+
+        for pair in outline.windows(2) {
+            band.pieces.push(Triangle {
+                a: centre,
+                b: pair[0],
+                c: pair[1],
+            });
+            band.cover(&[centre, pair[0], pair[1]]);
+        }
+
+        band
+    }
+
     /// Grows the band's own bounds over `corners`; the damage is added once, when the band is finished.
     ///
     /// One rectangle per band rather than one per corner: a corner is a point, and a damage of points
@@ -297,6 +345,72 @@ mod tests {
         assert_eq!(band.pieces()[0].a, (100.0, 50.0));
         // The span is ten long at 2x, so its far corner is twenty along.
         assert_eq!(band.pieces()[0].b, (120.0, 50.0));
+    }
+
+    /// A whole page is a run of bands: one per span between readings, for every stroke on it.
+    ///
+    /// This is the *static* path — a page read, a page turned to, the first frame of a document — where
+    /// the engine is handed a stroke list rather than a reading. It is the same geometry as the
+    /// reading-by-reading path (E6): a stroke's pieces turned into triangles, and each stroke's band
+    /// filled as one union.
+    #[test]
+    fn a_whole_stroke_is_a_run_of_bands() {
+        use note_format::ink::{ribbon, InkPoint, Model, Tip};
+
+        let points = [
+            InkPoint::new(10.0, 10.0, 4.0),
+            InkPoint::new(14.0, 10.0, 4.0),
+            InkPoint::new(18.0, 12.0, 4.0),
+        ];
+        let pieces = ribbon(&Model::of(&points, 1.0, Tip::Curved)).pieces;
+        let place = Placement::new((600.0, 800.0), Quarters::UPRIGHT, 1.0, (0.0, 0.0));
+
+        let band = Band::of(&pieces, &place);
+
+        // A stroke of three readings has a span between each pair, and a wedge at each end: the same
+        // pieces the model walked, as triangles.
+        assert!(
+            band.pieces().len() >= 4,
+            "a stroke of three readings drew {} triangles",
+            band.pieces().len()
+        );
+        assert!(!band.is_empty(), "a whole stroke's band came out empty");
+        // The band is the stroke's own box, grown by the edge slack — not the page's.
+        let damage = band.damage().bounds();
+        assert!(damage.width < 60.0, "a stroke's band was page-wide");
+        assert!(
+            damage.y >= 10.0 - crate::band::EDGE_SLACK - 3.0,
+            "a stroke's band began above the stroke"
+        );
+    }
+
+    /// A point repeated is still a disc, not nothing: a nib that came down and lifted without moving
+    /// lays a dot (the model's own rule, `doc/VIEW.md` §7).
+    #[test]
+    fn a_stroke_of_one_reading_is_a_disc() {
+        use note_format::ink::{InkPoint, Stroke, Tip};
+
+        let mut dot = Stroke::new(InkPoint::new(50.0, 50.0, 4.0), Stroke::DEFAULT_COLOR);
+        dot.freeze(1.0, Tip::Curved);
+
+        assert!(
+            dot.pieces.is_empty(),
+            "the model gave a one-reading stroke pieces, so this is not testing the disc"
+        );
+
+        let place = Placement::new((600.0, 800.0), Quarters::UPRIGHT, 1.0, (0.0, 0.0));
+        let band = Band::of_stroke(&dot, &place);
+
+        assert!(!band.is_empty(), "a dot laid no ink");
+        assert!(
+            band.pieces().len() >= 2,
+            "a disc was not a fan of triangles"
+        );
+        assert!(
+            band.damage().bounds().width <= 2.0 * 2.5 + 2.0 * crate::band::EDGE_SLACK + 0.5,
+            "a dot's damage was wider than its own nib: {}",
+            band.damage().bounds().width
+        );
     }
 
     /// E2 on a real stroke: one reading extends an open stroke by its band, and the band is the span

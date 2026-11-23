@@ -24,5 +24,5 @@ pub mod plan;
 
 pub use cheap_note_engine::surface::{Frame, PresentResult, Surface, SurfaceError};
 pub use gpu::{Gpu, GpuError};
-pub use metal::MetalSurface;
-pub use plan::{Plan, Step, Target};
+pub use metal::{Device, MetalSurface};
+pub use plan::{BaseLayer, Mark, Plan, RectFill, Step, Target};

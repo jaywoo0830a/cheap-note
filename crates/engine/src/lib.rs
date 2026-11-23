@@ -17,6 +17,7 @@ pub mod band;
 pub mod engine;
 pub mod footprint;
 pub mod journal;
+pub mod page;
 pub mod place;
 pub mod surface;
 
@@ -27,5 +28,6 @@ pub use band::Band;
 pub use engine::{Engine, FrameCap, State, StrokeWork};
 pub use footprint::{Footprint, Rect};
 pub use journal::{Journal, JournalBatch};
+pub use page::PageBands;
 pub use place::Placement;
 pub use surface::{Frame, PresentResult, Surface, SurfaceError};

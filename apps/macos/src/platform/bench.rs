@@ -45,7 +45,65 @@ use note_ui::ink_layer::canvas::{Canvas, Ink, Rect};
 use gpui_kit::{rgb, rgba, Hsla};
 use note_ui::report::{Budget, Command, Format, Report, Row, Value, Verdict};
 
-use crate::platform::metal::Surface;
+use cheap_note_engine::surface::PresentResult;
+use cheap_note_engine_metal::MetalSurface;
+
+use crate::platform::canvas::{base_of, ink_of, placement};
+
+/// The benchmark's canvas: the engine's surface, drawing one description of the canvas.
+///
+/// The app's canvas draws through exactly these calls; what is here is the timing the bench needs and the
+/// app does not — a frame's own work apart from the display's clock, and the GPU's share, which is the
+/// `settle` after the present.
+pub struct Bench {
+    surface: MetalSurface<cheap_note_engine_metal::Device>,
+}
+
+impl Bench {
+    /// A surface of the benchmark's own, in a view that is not in any window.
+    fn offscreen(view: &objc2_app_kit::NSView) -> Option<Self> {
+        use objc2_quartz_core::CAMetalLayer;
+
+        let layer = CAMetalLayer::layer();
+        view.setWantsLayer(true);
+        view.setLayer(Some(&layer));
+
+        let device =
+            cheap_note_engine_metal::Device::new(layer, CANVAS.0 as u32, CANVAS.1 as u32, 1.0)?;
+        let target = cheap_note_engine_metal::Target::new(CANVAS.0 as f32, CANVAS.1 as f32, 1.0);
+
+        Some(Bench {
+            surface: MetalSurface::new(device, target),
+        })
+    }
+
+    /// Hands one description of the canvas to the surface, and says whether a frame went out.
+    fn draw(&mut self, canvas: &Canvas) -> Result<bool, String> {
+        let place = placement(canvas);
+        let frame = cheap_note_engine::surface::Frame {
+            base: Default::default(),
+            ink: ink_of(canvas, &place),
+        };
+        let base = base_of(canvas);
+
+        match self.surface.present(&base, &frame, None) {
+            Ok(PresentResult::Presented) => Ok(true),
+            Ok(PresentResult::NotReady) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// Waits for the last frame to be paid for: the GPU's share of a frame.
+    fn settle(&self) {
+        self.surface.device().settle();
+    }
+
+    /// How many corners the last frame drew.
+    fn vertices(&self) -> usize {
+        let stated = self.surface.device().stated();
+        (stated.ink + stated.base) as usize
+    }
+}
 
 /// The canvas the benchmark asks for, in device pixels.
 const CANVAS: (usize, usize) = (1_280, 900);
@@ -290,7 +348,7 @@ fn measure(options: &Options, format: Format) -> Result<i32, String> {
 ///
 /// The app reaches its view through GPUI's window handle; the surface takes the view. So a bare
 /// `NSView` with a frame and a Metal layer is the whole of what a canvas needs to exist.
-fn offscreen() -> Option<Surface> {
+fn offscreen() -> Option<Bench> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSView;
 
@@ -307,8 +365,7 @@ fn offscreen() -> Option<Surface> {
         },
     });
 
-    let mut surface = Surface::install(&view, 1.0)?;
-    surface.resize(CANVAS.0, CANVAS.1, 1.0);
+    let surface = Bench::offscreen(&view)?;
 
     // The view has to outlive the surface it lent its layer to. Leaking it is deliberate: the benchmark
     // runs once and exits, and a view kept alive by Objective-C's own reference count would otherwise be
@@ -319,7 +376,7 @@ fn offscreen() -> Option<Surface> {
 }
 
 /// Measures one page: its first frame, its settled frames, a rebuild and a pan.
-fn measure_page(surface: &mut Surface, strokes: usize, frames: usize) -> Result<PageCost, String> {
+fn measure_page(surface: &mut Bench, strokes: usize, frames: usize) -> Result<PageCost, String> {
     let mut canvas = page(strokes);
 
     // The first frame is the one that bakes every realization. It is timed before any other frame has
@@ -362,32 +419,23 @@ fn measure_page(surface: &mut Surface, strokes: usize, frames: usize) -> Result<
     }
     let freeze = regrow.elapsed();
     canvas.ink.revision = canvas.ink.revision.wrapping_add(1);
-    surface.take_stages();
     let started = Instant::now();
-    let (drawn, waited) = surface.draw_with_wait(&canvas, None);
-    if !drawn {
+    if !surface.draw(&canvas)? {
         return Err(String::from(
             "the layer had no drawable ready for the rebuild",
         ));
     }
     // The frame's own work ends where `draw` returns; the settle after it is the GPU, as in `warm`.
-    let work = started.elapsed().saturating_sub(waited);
-    let (refresh, upload, bytes, allocations) = surface.take_stages();
+    let work = started.elapsed();
 
     if std::env::var_os("CHEAP_NOTE_BENCH_BREAKDOWN").is_some() {
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
         let count = surface.vertices();
 
         eprintln!(
-            "    rebuild: freeze {:.2} ms, then rebuild_work {:.2} ms = refresh {:.2} ms + upload \
-             {:.2} ms ({:.1} MB, {} vertices, {:.1} bytes/vertex, {allocations} new buffers)",
+            "    rebuild: freeze {:.2} ms, then the frame's own work {:.2} ms ({count} corners)",
             ms(freeze),
             ms(work),
-            ms(refresh),
-            ms(upload),
-            bytes as f64 / (1024.0 * 1024.0),
-            count,
-            bytes as f64 / count.max(1) as f64,
         );
     }
 
@@ -419,13 +467,13 @@ fn measure_page(surface: &mut Surface, strokes: usize, frames: usize) -> Result<
 /// work; `settle` is the GPU. A rebuild's own cost is the part of `draw` that is not the wait, so the
 /// two cannot be told apart from a single number: on an empty page `rebuild` reads 8.2 ms and all of it is
 /// the wait.
-fn time_frame(surface: &mut Surface, canvas: &Canvas) -> Result<Duration, String> {
+fn time_frame(surface: &mut Bench, canvas: &Canvas) -> Result<Duration, String> {
     Ok(time_frame_in_stages(surface, canvas)?.0)
 }
 
 /// One frame's total, plus how much of it was the GPU.
 fn time_frame_in_stages(
-    surface: &mut Surface,
+    surface: &mut Bench,
     canvas: &Canvas,
 ) -> Result<(Duration, Duration), String> {
     let started = Instant::now();
@@ -436,8 +484,8 @@ fn time_frame_in_stages(
 }
 
 /// Draws one frame, or says why the layer would not take it.
-fn draw(surface: &mut Surface, canvas: &Canvas) -> Result<(), String> {
-    if surface.draw(canvas, None) {
+fn draw(surface: &mut Bench, canvas: &Canvas) -> Result<(), String> {
+    if surface.draw(canvas)? {
         Ok(())
     } else {
         Err(String::from(

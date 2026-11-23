@@ -3622,3 +3622,65 @@ fn a_notes_memory_does_not_grow_with_its_page_count() {
         );
     }
 }
+
+/// A batch reports what a surface has to draw, in the paper's own coordinates, and a reading that laid
+/// nothing reports nothing.
+///
+/// This is the seam between the model and a canvas that draws by the reading (`doc/ENGINE.md`, E2): a
+/// surface handed these can draw the band each one swept and nothing else. The check that matters is the
+/// *coordinate space* — a surface given window pixels would have to undo the placement the model just
+/// applied, and would be wrong the moment the sheet moved between the reading and the draw.
+#[test]
+fn a_batch_says_what_it_laid_on_the_paper() {
+    let mut page = InkDocument::blank();
+    page.set_mode(Tool::Pen);
+
+    let batch = [
+        reading(1, Phase::Down, 100.0, 100.0, Some(1.0)),
+        reading(1, Phase::Move, 104.0, 100.0, Some(1.0)),
+    ];
+
+    let mut laid = Vec::new();
+    let changed = page.consume_laid(&batch, &id(), &settings(), &mut laid);
+
+    assert!(changed, "a stroke laid ink and the model did not notice");
+    assert_eq!(laid.len(), 2, "a batch of two readings laid two points");
+
+    // The paper's own coordinates, and the line the nib drew.
+    assert_eq!(laid[0].point.x, 100.0, "the first point left the paper");
+    assert_eq!(laid[1].point.x, 104.0, "the second point left the paper");
+    assert!(
+        laid[0].point.width > 0.0,
+        "a laid point carried no width, so a surface could not draw it"
+    );
+
+    // One stroke, one number, and one colour: a surface appends the band to the line it is writing.
+    assert_eq!(
+        laid[0].stroke, laid[1].stroke,
+        "two points of one stroke had two numbers"
+    );
+    assert_eq!(
+        laid[0].colour, laid[1].colour,
+        "one stroke changed colour mid-line"
+    );
+
+    // And an empty batch lays nothing at all.
+    let mut nothing = Vec::new();
+    page.consume_laid(&[], &id(), &settings(), &mut nothing);
+    assert!(nothing.is_empty(), "an empty batch laid points");
+}
+
+/// A hover lays nothing, and the model says so: a pen in range is a cursor, not ink (E1).
+#[test]
+fn a_hover_lays_no_points() {
+    let mut page = InkDocument::blank();
+    page.set_mode(Tool::Pen);
+
+    let hover = [reading(1, Phase::Hover, 100.0, 100.0, None)];
+
+    let mut laid = Vec::new();
+    let changed = page.consume_laid(&hover, &id(), &settings(), &mut laid);
+
+    assert!(!changed, "a hover was reported as ink");
+    assert!(laid.is_empty(), "a hover laid a point");
+}

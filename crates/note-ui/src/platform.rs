@@ -231,6 +231,28 @@ pub trait SystemStats {
     }
 }
 
+/// One reading that reached the paper, as a surface sees it: where it is *on the paper*, and how thick
+/// the ink under it is.
+///
+/// The paper's own coordinates and not the window's, because that is what a stroke is stored in: a
+/// pan or a zoom changes where the paper is drawn, not where the ink was written (`doc/VIEW.md` §7).
+/// The surface resolves the placement itself, so a reading arriving mid-pan lands on the sheet the
+/// canvas was last described at.
+///
+/// This is deliberately smaller than `Reading` (`crate::input`): a surface that draws ink needs the
+/// three numbers that make a line, and nothing about pressure, tilt or pointer identity — those are
+/// the model's, and it has already used them by the time a batch is laid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Laid {
+    /// Where on the paper the nib touched, and how wide. The nib's *line*, not its half.
+    pub point: note_format::ink::InkPoint,
+    /// The stroke this reading extended, as the model numbers it: a new number begins a stroke, and
+    /// the same number is the same line still being written.
+    pub stroke: u64,
+    /// The colour of the ink in hand (`0xAARRGGBB`), stamped on the first reading of a stroke.
+    pub colour: u32,
+}
+
 /// The surface the desk, the paper and the ink are painted on: the view says what, this says how.
 pub trait InkSurface {
     /// Paints one frame of the canvas.
@@ -258,6 +280,22 @@ pub trait InkSurface {
     /// where pressing it can have an effect (see `NoteApp::honours_vsync`).
     fn honours_vsync(&self) -> bool {
         true
+    }
+
+    /// Tells the surface what a *batch of readings* just changed, before any frame describes the
+    /// canvas again.
+    ///
+    /// A frame's [`Self::draw`] carries the whole canvas, and a surface that redraws all of it is a
+    /// surface whose cost is the page rather than the reading (`doc/ENGINE.md`, E2). This is the hook
+    /// that lets a surface draw only the bands the readings laid. It is called on the pen's own wake,
+    /// once per batch, *after* the model has consumed it and *before* any canvas is described.
+    ///
+    /// The default does nothing and says so, which is what every surface written before this hook
+    /// existed already does: it draws the newest whole canvas at the next [`Self::draw`], exactly as
+    /// it did. `Ok(false)` is "nothing was laid" — a hover, a dropped resample, an eraser that found
+    /// nothing — and it is not a failed present.
+    fn lay(&mut self, _laid: &[Laid]) -> Result<bool, String> {
+        Ok(false)
     }
 }
 

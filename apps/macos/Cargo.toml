@@ -20,6 +20,12 @@ note-ui = { path = "../../crates/note-ui" }
 note-format = { path = "../../crates/note-format" }
 gpui-kit = "=0.9.1"
 
+# The engine, and this platform's half of it: the canvas draws bands in the paper's own units, and the
+# Metal surface turns them into pixels (`doc/ENGINE.md`). The app no longer has a canvas of its own —
+# `platform::canvas` is the window's part of it and nothing else.
+cheap-note-engine = { path = "../../crates/engine" }
+cheap-note-engine-metal = { path = "../../crates/engine-metal" }
+
 # The pen: `NSEvent`'s tablet fields, read on the thread that draws (see its own docs).
 pen-macos = { path = "pen-macos" }
 

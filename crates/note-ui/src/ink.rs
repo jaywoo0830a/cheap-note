@@ -1916,9 +1916,8 @@ impl Notes {
 
     /// How many pages besides the one in front the note is holding.
     ///
-    /// Bounded by [`PAGES_KEPT`] — that is the whole of what keeps a long note's memory flat — and read
-    /// by the tests that pin the bound.
-    #[cfg(test)]
+    /// Bounded by [`PAGES_KEPT`] — that is the whole of what keeps a long note's memory flat — and read by
+    /// the tests that pin the bound and by the memory report (`crate::memory_report`), which prints it.
     pub fn taken_len(&self) -> usize {
         self.taken.len()
     }

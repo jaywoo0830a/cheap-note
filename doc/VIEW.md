@@ -986,12 +986,13 @@ one they have not looked at since. That is the same work as opening a page they 
 happens off the frame that turns the page, in the same pass `put_page` already pays to detail a page for
 the current zoom.
 
-`--memory-report` will not see any of this: it measures opening and closing documents, one at a time,
-while the ink of a note you are writing on is held for as long as the note is open. These figures came
-from driving `Notes` directly and reading the allocator's own `size_in_use`. **Resident memory is the
-wrong instrument here** — a freed block stays resident and the next stroke reuses it, so 156 MB of live
-ink once read as `+0.1 MiB` in `ps`. Use `malloc_zone_statistics` (or Instruments' Allocations) to
-answer this kind of question, not RSS.
+`--memory-report` now measures this half too: its `ink:` and `note:` rows drive exactly the scenarios
+above — writing past the page bound, turning back through it, clearing and undoing, walking the zoom
+rungs, and writing a note through the writer thread — and its final `end` row is the figure its verdict
+reads. What it still cannot give is the **live** heap: it reports resident memory, and a freed block stays
+resident and the next stroke reuses it, so 156 MB of live ink once read as `+0.1 MiB` in `ps`. The figures
+in this section came from driving `Notes` directly and reading the allocator's own `size_in_use`; use
+`malloc_zone_statistics` (or Instruments' Allocations) to answer "was this freed" rather than "did it grow".
 
 ## 11. Painting the canvas
 

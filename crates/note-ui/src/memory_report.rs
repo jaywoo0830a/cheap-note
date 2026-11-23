@@ -41,6 +41,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::ink::{InkPoint, Stroke};
 use crate::note::Note;
 use crate::pdf::{PageRequest, PdfDocumentView};
 
@@ -68,7 +69,12 @@ pub const FLAG: &str = "--memory-report";
 /// One sentence rather than a line per platform: both mains dispatch on the same flag and both hand
 /// the rest to the same `report::Options` parser, so the usage cannot drift between them.
 pub fn usage() -> String {
-    format!("usage: cheap-note {FLAG} [--format table|json] <note> [<note> ...]\n")
+    format!(
+        "usage: cheap-note {FLAG} [--format table|json] [<note> ...]\n\
+         \n\
+         The ink and note scenarios run whether or not a note is given; each <note> adds a row for\n\
+         opening and closing its document.\n"
+    )
 }
 
 /// One row of the report: what the process held after one operation.
@@ -251,11 +257,6 @@ pub fn run_in(
     format: crate::report::Format,
     platform: &'static str,
 ) -> i32 {
-    if paths.is_empty() {
-        let _ = write!(out, "{}", usage());
-        return 2;
-    }
-
     match collect(paths, stats) {
         Ok(report) => match format {
             crate::report::Format::Table => {
@@ -373,11 +374,31 @@ pub fn to_contract(report: &Report, platform: &'static str) -> crate::report::Re
 /// A note is closed by dropping it, which is what releases the document's bytes, its bitmaps and its
 /// Pdfium handle — the same drop the app performs when a reader leaves a note. Nothing is written, so a
 /// report does not disturb what it measures.
+///
+/// ## The scenarios, and why each is here
+///
+/// The document half is only half the app's memory. The ink half is the larger one — a note's page holds
+/// 71x its readings in derived geometry (`doc/VIEW.md`, "What the note holds in memory") — and it has
+/// bounds that a report about opening PDFs can never see go wrong. So the run measures both, in this
+/// order:
+///
+/// | Rows | What it would catch |
+/// |---|---|
+/// | `open` / `close` per path | a document's bytes, bitmaps or Pdfium handle outliving its note |
+/// | `ink: writing N pages` | the page cache growing without bound (`ink::PAGES_KEPT`) |
+/// | `ink: turning back` | a page given up and never given back, or the reverse |
+/// | `ink: undo all` | the history outliving its bound (`HISTORY_EDITS`) |
+/// | `ink: zoom rungs` | a rebuild leaking the geometry it replaced |
+/// | `note: write N pages` | the writer thread and its connection outliving the note |
+/// | `note: pages added and deleted` | the page map not renumbering, which would strand ink |
+///
+/// Every ink scenario ends by dropping what it built, so the run's final figure is comparable to its
+/// baseline and the verdict means the same thing it always did: *did the process come back*.
 pub fn collect(
     paths: &[PathBuf],
     stats: &mut dyn crate::platform::SystemStats,
 ) -> Result<Report, String> {
-    let mut steps = Vec::with_capacity(paths.len() * 2 + 1);
+    let mut steps = Vec::with_capacity(paths.len() * 2 + 16);
 
     steps.push(measure(String::from("baseline"), None, stats));
 
@@ -394,6 +415,8 @@ pub fn collect(
 
         steps.push(measure(format!("close {name}"), None, stats));
     }
+
+    collect_ink(stats, &mut steps);
 
     Ok(Report { steps })
 }
@@ -466,6 +489,286 @@ fn note_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// How many pages the ink scenarios write, and how many strokes on each.
+///
+/// More than [`crate::ink::PAGES_KEPT`] so that the page cache is actually pushed past its bound — a run
+/// that wrote fewer would report a flat figure for the trivial reason that nothing had been given up yet.
+const SCENARIO_PAGES: usize = crate::ink::PAGES_KEPT + 8;
+
+/// How many strokes one scenario page holds.
+const SCENARIO_STROKES: usize = 2;
+
+/// How many zoom rungs the rebuild scenario walks.
+const SCENARIO_RUNGS: usize = 6;
+
+/// The ink and note scenarios: the half of the app's memory a report about PDFs cannot see.
+///
+/// Each block builds something, measures it, and drops it before the next one starts — so a figure that
+/// does not come back is one scenario's, not the run's. What they are *for* is stated on [`collect`];
+/// this is how each is built.
+///
+/// The rows are written whether or not the run has notes to open, because these scenarios need none: an
+/// ink-only leak is invisible to a `--memory-report` of a textbook and is the larger of the two halves.
+fn collect_ink(stats: &mut dyn crate::platform::SystemStats, steps: &mut Vec<Step>) {
+    collect_pages(stats, steps);
+    collect_undo(stats, steps);
+    collect_zoom(stats, steps);
+    collect_note_writes(stats, steps);
+
+    // The last row, so that the verdict is about the process after *everything* has been given up rather
+    // than about whichever scenario happened to run last. Without it a reader has to know the order of
+    // the scenarios to read the summary, and the summary is the line they will look at.
+    steps.push(measure(String::from("end"), None, stats));
+}
+
+/// A few strokes of the shape a hand makes, for a scenario page to hold.
+///
+/// Short on purpose — a report is not a benchmark, and a page of these is enough to make the derived
+/// geometry real without making the run take minutes.
+fn scenario_strokes(page: usize) -> Vec<Stroke> {
+    (0..SCENARIO_STROKES)
+        .map(|stroke| {
+            let seed = (page * SCENARIO_STROKES + stroke) as f32;
+            let mut points = Vec::with_capacity(40);
+            let (mut x, mut y) = (80.0f32, 80.0f32 + seed * 0.5);
+
+            for reading in 0..40 {
+                let t = seed + reading as f32;
+
+                x += 2.0 + (t * 0.7).sin() * 0.6;
+                y += (t * 1.1).cos() * 0.9;
+
+                points.push(InkPoint::new(x, y, 3.0));
+            }
+
+            let mut stroke = Stroke::new(points[0], 0x0011_2233);
+            stroke.points = points;
+
+            stroke
+        })
+        .collect()
+}
+
+/// Writes [`SCENARIO_PAGES`] pages and turns back through them.
+///
+/// What this catches is the page cache growing without bound: the count of pages a note holds is what its
+/// memory is proportional to, so the figure after the walk should be the same whether eight pages were
+/// written or eighty. The turn back is the other half — a page given up has to come back, or the bound
+/// would be a silent loss of ink.
+fn collect_pages(stats: &mut dyn crate::platform::SystemStats, steps: &mut Vec<Step>) {
+    let mut notes = crate::ink::Notes::new();
+
+    for page in 0..SCENARIO_PAGES {
+        if page > 0 {
+            notes.go_to(page);
+        }
+
+        notes.put_page(
+            page,
+            crate::ink::InkDocument::from_strokes(scenario_strokes(page)),
+        );
+    }
+
+    steps.push(ink_step(
+        format!("ink: {SCENARIO_PAGES} pages written"),
+        &notes,
+        stats,
+    ));
+
+    for page in (0..SCENARIO_PAGES).rev() {
+        notes.go_to(page);
+    }
+
+    steps.push(ink_step(
+        String::from("ink: turned back through"),
+        &notes,
+        stats,
+    ));
+
+    drop(notes);
+    steps.push(measure(String::from("ink: dropped"), None, stats));
+}
+
+/// Draws a page, takes every stroke back, and gives the page up.
+///
+/// The undo stack holds what it took back — that is what makes undo undoable — so a page whose history
+/// was not bounded would keep every stroke it ever drew alive. [`crate::history::HISTORY_EDITS`] is the
+/// bound; this is what would catch it moving or being bypassed.
+///
+/// Drawn by *clearing* rather than one stroke at a time, because a clear is one edit holding every stroke
+/// it removed: the history's bound is on edits, and this is the shape that puts the most ink behind it.
+fn collect_undo(stats: &mut dyn crate::platform::SystemStats, steps: &mut Vec<Step>) {
+    // Many strokes, because a clear's edit holds every one of them: this is the shape that puts the most
+    // ink behind a bounded history, and so the one that would show the bound not holding.
+    let drawn = 200;
+    let mut page = crate::ink::InkDocument::from_strokes(
+        (0..drawn).flat_map(scenario_strokes).collect::<Vec<_>>(),
+    );
+
+    steps.push(measure(
+        format!("ink: {} strokes drawn", page.stroke_count()),
+        None,
+        stats,
+    ));
+
+    page.clear();
+
+    steps.push(measure(
+        format!("ink: cleared, {} left", page.stroke_count()),
+        None,
+        stats,
+    ));
+
+    while page.undo() {}
+
+    steps.push(measure(
+        format!("ink: undone, {} back", page.stroke_count()),
+        None,
+        stats,
+    ));
+
+    drop(page);
+    steps.push(measure(String::from("ink: page dropped"), None, stats));
+}
+
+/// Rebuilds one page at the whole zoom ladder.
+///
+/// Detail is a rung, and crossing one re-derives every stroke's geometry (`Stroke::freeze`). What this
+/// catches is a rebuild that *adds* rather than replaces — an `Arc` copied and the old vectors kept, say
+/// — which over six rungs would show as a figure that climbs and never returns.
+fn collect_zoom(stats: &mut dyn crate::platform::SystemStats, steps: &mut Vec<Step>) {
+    let mut notes = crate::ink::Notes::new();
+    notes.put_page(
+        0,
+        crate::ink::InkDocument::from_strokes(scenario_strokes(0)),
+    );
+
+    for rung in 0..SCENARIO_RUNGS {
+        notes.set_zoom(2f32.powi(rung as i32));
+        notes.build_detail();
+    }
+
+    steps.push(ink_step(
+        format!("ink: {SCENARIO_RUNGS} zoom rungs"),
+        &notes,
+        stats,
+    ));
+
+    drop(notes);
+    steps.push(measure(String::from("ink: page dropped"), None, stats));
+}
+
+/// Writes pages to a real note through the writer thread, then closes it.
+///
+/// The writer is a thread with its own SQLite connection, and the note is a folder — both are state that
+/// lives outside the page cache and would not be released with it. This is the one scenario that needs a
+/// note on disk, so it makes one in the temporary directory and removes it afterwards.
+fn collect_note_writes(stats: &mut dyn crate::platform::SystemStats, steps: &mut Vec<Step>) {
+    let Ok(folder) = scenario_note_folder() else {
+        steps.push(measure(
+            String::from("note: could not make one"),
+            None,
+            stats,
+        ));
+        return;
+    };
+
+    let written = write_scenario_note(&folder);
+
+    steps.push(measure(
+        format!("note: {written} pages written"),
+        None,
+        stats,
+    ));
+
+    // Dropping the note is what closes its writer thread and its connection — the drop the app performs
+    // when a reader leaves a note.
+    drop(open(&folder));
+
+    steps.push(measure(String::from("note: closed"), None, stats));
+
+    // The folder is the report's, not the reader's: it was made to be measured and is not anyone's note.
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// Makes an empty folder in the temporary directory for a scenario note.
+fn scenario_note_folder() -> Result<PathBuf, std::io::Error> {
+    let base = std::env::temp_dir().join(format!("cheap-note-report-{}", std::process::id()));
+
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base)?;
+
+    Ok(base)
+}
+
+/// Writes [`SCENARIO_PAGES`] pages into `folder`, and waits for them to land.
+///
+/// The pages go through the store directly rather than through the writer thread, for the same reason a
+/// measurement should not race a queue: the figures are read after this returns, and a write still in
+/// flight would be a figure about the queue rather than about the note. The writer is spawned anyway and
+/// dropped at the end, because it is the other thing a note owns — a thread and its own connection — and
+/// it is part of what an open note costs.
+///
+/// Returns how many pages were written, for the row's label.
+fn write_scenario_note(folder: &Path) -> usize {
+    let Ok(mut note) = Note::placed_from(folder, folder) else {
+        return 0;
+    };
+
+    let writer = crate::note::NoteWriter::spawn(note.dir()).ok();
+
+    let mut written = 0;
+
+    for page in 0..SCENARIO_PAGES {
+        let strokes: Vec<Stroke> = scenario_strokes(page)
+            .into_iter()
+            .map(|mut stroke| {
+                stroke.close();
+                stroke
+            })
+            .collect();
+
+        let history = note_format::history::HistoryUpdate {
+            appended: Vec::new(),
+            applied: 0,
+            count: strokes.len(),
+        };
+
+        if note
+            .store_mut()
+            .append(page as u64, &strokes, &history)
+            .is_ok()
+        {
+            written += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Ends the writer's thread and closes its connection.
+    drop(writer);
+
+    written
+}
+
+/// A reading of the process, with a note's page count filled in.
+///
+/// The ink rows report `pages` as how many pages the note is holding, which is what the page-cache bound
+/// is about — so a reader comparing the two halves of the report can tell which one a row came from.
+fn ink_step(
+    label: String,
+    notes: &crate::ink::Notes,
+    stats: &mut dyn crate::platform::SystemStats,
+) -> Step {
+    Step {
+        label,
+        rss_bytes: stats.vitals().map_or(0, |vitals| vitals.resident_bytes),
+        surface_bytes: stats.surface_bytes(),
+        cache_bytes: 0,
+        pages: notes.taken_len() + 1,
+    }
 }
 
 #[cfg(test)]
@@ -573,5 +876,68 @@ mod tests {
         assert_eq!(FLAG, "--memory-report");
         assert!(usage().contains(FLAG));
         assert!(usage().contains("--format table|json"));
+    }
+
+    /// The scenarios write more pages than the note keeps, or the bound would never be exercised.
+    ///
+    /// This is the assertion that keeps the report honest as the bound moves: if `PAGES_KEPT` were raised
+    /// past `SCENARIO_PAGES`, every page row would be flat for the trivial reason that nothing was given
+    /// up, and a leak past the bound would go unreported.
+    #[test]
+    fn the_page_scenario_pushes_past_the_notes_bound() {
+        // A `const` block rather than a runtime assert: the two values are constants, so the check is the
+        // compiler's to make, and clippy is right that a runtime assertion on them can never be false.
+        const { assert!(SCENARIO_PAGES > crate::ink::PAGES_KEPT) };
+
+        // And the failure this guards is real: `SCENARIO_PAGES` is defined *from* `PAGES_KEPT`, so raising
+        // the bound moves the scenario with it, and the margin is what keeps the rows meaningful.
+        assert_eq!(
+            SCENARIO_PAGES,
+            crate::ink::PAGES_KEPT + 8,
+            "the scenario writes a margin past the bound, so the bound is actually crossed"
+        );
+    }
+
+    /// A scenario page is writeable ink, not an empty vector: a page with no strokes is not held at all,
+    /// so a scenario made of them would measure nothing.
+    #[test]
+    fn a_scenario_page_holds_real_strokes() {
+        let strokes = scenario_strokes(0);
+
+        assert_eq!(strokes.len(), SCENARIO_STROKES);
+
+        for stroke in strokes {
+            assert!(
+                stroke.points.len() >= 2,
+                "a stroke is a line, so it needs somewhere to go"
+            );
+        }
+    }
+
+    /// The scenarios leave nothing behind: what each one built is dropped before the next.
+    ///
+    /// Measured through the note's own count rather than through memory, because a resident figure cannot
+    /// tell a freed block from a held one — the allocator keeps both. What this pins is the *structure*:
+    /// a run that ended holding pages would be one whose drop was forgotten.
+    #[test]
+    fn the_page_scenario_gives_its_pages_back() {
+        let mut notes = crate::ink::Notes::new();
+
+        for page in 0..SCENARIO_PAGES {
+            if page > 0 {
+                notes.go_to(page);
+            }
+
+            notes.put_page(
+                page,
+                crate::ink::InkDocument::from_strokes(scenario_strokes(page)),
+            );
+        }
+
+        assert_eq!(
+            notes.taken_len(),
+            crate::ink::PAGES_KEPT,
+            "the scenario's pages are bounded by the note's own bound"
+        );
     }
 }

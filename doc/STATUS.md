@@ -244,13 +244,14 @@ grep -o 'present [0-9.]* ([0-9.]*)' ~/Library/Application\ Support/cheap-note/st
 | Two cursors on screen | `CHEAP_NOTE_TRACE` → `no pointer hook` | the system pointer could not be hooked |
 | A clause you expect is missing | §1 above | absent means zero or ordinary, not broken |
 
-## 12. Measuring memory across documents
+## 12. Measuring memory across documents, and the ink
 
 The status line says what this process holds *now*. To ask what opening and closing documents
-*costs* — the question behind "it climbs when I open PDFs" — there is a separate command:
+*costs* — the question behind "it climbs when I open PDFs" — and whether the ink and the note give their
+memory back, there is a separate command:
 
 ```sh
-cheap-note --memory-report <note-folder> [<note-folder> ...]
+cheap-note --memory-report [<note-folder> ...]
 ```
 
 No window opens. Each note is opened, measured, closed, and measured again, all in **one process**,
@@ -261,8 +262,20 @@ because two processes would answer a question about the operating system rather 
 baseline                    11 MiB         —      0 MB      0 MB      0
 open 화학-7f07d9fa            80 MiB   +69 MiB     11 MB      0 MB      1
 close 화학-7f07d9fa           63 MiB   -16 MiB      0 MB      0 MB      0
+ink: 16 pages written       64 MiB    +1 MiB      0 MB      0 MB      9
+ink: turned back through    64 MiB    +0 MiB      0 MB      0 MB      9
+ink: dropped                64 MiB    +0 MiB      0 MB      0 MB      0
+ink: 400 strokes drawn      75 MiB   +11 MiB      0 MB      0 MB      0
+ink: cleared, 0 left        75 MiB    +0 MiB      0 MB      0 MB      0
+ink: undone, 400 back       75 MiB    +0 MiB      0 MB      0 MB      0
+ink: page dropped           75 MiB    +0 MiB      0 MB      0 MB      0
+ink: 6 zoom rungs           76 MiB    +1 MiB      0 MB      0 MB      1
+ink: page dropped           76 MiB    +0 MiB      0 MB      0 MB      0
+note: 16 pages written      79 MiB    +2 MiB      0 MB      0 MB      0
+note: closed                79 MiB    +0 MiB      0 MB      0 MB      0
+end                         79 MiB    +0 MiB      0 MB      0 MB      0
 ──────────────────────────────────────────────────────────────────────
-peak 80 MiB   final 63 MiB   growth +52 MiB   ok
+peak 80 MiB   final 79 MiB   growth +68 MiB   ok
 ```
 
 - **`RSS`** — resident memory, read from the same counters the status line uses.
@@ -270,8 +283,17 @@ peak 80 MiB   final 63 MiB   growth +52 MiB   ok
   `+0 MiB` did not.
 - **`cache`** / **`pages`** — what the page cache holds, and how many bitmaps. Both go to zero on a
   close, which is what makes a `close` row worth reading: the cache emptied, so any resident figure
-  still standing is something else.
+  still standing is something else. On an `ink:` row `pages` is the **note's** page count instead, which
+  is bounded by `ink::PAGES_KEPT + 1` — a figure that climbed there would be the page cache leaking.
 - **`gpu`** — the graphics ledger (`IOSurface` on macOS), when the platform can report it.
+
+**The ink and note rows run whether or not a note is given**, because they need none, and the ink is the
+larger half of what the app holds — a page is 71x its readings in derived geometry (see
+[`VIEW.md`](VIEW.md), "What the note holds in memory"). They drive the scenarios a leak would have to
+show up in: writing past the page bound and turning back through it (`PAGES_KEPT`), clearing and undoing
+a page (`HISTORY_EDITS`), walking the zoom rungs (a rebuild that added rather than replaced), and
+writing a note through the writer thread. The `end` row is the process after everything was dropped,
+which is the figure the verdict reads.
 
 **Exit code** — `0` when the run came back within the allowance, `1` when it did not, `2` when the
 command could not run. That is what makes it usable in CI. The allowance is
@@ -295,6 +317,13 @@ opened twice now costs nothing the second time.
 
 A headless run renders bitmaps but never presents them, so the `gpu` column reports what the process
 allocated rather than what a compositor pooled. Read it for its direction, not its size.
+
+**Resident memory cannot say whether a specific allocation was freed** — a freed block stays resident and
+the next one reuses it, so a page that gave its 12 MiB back reads `+0 MiB`. What the report is good at is
+the question that matters: does a figure *climb and stay climbed* by the `end` row. To ask the narrower
+question — was this page released rather than reused — the answer is `malloc_zone_statistics` or
+Instruments' Allocations, not this command. It was measured that way: 156 MB of live ink once read as
+`+0.1 MiB` in `ps`.
 
 The commands' full contract — arguments, exit codes, the shape a script can read, and what a new
 platform has to provide — is [`doc/CLI.md`](CLI.md).

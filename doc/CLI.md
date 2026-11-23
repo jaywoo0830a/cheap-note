@@ -25,20 +25,41 @@ The human-readable table stays. `--format json` is added beside it for the three
 
 ## `cheap-note --memory-report`
 
-Measures what opening and closing documents costs the process.
+Measures what opening and closing documents costs the process, **and** what the ink and the note cost.
 
 ```sh
+cheap-note --memory-report
 cheap-note --memory-report <note-folder> [<note-folder> ...]
 cheap-note --memory-report --format json <note-folder> [<note-folder> ...]
 ```
 
-No window opens. Every note is opened, measured, closed, and measured again **in one process** —
-two processes would answer a question about the operating system rather than about the app.
+No window opens. Every note is opened, measured, closed, and measured again **in one process** — two
+processes would answer a question about the operating system rather than about the app.
+
+**The ink and note scenarios run whether or not a note is given**, because they need none: an ink-only
+leak is invisible to a report of a textbook, and the ink is the larger half of what the app holds (a page
+is 71x its readings in derived geometry — see [VIEW.md](VIEW.md), "What the note holds in memory"). Each
+`<note>` adds a pair of rows for opening and closing its document.
 
 Both platforms take the same `--format` flag: `report::Options` parses it before the note folders, so
 `--format json` is one contract on macOS and Windows. The Windows build writes the result through
 `apps/windows/src/platform/console.rs` — a console when the run has one, a file beside the executable
 when it does not.
+
+### What each row measures
+
+| Rows | What a figure that does not come back would mean |
+|---|---|
+| `open` / `close <note>` | a document's bytes, bitmaps or Pdfium handle outliving its note |
+| `ink: N pages written` | the page cache growing without bound (`ink::PAGES_KEPT`; the `pages` column is the count it holds) |
+| `ink: turned back through` | a page given up and never given back — the bound turning into lost ink |
+| `ink: M strokes drawn` / `cleared` / `undone` | the undo history outliving its bound (`history::HISTORY_EDITS`) |
+| `ink: 6 zoom rungs` | a rebuild leaking the geometry it replaced |
+| `note: N pages written` / `closed` | the writer thread and its SQLite connection outliving the note |
+| `end` | the process after everything above was dropped — the row the summary is about |
+
+Every scenario drops what it built before the next starts, so a figure that does not return is one
+scenario's, not the run's.
 
 ### What each column means
 
@@ -46,22 +67,34 @@ when it does not.
 |---|---|
 | `rss` | resident memory, from the same counters the status line reads |
 | `delta` | against the row above; a `close` that reads `+0` gave nothing back |
-| `cache` | what the page cache holds, in bytes |
+| `cache` | what the PDF page cache holds, in bytes |
 | `gpu` | the graphics ledger when the platform can report it, else `null` |
-| `pages` | how many bitmaps the cache holds |
+| `pages` | how many pages the thing being measured is holding — the PDF cache's bitmaps, or the note's pages |
 
 `cache` and `pages` going to zero on a `close` is what makes that row worth reading: the cache
-emptied, so any resident figure still standing is something *else* holding on.
+emptied, so any resident figure still standing is something *else* holding on. The `pages` column on an
+`ink:` row is deliberately bounded: it reads the note's own page count, which never exceeds
+`PAGES_KEPT + 1`, and a figure that climbed would be the page cache leaking.
+
+### Reading a row that does not move
+
+Resident memory is the right figure for "did the process come back", and the wrong one for "was this
+freed": **a freed block stays resident and the next allocation reuses it**. So an `ink: dropped` that
+reads `+0 MiB` is the normal case, not a pass by itself — what it means is that nothing *grew*. A real
+leak shows as a figure that climbs and never returns by the `end` row, which is what the verdict reads.
+
+To see whether a specific page was released rather than reused, the answer is `malloc_zone_statistics`
+(or Instruments' Allocations), not this command. See [VIEW.md](VIEW.md), "What the note holds in memory".
 
 ### Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | every note came back within the allowance |
-| `1` | at least one did not |
-| `2` | the command could not run — no paths, or a note that would not open |
+| `0` | the process came back within the allowance |
+| `1` | it did not |
+| `2` | the command could not run — a note that would not open |
 
-Three codes rather than two because "the app leaked" and "the command was wrong" are different
+Two codes past success, because "the app leaked" (`1`) and "the command was wrong" (`2`) are different
 problems, and a CI job wants to tell them apart. A run that cannot measure at all (a build with no
 process counters) exits `1`, not `0`: a pass it did not earn is worse than a failure.
 
@@ -70,7 +103,9 @@ process counters) exits `1`, not `0`: a pass it did not earn is worse than a fai
 `LEAK_TOLERANCE_BYTES` (64 MiB) is sized for **Pdfium's fixed per-document cost** — 30–50 MiB
 whatever the document's size — and not for a leak. A real leak is proportional to the document:
 before the fix, a 62 MB PDF left 130 MiB behind. The allowance sits between the two, so a fixed
-cost passes and a proportional one fails.
+cost passes and a proportional one fails. The ink scenarios' own cost is well inside it: the whole run
+grows by about 17 MiB, almost all of it the 400-stroke undo scenario's ink, which is dropped before
+`end`.
 
 ## `cheap-note --bench`
 

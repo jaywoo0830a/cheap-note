@@ -19,10 +19,11 @@ cheap-note --bench --format json                     # for a script
 
 On Windows `cheap-note-bench` is still there as a thin wrapper, for scripts that call it by name.
 
-`cheap-note --memory-report <note-folder> ...` is the other measurement: whether a document gives its
-memory back. Both commands share one contract — the same fields, the same `--format`, and the same
-`0` / `1` / `2` exit codes for pass, fail and could-not-measure. [`doc/CLI.md`](doc/CLI.md) is that
-contract.
+`cheap-note --memory-report` is the other measurement: whether a document gives its memory back, and
+whether the ink and the note do. It takes note folders to open and close, and measures the ink scenarios —
+the page bound, undo, zoom rebuilds, writing a note — whether or not any are given. Both commands share
+one contract — the same fields, the same `--format`, and the same `0` / `1` / `2` exit codes for pass,
+fail and could-not-measure. [`doc/CLI.md`](doc/CLI.md) is that contract.
 
 See [doc/WINDOWS.md §6.4](doc/WINDOWS.md#64-measure-the-windows-canvas) for what each column means and
 the numbers it produced.

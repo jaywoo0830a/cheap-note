@@ -68,9 +68,8 @@ impl Bench {
         view.setWantsLayer(true);
         view.setLayer(Some(&layer));
 
-        let device =
-            cheap_note_engine_metal::Device::new(layer, CANVAS.0 as u32, CANVAS.1 as u32, 1.0)?;
         let target = cheap_note_engine_metal::Target::new(CANVAS.0 as f32, CANVAS.1 as f32, 1.0);
+        let device = cheap_note_engine_metal::Device::new(layer, target)?;
 
         Some(Bench {
             surface: MetalSurface::new(device, target),
@@ -100,7 +99,7 @@ impl Bench {
 
     /// How many corners the last frame drew.
     fn vertices(&self) -> usize {
-        let stated = self.surface.device().stated();
+        let stated = self.surface.device().stated;
         (stated.ink + stated.base) as usize
     }
 }

@@ -93,13 +93,9 @@ impl InkCanvas {
         view.setWantsLayer(true);
         view.setLayer(Some(&layer));
 
-        let (width, height) = (
-            device(frame.size.width, scale) as u32,
-            device(frame.size.height, scale) as u32,
-        );
+        let target = target(frame.size.width, frame.size.height, scale);
 
-        let device =
-            cheap_note_engine_metal::Device::new(layer.clone(), width, height, scale as f32)?;
+        let device = cheap_note_engine_metal::Device::new(layer.clone(), target)?;
 
         // Below GPUI's view: the interface is painted over the ink, never the other way round.
         parent.addSubview_positioned_relativeTo(
@@ -108,14 +104,7 @@ impl InkCanvas {
             Some(gpui_view),
         );
 
-        let surface = MetalSurface::new(
-            device,
-            Target::new(
-                (width as f32) / (scale as f32),
-                (height as f32) / (scale as f32),
-                scale as f32,
-            ),
-        );
+        let surface = MetalSurface::new(device, target);
 
         Some(InkCanvas {
             view,
@@ -136,19 +125,35 @@ impl InkCanvas {
     /// Matches the surface to the view: the drawable's size and the display's scale.
     fn follow(&mut self, scale: f64) {
         let frame = self.view.frame();
-        let (width, height) = (
-            device(frame.size.width, scale) as u32,
-            device(frame.size.height, scale) as u32,
-        );
+        let target = target(frame.size.width, frame.size.height, scale);
 
-        self.surface
-            .device_mut()
-            .resize(width, height, scale as f32);
-        self.surface.resize(
-            (width as f32) / (scale as f32),
-            (height as f32) / (scale as f32),
-        );
+        self.surface.device_mut().resize(target);
+        self.surface.resize(target.width, target.height);
     }
+}
+
+/// The target for a view of this size at this display scale: whole device pixels, and the logical size
+/// they came from.
+///
+/// The logical size is the device size divided back by the scale, not the view's own width, so that the
+/// two numbers [`Target`] holds describe the same rectangle exactly — a target of 1000.5 logical pixels
+/// at 2× is a texture of 2001, and a shader told 1000.5 would place the sheet half a pixel from where the
+/// texture ends.
+fn target(width: CGFloat, height: CGFloat, scale: f64) -> Target {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale as f32
+    } else {
+        1.0
+    };
+
+    let device_width = device(width, f64::from(scale));
+    let device_height = device(height, f64::from(scale));
+
+    Target::new(
+        device_width as f32 / scale,
+        device_height as f32 / scale,
+        scale,
+    )
 }
 
 impl InkSurface for InkCanvas {
@@ -275,18 +280,18 @@ impl InkSurface for InkCanvas {
 }
 
 /// Where the paper is drawn, and how large, for a canvas: the placement the engine bakes bands through.
+///
+/// **Logical pixels, and the display's density only once.** A [`Placement`] is in the engine's own unit —
+/// the one `Target::device_point` multiplies into device pixels when the half draws. So this is built
+/// from what the canvas holds *undensified*: paper, rotation, zoom and origin exactly as the view
+/// computed them. Multiplying by `canvas.scale` here as well gave one point two densities, and it drew
+/// the ink at twice its distance from the origin while the sheet, which arrives logical, stayed put.
 pub(crate) fn placement(canvas: &Canvas) -> Placement {
-    let scale = if canvas.scale > 0.0 {
-        canvas.scale
-    } else {
-        1.0
-    };
-
     Placement::new(
         canvas.ink.paper,
         canvas.ink.rotation,
-        canvas.ink.zoom * scale,
-        (canvas.ink.origin.0 * scale, canvas.ink.origin.1 * scale),
+        canvas.ink.zoom,
+        canvas.ink.origin,
     )
 }
 

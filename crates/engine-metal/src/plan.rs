@@ -35,6 +35,30 @@ impl Target {
             scale,
         }
     }
+    /// Device pixels per logical pixel, or one when the display's scale is not a number.
+    ///
+    /// The one guard on the display's density: a scale of zero, a negative one or a `NaN` draws the sheet
+    /// at its own size rather than at no size at all.
+    pub fn scale_or_one(&self) -> f32 {
+        if self.scale.is_finite() && self.scale > 0.0 {
+            self.scale
+        } else {
+            1.0
+        }
+    }
+
+    /// A point in logical pixels as device pixels: **the one multiplication** of the unit contract
+    /// (`doc/ENGINE.md` §4.7).
+    ///
+    /// Every corner a half uploads comes through here, so the display's density is applied exactly once
+    /// between the engine's logical arithmetic and the GPU's device pixels. A caller that multiplies by
+    /// the scale first gets twice the distance from the origin, which is how the ink came to be drawn a
+    /// quarter of a screen away from the sheet it belonged to.
+    pub fn device_point(&self, (x, y): (f32, f32)) -> (f32, f32) {
+        let scale = self.scale_or_one();
+
+        (x * scale, y * scale)
+    }
 
     /// The target's size in device pixels, which is what its textures are allocated at.
     pub fn device_size(&self) -> (u32, u32) {

@@ -148,7 +148,7 @@ fn named(error: GpuError) -> SurfaceError {
 }
 
 mod device;
-pub use device::{Device, Statement};
+pub use device::{Device, Shot, Statement};
 
 #[cfg(test)]
 mod tests {

@@ -61,6 +61,16 @@ use crate::pdf::{PageRequest, PdfDocumentView};
 /// value too high hides a leak of one bitmap, a value too low fails every run.
 pub const LEAK_TOLERANCE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// How much the **ink** scenarios may leave behind, measured on their own.
+///
+/// Smaller than [`LEAK_TOLERANCE_BYTES`] because this half pays nothing like Pdfium's cost: the scenarios
+/// write 16 pages, draw 400 strokes, walk six zoom rungs and write a note, and a run that gives all of it
+/// back finishes about 14 MiB above where the scenarios started. The figure is set from that measurement with
+/// room for allocator retention — the free pages a process keeps rather than returns — and is tight enough
+/// that a page cache that stopped evicting, or a history that stopped trimming, would cross it: the
+/// 400-stroke page alone is 11 MiB, and a note holding every page ever written was 52 MiB at 10 pages.
+pub const INK_TOLERANCE_BYTES: u64 = 32 * 1024 * 1024;
+
 /// The flag that asks for this report rather than a window.
 pub const FLAG: &str = "--memory-report";
 
@@ -77,11 +87,30 @@ pub fn usage() -> String {
     )
 }
 
+/// Which half of the app a row measures.
+///
+/// The two halves are judged separately because they have different costs that are both legitimate: opening a
+/// PDF pays Pdfium's fixed per-process cost (30–50 MiB, whatever the document's size), and the ink scenarios
+/// pay for a page of derived geometry. Measured against one allowance they add up to 56–67 MiB, straddling a
+/// 64 MiB line, so a run would pass or fail on which allocator block happened to survive. Split, each half is
+/// compared with the cost it actually has, and neither can hide behind the other.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Kind {
+    /// The process before anything was measured.
+    Baseline,
+    /// A document — `open` and `close` per note. Judged across the whole run.
+    Document,
+    /// The ink and note scenarios, judged from where the scenarios started to the `end` row.
+    Ink,
+}
+
 /// One row of the report: what the process held after one operation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Step {
     /// What was done — `baseline`, `open 화학.pdf`, `close 화학.pdf`.
     pub label: String,
+    /// Which half of the app this row judges, for the verdict.
+    pub kind: Kind,
     /// Resident memory, from the platform.
     pub rss_bytes: u64,
     /// The GPU's share, when the platform can say.
@@ -137,7 +166,10 @@ impl Report {
         self.steps.last()
     }
 
-    /// How much the resident figure grew across the whole run.
+    /// How much the resident figure grew across the whole run, from `baseline` to the last row.
+    ///
+    /// This is the figure the table prints, and it is not the figure the verdict reads: the two halves are
+    /// judged separately (see [`Self::verdict`]), because their legitimate costs do not fit one allowance.
     ///
     /// Negative when the process ended smaller than it started, which is ordinary: a first note's
     /// close can release state the baseline was still holding.
@@ -147,10 +179,49 @@ impl Report {
         Some(last as i64 - baseline as i64)
     }
 
-    /// Whether the run came back to where it started, within [`LEAK_TOLERANCE_BYTES`].
+    /// What the document half grew by: `baseline` to the last row that measured a document.
+    ///
+    /// `None` when no note was given, which is not a pass — there was nothing to measure.
+    pub fn document_growth(&self) -> Option<i64> {
+        let baseline = self.baseline()?.rss_bytes;
+        let last = self
+            .steps
+            .iter()
+            .rev()
+            .find(|step| step.kind == Kind::Document)?;
+        Some(last.rss_bytes as i64 - baseline as i64)
+    }
+
+    /// What the ink half grew by: from the row the scenarios started at to the `end` row.
+    ///
+    /// The start is the last row before the first ink row — `baseline` when no note was opened, the last
+    /// `close` when one was — so the scenarios are judged against the process they actually ran in, not
+    /// against a baseline that a document had already moved.
+    pub fn ink_growth(&self) -> Option<i64> {
+        let first_ink = self.steps.iter().position(|step| step.kind == Kind::Ink)?;
+        let start = self.steps.get(first_ink.checked_sub(1)?)?;
+        let end = self
+            .steps
+            .iter()
+            .rev()
+            .find(|step| step.kind == Kind::Ink)?;
+        Some(end.rss_bytes as i64 - start.rss_bytes as i64)
+    }
+
+    /// Whether the run came back to where it started, on the half that was measured.
+    ///
+    /// The run passes when **every half it measured** passed: a document that gave its memory back and ink
+    /// that did not is not a pass. A half that was not measured is not counted either way, so an ink-only run
+    /// is judged on the ink and a report of notes is judged on both.
     pub fn is_clean(&self) -> bool {
-        self.growth_bytes()
-            .is_some_and(|growth| growth <= LEAK_TOLERANCE_BYTES as i64)
+        let document = self
+            .document_growth()
+            .is_none_or(|growth| growth <= LEAK_TOLERANCE_BYTES as i64);
+        let ink = self
+            .ink_growth()
+            .is_none_or(|growth| growth <= INK_TOLERANCE_BYTES as i64);
+
+        document && ink && (self.document_growth().is_some() || self.ink_growth().is_some())
     }
 
     /// The whole report as text: the table, then the verdict.
@@ -186,12 +257,27 @@ impl Report {
                     if self.is_clean() { "ok" } else { "LEAK" },
                 ));
 
-                if !self.is_clean() {
-                    out.push_str(&format!(
-                        "leak: closing left {} MiB behind (the allowance is {})\n",
-                        growth / (1024 * 1024),
-                        mib(LEAK_TOLERANCE_BYTES),
-                    ));
+                // A failing half is named with its own figure and its own allowance, because the two are
+                // judged against different ones: a reader who sees one `growth` figure and one `LEAK` would
+                // otherwise compare the wrong pair and conclude the allowance was wrong.
+                if let Some(document) = self.document_growth() {
+                    if document > LEAK_TOLERANCE_BYTES as i64 {
+                        out.push_str(&format!(
+                            "leak: documents left {} MiB behind (the allowance is {})\n",
+                            document / (1024 * 1024),
+                            mib(LEAK_TOLERANCE_BYTES),
+                        ));
+                    }
+                }
+
+                if let Some(ink) = self.ink_growth() {
+                    if ink > INK_TOLERANCE_BYTES as i64 {
+                        out.push_str(&format!(
+                            "leak: the ink and note scenarios left {} MiB behind (the allowance is {})\n",
+                            ink / (1024 * 1024),
+                            mib(INK_TOLERANCE_BYTES),
+                        ));
+                    }
                 }
             }
             // No platform to ask, which is a build rather than a bug: say so, and let the caller decide
@@ -335,7 +421,16 @@ pub fn to_contract(report: &Report, platform: &'static str) -> crate::report::Re
     if let Some(growth) = report.growth_bytes() {
         contract.summarise("growth", Value::Signed(growth));
     }
-    contract.summarise("tolerance", Value::Count(LEAK_TOLERANCE_BYTES));
+    // The two figures the verdict is actually made from, beside the whole-run one, so that a script can see
+    // which half failed without reading the note.
+    if let Some(document) = report.document_growth() {
+        contract.summarise("document_growth", Value::Signed(document));
+        contract.summarise("document_tolerance", Value::Count(LEAK_TOLERANCE_BYTES));
+    }
+    if let Some(ink) = report.ink_growth() {
+        contract.summarise("ink_growth", Value::Signed(ink));
+        contract.summarise("ink_tolerance", Value::Count(INK_TOLERANCE_BYTES));
+    }
 
     // Whether the GPU column was measured is a fact about the *rows*, not about the platform: macOS
     // reports the ledger and Windows does not, but a headless run may still read zero here. Declaring a
@@ -353,13 +448,23 @@ pub fn to_contract(report: &Report, platform: &'static str) -> crate::report::Re
 
     let note = match verdict {
         Verdict::Ok => Some(format!(
-            "came back within {} MiB",
-            LEAK_TOLERANCE_BYTES / (1024 * 1024)
+            "documents within {} MiB, ink within {} MiB",
+            LEAK_TOLERANCE_BYTES / (1024 * 1024),
+            INK_TOLERANCE_BYTES / (1024 * 1024)
         )),
-        Verdict::Failed => Some(format!(
-            "grew more than the {} MiB allowance",
-            LEAK_TOLERANCE_BYTES / (1024 * 1024)
-        )),
+        Verdict::Failed => Some(match (report.document_growth(), report.ink_growth()) {
+            (Some(document), _) if document > LEAK_TOLERANCE_BYTES as i64 => format!(
+                "documents left {} MiB behind (the allowance is {} MiB)",
+                document / (1024 * 1024),
+                LEAK_TOLERANCE_BYTES / (1024 * 1024)
+            ),
+            (_, Some(ink)) if ink > INK_TOLERANCE_BYTES as i64 => format!(
+                "the ink and note scenarios left {} MiB behind (the allowance is {} MiB)",
+                ink / (1024 * 1024),
+                INK_TOLERANCE_BYTES / (1024 * 1024)
+            ),
+            _ => String::from("grew more than its allowance"),
+        }),
         Verdict::Skipped => Some(String::from("no rows were measured")),
     };
 
@@ -394,26 +499,52 @@ pub fn to_contract(report: &Report, platform: &'static str) -> crate::report::Re
 ///
 /// Every ink scenario ends by dropping what it built, so the run's final figure is comparable to its
 /// baseline and the verdict means the same thing it always did: *did the process come back*.
+///
+/// **Why a `failed` here can be the fixed costs and not the document.** Pdfium does not return its
+/// per-document cost to the system after a close (30–50 MiB, whatever the document's size), and the ink
+/// scenarios' own ~14 MiB is allocated on top of it. Each fits inside the 64 MiB allowance; together they
+/// measure 56–67 MiB, so the verdict flips between `ok` and `failed` with the document — and not with its
+/// size, which was checked (a 175 MB PDF reads *lighter* than a 32 MB one). Running the ink scenarios before
+/// the notes does not help, and was measured making it worse (+50 → +65 MiB after a close): the allocator's
+/// state before the first document is part of what Pdfium's figure depends on. The rows remain the
+/// instrument for a real leak, which is the thing that *climbs* — the same note opened three times costs
+/// `+69 → +17 → +17 MiB` and settles, and `leaks --atExit` finds 0 bytes on an ink-only run. See
+/// `doc/CLI.md`, "The two halves, and why each has its own allowance".
 pub fn collect(
     paths: &[PathBuf],
     stats: &mut dyn crate::platform::SystemStats,
 ) -> Result<Report, String> {
     let mut steps = Vec::with_capacity(paths.len() * 2 + 16);
 
-    steps.push(measure(String::from("baseline"), None, stats));
+    steps.push(measure(
+        String::from("baseline"),
+        Kind::Baseline,
+        None,
+        stats,
+    ));
 
     for path in paths {
         let name = note_name(path);
 
         let opened = open(path).map_err(|error| format!("{name}: {error}"))?;
 
-        steps.push(measure(format!("open {name}"), Some(&opened), stats));
+        steps.push(measure(
+            format!("open {name}"),
+            Kind::Document,
+            Some(&opened),
+            stats,
+        ));
 
         // Closed by dropping, and measured *after* the drop: a figure taken while the document is still
         // alive is the one that says nothing about whether closing gave the memory back.
         drop(opened);
 
-        steps.push(measure(format!("close {name}"), None, stats));
+        steps.push(measure(
+            format!("close {name}"),
+            Kind::Document,
+            None,
+            stats,
+        ));
     }
 
     collect_ink(stats, &mut steps);
@@ -470,6 +601,7 @@ fn open(path: &Path) -> Result<Opened, String> {
 /// Takes one reading, with the cache's figures filled in from the open document when there is one.
 fn measure(
     label: String,
+    kind: Kind,
     opened: Option<&Opened>,
     stats: &mut dyn crate::platform::SystemStats,
 ) -> Step {
@@ -477,6 +609,7 @@ fn measure(
 
     Step {
         label,
+        kind,
         rss_bytes: stats.vitals().map_or(0, |vitals| vitals.resident_bytes),
         surface_bytes: stats.surface_bytes(),
         cache_bytes: stats_of_cache.map_or(0, |pdf| pdf.bytes),
@@ -520,7 +653,7 @@ fn collect_ink(stats: &mut dyn crate::platform::SystemStats, steps: &mut Vec<Ste
     // The last row, so that the verdict is about the process after *everything* has been given up rather
     // than about whichever scenario happened to run last. Without it a reader has to know the order of
     // the scenarios to read the summary, and the summary is the line they will look at.
-    steps.push(measure(String::from("end"), None, stats));
+    steps.push(measure(String::from("end"), Kind::Ink, None, stats));
 }
 
 /// A few strokes of the shape a hand makes, for a scenario page to hold.
@@ -588,7 +721,12 @@ fn collect_pages(stats: &mut dyn crate::platform::SystemStats, steps: &mut Vec<S
     ));
 
     drop(notes);
-    steps.push(measure(String::from("ink: dropped"), None, stats));
+    steps.push(measure(
+        String::from("ink: dropped"),
+        Kind::Ink,
+        None,
+        stats,
+    ));
 }
 
 /// Draws a page, takes every stroke back, and gives the page up.
@@ -609,6 +747,7 @@ fn collect_undo(stats: &mut dyn crate::platform::SystemStats, steps: &mut Vec<St
 
     steps.push(measure(
         format!("ink: {} strokes drawn", page.stroke_count()),
+        Kind::Ink,
         None,
         stats,
     ));
@@ -617,6 +756,7 @@ fn collect_undo(stats: &mut dyn crate::platform::SystemStats, steps: &mut Vec<St
 
     steps.push(measure(
         format!("ink: cleared, {} left", page.stroke_count()),
+        Kind::Ink,
         None,
         stats,
     ));
@@ -625,12 +765,18 @@ fn collect_undo(stats: &mut dyn crate::platform::SystemStats, steps: &mut Vec<St
 
     steps.push(measure(
         format!("ink: undone, {} back", page.stroke_count()),
+        Kind::Ink,
         None,
         stats,
     ));
 
     drop(page);
-    steps.push(measure(String::from("ink: page dropped"), None, stats));
+    steps.push(measure(
+        String::from("ink: page dropped"),
+        Kind::Ink,
+        None,
+        stats,
+    ));
 }
 
 /// Rebuilds one page at the whole zoom ladder.
@@ -657,7 +803,12 @@ fn collect_zoom(stats: &mut dyn crate::platform::SystemStats, steps: &mut Vec<St
     ));
 
     drop(notes);
-    steps.push(measure(String::from("ink: page dropped"), None, stats));
+    steps.push(measure(
+        String::from("ink: page dropped"),
+        Kind::Ink,
+        None,
+        stats,
+    ));
 }
 
 /// Writes pages to a real note through the writer thread, then closes it.
@@ -669,6 +820,7 @@ fn collect_note_writes(stats: &mut dyn crate::platform::SystemStats, steps: &mut
     let Ok(folder) = scenario_note_folder() else {
         steps.push(measure(
             String::from("note: could not make one"),
+            Kind::Ink,
             None,
             stats,
         ));
@@ -679,6 +831,7 @@ fn collect_note_writes(stats: &mut dyn crate::platform::SystemStats, steps: &mut
 
     steps.push(measure(
         format!("note: {written} pages written"),
+        Kind::Ink,
         None,
         stats,
     ));
@@ -687,7 +840,12 @@ fn collect_note_writes(stats: &mut dyn crate::platform::SystemStats, steps: &mut
     // when a reader leaves a note.
     drop(open(&folder));
 
-    steps.push(measure(String::from("note: closed"), None, stats));
+    steps.push(measure(
+        String::from("note: closed"),
+        Kind::Ink,
+        None,
+        stats,
+    ));
 
     // The folder is the report's, not the reader's: it was made to be measured and is not anyone's note.
     let _ = std::fs::remove_dir_all(&folder);
@@ -764,6 +922,7 @@ fn ink_step(
 ) -> Step {
     Step {
         label,
+        kind: Kind::Ink,
         rss_bytes: stats.vitals().map_or(0, |vitals| vitals.resident_bytes),
         surface_bytes: stats.surface_bytes(),
         cache_bytes: 0,
@@ -778,6 +937,7 @@ mod tests {
     fn step(label: &str, rss_mib: u64) -> Step {
         Step {
             label: label.to_string(),
+            kind: Kind::Document,
             rss_bytes: rss_mib * 1024 * 1024,
             surface_bytes: None,
             cache_bytes: 0,
@@ -787,7 +947,35 @@ mod tests {
 
     fn report(rss: &[u64]) -> Report {
         Report {
-            steps: vec![step("baseline", rss[0]), step("close", rss[1])],
+            steps: vec![
+                Step {
+                    kind: Kind::Baseline,
+                    ..step("baseline", rss[0])
+                },
+                step("close", rss[1]),
+            ],
+        }
+    }
+
+    /// A run with both halves: a `baseline`, an ink scenario, and the `end` row.
+    fn both(document_close: u64, ink_end: u64) -> Report {
+        Report {
+            steps: vec![
+                Step {
+                    kind: Kind::Baseline,
+                    ..step("baseline", 100)
+                },
+                step("open", 180),
+                step("close", document_close),
+                Step {
+                    kind: Kind::Ink,
+                    ..step("ink: drawn", 120)
+                },
+                Step {
+                    kind: Kind::Ink,
+                    ..step("end", ink_end)
+                },
+            ],
         }
     }
 
@@ -821,7 +1009,73 @@ mod tests {
 
         let leaked = report(&[100, 200]).render();
         assert!(leaked.contains("LEAK"));
-        assert!(leaked.contains("leak: closing left 100 MiB behind"));
+        assert!(leaked.contains("leak: documents left 100 MiB behind"));
+    }
+
+    /// The ink half is judged against its own allowance, not the document's.
+    ///
+    /// The failing figure in this run is 40 MiB, which is under the 64 MiB document allowance and over the
+    /// ink one. Against a single allowance this run would pass; the split is what makes it fail.
+    #[test]
+    fn the_ink_half_has_its_own_allowance() {
+        let ink_over = both(100, 140).render();
+        assert!(
+            ink_over.contains("LEAK"),
+            "40 MiB is over the ink allowance"
+        );
+        assert!(ink_over.contains("the ink and note scenarios left"));
+
+        // The same ink figure with a document that came back is still a failure: one bad half fails the run.
+        assert!(!both(100, 140).is_clean());
+
+        // Within its own allowance, it passes.
+        assert!(both(100, 110).is_clean());
+    }
+
+    /// A document's figure and the ink's are measured from different baselines.
+    ///
+    /// The document half runs `baseline → close`; the ink half runs from the last `close` to `end`, because that
+    /// is the state the scenarios began in. Here the document grew 50 MiB (inside its 64) and the ink 50 MiB
+    /// (outside its 32), and the whole-run figure is 100 — which a single 64 MiB allowance looking only at the
+    /// run's total would have passed.
+    #[test]
+    fn each_half_is_measured_from_its_own_start() {
+        let run = both(150, 200);
+        let mib = 1024 * 1024;
+
+        assert_eq!(run.document_growth(), Some(50 * mib as i64));
+        assert_eq!(
+            run.ink_growth(),
+            Some(50 * mib as i64),
+            "from the close, which is where the scenarios started"
+        );
+        assert_eq!(run.growth_bytes(), Some(100 * mib as i64));
+        assert!(!run.is_clean(), "the ink half is where it failed");
+        assert!(run.render().contains("the ink and note scenarios left"));
+    }
+
+    /// An ink-only run is judged on the ink, not skipped for having no document.
+    ///
+    /// `nothing to measure` and `measured and passed` must not be the same answer, so a run with only ink rows
+    /// passes on its ink figure and an empty run does not pass at all.
+    #[test]
+    fn an_ink_only_run_is_judged_on_the_ink() {
+        let ink_only = Report {
+            steps: vec![
+                Step {
+                    kind: Kind::Baseline,
+                    ..step("baseline", 100)
+                },
+                Step {
+                    kind: Kind::Ink,
+                    ..step("end", 110)
+                },
+            ],
+        };
+
+        assert_eq!(ink_only.document_growth(), None, "no document was measured");
+        assert_eq!(ink_only.ink_growth(), Some(10 * 1024 * 1024));
+        assert!(ink_only.is_clean());
     }
 
     /// No steps is no measurement, which is not a pass.

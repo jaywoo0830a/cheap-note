@@ -288,17 +288,19 @@ peak 80 MiB   final 79 MiB   growth +68 MiB   ok
 - **`gpu`** — the graphics ledger (`IOSurface` on macOS), when the platform can report it.
 
 **The ink and note rows run whether or not a note is given**, because they need none, and the ink is the
-larger half of what the app holds — a page is 71x its readings in derived geometry (see
-[`VIEW.md`](VIEW.md), "What the note holds in memory"). They drive the scenarios a leak would have to
-show up in: writing past the page bound and turning back through it (`PAGES_KEPT`), clearing and undoing
-a page (`HISTORY_EDITS`), walking the zoom rungs (a rebuild that added rather than replaced), and
-writing a note through the writer thread. The `end` row is the process after everything was dropped,
-which is the figure the verdict reads.
+larger half of what the app holds. They drive the scenarios a leak would have to show up in: writing past
+the page bound and turning back through it (`PAGES_KEPT`), clearing and undoing a page (`HISTORY_EDITS`),
+walking the zoom rungs, and writing a note through the writer thread.
 
-**Exit code** — `0` when the run came back within the allowance, `1` when it did not, `2` when the
-command could not run. That is what makes it usable in CI. The allowance is
-`LEAK_TOLERANCE_BYTES`, sized for the fixed cost of Pdfium's first document (30–50 MiB whatever the
-document's size) rather than for a leak.
+**The verdict is two figures, not one.** Documents are judged `baseline` → last `close` against 64 MiB; the
+ink is judged from where the scenarios started to `end` against 32 MiB. The run passes only if both do.
+Their legitimate costs are different sizes — Pdfium's fixed per-process cost against a page of derived
+geometry — and summed they straddle a single allowance, which made the verdict flip with the document and
+not with its size. On the local notes every one passes with room: documents 42–53 MiB of 64, ink 14 of 32.
+The reasoning and the tripwire tests are in [`CLI.md`](CLI.md), "The two halves".
+
+**Exit code** — `0` when both halves came back within their allowances, `1` when either did not (or the build
+cannot measure at all), `2` when the command could not run. That is what makes it usable in CI.
 
 On Windows the same command runs through `apps/windows/src/platform/report.rs`. A release image is a
 windows-subsystem program, so it attaches to the console that started it (or uses redirected stdout);
@@ -313,6 +315,12 @@ into the heap, and macOS does not return a freed large block to the system. Mapp
 `note_format::mapped`) took the 62 MB case to 70 MiB and the 14 MB case to 35 MiB, and a document
 opened twice now costs nothing the second time.
 
+Measuring the ink half found the thing the PDF half could not: a note held **every page ever written**
+in derived geometry, at 71x its readings, so opening a long note cost memory in proportion to how much
+had been written on it. `ink::PAGES_KEPT` (8 pages, LRU) fixed it, and the report now shows the count
+stopping at 9 rather than climbing with the pages written — 52 MB at 10, 20 or 40 pages instead of
+52/104/208, and 294 MB at 8x zoom instead of climbing again.
+
 ### What it cannot see
 
 A headless run renders bitmaps but never presents them, so the `gpu` column reports what the process
@@ -320,10 +328,30 @@ allocated rather than what a compositor pooled. Read it for its direction, not i
 
 **Resident memory cannot say whether a specific allocation was freed** — a freed block stays resident and
 the next one reuses it, so a page that gave its 12 MiB back reads `+0 MiB`. What the report is good at is
-the question that matters: does a figure *climb and stay climbed* by the `end` row. To ask the narrower
-question — was this page released rather than reused — the answer is `malloc_zone_statistics` or
-Instruments' Allocations, not this command. It was measured that way: 156 MB of live ink once read as
-`+0.1 MiB` in `ps`.
+the question that matters: does a figure *climb and stay climbed* by the `end` row. It was measured that
+way once: 156 MB of live ink read as `+0.1 MiB` in `ps`.
+
+### Checking with `leaks` rather than with the table
+
+The checker that ships with the instrument settles the question outright:
+
+```sh
+leaks --atExit -- ./target/release/cheap-note --memory-report
+leaks --atExit -- ./target/release/cheap-note --memory-report "$HOME/Library/Application Support/cheap-note/notes/<note>"
+```
+
+What it found:
+
+- **An ink-only report: 0 leaks for 0 bytes.** The page cache, the undo history, the zoom rebuilds and the
+  writer thread all give their memory back.
+- **A report that opens a note: 2 leaks for 208 bytes**, and the stack is `report::Options::parse` →
+  `RawVec<String>` growing — the command line's own path strings, which are alive until `process::exit`.
+  That is argument memory, not the document. Three notes in one run report 4 leaks for 400 bytes, so it
+  follows the arguments and not the pages.
+
+A binary built with `--profile release-sym` is what makes that stack readable; `[profile.release]` strips
+symbols on purpose, and a stripped binary's leak report names addresses only.
+
 
 The commands' full contract — arguments, exit codes, the shape a script can read, and what a new
 platform has to provide — is [`doc/CLI.md`](CLI.md).
@@ -335,5 +363,15 @@ The clause order and the exact wording of each clause live in `compose_status` i
 `crates/note-ui/src/app.rs`; the timing and machine clauses are spelled by `Timings::summary` in
 `crates/note-ui/src/timing.rs`, and the cache clause by `PdfStats::summary` in `crates/note-ui/src/pdf.rs`.
 This document describes them. If the two disagree, the code is right.
+
+### Known drift in `doc/CLI.md`
+
+- **`--bench`'s budget flags are a contract, not code.** `doc/CLI.md` §"Exit codes and the budget flags"
+  documents `--max-ms`, `--max-joules-per-op`, `--min-ops-per-joule` and `--require-energy`, and says a
+  budget given by argument should fail the run at exit `1`. None of those flags is parsed anywhere in the
+  workspace: `cheap-note --bench --max-ms 16.6` exits `2` as an unrecognised argument. A CI job written
+  against that section would think it was gating the frame budget and would be gating nothing. Until the
+  flags exist, gate on the table's `worst` column by hand.
+
 
 

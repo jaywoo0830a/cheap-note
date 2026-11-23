@@ -988,11 +988,12 @@ the current zoom.
 
 `--memory-report` now measures this half too: its `ink:` and `note:` rows drive exactly the scenarios
 above — writing past the page bound, turning back through it, clearing and undoing, walking the zoom
-rungs, and writing a note through the writer thread — and its final `end` row is the figure its verdict
-reads. What it still cannot give is the **live** heap: it reports resident memory, and a freed block stays
-resident and the next stroke reuses it, so 156 MB of live ink once read as `+0.1 MiB` in `ps`. The figures
-in this section came from driving `Notes` directly and reading the allocator's own `size_in_use`; use
-`malloc_zone_statistics` (or Instruments' Allocations) to answer "was this freed" rather than "did it grow".
+rungs, and writing a note through the writer thread — and it judges them as a half of their own, against
+`INK_TOLERANCE_BYTES` (32 MiB) rather than the allowance a document is held to. What it still cannot give
+is the **live** heap: it reports resident memory, and a freed block stays resident and the next stroke
+reuses it, so 156 MB of live ink once read as `+0.1 MiB` in `ps`. The figures in this section came from
+driving `Notes` directly and reading the allocator's own `size_in_use`; use `leaks --atExit` to answer
+"was this freed" rather than "did it grow".
 
 ## 11. Painting the canvas
 

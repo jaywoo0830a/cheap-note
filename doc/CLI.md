@@ -56,7 +56,7 @@ when it does not.
 | `ink: M strokes drawn` / `cleared` / `undone` | the undo history outliving its bound (`history::HISTORY_EDITS`) |
 | `ink: 6 zoom rungs` | a rebuild leaking the geometry it replaced |
 | `note: N pages written` / `closed` | the writer thread and its SQLite connection outliving the note |
-| `end` | the process after everything above was dropped — the row the summary is about |
+| `end` | the process after everything above was dropped |
 
 Every scenario drops what it built before the next starts, so a figure that does not return is one
 scenario's, not the run's.
@@ -76,36 +76,56 @@ emptied, so any resident figure still standing is something *else* holding on. T
 `ink:` row is deliberately bounded: it reads the note's own page count, which never exceeds
 `PAGES_KEPT + 1`, and a figure that climbed would be the page cache leaking.
 
+### The two halves, and why each has its own allowance
+
+The verdict is not one number. A run is judged on **documents** and on **ink** separately, because their
+legitimate costs are different sizes and neither is a leak:
+
+| Half | Measured from → to | Allowance | Typical |
+|---|---|---|---|
+| documents | `baseline` → last `close` | `LEAK_TOLERANCE_BYTES`, 64 MiB | 42–53 MiB |
+| ink and note | last row before the first `ink:` row → `end` | `INK_TOLERANCE_BYTES`, 32 MiB | 14 MiB |
+
+**The document allowance** is sized for Pdfium's fixed per-process cost — 30–50 MiB whatever the
+document's size. It is not sized for a leak: a document's bytes held in the heap left 130 MiB behind for a
+62 MB PDF, and mapping them instead (see `note_format::mapped`) left 70. The allowance sits between the two,
+so a fixed cost passes and a proportional one fails.
+
+**The ink allowance** is smaller because this half pays nothing like Pdfium's cost: the 400-stroke page is
+11 MiB and the scenarios finish about 14 MiB above where they started. It is tight enough that a page cache
+that stopped evicting would cross it — a note holding every page ever written was 52 MiB at 10 pages.
+
+The halves were split after measuring that they do not fit one allowance together. Summed, one document
+plus the ink scenarios read 56–67 MiB, and the verdict flipped between `ok` and `failed` with the document
+and **not with its size** (a 175 MB PDF read 56, a 32 MB one 64). Split, every local note passes with room:
+documents 42–53 of 64, ink 14 of 32. Both tripwires were verified by injecting a leak: 40 MiB held by the
+ink made the run fail and named the ink; 40 MiB leaked per note failed and named the documents.
+
+A run fails when **either** half does. A half that was not measured is not counted either way, so
+`--memory-report` with no paths is judged on the ink alone.
+
 ### Reading a row that does not move
 
 Resident memory is the right figure for "did the process come back", and the wrong one for "was this
 freed": **a freed block stays resident and the next allocation reuses it**. So an `ink: dropped` that
-reads `+0 MiB` is the normal case, not a pass by itself — what it means is that nothing *grew*. A real
-leak shows as a figure that climbs and never returns by the `end` row, which is what the verdict reads.
+reads `+0 MiB` is the normal case, not a pass by itself — what it means is that nothing *grew*.
 
-To see whether a specific page was released rather than reused, the answer is `malloc_zone_statistics`
-(or Instruments' Allocations), not this command. See [VIEW.md](VIEW.md), "What the note holds in memory".
+For the narrower question — was this page released rather than reused — `leaks --atExit` is the answer, and
+it agrees with the table: an ink-only report is **0 leaks for 0 bytes**, and a report that opens a note is
+208 bytes, which the stack attributes to `report::Options::parse` growing its own argument vector. See
+[STATUS.md](STATUS.md), "Checking with `leaks` rather than with the table".
 
 ### Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | the process came back within the allowance |
-| `1` | it did not |
+| `0` | both halves came back within their allowances |
+| `1` | one did not, or the build cannot measure memory at all |
 | `2` | the command could not run — a note that would not open |
 
 Two codes past success, because "the app leaked" (`1`) and "the command was wrong" (`2`) are different
-problems, and a CI job wants to tell them apart. A run that cannot measure at all (a build with no
-process counters) exits `1`, not `0`: a pass it did not earn is worse than a failure.
-
-### The allowance
-
-`LEAK_TOLERANCE_BYTES` (64 MiB) is sized for **Pdfium's fixed per-document cost** — 30–50 MiB
-whatever the document's size — and not for a leak. A real leak is proportional to the document:
-before the fix, a 62 MB PDF left 130 MiB behind. The allowance sits between the two, so a fixed
-cost passes and a proportional one fails. The ink scenarios' own cost is well inside it: the whole run
-grows by about 17 MiB, almost all of it the 400-stroke undo scenario's ink, which is dropped before
-`end`.
+problems, and a CI job wants to tell them apart. A run that cannot measure at all exits `1`, not `0`: a pass
+it did not earn is worse than a failure.
 
 ## `cheap-note --bench`
 
@@ -530,10 +550,18 @@ chatter, nothing a JSON parser has to be taught to skip.
     { "label": "open 화학", "rss": 83886080, "delta": 72351744, "cache": 11534336, "gpu": 0, "pages": 1 },
     { "label": "close 화학", "rss": 66060288, "delta": -17825792, "cache": 0, "gpu": 0, "pages": 0 }
   ],
-  "summary": { "peak": 83886080, "final": 66060288, "growth": 54525952, "tolerance": 67108864 },
+  "summary": {
+    "peak": 83886080,
+    "final": 66060288,
+    "growth": 54525952,
+    "document_growth": 54525952,
+    "document_tolerance": 67108864,
+    "ink_growth": 14680064,
+    "ink_tolerance": 33554432
+  },
   "verdict": "ok",
   "exit_code": 0,
-  "note": "came back within 64 MiB"
+  "note": "documents within 64 MiB, ink within 32 MiB"
 }
 ```
 

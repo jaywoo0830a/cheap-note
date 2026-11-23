@@ -170,9 +170,9 @@ pub fn usage() -> &'static str {
      Draws a synthetic page through the same Direct2D canvas the app uses and reports the first,\n\
      warm, worst, rebuild and pan costs of a frame, with the present timed separately.\n\
      \n\
-     --max-ms N fails the run (exit 1) when any row's `present` exceeds N ms; for\n\
-     120 Hz use 8.33. `frame` is not gated: it and `rebuild` both include the wait for the display, so a\n\
-     budget on them would measure the panel rather than the app.\n\
+     --max-ms N fails the run (exit 1) when any row's `rebuild_work` or `present` exceeds N ms; for\n\
+     120 Hz use 8.33. `warm`, `rebuild` and `frame` are not gated: they include the wait for the\n\
+     display, so a budget on them would measure the panel, not the app.\n\
      \n\
      Run it in release: cargo run --release -p cheap-note -- --bench\n\
      The console wrapper `cheap-note-bench` runs the same measurement."
@@ -224,6 +224,8 @@ struct Row {
     warm: Duration,
     worst: Duration,
     rebuild: Duration,
+    /// The rebuild's CPU work with no display clock in it — the column a budget is measured against.
+    rebuild_work: Duration,
     pan: Duration,
     present: Duration,
 }
@@ -266,7 +268,15 @@ fn measure_on(
         format!("Direct2D canvas · {}×{} at 1.0x", WINDOW.0, WINDOW.1),
     )
     .columns(&[
-        "strokes", "first", "warm", "worst", "rebuild", "pan", "present", "frame",
+        "strokes",
+        "first",
+        "warm",
+        "worst",
+        "rebuild",
+        "rebuild_work",
+        "pan",
+        "present",
+        "frame",
     ]);
 
     for row in &rows {
@@ -278,6 +288,7 @@ fn measure_on(
                 Value::Millis(ms(row.warm)),
                 Value::Millis(ms(row.worst)),
                 Value::Millis(ms(row.rebuild)),
+                Value::Millis(ms(row.rebuild_work)),
                 Value::Millis(ms(row.pan)),
                 Value::Millis(ms(row.present)),
                 // The figure worth comparing across platforms: one frame while the page is being panned
@@ -332,8 +343,13 @@ fn measure_page(device: &mut Device, strokes: usize, frames: usize) -> Result<Ro
 
     // A detail rebuild: the revision changes, so every realization is stale and the next frame
     // builds all of them. This is the cost `build_detail` moves out of the frame.
+    //
+    // `rebuild_work` is the same figure on this platform. Windows' `draw` is the CPU work alone — there
+    // is no drawable to wait for before it, and the present is timed after it — so unlike macOS's
+    // `rebuild` there is no display clock inside this number to take back out.
     canvas.ink.revision += 1;
     let rebuild = time_draw(device, &canvas)?;
+    let rebuild_work = rebuild;
     device.present().map_err(|error| format!("{error:#}"))?;
 
     // A pan: the same ink and the same detail, moved. It must rebuild nothing; the difference
@@ -348,6 +364,7 @@ fn measure_page(device: &mut Device, strokes: usize, frames: usize) -> Result<Ro
         warm: warm / frames as u32,
         worst,
         rebuild,
+        rebuild_work,
         pan,
         present: present / frames as u32,
     })

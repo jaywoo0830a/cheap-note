@@ -34,6 +34,7 @@
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use note_format::ink::Bounds;
 use note_ui::cursor::{
@@ -1350,6 +1351,20 @@ fn page_quad(canvas: &Canvas, scale: f32) -> Vec<PageVertex> {
 impl Surface {
     /// Draws one description of the canvas, and the pen's mark over it. `false` when there was no drawable.
     pub(crate) fn draw(&mut self, canvas: &Canvas, mark: Option<&Mark>) -> bool {
+        self.draw_with_wait(canvas, mark).0
+    }
+
+    /// [`Self::draw`], and how much of it was spent waiting for a drawable.
+    ///
+    /// The wait is the display's clock, not the app's work: `nextDrawable` blocks while the compositor
+    /// still holds the layer's buffers, which is why a frame's total carries one refresh interval even
+    /// for an empty page. The benchmark needs the two apart to say what a rebuild actually costs, and a
+    /// figure it can only get from inside the first call of the frame.
+    pub(crate) fn draw_with_wait(
+        &mut self,
+        canvas: &Canvas,
+        mark: Option<&Mark>,
+    ) -> (bool, Duration) {
         let scale = if canvas.scale > 0.0 {
             canvas.scale
         } else {
@@ -1358,12 +1373,16 @@ impl Surface {
 
         // A drawable that is not ready is a frame to skip, not work to do: the pen's pump is on
         // the main thread, and building a frame nobody can see would hold the next reading.
-        let Some(drawable) = self.layer.nextDrawable() else {
-            return false;
+        let waited = Instant::now();
+        let drawable = self.layer.nextDrawable();
+        let waited = waited.elapsed();
+
+        let Some(drawable) = drawable else {
+            return (false, waited);
         };
 
         let Some(msaa) = self.multisample() else {
-            return false;
+            return (false, waited);
         };
 
         // The buffer slot this frame writes. It advances only when a frame is actually committed, so
@@ -1436,11 +1455,11 @@ impl Surface {
         attachment.setStoreAction(MTLStoreAction::MultisampleResolve);
 
         let Some(buffer) = self.queue.commandBuffer() else {
-            return false;
+            return (false, waited);
         };
 
         let Some(encoder) = buffer.renderCommandEncoderWithDescriptor(&pass) else {
-            return false;
+            return (false, waited);
         };
 
         // Behind: the desk, the shadow, the sheet, the ruling.
@@ -1515,7 +1534,7 @@ impl Surface {
 
         self.buffer_slot = (self.buffer_slot + 1) % self.ink_buffers.len();
 
-        true
+        (true, waited)
     }
 
     /// Waits for every command buffer this surface has committed to finish on the GPU.

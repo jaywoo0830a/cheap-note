@@ -158,6 +158,7 @@ For each stroke count:
 | `warm` | the mean of the frames after it, where every realization is already baked |
 | `worst` | the slowest warm frame — a mean hides the one frame a hand would feel |
 | `rebuild` | one frame after a detail rebuild, which invalidates every realization |
+| `rebuild_work` | the rebuild's own work, with the display's wait taken out — see below |
 | `pan` | one frame with the sheet moved, which must rebuild nothing |
 | `present` | the GPU's share, timed apart from the drawing — see the note below |
 
@@ -191,42 +192,45 @@ Two things follow, and both are worth knowing before reading the table as a rend
 * **`warm` missed by a lot is still the real signal.** A frame whose own work exceeds the interval runs
   over into the next, so a `warm` of, say, 25 ms is the renderer plus one wait and is not a tie.
 
-`present` is the one figure that responds to the page without also containing the display's clock, so a
-claim about drawing cost should rest on it. `rebuild` responds to the page too, but it is timed from the
-start of a draw and so carries a tick of waiting on top: measured, `rebuild` minus `warm` is −0.09 ms at
-0 strokes and 18.2 ms at 8 182 — the difference, not the figure, is the rebuild's own cost. `--frames`
-does not change the floor: 10, 100 and 400 warm frames all read 8.1–8.3 ms.
+`present` is the one figure that responds to the page without also containing the display's clock. `rebuild`
+responds to the page too, but it is timed from the start of a draw and so carries a tick of waiting on top;
+`rebuild_work` is the same frame with that wait measured and subtracted, which is the figure that moves when
+the renderer gets faster. Measured at 8 182 strokes: `rebuild` 30.78 ms, its wait 8.76 ms, `rebuild_work`
+22.28 ms — and at 0 strokes `rebuild` 8.42 ms against `rebuild_work` 0.09 ms. `--frames` does not change the
+floor: 10, 100 and 400 warm frames all read 8.1–8.3 ms.
 
 ### `--max-ms` — the budget a CI job can hold
 
 ```console
 $ cheap-note --bench --max-ms 8.33     # 120 Hz
-ok — 30 warm frames per page · `present` is the GPU's whole frame on macOS
+FAILED — over the 8.33 ms budget: 8182 strokes rebuild_work 18.44
 $ echo $?
-0
+1
 ```
 
-`--max-ms N` fails the run (exit `1`) when any row's **`present`** exceeds `N` milliseconds, and the
-sentence names each offending row:
+`--max-ms N` fails the run (exit `1`) when any row's **`rebuild_work`** or **`present`** exceeds `N`
+milliseconds, and the sentence names each offending row and the column it broke.
 
-```console
-$ cheap-note --bench --max-ms 3.0
-FAILED — over the 3.00 ms budget: 8182 strokes present 5.55
-```
+**Those two columns are the whole point, and choosing them took a correction.** Every other duration in the
+table is timed from the start of a draw, and a draw's first act is to ask `CAMetalLayer` for a drawable — a
+call that waits for the display. `warm` and `rebuild` therefore read ~8.2 ms on an **empty** page, and a
+120 Hz budget on either would fail the app for the panel's clock.
 
-**It is measured against `present` alone, and this is the deliberate part.** `frame` and `rebuild` are
-both timed from the start of a draw, and a draw's first act is to ask `CAMetalLayer` for a drawable — a
-call that waits for the display. Gating either would fail a page for the panel's clock: `rebuild` reads
-8.2 ms on an **empty** page, so a 120 Hz budget on it would fail 0 strokes. `present` is taken after the
-drawable is in hand, so it holds the app's own work and nothing else.
+An earlier version of this budget gated `present` alone. That is a figure with no wait in it — but it was
+also the figure a renderer optimisation barely moves: taking 8 182 strokes of rebuild from 70.7 ms to
+18.2 ms changed `present` by **+1.6 ms**, so the gate passed before the work and after it. A gate that
+cannot see the improvement it exists for is not a gate. `rebuild_work` is the column that moves (62.5 ms of
+work before, 10.0 ms after), so that is what it is measured against.
 
-The consequence, stated plainly: **this is a GPU-work gate, not a latency gate.** It says a frame of
-drawing fits in the interval. It does not say a frame reached the glass within one tick, because that
-also depends on the display's rate and the compositor. The figure for latency is `frame`, and it is
-deliberately not gated — a gate on it would be a gate on the monitor.
+The consequence, stated plainly: **this is work-in-a-frame, not latency.** A frame that meets it can still
+miss a tick, because reaching the glass within 8.33 ms also depends on the display's rate and the compositor.
+`frame` is the figure for latency and is deliberately not gated.
 
-A budget on a quantity nothing measured is a **skip (exit `2`), never a pass**: `present` absent from a
-row means the gate was not earned. That is the same rule the energy budgets follow.
+A budget on a quantity nothing measured is a **skip (exit `2`), never a pass**: `rebuild_work` or `present`
+absent from a row means the gate was not earned. That is the same rule the energy budgets follow.
+
+On Windows `rebuild_work` equals `rebuild`, because `draw` there is the CPU work alone with the present timed
+after it — there is no display clock inside the number to take out.
 
 The default counts are 0, 29, 316, 1 000 and 8 182 strokes, and both platforms default to 30 warm
 frames. The first three counts are the ones the older measurements used, and 8 182 is the page the macOS
@@ -488,8 +492,8 @@ The last clause is the one a CI gate needs: `--require-energy` and an energy bud
 joules" into a skip, never a pass. A budget on a quantity that was not measured is not a success.
 
 A budget applies to every row and one row over it fails the run. `--max-ms` is compared against the
-bench's `present`, not `worst` and not `frame` — see "`--max-ms` — the budget a CI job can hold" for why
-`frame` and `rebuild` cannot be gated on a machine whose display sets their floor; the energy budgets are
+bench's `rebuild_work` and `present` — the two figures with no display clock in them; see "`--max-ms` — the
+budget a CI job can hold" for why `warm`, `rebuild` and `frame` cannot be gated. The energy budgets are
 compared against the row's `joules_per_op` and `ops_per_joule`.
 
 `--max-ms` is the one budget flag that exists today, in both benches. `--max-joules-per-op`,

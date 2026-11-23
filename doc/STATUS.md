@@ -364,21 +364,31 @@ The clause order and the exact wording of each clause live in `compose_status` i
 `crates/note-ui/src/timing.rs`, and the cache clause by `PdfStats::summary` in `crates/note-ui/src/pdf.rs`.
 This document describes them. If the two disagree, the code is right.
 
-### `--bench --max-ms` — the frame budget, and what it deliberately does not gate
+### `--bench --max-ms` — the frame budget, measured on work rather than on the display's clock
 
-`cheap-note --bench --max-ms 8.33` gates on `present` and exits `1` when a row exceeds it. Verified on
-macOS: `8.33` → `ok` / `0`; `3.0` → `FAILED — over the 3.00 ms budget: 8182 strokes present 5.55` / `1`;
-`--max-ms abc` → exit `2` with the usage.
+`cheap-note --bench --max-ms 8.33` gates `rebuild_work` and `present`, and exits `1` when a row exceeds
+either. Verified on macOS: `8.33` → `FAILED — over the 8.33 ms budget: 8182 strokes rebuild_work 18.44` /
+`1`; `25` → `ok` / `0`; `--max-ms abc` → exit `2` with the usage.
 
-**It does not gate `frame` or `rebuild`, and this is a finding rather than a shortcut.** Both are timed
-from the start of a draw, whose first act is to ask `CAMetalLayer` for a drawable — a call that waits for
-the display. Measured, `rebuild` minus `warm` is −0.09 ms at 0 strokes and 18.2 ms at 8 182, and
-`rebuild` reads 8.2 ms on an empty page. A 120 Hz budget on either figure would therefore fail the app
-for the panel's clock.
+**Two corrections were needed to get here, and both are worth keeping written down.**
 
-So the honest scope is: **`--max-ms` is a GPU-work gate, not a latency gate.** A frame that meets it can
-still miss a tick, because reaching the glass within 8.33 ms also depends on the display's rate and the
-compositor. `frame` remains the figure to read for latency and is reported ungated.
+*First*, every other duration in the bench (`warm`, `rebuild`, `frame`) is timed from the start of a draw,
+whose first act is to ask `CAMetalLayer` for a drawable — a call that waits for the display. `warm` and
+`rebuild` both read ~8.2 ms on an **empty** page, so a 120 Hz budget on them fails the app for the panel's
+clock. That is why `rebuild_work` exists: it is the rebuild's draw stage with the measured wait subtracted
+(0.09 ms at 0 strokes, 22.28 ms at 8 182, where `rebuild` is 8.42 and 30.78).
+
+*Second*, an earlier version gated `present` alone — a figure with no wait in it, but one that a renderer
+optimisation barely moves. The chunking work took 8 182 strokes of rebuild from 70.7 ms to 18.2 ms and moved
+`present` by **+1.6 ms**, so that gate passed identically before and after the improvement it was meant to
+protect. `rebuild_work` is the column that moves: 62.5 ms of work before, 10.0 ms after.
+
+**What this gate is not:** latency. A frame that meets it can still miss a tick, because reaching the glass
+within 8.33 ms also depends on the display's rate and the compositor. `frame` stays ungated for that reason.
+
+**What it currently reports:** at 8 182 strokes the rebuild's own work is 18.4–22.3 ms against an 8.33 ms
+budget, so the 120 Hz gate fails on the largest page by roughly 10 ms. That is a real remaining gap, not a
+measurement artefact — the gate is doing what it was built to do.
 
 The remaining budget flags (`--max-joules-per-op`, `--min-ops-per-joule`, `--require-energy`) are still
 documented as a future contract under `--power-report` and are not parsed; `doc/CLI.md` says so.

@@ -527,25 +527,27 @@ impl Options {
 
 /// A frame-time budget, and the columns it is measured against.
 ///
-/// ## Why `present` and not `frame` or `rebuild`
+/// ## Why `rebuild_work` and `present`
 ///
-/// On macOS every warmed frame begins by asking `CAMetalLayer` for a drawable, and that call waits for
-/// the display while the compositor still holds the buffers. So any figure timed from the start of a
-/// draw carries **one refresh interval of waiting** on top of the work: `warm` reads 8.2–8.7 ms even for
-/// an empty page, and `rebuild` reads 8.2 ms for an empty page for the same reason — measured, the
-/// difference `rebuild - warm` is −0.09 ms at 0 strokes and 18.2 ms at 8 182. Gating either of them
-/// against a 120 Hz budget would fail an empty page, which is the app being blamed for the panel.
+/// Those are the two columns that hold the app's own work with none of the display's clock in them, and
+/// between them they cover both halves of a frame — the one a zoom or a new stroke forces, and the GPU's
+/// share of every frame after it.
 ///
-/// `present` is the one figure taken *after* the drawable is in hand: the GPU's share of the frame, with
-/// no wait in it. It is what remains of a frame's cost once the display's own clock is taken out, so it
-/// is what a budget can hold the app to.
+/// Every other duration in the bench is timed from the start of a draw, whose first act is to ask
+/// `CAMetalLayer` for a drawable — a call that **waits for the display** while the compositor still holds
+/// the buffers. Measured on an arm64 laptop, `warm` and `rebuild` both read 8.2 ms on an **empty** page,
+/// and that 8.2 ms is the wait. Gating any of them against a 120 Hz budget would fail the app for the
+/// panel's clock, and — the reason this exists — would not see the work a rebuild does at all: a 52 ms
+/// improvement to the rebuild moves `rebuild` by 52 ms but `present` by nothing.
+///
+/// `rebuild_work` is the rebuild's draw stage with the measured wait subtracted, so it is what the
+/// benchmark observed the app doing. `present` is the GPU's share, taken after the drawable is in hand.
 ///
 /// ## The consequence, stated plainly
 ///
-/// A budget here is a **GPU-work gate, not a latency gate**. It says the app's own drawing of a frame
-/// fits in the interval; it does not and cannot say the frame reached the glass within one tick, because
-/// that depends on the display's rate and the compositor. `frame` is the figure for latency, and it is
-/// deliberately not gated.
+/// A budget here is **work in a frame's budget, not latency**. It says the app's own drawing fits in the
+/// interval; it does not say the frame reached the glass within one tick, because that also depends on
+/// the display's rate and the compositor. `frame` is the figure for latency and is deliberately not gated.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Budget {
     /// The most a single frame may spend, in milliseconds.
@@ -553,8 +555,8 @@ pub struct Budget {
 }
 
 impl Budget {
-    /// The columns a [`Budget`] is judged on. One column, because it is the only one without the wait.
-    pub const COLUMNS: [&'static str; 1] = ["present"];
+    /// The columns a [`Budget`] is judged on, in the order they are checked.
+    pub const COLUMNS: [&'static str; 2] = ["rebuild_work", "present"];
 
     /// Reads `--max-ms`'s value.
     pub fn from_name(text: &str) -> Result<Self, String> {
@@ -634,18 +636,18 @@ pub fn emit(report: &Report, format: Format, out: &mut impl std::io::Write) -> i
 mod tests {
     use super::*;
 
-    /// A page over the gated column fails the run, and the sentence names the row.
+    /// A row over the budget names itself and the column it broke.
     #[test]
     fn a_budget_names_the_row_that_broke_it() {
-        let columns = ["strokes", "present", "rebuild"];
+        let columns = ["strokes", "rebuild_work", "present"];
         let rows = vec![
             Row::new(
                 "1000 strokes",
-                vec![Value::Count(1000), Value::Millis(2.5), Value::Millis(40.0)],
+                vec![Value::Count(1000), Value::Millis(5.6), Value::Millis(2.5)],
             ),
             Row::new(
                 "8182 strokes",
-                vec![Value::Count(8182), Value::Millis(9.4), Value::Millis(18.6)],
+                vec![Value::Count(8182), Value::Millis(10.0), Value::Millis(5.7)],
             ),
         ];
 
@@ -655,25 +657,58 @@ mod tests {
         assert_eq!(verdict, Verdict::Failed);
         let sentence = sentence.expect("a failure explains itself");
         assert!(sentence.contains("8182 strokes"), "{sentence}");
-        assert!(sentence.contains("present"), "{sentence}");
-        // The row whose only excess was `rebuild` is not named: that figure carries the wait for the
-        // display, so gating it would fail a page for the panel's clock.
+        assert!(sentence.contains("rebuild_work"), "{sentence}");
         assert!(!sentence.contains("1000 strokes"), "{sentence}");
     }
 
-    /// The gated figure has to be the one taken after the drawable is in hand. A `rebuild` over budget
-    /// on its own is not a failure, because `rebuild` is timed from the start of a draw and so contains
-    /// a refresh interval of waiting — an empty page reads 8.2 ms of it.
+    /// The gated figures have to be the ones with no wait in them. `warm` and `rebuild` are both timed
+    /// from the start of a draw and so contain a refresh interval of waiting — an empty page reads 8.2 ms
+    /// of it — which is why neither is gated.
     #[test]
     fn the_wait_for_the_display_is_not_gated() {
-        let columns = ["present", "rebuild"];
+        let columns = ["warm", "rebuild", "rebuild_work", "present"];
         let rows = vec![Row::new(
             "0 strokes",
-            vec![Value::Millis(0.5), Value::Millis(8.42)],
+            vec![
+                Value::Millis(8.28),
+                Value::Millis(8.49),
+                Value::Millis(0.21),
+                Value::Millis(0.83),
+            ],
         )];
 
         let (verdict, _) = Budget { max_ms: 8.33 }.judge(&columns, &rows);
-        assert_eq!(verdict, Verdict::Ok, "0.5 is the work; 8.42 is the tick");
+        assert_eq!(
+            verdict,
+            Verdict::Ok,
+            "8.28 and 8.49 are the tick; 0.21 and 0.83 are the work"
+        );
+    }
+
+    /// The gate has to see a rebuild improvement, or it is not gating what the app spends most of its
+    /// frame on. Before the chunking work the rebuild did ~62 ms of work; it now does ~10.
+    #[test]
+    fn the_budget_sees_a_rebuild_improvement() {
+        let columns = ["rebuild_work", "present"];
+        let before = vec![Row::new(
+            "8182 strokes",
+            vec![Value::Millis(62.5), Value::Millis(3.9)],
+        )];
+        let after = vec![Row::new(
+            "8182 strokes",
+            vec![Value::Millis(10.0), Value::Millis(5.5)],
+        )];
+
+        let budget = Budget { max_ms: 8.33 };
+        assert_eq!(budget.judge(&columns, &before).0, Verdict::Failed);
+        assert_eq!(budget.judge(&columns, &after).0, Verdict::Failed);
+        // Both fail today, but for different margins — which is the gate doing its job: it reports the
+        // work that is left rather than a figure the display sets.
+        let (_, sentence) = budget.judge(&columns, &after);
+        assert!(
+            sentence.expect("fails").contains("10.0"),
+            "the sentence carries the measured work"
+        );
     }
 
     /// A budget on a column nothing measured is a skip, never a pass — an unearned success is the one

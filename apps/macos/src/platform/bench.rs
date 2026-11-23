@@ -160,9 +160,9 @@ pub fn print_usage() {
          Draws a synthetic page through the same Metal canvas the app uses and reports the first,\n\
          warm, worst, rebuild and pan costs of a frame, with the GPU's own time waited for apart.\n\
          \n\
-         --max-ms N fails the run (exit 1) when any row's `present` exceeds N ms; for\n\
-         120 Hz use 8.33. `frame` is not gated: it and `rebuild` both include the wait for the display, so a\n\
-         budget on them would measure the panel rather than the app.\n\
+         --max-ms N fails the run (exit 1) when any row's `rebuild_work` or `present` exceeds N ms; for\n\
+         120 Hz use 8.33. `warm`, `rebuild` and `frame` are not gated: they include the wait for the\n\
+         display, so a budget on them would measure the panel, not the app.\n\
          \n\
          Run it in release: cargo run --release -p cheap-note-macos -- --bench"
     );
@@ -176,6 +176,8 @@ struct PageCost {
     warm: Duration,
     worst: Duration,
     rebuild: Duration,
+    /// The rebuild's `draw` stage with the display's wait taken out — see [`time_frame_in_stages`].
+    rebuild_work: Duration,
     pan: Duration,
     gpu: Duration,
 }
@@ -222,7 +224,15 @@ fn measure(options: &Options, format: Format) -> Result<i32, String> {
         format!("Metal · {}×{} at 1.0x", CANVAS.0, CANVAS.1),
     )
     .columns(&[
-        "strokes", "first", "warm", "worst", "rebuild", "pan", "present", "frame",
+        "strokes",
+        "first",
+        "warm",
+        "worst",
+        "rebuild",
+        "rebuild_work",
+        "pan",
+        "present",
+        "frame",
     ]);
 
     for cost in &costs {
@@ -234,6 +244,7 @@ fn measure(options: &Options, format: Format) -> Result<i32, String> {
                 Value::Millis(ms(cost.warm)),
                 Value::Millis(ms(cost.worst)),
                 Value::Millis(ms(cost.rebuild)),
+                Value::Millis(ms(cost.rebuild_work)),
                 Value::Millis(ms(cost.pan)),
                 Value::Millis(ms(cost.gpu)),
                 Value::Millis(ms(cost.warm + cost.gpu)),
@@ -326,8 +337,23 @@ fn measure_page(surface: &mut Surface, strokes: usize, frames: usize) -> Result<
 
     // A detail rebuild: the revision changes, so every realization is stale and the next frame builds
     // all of them. This is the cost a frame must be able to absorb.
+    //
+    // Its `draw` stage is where the work is, but that stage also begins by waiting for a drawable, so
+    // the wait is taken out: `rebuild` is what a hand feels, `rebuild_work` is what the app did. On an
+    // empty page the wait is all of it, which is why a budget on `rebuild` alone would fail 0 strokes.
     canvas.ink.revision = canvas.ink.revision.wrapping_add(1);
-    let rebuild = time_frame(surface, &canvas)?;
+    let started = Instant::now();
+    let (drawn, waited) = surface.draw_with_wait(&canvas, None);
+    if !drawn {
+        return Err(String::from(
+            "the layer had no drawable ready for the rebuild",
+        ));
+    }
+    // The frame's own work ends where `draw` returns; the settle after it is the GPU, as in `warm`.
+    let work = started.elapsed().saturating_sub(waited);
+    surface.settle();
+    let rebuild = started.elapsed();
+    let rebuild_work = work;
 
     // A pan: the same ink and the same detail, moved. It must rebuild nothing; the difference between
     // this and `warm` is what a pan costs over a still page.
@@ -340,17 +366,33 @@ fn measure_page(surface: &mut Surface, strokes: usize, frames: usize) -> Result<
         warm: warm / frames as u32,
         worst,
         rebuild,
+        rebuild_work,
         pan,
         gpu: gpu / frames as u32,
     })
 }
 
-/// One frame, waited for, as the time it took.
+/// One frame, waited for, as the time it took, and its two stages apart.
+///
+/// The `draw` stage and the `settle` stage are timed separately because they answer different questions.
+/// `draw` asks the layer for a drawable — **which waits for the display** — and then records the frame's
+/// work; `settle` is the GPU. A rebuild's own cost is the part of `draw` that is not the wait, so the
+/// two cannot be told apart from a single number: on an empty page `rebuild` reads 8.2 ms and all of it is
+/// the wait.
 fn time_frame(surface: &mut Surface, canvas: &Canvas) -> Result<Duration, String> {
+    Ok(time_frame_in_stages(surface, canvas)?.0)
+}
+
+/// One frame's total, plus how much of it was the GPU.
+fn time_frame_in_stages(
+    surface: &mut Surface,
+    canvas: &Canvas,
+) -> Result<(Duration, Duration), String> {
     let started = Instant::now();
     draw(surface, canvas)?;
+    let gpu_started = Instant::now();
     surface.settle();
-    Ok(started.elapsed())
+    Ok((started.elapsed(), gpu_started.elapsed()))
 }
 
 /// Draws one frame, or says why the layer would not take it.

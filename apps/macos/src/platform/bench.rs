@@ -335,13 +335,27 @@ fn measure_page(surface: &mut Surface, strokes: usize, frames: usize) -> Result<
         worst = worst.max(elapsed);
     }
 
-    // A detail rebuild: the revision changes, so every realization is stale and the next frame builds
-    // all of them. This is the cost a frame must be able to absorb.
+    // A detail rebuild: a zoom crossed into another rung, so every stroke's outline is made again and
+    // the next frame builds every triangle on the page. This is the cost a frame must be able to absorb,
+    // and it has two halves: the `freeze` below, which the app does between frames, and the frame that
+    // draws the new triangles. Only the second is a frame, so only it is timed against the budget — but
+    // both are real work a reader waits on, and `rebuild` reports what the pair costs.
     //
-    // Its `draw` stage is where the work is, but that stage also begins by waiting for a drawable, so
-    // the wait is taken out: `rebuild` is what a hand feels, `rebuild_work` is what the app did. On an
-    // empty page the wait is all of it, which is why a budget on `rebuild` alone would fail 0 strokes.
+    // The strokes are re-derived here, not just the counter bumped. `Ink::revision` is what the layer
+    // watches, but what makes a rebuild expensive is the `freeze` below — the ribbon walk, the pieces —
+    // and timing a rebuild that skipped it would measure a page that never has to happen. The zoom is
+    // the one `page` built them at, so the pieces come out the same size and the count is comparable.
+    // Serial, unlike the app's `InkDocument::build_detail`, which spreads the same loop over `rayon`.
+    // A bench that borrowed the pool would owe the harness a dependency for one loop and would hide,
+    // rather than show, what one core pays — and the number that matters here is the whole rebuild's.
+    let regrow = Instant::now();
+    let list = Arc::make_mut(&mut canvas.ink.strokes);
+    for stroke in list.iter_mut() {
+        Arc::make_mut(stroke).close_at(1.0);
+    }
+    let freeze = regrow.elapsed();
     canvas.ink.revision = canvas.ink.revision.wrapping_add(1);
+    surface.take_stages();
     let started = Instant::now();
     let (drawn, waited) = surface.draw_with_wait(&canvas, None);
     if !drawn {
@@ -351,8 +365,27 @@ fn measure_page(surface: &mut Surface, strokes: usize, frames: usize) -> Result<
     }
     // The frame's own work ends where `draw` returns; the settle after it is the GPU, as in `warm`.
     let work = started.elapsed().saturating_sub(waited);
+    let (refresh, upload, bytes, allocations) = surface.take_stages();
+
+    if std::env::var_os("CHEAP_NOTE_BENCH_BREAKDOWN").is_some() {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        let count = surface.vertices();
+
+        eprintln!(
+            "    rebuild: freeze {:.2} ms, then rebuild_work {:.2} ms = refresh {:.2} ms + upload \
+             {:.2} ms ({:.1} MB, {} vertices, {:.1} bytes/vertex, {allocations} new buffers)",
+            ms(freeze),
+            ms(work),
+            ms(refresh),
+            ms(upload),
+            bytes as f64 / (1024.0 * 1024.0),
+            count,
+            bytes as f64 / count.max(1) as f64,
+        );
+    }
+
     surface.settle();
-    let rebuild = started.elapsed();
+    let rebuild = freeze + started.elapsed();
     let rebuild_work = work;
 
     // A pan: the same ink and the same detail, moved. It must rebuild nothing; the difference between

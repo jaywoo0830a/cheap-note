@@ -180,6 +180,20 @@ pub(crate) struct Surface {
     ink_buffers: [Option<Retained<ProtocolObject<dyn MTLBuffer>>>; 3],
     /// Which of the finished ink's buffers hold the current ink.
     ink_slots_valid: [bool; 3],
+    /// Time spent copying the finished ink into a frame's buffer, and how much was copied.
+    ///
+    /// Instrumentation for the bench's breakdown (`CHEAP_NOTE_BENCH_BREAKDOWN`): a rebuild's wall time
+    /// is the fill plus this copy, and which of the two it is changes what to do about it. Reset by
+    /// [`Self::take_stages`].
+    stage_uploaded: std::time::Duration,
+    uploaded_bytes: u64,
+    /// Time spent turning strokes into vertices: `refresh_ink`'s fill, without the copy that follows.
+    stage_refresh: std::time::Duration,
+    /// How many of those uploads had to make a new buffer rather than refill one already big enough.
+    ///
+    /// A page that grows past a buffer's length allocates again, and an allocation of 137 MB is not
+    /// free — worth telling apart from the copy itself.
+    upload_count: u32,
     /// The open stroke's buffers, one per frame in flight.
     open_buffers: [Option<Retained<ProtocolObject<dyn MTLBuffer>>>; 3],
     /// Which of the three the next frame writes.
@@ -267,6 +281,10 @@ impl Surface {
             open_rotation: 0,
             ink_buffers: [None, None, None],
             ink_slots_valid: [false; 3],
+            stage_uploaded: std::time::Duration::ZERO,
+            uploaded_bytes: 0,
+            upload_count: 0,
+            stage_refresh: std::time::Duration::ZERO,
             open_buffers: [None, None, None],
             buffer_slot: 0,
             scratch: Vec::new(),
@@ -382,6 +400,8 @@ impl Surface {
             return false;
         }
 
+        let started = std::time::Instant::now();
+
         self.ink.clear();
         self.ink_key = Some(key);
         self.ink_covered = cull_of(ink.visible);
@@ -463,7 +483,31 @@ impl Surface {
         // invalidation cannot drift apart — the caller only has to know that a rebuild happened.
         self.ink_slots_valid = [false; 3];
 
+        self.stage_refresh += started.elapsed();
+
         true
+    }
+
+    /// How many corners the last build made: what the upload copies and the draw reads.
+    pub fn vertices(&self) -> usize {
+        self.ink.len()
+    }
+
+    /// Clears the stages and totals, so a measurement starts from nothing.
+    pub fn take_stages(&mut self) -> (std::time::Duration, std::time::Duration, u64, u32) {
+        let taken = (
+            self.stage_refresh,
+            self.stage_uploaded,
+            self.uploaded_bytes,
+            self.upload_count,
+        );
+
+        self.stage_refresh = std::time::Duration::ZERO;
+        self.stage_uploaded = std::time::Duration::ZERO;
+        self.uploaded_bytes = 0;
+        self.upload_count = 0;
+
+        taken
     }
 
     /// The multisampled target, made once per size.
@@ -561,9 +605,27 @@ impl Surface {
     }
 
     /// Uploads the finished ink into the current frame's buffer.
+    ///
+    /// The stage most of a rebuild's wall time goes into at page size, and the one with a surprise in
+    /// it: `StorageModeShared` is memory both the CPU and the GPU read, and on Apple silicon writing it
+    /// is not a `memcpy` — the 137 MB a page of 8 182 strokes makes costs several times what copying
+    /// the same bytes in ordinary heap does (measured; see `OPT-MAC.md`). So the copy is worth *not*
+    /// doing when the list has not changed, and `ink_slots_valid` is what says it has not.
     fn upload_ink(&mut self, slot: usize) {
+        let started = std::time::Instant::now();
+        let bytes = std::mem::size_of_val(&self.ink[..]);
+
         let buffer = self.ink_buffers[slot].take();
+        let reused = buffer
+            .as_ref()
+            .is_some_and(|buffer| buffer.length() >= bytes);
         self.ink_buffers[slot] = Self::upload(&self.device, &self.ink, buffer);
+
+        self.stage_uploaded += started.elapsed();
+        self.uploaded_bytes += bytes as u64;
+        if !reused {
+            self.upload_count += 1;
+        }
     }
 
     /// Uploads the open stroke into the current frame's buffer.
@@ -772,6 +834,40 @@ fn pieces(
     shift: (f32, f32),
     colour: [u8; 4],
 ) {
+    // The unturned page asks for nothing: every corner is already where it goes, and the arithmetic
+    // below would be a multiply and an add per axis per corner for no change (see `is_identity`). The
+    // shift is the one thing that can still move a corner, so it is what the fast path checks.
+    if mapping.is_identity() && shift == (0.0, 0.0) {
+        let corner = |[x, y]: [f32; 2]| Vertex { x, y, colour };
+
+        for piece in list {
+            match *piece {
+                note_format::ink::Piece::Quad {
+                    left_from,
+                    left_to,
+                    right_to,
+                    right_from,
+                } => {
+                    let (a, b, c, d) = (
+                        corner(left_from),
+                        corner(left_to),
+                        corner(right_to),
+                        corner(right_from),
+                    );
+
+                    vertices.extend_from_slice(&[a, b, c, a, c, d]);
+                }
+                note_format::ink::Piece::Fan { centre, from, to } => {
+                    let (o, a, b) = (corner(centre), corner(from), corner(to));
+
+                    vertices.extend_from_slice(&[o, a, b]);
+                }
+            }
+        }
+
+        return;
+    }
+
     let vertex = |corner: [f32; 2]| {
         let (x, y) = mapping.point(corner, shift);
 
@@ -1280,6 +1376,16 @@ impl Mapping {
 
         (across, down)
     }
+
+    /// Whether the map leaves a corner where it is, so a caller can skip the arithmetic entirely.
+    ///
+    /// The common page is unturned and unmoved: `drawn_of_paper` is the identity for no turns, so
+    /// `base`/`step_x`/`step_y` are `(0,0)`, `(1,0)`, `(0,1)` and every corner is already the answer.
+    /// A rebuild that asked `point` anyway would spend two multiplies and an add per axis per corner —
+    /// about 11.5 million corners at 8 182 strokes — to compute a value it already had.
+    fn is_identity(&self) -> bool {
+        self.base == (0.0, 0.0) && self.step_x == (1.0, 0.0) && self.step_y == (0.0, 1.0)
+    }
 }
 
 /// Where the sheet's drawn coordinates land in the window: a scale and a shift, in device pixels.
@@ -1430,6 +1536,10 @@ impl Surface {
         // it makes one. A pan or a zoom that the ink already covers rebuilds nothing, so there is nothing
         // to upload either: the list is byte for byte what the buffers hold, and copying a page's worth of
         // it again into each of three buffers in flight is the one cost a still page has.
+        //
+        // A buffer cannot simply be handed to all three slots: a frame in flight may still be reading the
+        // one it was given, and writing it for the next frame would change what the GPU sees mid-draw.
+        // The ring exists for that reason and each slot is refilled on its own turn.
         self.refresh_ink(canvas);
         if !self.ink_slots_valid[slot] {
             self.upload_ink(slot);
@@ -1943,6 +2053,34 @@ mod tests {
 #[cfg(test)]
 mod fill_tests {
     use super::*;
+
+    /// The pieces fill is a pure copy for an unturned page, so the identity test must be exact.
+    ///
+    /// `pieces` takes the fast path only when `is_identity` says every corner is already where it goes.
+    /// A page whose paper is 720×1 018 and whose origin is 40, 40 is the common one, and it must qualify:
+    /// the mapping is built from the *paper's shape* and the page's turn, not its size or its place, so
+    /// nothing about a page at rest can stop it. A quarter turn must not qualify — `drawn_of_paper` swaps
+    /// the axes, and a corner really does move.
+    #[test]
+    fn an_unturned_page_maps_to_nothing_and_a_turned_one_does_not() {
+        let mut canvas = Canvas {
+            scale: 2.0,
+            ..Canvas::default()
+        };
+        canvas.ink.paper = (720.0, 1_018.0);
+        canvas.ink.origin = (40.0, 40.0);
+
+        assert!(Mapping::of(&canvas).is_identity());
+
+        for turns in [1, 2, 3] {
+            canvas.ink.rotation = note_format::pages::Quarters::from_turns(turns);
+
+            assert!(
+                !Mapping::of(&canvas).is_identity(),
+                "a page turned {turns} is not the identity"
+            );
+        }
+    }
 
     /// The fill answers the same as the obvious implementation, which reads every edge for every band.
     ///

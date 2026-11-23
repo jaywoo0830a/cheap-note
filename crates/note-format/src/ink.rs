@@ -1077,8 +1077,11 @@ pub fn ribbon(model: &Model) -> Ribbon {
     // One reading is one disc, and a pen that never left the place it was put is one disc too: neither
     // has two sides to walk between, so both are the boundary alone.
     if line.len() == 1 {
+        let mut outline = Vec::with_capacity(ARC_STEPS);
+        arc_points(line[0], 0.0, std::f32::consts::TAU, ARC_STEPS, &mut outline);
+
         return Ribbon {
-            outline: arc_points(line[0], 0.0, std::f32::consts::TAU, ARC_STEPS),
+            outline,
             sides: Vec::new(),
             pieces: Vec::new(),
             discs: line.clone(),
@@ -1126,8 +1129,11 @@ pub fn ribbon(model: &Model) -> Ribbon {
             radius: reach,
         };
 
+        let mut outline = Vec::with_capacity(ARC_STEPS);
+        arc_points(whole, 0.0, std::f32::consts::TAU, ARC_STEPS, &mut outline);
+
         return Ribbon {
-            outline: arc_points(whole, 0.0, std::f32::consts::TAU, ARC_STEPS),
+            outline,
             sides: Vec::new(),
             pieces: Vec::new(),
             discs: line.clone(),
@@ -1149,6 +1155,12 @@ pub fn ribbon(model: &Model) -> Ribbon {
     }
 
     // The loop: the left edge forwards, round the far disc, the right edge back, and round the near one.
+    //
+    // Sized for what the walk writes on an ordinary stroke: two points a reading, plus an arc at each end.
+    // Arcs at turns are extra, and on a line that turns often there are up to `ARC_STEPS` more at every
+    // reading — so the buffer is allowed to grow there rather than every stroke paying for a sharp line's
+    // worth of room it never uses (a `Vec` grows by doubling, so a turn-heavy line costs a handful of
+    // reallocations at most).
     let mut outline: Vec<[f32; 2]> = Vec::with_capacity(line.len() * 2 + ARC_STEPS * 2);
 
     // The left edge, with the disc's own arc wherever the band turns hard enough that the two straight
@@ -1160,11 +1172,11 @@ pub fn ribbon(model: &Model) -> Ribbon {
     for index in 1..line.len() {
         let point = line[index];
 
-        outline.extend(arc_between(point, left[index - 1], left[index], ARC_STEPS));
+        arc_between(point, left[index - 1], left[index], ARC_STEPS, &mut outline);
         outline.push(left[index]);
     }
 
-    outline.extend(end_arc(
+    end_arc(
         line[last],
         left[last],
         right[last],
@@ -1173,7 +1185,8 @@ pub fn ribbon(model: &Model) -> Ribbon {
             line[last.saturating_sub(1)].y,
         ],
         ARC_STEPS,
-    ));
+        &mut outline,
+    );
 
     for index in (0..line.len()).rev() {
         let point = line[index];
@@ -1181,22 +1194,24 @@ pub fn ribbon(model: &Model) -> Ribbon {
         outline.push(right[index]);
 
         if index > 0 {
-            outline.extend(arc_between(
+            arc_between(
                 point,
                 right[index],
                 right[index - 1],
                 ARC_STEPS,
-            ));
+                &mut outline,
+            );
         }
     }
 
-    outline.extend(end_arc(
+    end_arc(
         line[0],
         right[0],
         left[0],
         [line[(1).min(last)].x, line[(1).min(last)].y],
         ARC_STEPS,
-    ));
+        &mut outline,
+    );
 
     let pieces = pieces_of(line, &left, &right);
 
@@ -1395,19 +1410,15 @@ fn outer_tangent(from: Disc, to: Disc, side: Side) -> Option<[f32; 2]> {
 }
 
 /// `steps` points along a disc's edge, starting at `start` and turning through `sweep` radians.
-fn arc_points(centre: Disc, start: f32, sweep: f32, steps: usize) -> Vec<[f32; 2]> {
-    let mut points = Vec::with_capacity(steps);
-
+fn arc_points(centre: Disc, start: f32, sweep: f32, steps: usize, into: &mut Vec<[f32; 2]>) {
     for step in 0..steps {
         let angle = start + sweep * step as f32 / steps as f32;
 
-        points.push([
+        into.push([
             centre.x + centre.radius * angle.cos(),
             centre.y + centre.radius * angle.sin(),
         ]);
     }
-
-    points
 }
 
 /// The boundary of a stroke's ink, from its points. A convenience over [`Model::of`] and [`ribbon_outline`].
@@ -1423,7 +1434,7 @@ pub fn outline_of(points: &[InkPoint], detail: f32, tip: Tip) -> Vec<[f32; 2]> {
 /// pen turned round and came back, it is nearly a whole circle.
 ///
 /// `outwards` is the reading the edge came from; the sweep kept is the one going away from it.
-fn arc_between(end: Disc, from: [f32; 2], to: [f32; 2], steps: usize) -> Vec<[f32; 2]> {
+fn arc_between(end: Disc, from: [f32; 2], to: [f32; 2], steps: usize, into: &mut Vec<[f32; 2]>) {
     // Both points are on the disc's rim by construction, so their angles round it are the angles of the arc.
     // Measuring them from the centre is only safe if they really are on the rim: a point that floated inside
     // would swing through a wild angle and draw an arc that is not there. Where one is not on the rim the edge
@@ -1436,7 +1447,7 @@ fn arc_between(end: Disc, from: [f32; 2], to: [f32; 2], steps: usize) -> Vec<[f3
     };
 
     if !on_rim(from) || !on_rim(to) {
-        return Vec::new();
+        return;
     }
 
     let start = (from[1] - end.y).atan2(from[0] - end.x);
@@ -1455,10 +1466,10 @@ fn arc_between(end: Disc, from: [f32; 2], to: [f32; 2], steps: usize) -> Vec<[f3
     // piece it is already drawn as — which is the difference between a band painted once and painted twice
     // over. The arc is only boundary where the corner is sharper than the straight pieces can cover.
     if sweep.abs() < TURN {
-        return Vec::new();
+        return;
     }
 
-    arc_points(end, start, sweep, steps)
+    arc_points(end, start, sweep, steps, into)
 }
 
 /// How sharp a turn has to be before its disc contributes an arc: about 20°, which is a corner a reader can
@@ -1478,7 +1489,8 @@ fn end_arc(
     to: [f32; 2],
     behind: [f32; 2],
     steps: usize,
-) -> Vec<[f32; 2]> {
+    into: &mut Vec<[f32; 2]>,
+) {
     let start = (from[1] - end.y).atan2(from[0] - end.x);
     let finish = (to[1] - end.y).atan2(to[0] - end.x);
 
@@ -1517,7 +1529,7 @@ fn end_arc(
         sweep -= std::f32::consts::TAU * sweep.signum();
     }
 
-    arc_points(end, start, sweep, steps)
+    arc_points(end, start, sweep, steps, into)
 }
 
 /// How many straight pieces one segment of a stroke is drawn as.

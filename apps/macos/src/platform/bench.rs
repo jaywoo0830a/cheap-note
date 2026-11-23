@@ -377,7 +377,6 @@ fn page(strokes: usize) -> Canvas {
             sides: Vec::new(),
             discs: Vec::new(),
             pieces: Vec::new(),
-            single_layer: false,
             bounds: Bounds::NOTHING,
         };
         stroke.close();

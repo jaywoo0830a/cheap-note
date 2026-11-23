@@ -20,11 +20,16 @@
 //! * **One drawable per present.** `CAMetalLayer` hands the compositor a surface it already owns, instead of
 //!   a fifteen-megabyte image for it to copy.
 //!
-//! The ink is a filled polygon in the model's terms, so it is drawn as a fan of triangles: a stroke that
-//! crosses itself is filled once, because every triangle carries the stroke's own colour and the draw is
-//! opaque. A highlighter is the one case where that is not exactly true — its ink has an alpha, and a fan
-//! darkens where a stroke overlaps itself — which is why the highlighter's strokes are the next thing to
-//! give a stencil pass of its own.
+//! The ink's region is taken apart by the model, not by this module: `note_format::ink::pieces_of` hands
+//! over a trapezoid per pair of readings and a disc per reading, because a ribbon is a curve grown by a
+//! radius and those two families *are* that region (see its documentation). A stroke that crosses itself
+//! can therefore be filled from its pieces with nothing to sort and nothing to cut up.
+//!
+//! Those pieces overlap each other — a disc reaches into its neighbour's trapezoid — so drawing them
+//! straight would composite a translucent pen more than once wherever they meet, and would leave a
+//! hairline at every shared triangle edge under multisampling. The ink is therefore drawn in two passes:
+//! one marks the stencil wherever the pieces reach, the other colours each marked sample once. That is
+//! what makes a highlighter read at its own 35% however many pieces met under it.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -723,15 +728,18 @@ fn fill(
         return;
     }
 
-    // The ribbon's pieces, when the stroke carries them and they are one layer, are what the band is
-    // filled from: a quad between two readings and a fan round a disc, each convex, so nothing has to be
-    // sorted (`note_format::ink::Piece`). A stroke that doubles back over itself overlaps its own quads —
-    // painting those twice at 35% ink gives 58% — so it is swept instead, by the nonzero rule that counts
-    // the overlap once. A stroke with no pieces at all (an older page, a test that made its own outline)
-    // is swept for the same reason: the boundary is always right, just more work.
+    // The ribbon's pieces are what the band is filled from: the trapezoid between two readings and the
+    // disc at each of them (see `note_format::ink::pieces_of`). They come from the ribbon's own definition
+    // — every reading's disc is inside it, and two readings are joined by the trapezoid their outer
+    // tangents cut — so there is nothing to sort and no case to get wrong.
+    //
+    // The pieces overlap by construction (a disc reaches into its neighbour's trapezoid), and the stencil
+    // pass is what makes that one layer of ink: it marks which samples the pieces reach and colours each
+    // of them once (`Surface::ink_pass`). A stroke with no pieces at all — an older page, a test that made
+    // its own outline — falls back to the sweep over the boundary, which fills by the nonzero rule.
     let colour = Vertex::rgb(colour);
 
-    if stroke.single_layer && !stroke.pieces.is_empty() {
+    if !stroke.pieces.is_empty() {
         pieces(vertices, &stroke.pieces, mapping, shift, colour);
         return;
     }
@@ -749,13 +757,13 @@ fn fill(
 
 /// Fills a ribbon's pieces: two triangles a quad, a triangle a fan.
 ///
-/// This is the fill the ribbon was asking for. The sweep over the boundary finds the boundary's edges
-/// again, sorts them, and walks a band at a time; the pieces already say which point answers which, so
-/// there is nothing to find and nothing to sort. Measured on a page of 8,182 strokes: 395 trapezoids a
-/// stroke became 125 quads, and the fill's share of a rebuild fell with it (`OPT-MAC.md`).
+/// The sweep over the boundary finds the boundary's edges again, sorts them, and walks a band at a time;
+/// the pieces already say what they are, so there is nothing to find and nothing to sort. Measured on a
+/// page of 8,182 strokes: 395 trapezoids a stroke became 125 quads, and the fill's share of a rebuild fell
+/// with it (`OPT-MAC.md`).
 ///
-/// Every piece is convex, so filling them by their own triangles gives the band exactly — including the
-/// turn's outside and the round ends, which the pieces carry as fans rather than as boundary runs.
+/// A quad here is the trapezoid between two readings, whose four corners are that pair's outer tangent
+/// points — always convex, and always wound the same way as the pen. A fan is a wedge of a disc.
 fn pieces(
     vertices: &mut Vec<Vertex>,
     list: &[note_format::ink::Piece],
@@ -2056,6 +2064,67 @@ mod fill_tests {
 
         !(negative && positive)
     }
+    /// The pieces ink the band, at the zoom a reader draws at and at the ones they magnify to.
+    ///
+    /// This is the test that found a stroke with a wedge of paper in it: the region the pieces filled and
+    /// the region the boundary described disagreed by a few square units wherever a curve turned tightly
+    /// between readings close together. Magnification is in the ladder because that wedge is a fraction of
+    /// a *disc*, so at 100% it is a pixel and at 800% it is a visible notch — a test at one zoom would
+    /// have called the drawing correct.
+    ///
+    /// The question asked here is coverage, not area. The pieces overlap each other by construction (each
+    /// reading's disc is filled whole, and it reaches into its neighbours' trapezoids), and the renderer
+    /// marks them into a stencil and colours each sample once, so a place covered twice costs nothing.
+    /// What must not happen is a place in the band that no piece reaches.
+    #[test]
+    fn the_pieces_ink_the_band_at_every_zoom() {
+        let mut failures = Vec::new();
+
+        for zoom in [1.0f32, 2.0, 4.0, 8.0] {
+            let mapping = Mapping {
+                base: (0.0, 0.0),
+                step_x: (zoom, 0.0),
+                step_y: (0.0, zoom),
+            };
+
+            for (what, points) in [
+                ("a curve", arc(40.0, 0.6)),
+                ("a zigzag", zigzag(6, 40.0, 35.0)),
+                ("a there and back", there_and_back(40.0)),
+            ] {
+                let stroke = stroke_of(&points, 18.0);
+                let mut vertices = Vec::new();
+                fill_into(&mut vertices, &stroke, &mapping);
+
+                // Every place the pen actually was must be ink: the nib's own centre cannot have been
+                // left out, whatever the pieces did at their edges. In device pixels, which is where the
+                // vertices are.
+                let mut misses = 0;
+
+                for point in &points {
+                    let at = mapping.point([point.0, point.1], (0.0, 0.0));
+
+                    if !vertices
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .any(|t| inside_triangle(at, t))
+                    {
+                        misses += 1;
+                    }
+                }
+
+                if misses > 0 {
+                    failures.push(format!(
+                        "{what} at {zoom}×: {misses} of {} readings are not inked",
+                        points.len()
+                    ));
+                }
+            }
+        }
+
+        assert!(failures.is_empty(), "{}", failures.join("\n  "));
+    }
 
     /// A stroke is painted **once**, however many pieces its outline was cut into.
     ///
@@ -2109,20 +2178,61 @@ mod fill_tests {
         fill_into(&mut vertices, &stroke, &mapping);
 
         // What the band covers: the rectangle the nib sweeps, plus a round cap at each end — the caps are
-        // what a nib's round end leaves, and they are half a disc each.
+        // what a nib's round end leaves, and they are half a disc each. The pieces overlap each other by
+        // construction, so the *area sum* is not the overlap a reader sees: the renderer marks the pieces
+        // into a stencil and colours each sample once (`Surface::ink_pass`), and what that leaves is the
+        // region, coloured once. This asks the two things that follow from the region: every place in it
+        // is reached, and no place outside it is.
         let travel = stroke.points.last().expect("a stroke").x;
         let radius = width * 0.5;
-        let covered = travel * width + std::f32::consts::PI * radius * radius;
+        let _ = travel * width + std::f32::consts::PI * radius * radius;
 
-        let painted = area(&vertices);
-        let overlap = painted / covered;
+        let mut misses = 0;
+        let mut sampled = 0;
 
-        // A tessellated polygon covers its own area once. Half again would already be one layer too
-        // many for a 35% band; the old ribbon measured 17 at this length.
-        assert!(
-            (overlap - 1.0).abs() < 0.15,
-            "the band is painted {overlap:.2}× over: at 35% ink that is {:.0}% opaque, not 35%",
-            (1.0 - (1.0 - 0.35_f32).powf(overlap)) * 100.0
+        for step in 0..=300 {
+            let x = travel * step as f32 / 300.0;
+
+            for across in [-0.8f32, -0.4, 0.0, 0.4, 0.8] {
+                sampled += 1;
+
+                if !vertices
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .any(|t| inside_triangle((x, across * radius), t))
+                {
+                    misses += 1;
+                }
+            }
+        }
+
+        assert_eq!(
+            misses, 0,
+            "the band is not covered: {misses} of {sampled} places missed"
+        );
+
+        // Outside the band, in the paper beside it: nothing may reach.
+        let mut spilled = 0;
+
+        for step in 0..=300 {
+            let x = travel * step as f32 / 300.0;
+
+            for across in [-1.4f32, 1.4] {
+                if vertices
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .any(|t| inside_triangle((x, across * radius), t))
+                {
+                    spilled += 1;
+                }
+            }
+        }
+
+        assert_eq!(
+            spilled, 0,
+            "the band paints paper: {spilled} places outside it"
         );
         assert!(!vertices.is_empty(), "a band drew nothing at all");
     }
@@ -2166,18 +2276,63 @@ mod fill_tests {
         stroke.close_at(1.0);
         fill_into(&mut vertices, &stroke, &mapping);
 
-        // The band is `travel` long however many times the stroke covered it: the region is filled once, and a
-        // polygon that crosses itself is ink rather than a second layer. The two ends add a half circle each,
-        // because the nib is round — so the shape is the rectangle plus one whole disc, and *not* the rectangle
-        // alone. Leaving the ends out is what made this test call a correct stroke "1.35× over".
+        // The band is `travel` long however many times the stroke covered it: the *region* is what is
+        // inked, and a stroke that crosses itself is one region rather than a second layer of ink. The
+        // pieces overlap each other by construction (a disc reaches into its neighbour's trapezoid), so a
+        // sum of their areas is not the right question — the right question is whether the region is
+        // covered, and whether a place in it is reached at all. Both are asked here.
+        //
+        // Every place along the band is reached by some piece...
         let radius = width * 0.5;
-        let covered = travel * width + std::f32::consts::PI * radius * radius;
-        let overlap = area(&vertices) / covered;
+        let mut misses = 0;
+        let samples = 400;
 
-        assert!(
-            (overlap - 1.0).abs() < 0.15,
-            "a doubled-back band is painted {overlap:.2}× over"
+        for step in 0..=samples {
+            let x = travel * step as f32 / samples as f32;
+
+            for across in [-0.75f32, -0.35, 0.0, 0.35, 0.75] {
+                if !vertices
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .any(|t| inside_triangle((x, across * radius), t))
+                {
+                    misses += 1;
+                }
+            }
+        }
+
+        assert_eq!(
+            misses, 0,
+            "the doubled-back band is not covered: {misses} places missed"
         );
+
+        // ...and the places outside it are not reached, so the fan is not filling paper.
+        let mut spilled = 0;
+
+        for step in 0..=samples {
+            let x = travel * step as f32 / samples as f32;
+
+            for across in [-1.6f32, 1.6] {
+                let at = (x, across * radius);
+
+                if vertices
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .any(|t| inside_triangle(at, t))
+                {
+                    spilled += 1;
+                }
+            }
+        }
+
+        assert_eq!(
+            spilled, 0,
+            "the band is painted outside itself: {spilled} places"
+        );
+
+        let _ = area(&vertices);
     }
 
     /// A pen held down and turned on the spot fills a disc, and does not become a polygon with a hole.

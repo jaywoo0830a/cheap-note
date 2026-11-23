@@ -1,0 +1,33 @@
+[package]
+name = "cheap-note-engine"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "The cheap-note ink engine: what changed, in the paper's own units, with no platform and no GPU."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# The engine's head (`doc/ENGINE.md` §5.1): the state machine, the band and its repair, the journal,
+# the uniforms, and the geometry both platform halves are cursors over.
+#
+# The rule this manifest is built on is the one `note-format` and `note-ui` are built on, one layer
+# down: **nothing here may name a platform's own API, and nothing here may need a GPU.** No `[target.…]`
+# section, no `gpui`, no `objc2`, no `windows`. `cheap-note-engine-metal` and `-d2d` are what implement
+# the traits below; the tests in this crate run on any machine, with no window and no device.
+[dependencies]
+# A stroke, its pieces, the page list's quarters, and the sheet's paper — the ink model the engine
+# consumes. The format crate and not `note-ui`: the engine draws ink, it does not own the document.
+note-format = { path = "../note-format" }
+
+# The detail rebuild's parallel loop (`doc/ENGINE.md` §4.5): every stroke's pieces depend on that
+# stroke alone, so the one place the engine derives geometry is the one place the pool pays.
+rayon = "=1.12.0"
+
+[features]
+# The fake surface (`crate::testing`) outside a test build, for a platform half's own tests: a Metal
+# test that records what the engine asked for rather than reading pixels back needs it.
+testing = []
+
+[dev-dependencies]
+# Nothing. The tests use the crate's own fake surface (`src/testing.rs`), which is a plain Rust
+# struct: a test that needed a device would be a test of the platform half, not of the engine.

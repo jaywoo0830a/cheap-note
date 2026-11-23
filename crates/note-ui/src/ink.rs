@@ -102,7 +102,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::history::{Edit, History};
 use crate::pages::Quarters;
-use crate::platform::Laid;
 use crate::settings::{HighlighterWeight, Settings};
 
 /// The ink itself, from the format crate — and the geometry that is arithmetic over it.
@@ -1130,81 +1129,6 @@ impl InkDocument {
             self.finished.len(),
             "the selection and the stroke list must be the same length"
         );
-
-        changed
-    }
-
-    /// [`Self::consume`], and *what it laid*: the points each reading added to the paper, for a surface
-    /// that draws by the reading rather than by the page (`doc/ENGINE.md`, E2).
-    ///
-    /// The two are one function because they are one walk of the model: a second entry point that
-    /// walked the readings again would draw a band the model did not keep, and the two would disagree
-    /// the first time the resampler dropped a reading.
-    ///
-    /// `laid` is cleared and filled with one [`Laid`] per point the model actually appended — a reading
-    /// that resampled away, erased, or swept a lasso adds none, and a stroke's width and colour are the
-    /// ones the stroke carries after that reading, so a surface never has to guess them from the tool in
-    /// hand (which may have changed since the stroke began).
-    ///
-    /// The paper's own coordinates, because that is what a stroke is stored in and what a surface bakes
-    /// its geometry in: a pan between the reading and the draw moves the paper, not the ink.
-    pub fn consume_laid(
-        &mut self,
-        samples: &[Reading],
-        transform: &InkTransform,
-        settings: &Settings,
-        laid: &mut Vec<Laid>,
-    ) -> bool {
-        laid.clear();
-
-        // Each reading on its own, so that what it appended can be told apart from what the one before
-        // it did. A batch is a handful of readings — the pen's own batching — so this is the same walk
-        // `consume` makes, with the open stroke's length read between them.
-        let mut changed = false;
-
-        for sample in samples {
-            let before = self.open.as_ref().map_or(0, |stroke| stroke.points.len());
-            let id_before = self.open_id;
-
-            // The stroke as it is *before* this reading: a lift closes it, and the point a lift lays is
-            // the stroke's last one — so what it appended has to be read from the closed stroke, which
-            // is no longer `self.open` once `consume` has run.
-            let closing = matches!(sample.phase, Phase::Up | Phase::Cancel | Phase::Leave);
-            let id_open = self.open_id;
-
-            changed |= self.consume(std::slice::from_ref(sample), transform, settings);
-
-            // A reading that ended a stroke leaves nothing open to read from. The points it appended are
-            // the ones the closed stroke got, which is what the finished list now ends with.
-            if closing {
-                if let Some(stroke) = self.finished.last() {
-                    for point in &stroke.points[before.min(stroke.points.len())..] {
-                        laid.push(Laid {
-                            point: *point,
-                            stroke: id_open,
-                            colour: stroke.color,
-                        });
-                    }
-                }
-
-                continue;
-            }
-
-            let Some(stroke) = self.open.as_ref() else {
-                continue;
-            };
-
-            let began = self.open_id != id_before;
-            let from = if began { 0 } else { before };
-
-            for point in &stroke.points[from..] {
-                laid.push(Laid {
-                    point: *point,
-                    stroke: self.open_id,
-                    colour: stroke.color,
-                });
-            }
-        }
 
         changed
     }

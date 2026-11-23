@@ -40,14 +40,6 @@ impl Gpu for Recorder {
         self.plans.push(plan.clone());
         Ok(())
     }
-
-    fn base(&mut self, _base: &cheap_note_engine_metal::BaseLayer) -> Result<(), GpuError> {
-        Ok(())
-    }
-
-    fn mark(&mut self, _mark: Option<&cheap_note_engine_metal::Mark>) -> Result<(), GpuError> {
-        Ok(())
-    }
 }
 
 fn a_band(at: f32) -> Band {

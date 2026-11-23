@@ -34,14 +34,12 @@ objc2-metal = { version = "0.3", features = [
     "MTLRenderPipeline",
     "MTLLibrary",
     "MTLBuffer",
-    "MTLDepthStencil",
     "MTLTexture",
     "MTLPixelFormat",
     "MTLDrawable",
 ] }
 objc2-quartz-core = { version = "0.3", features = ["CAMetalLayer", "CALayer"] }
-objc2-core-foundation = "0.3"
-objc2-foundation = { version = "0.3", features = ["NSString"] }
+objc2-foundation = { version = "0.3" }
 
 [dev-dependencies]
 cheap-note-engine = { path = "../engine", features = ["testing"] }

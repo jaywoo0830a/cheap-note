@@ -313,35 +313,6 @@ turn(prev, next):
 
 Its cost is `O(pieces of the open stroke inside the band)` — not the page, and not the whole stroke.
 
-#### 4.2.1 What a repair is on a GPU, and the store action that makes it possible
-
-The binding is one command buffer, **two render passes, one present**: the base pass clears and paints the
-desk and the sheet, and the ink pass loads that same multisampled colour buffer, marks each band into a
-stencil, colours each marked sample once, and repairs. Both passes resolve into the same single-sample
-texture.
-
-Two consequences that are not obvious, and that cost this project a canvas that drew nothing:
-
-| Rule | What it must be | Why |
-|---|---|---|
-| the base pass's store action | `storeAndMultisampleResolve` | a plain `multisampleResolve` **discards the multisampled data**, so the ink pass's `load` finds nothing and then resolves its own blackness over the base it just wrote. With no ink at all, that is a canvas with nothing on it. |
-| a repair's colour | the base's own pixels there | the ink is composited *onto* the paper in the same buffer, so removing an ink pixel means painting the paper back — the sheet inside the repair and the desk outside it, from the base layer's own fills. A repair in the desk's colour leaves a grey rectangle on the sheet, which is what an erase used to look like. |
-
-#### 4.2.2 The unit contract: logical pixels, one density
-
-Every corner a platform half is handed is in **logical pixels**, and the display's density is applied
-exactly once, by the half, in one place (`Target::device_point`). Nothing above that multiplies by the
-scale: a `Placement`, a band and a base rectangle all arrive in the window's own units.
-
-This is one rule because its violation is invisible in a unit test and glaring on a screen: two densities
-for one point draws the ink at twice its distance from the origin while the sheet — which is logical and is
-scaled by the half — stays where it belongs. The ink and the cursor then live a quarter of a screen away
-from the paper they are written on, and nothing in the engine is wrong.
-
-What holds it: `crates/engine-metal/tests/rendered.rs` draws real frames on the GPU offscreen and reads the
-pixels back — the same encode the window uses. `a_stroke_is_the_same_place_at_either_density` draws one
-stroke at 1× and at 2× over the same logical surface and checks the same logical point is ink on both.
-
 ### 4.3 Idle is the cheapest state, and it is the *engine's* decision
 
 The presenter (§5.2) can present only when the engine says there is something, and the engine says so

@@ -3,6 +3,7 @@
 pub mod bench;
 pub mod canvas;
 pub mod ghost;
+pub mod metal;
 pub mod pen;
 pub mod pointer;
 pub mod vitals;

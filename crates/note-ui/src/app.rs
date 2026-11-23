@@ -2304,30 +2304,7 @@ impl NoteApp {
             return false;
         }
 
-        // What each reading laid, for a canvas that draws by the reading rather than by the page: a
-        // surface with no such hook ignores it (see [`crate::platform::InkSurface::lay`]), and the frame
-        // that follows describes the whole canvas as it always did.
-        let mut laid = Vec::new();
-        let changed = self
-            .ink
-            .consume_laid(&kept, &transform, &self.settings, &mut laid);
-
-        if !laid.is_empty() {
-            if let Some(surface) = self.ink_layer.as_mut() {
-                // A surface that cannot lay is one whose next frame draws everything; a surface that
-                // lays answers whether a frame went out, and a drawable that was not ready is not a
-                // failure (`doc/ENGINE.md` §5.6). The error is kept and shown, the same way a frame's is:
-                // the layer is not dropped, because it still holds the last thing it drew.
-                if let Err(error) = surface.lay(&laid) {
-                    let message = format!("canvas: {error}");
-                    if self.message != message {
-                        self.message = message;
-                    }
-                }
-            }
-        }
-
-        changed
+        self.ink.consume(&kept, &transform, &self.settings)
     }
 
     /// Lets the pen gesture go, committing what it did if it was a zoom.

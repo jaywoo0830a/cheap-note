@@ -65,41 +65,6 @@ impl<D: Gpu> MetalSurface<D> {
         &mut self.device
     }
 
-    /// Draws one frame *with its whole context*: the base layer under the ink, the ink's bands, and the
-    /// pen's mark over it — one present, in that order.
-    ///
-    /// This is what a platform half's own caller uses, because a frame without its desk is a frame of ink
-    /// on nothing, and a frame without its mark is a cursor that does not move. [`Surface::draw`] is the
-    /// engine's view of the same call with an empty base and no mark, which is what a test or a
-    /// headless caller has.
-    pub fn present(
-        &mut self,
-        base: &crate::plan::BaseLayer,
-        frame: &Frame,
-        mark: Option<&crate::plan::Mark>,
-    ) -> Result<PresentResult, SurfaceError> {
-        if !self.device.drawable() {
-            self.refused += 1;
-            return Ok(PresentResult::NotReady);
-        }
-
-        let plan = Plan::of(frame);
-
-        match self.device.present(base, &plan, mark) {
-            Ok(()) => {
-                self.presents += 1;
-                Ok(PresentResult::Presented)
-            }
-            Err(error) if error.reason.contains("no drawable") => {
-                // A drawable that went away between the check and the request is the same answer as one
-                // that was never there: not ready, not failed (`doc/ENGINE.md` §5.6).
-                self.refused += 1;
-                Ok(PresentResult::NotReady)
-            }
-            Err(error) => Err(named(error)),
-        }
-    }
-
     /// Frames handed over, and frames refused for want of a drawable.
     pub fn counts(&self) -> (usize, usize) {
         (self.presents, self.refused)
@@ -147,8 +112,108 @@ fn named(error: GpuError) -> SurfaceError {
     SurfaceError::new(error.reason)
 }
 
-mod device;
-pub use device::{Device, Shot, Statement};
+/// The device: `MTLDevice`, one queue, and a `CAMetalLayer` of the app's own.
+///
+/// The skeleton is a device that owns the pieces and answers the two questions [`Gpu`] asks — whether a
+/// drawable is ready, and how large the target is — with the encode half left where `apps/macos` has
+/// it: the per-command work (a stencil pass over a band's pieces, one colour pass, the drawable's
+/// present) is written against this same type in one more file when the engine is wired in, and every
+/// command it encodes is one `plan::Step` it is handed. Nothing in the engine changes for it.
+#[cfg(target_os = "macos")]
+pub struct Device {
+    device: objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>>,
+    queue: objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandQueue>>,
+    layer: objc2::rc::Retained<objc2_quartz_core::CAMetalLayer>,
+    size: (u32, u32),
+}
+
+#[cfg(target_os = "macos")]
+impl Device {
+    /// A device on the machine's GPU, drawing into `layer` at a size in device pixels.
+    ///
+    /// A `None` is a machine with no Metal device — which no supported Mac is, but a sandbox or a
+    /// remote session can be — and it is reported once, at startup, by whoever installs the surface
+    /// (`doc/ENGINE.md` §4.3: "a failure keeps the layer", so the canvas keeps its last frame and says
+    /// what is wrong).
+    pub fn new(
+        layer: objc2::rc::Retained<objc2_quartz_core::CAMetalLayer>,
+        size: (u32, u32),
+    ) -> Option<Self> {
+        use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice as _};
+
+        let device = MTLCreateSystemDefaultDevice()?;
+        let queue = device.newCommandQueue()?;
+
+        layer.setDevice(Some(&device));
+        layer.setPixelFormat(objc2_metal::MTLPixelFormat::BGRA8Unorm);
+
+        Some(Device {
+            device,
+            queue,
+            layer,
+            size,
+        })
+    }
+
+    /// The device itself, for the part of the half that encodes commands.
+    pub fn metal(&self) -> &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice> {
+        &self.device
+    }
+
+    /// The queue every frame is encoded on.
+    pub fn queue(&self) -> &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandQueue> {
+        &self.queue
+    }
+
+    /// The layer the canvas is composed from.
+    pub fn layer(&self) -> &objc2_quartz_core::CAMetalLayer {
+        &self.layer
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Gpu for Device {
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn drawable(&self) -> bool {
+        // Asking for a drawable is a call that waits when the layer's buffers are all still with the
+        // compositor (`doc/MACOS.md` §8's `warm`), so the answer here is whether one *would* be there:
+        // the next drawable's own check, not a wait. The encode half takes the drawable once.
+        true
+    }
+
+    fn run(&mut self, _plan: &Plan) -> Result<(), GpuError> {
+        // The encode half: one render pass for the repairs and bands, one drawable, one present. It is
+        // `apps/macos/src/platform/metal.rs`'s `draw`, with a `Plan`'s steps in place of the canvas
+        // description it walks today — and it is deliberately not written here until the engine is the
+        // thing the app draws with, so that this crate has one source of truth per command.
+        Ok(())
+    }
+}
+
+/// A machine with no Metal. The crate still builds and its logic still tests; a surface made of this is
+/// a canvas that says why it cannot draw.
+#[cfg(not(target_os = "macos"))]
+pub struct Device {
+    size: (u32, u32),
+}
+
+#[cfg(not(target_os = "macos"))]
+impl Gpu for Device {
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn drawable(&self) -> bool {
+        false
+    }
+
+    fn run(&mut self, _plan: &Plan) -> Result<(), GpuError> {
+        Err(GpuError::new("this machine has no Metal device"))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -166,8 +231,6 @@ mod tests {
         plans: Vec<Plan>,
         ready: bool,
         fails: bool,
-        bases: usize,
-        marks: usize,
     }
 
     impl Recorder {
@@ -176,8 +239,6 @@ mod tests {
                 plans: Vec::new(),
                 ready: true,
                 fails: false,
-                bases: 0,
-                marks: 0,
             }
         }
     }
@@ -197,16 +258,6 @@ mod tests {
             }
 
             self.plans.push(plan.clone());
-            Ok(())
-        }
-
-        fn base(&mut self, base: &crate::plan::BaseLayer) -> Result<(), GpuError> {
-            self.bases += base.fills.len() + usize::from(base.desk.is_some());
-            Ok(())
-        }
-
-        fn mark(&mut self, mark: Option<&crate::plan::Mark>) -> Result<(), GpuError> {
-            self.marks += usize::from(mark.is_some());
             Ok(())
         }
     }

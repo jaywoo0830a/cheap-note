@@ -35,30 +35,6 @@ impl Target {
             scale,
         }
     }
-    /// Device pixels per logical pixel, or one when the display's scale is not a number.
-    ///
-    /// The one guard on the display's density: a scale of zero, a negative one or a `NaN` draws the sheet
-    /// at its own size rather than at no size at all.
-    pub fn scale_or_one(&self) -> f32 {
-        if self.scale.is_finite() && self.scale > 0.0 {
-            self.scale
-        } else {
-            1.0
-        }
-    }
-
-    /// A point in logical pixels as device pixels: **the one multiplication** of the unit contract
-    /// (`doc/ENGINE.md` §4.7).
-    ///
-    /// Every corner a half uploads comes through here, so the display's density is applied exactly once
-    /// between the engine's logical arithmetic and the GPU's device pixels. A caller that multiplies by
-    /// the scale first gets twice the distance from the origin, which is how the ink came to be drawn a
-    /// quarter of a screen away from the sheet it belonged to.
-    pub fn device_point(&self, (x, y): (f32, f32)) -> (f32, f32) {
-        let scale = self.scale_or_one();
-
-        (x * scale, y * scale)
-    }
 
     /// The target's size in device pixels, which is what its textures are allocated at.
     pub fn device_size(&self) -> (u32, u32) {
@@ -179,46 +155,4 @@ impl Plan {
 pub struct Ran {
     pub result: PresentResult,
     pub steps: usize,
-}
-
-/// The desk, the sheet's shadow, the sheet and the ruling, as a device draws them.
-///
-/// The engine does not own this: `note_ui` describes it (`Canvas::fills`, `Canvas::rules`) and the
-/// platform half turns the description into pixels. It is here, rather than in the platform crate, so
-/// that *the whole of one frame* is one value a device is handed — base, ink, mark, present — and a test
-/// can read all of it without a device.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct BaseLayer {
-    /// The desk, under everything: the colour the window's own surface would be.
-    pub desk: Option<u32>,
-    /// The shadow's steps, the sheet, and the ruling, in the order painted.
-    pub fills: Vec<RectFill>,
-}
-
-/// A rectangle to fill and the colour to fill it with, in window pixels.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RectFill {
-    pub rect: Rect,
-    pub colour: u32,
-}
-
-/// The pen's mark: what the ghost cursor last said, in logical window pixels.
-///
-/// The engine draws it and the half puts it on the screen, but it is not ink and not the interface: it
-/// is a position, and it is drawn in the same pass as the ink so that it is never a frame behind the
-/// pen (`doc/VIEW.md` §5).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Mark {
-    /// Where the nib is, in logical window pixels.
-    pub at: (f32, f32),
-    /// The ink in hand, `0xRRGGBB`: what the next stroke will be written in.
-    pub colour: u32,
-    /// The paper's contrast colour, `0xRRGGBB`: the halo, and the body's faint passes.
-    pub halo: u32,
-    /// The nib's radius, in logical pixels: how thick the next line will be.
-    pub nib_radius: f32,
-    /// How much the pen leans away from its nib: `0.0` upright, rising to the body's full weight.
-    pub lean: f32,
-    /// The interface scale's factor: the ghost's body follows it, the nib mark does not.
-    pub unit: f32,
 }

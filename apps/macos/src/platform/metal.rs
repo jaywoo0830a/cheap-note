@@ -178,6 +178,12 @@ pub(crate) struct Surface {
     open_buffers: [Option<Retained<ProtocolObject<dyn MTLBuffer>>>; 3],
     /// Which of the three the next frame writes.
     buffer_slot: usize,
+    /// The polygon and sweep a fill reuses, stroke after stroke.
+    ///
+    /// Both are buffers whose capacity a long stroke earns and the next one spends; keeping them on the
+    /// surface is what stops a rebuild from making and freeing one set per stroke (`OPT-MAC.md`).
+    scratch: Vec<(f32, f32)>,
+    sweep: Sweep,
     /// The document's page on the GPU, and the identity of the rasterisation it holds.
     page_texture: Option<(usize, Retained<ProtocolObject<dyn MTLTexture>>)>,
     /// The multisampled target the passes draw into, resolved into the drawable. Made with the size.
@@ -257,6 +263,8 @@ impl Surface {
             ink_slots_valid: [false; 3],
             open_buffers: [None, None, None],
             buffer_slot: 0,
+            scratch: Vec::new(),
+            sweep: Sweep::default(),
             page_texture: None,
             msaa: None,
             last_commit: None,
@@ -381,13 +389,24 @@ impl Surface {
         let cull = self.ink_covered;
         let in_hand = |index: usize| ink.selected.get(index).copied().unwrap_or(false);
 
+        // The polygon and the sweep are the surface's own: neither depends on which stroke is being
+        // filled, and a page is thousands of them.
+        let Self {
+            ink: vertices,
+            scratch,
+            sweep,
+            ..
+        } = self;
+
         for (index, stroke) in list.iter().enumerate() {
             if in_hand(index) || !stroke.visible_in(cull) {
                 continue;
             }
 
             fill(
-                &mut self.ink,
+                vertices,
+                scratch,
+                sweep,
                 stroke,
                 &mapping,
                 (0.0, 0.0),
@@ -403,7 +422,9 @@ impl Surface {
                 }
 
                 fill(
-                    &mut self.ink,
+                    vertices,
+                    scratch,
+                    sweep,
                     stroke,
                     &mapping,
                     ink.offset,
@@ -411,7 +432,9 @@ impl Surface {
                 );
 
                 if let Some(colour) = ink.selection {
-                    fill(&mut self.ink, stroke, &mapping, ink.offset, colour);
+                    fill(
+                        vertices, scratch, sweep, stroke, &mapping, ink.offset, colour,
+                    );
                 }
             }
         }
@@ -419,7 +442,15 @@ impl Surface {
         // The lasso's loop: the ring the reader is drawing, in the selection's colour.
         if let Some(stroke) = &ink.lasso {
             let colour = ink.selection.unwrap_or_else(|| ink_colour(stroke.color));
-            fill(&mut self.ink, stroke, &mapping, (0.0, 0.0), colour);
+            fill(
+                vertices,
+                scratch,
+                sweep,
+                stroke,
+                &mapping,
+                (0.0, 0.0),
+                colour,
+            );
         }
 
         // The ink changed: every slot is stale until its frame uploads it. Said here so the build and the
@@ -511,7 +542,15 @@ impl Surface {
         }
 
         self.open.clear();
-        fill(&mut self.open, stroke, &mapping, (0.0, 0.0), colour);
+        fill(
+            &mut self.open,
+            &mut self.scratch,
+            &mut self.sweep,
+            stroke,
+            &mapping,
+            (0.0, 0.0),
+            colour,
+        );
         self.open_points = points.len();
     }
 
@@ -646,25 +685,35 @@ impl Vertex {
     /// The colour is packed here rather than carried as four floats, which is the whole of what made a vertex
     /// twelve bytes instead of twenty-four (see [`Vertex`]).
     fn new(x: f32, y: f32, colour: gpui_kit::Hsla) -> Self {
-        let rgba = gpui_kit::Rgba::from(colour);
-        let byte = |component: f32| (component.clamp(0.0, 1.0) * 255.0).round() as u8;
-
         Vertex {
             x,
             y,
-            colour: [byte(rgba.r), byte(rgba.g), byte(rgba.b), byte(rgba.a)],
+            colour: Self::rgb(colour),
         }
+    }
+
+    /// The colour half of [`Vertex::new`], on its own.
+    ///
+    /// A stroke's corners all carry the same colour, so packing it belongs to the stroke rather than to
+    /// each corner: `fill` calls this once and hands the four bytes to every corner it makes.
+    fn rgb(colour: gpui_kit::Hsla) -> [u8; 4] {
+        let rgba = gpui_kit::Rgba::from(colour);
+        let byte = |component: f32| (component.clamp(0.0, 1.0) * 255.0).round() as u8;
+
+        [byte(rgba.r), byte(rgba.g), byte(rgba.b), byte(rgba.a)]
     }
 }
 
-/// A finished stroke, filled exactly: its outline, tessellated once and kept.
+/// A finished stroke, filled exactly: its ribbon, triangulated once and kept.
 ///
 /// The outline is the ribbon's edge, and it is a polygon — one Direct2D fills in a single primitive on
 /// Windows, which is why a stroke that crosses itself there is ink and not a hole. Metal has no such fill,
-/// so the polygon is cut into triangles here, once per stroke, and the triangles are cached with the rest of
+/// so the band is cut into triangles here, once per stroke, and the triangles are cached with the rest of
 /// the ink (see [`InkKey`]).
 fn fill(
     vertices: &mut Vec<Vertex>,
+    scratch: &mut Vec<(f32, f32)>,
+    sweep: &mut Sweep,
     stroke: &note_format::ink::Stroke,
     mapping: &Mapping,
     shift: (f32, f32),
@@ -674,13 +723,76 @@ fn fill(
         return;
     }
 
-    let polygon: Vec<(f32, f32)> = stroke
-        .outline
-        .iter()
-        .map(|point| mapping.point(*point, shift))
-        .collect();
+    // The ribbon's pieces, when the stroke carries them and they are one layer, are what the band is
+    // filled from: a quad between two readings and a fan round a disc, each convex, so nothing has to be
+    // sorted (`note_format::ink::Piece`). A stroke that doubles back over itself overlaps its own quads —
+    // painting those twice at 35% ink gives 58% — so it is swept instead, by the nonzero rule that counts
+    // the overlap once. A stroke with no pieces at all (an older page, a test that made its own outline)
+    // is swept for the same reason: the boundary is always right, just more work.
+    let colour = Vertex::rgb(colour);
 
-    tessellate(vertices, &polygon, colour);
+    if stroke.single_layer && !stroke.pieces.is_empty() {
+        pieces(vertices, &stroke.pieces, mapping, shift, colour);
+        return;
+    }
+
+    scratch.clear();
+    scratch.extend(
+        stroke
+            .outline
+            .iter()
+            .map(|point| mapping.point(*point, shift)),
+    );
+
+    sweep.run(vertices, scratch, colour);
+}
+
+/// Fills a ribbon's pieces: two triangles a quad, a triangle a fan.
+///
+/// This is the fill the ribbon was asking for. The sweep over the boundary finds the boundary's edges
+/// again, sorts them, and walks a band at a time; the pieces already say which point answers which, so
+/// there is nothing to find and nothing to sort. Measured on a page of 8,182 strokes: 395 trapezoids a
+/// stroke became 125 quads, and the fill's share of a rebuild fell with it (`OPT-MAC.md`).
+///
+/// Every piece is convex, so filling them by their own triangles gives the band exactly — including the
+/// turn's outside and the round ends, which the pieces carry as fans rather than as boundary runs.
+fn pieces(
+    vertices: &mut Vec<Vertex>,
+    list: &[note_format::ink::Piece],
+    mapping: &Mapping,
+    shift: (f32, f32),
+    colour: [u8; 4],
+) {
+    let vertex = |corner: [f32; 2]| {
+        let (x, y) = mapping.point(corner, shift);
+
+        Vertex { x, y, colour }
+    };
+
+    for piece in list {
+        match *piece {
+            note_format::ink::Piece::Quad {
+                left_from,
+                left_to,
+                right_to,
+                right_from,
+            } => {
+                let (a, b, c, d) = (
+                    vertex(left_from),
+                    vertex(left_to),
+                    vertex(right_to),
+                    vertex(right_from),
+                );
+
+                vertices.extend_from_slice(&[a, b, c, a, c, d]);
+            }
+            note_format::ink::Piece::Fan { centre, from, to } => {
+                let (o, a, b) = (vertex(centre), vertex(from), vertex(to));
+
+                vertices.extend_from_slice(&[o, a, b]);
+            }
+        }
+    }
 }
 
 /// Cuts a closed polygon into triangles with the **nonzero winding** rule.
@@ -709,126 +821,152 @@ fn fill(
 /// band is the same set, found without re-reading the whole polygon. Same triangles, in every case tried:
 /// self-crossing, shared heights, zero-width spikes, repeated points.
 fn tessellate(vertices: &mut Vec<Vertex>, polygon: &[(f32, f32)], colour: gpui_kit::Hsla) {
-    if polygon.len() < 3 {
-        return;
-    }
+    Sweep::default().run(vertices, polygon, Vertex::rgb(colour));
+}
 
-    let mut bands: Vec<f32> = polygon.iter().map(|point| point.1).collect();
-    bands.sort_by(|left, right| left.total_cmp(right));
-    bands.dedup_by(|left, right| (*left - *right).abs() < f32::EPSILON);
+/// The buffers one tessellation sweeps through, kept so a page's worth of strokes shares one set.
+///
+/// A rebuild fills a polygon per stroke — thousands on a page — and each call used to make and then free
+/// four `Vec`s of its own. Nothing here depends on which polygon it is, so the surface keeps one set and
+/// every stroke in a rebuild spends it (`OPT-MAC.md`).
+#[derive(Default)]
+struct Sweep {
+    bands: Vec<f32>,
+    edges: Vec<Edge>,
+    crossings: Vec<Crossing>,
+    active: Vec<usize>,
+}
 
-    // Every edge, with the span of heights it covers. A horizontal edge crosses nothing and is left out.
-    struct Edge {
-        low: f32,
-        high: f32,
-        from: (f32, f32),
-        to: (f32, f32),
-        winding: i32,
-    }
+/// Every edge, with the span of heights it covers. A horizontal edge crosses nothing and is left out.
+struct Edge {
+    low: f32,
+    high: f32,
+    from: (f32, f32),
+    to: (f32, f32),
+    winding: i32,
+}
 
-    let mut edges: Vec<Edge> = Vec::with_capacity(polygon.len());
+/// One crossing of a band: where it is at the band's middle (which is what orders two crossings), which
+/// way its edge runs, and where it meets the band's own bottom and top — one crossing gives a trapezoid
+/// two of its corners.
+struct Crossing {
+    middle: f32,
+    winding: i32,
+    bottom: f32,
+    top: f32,
+}
 
-    for index in 0..polygon.len() {
-        let (a, b) = (polygon[index], polygon[(index + 1) % polygon.len()]);
-
-        if a.1 == b.1 {
-            continue;
+impl Sweep {
+    fn run(&mut self, vertices: &mut Vec<Vertex>, polygon: &[(f32, f32)], colour: [u8; 4]) {
+        if polygon.len() < 3 {
+            return;
         }
 
-        let (low, high) = if a.1 < b.1 { (a, b) } else { (b, a) };
+        let Sweep {
+            bands,
+            edges,
+            crossings,
+            active,
+        } = self;
 
-        edges.push(Edge {
-            low: low.1,
-            high: high.1,
-            from: a,
-            to: b,
-            winding: if b.1 > a.1 { 1 } else { -1 },
-        });
-    }
+        bands.clear();
+        bands.extend(polygon.iter().map(|point| point.1));
+        bands.sort_by(|left, right| left.total_cmp(right));
+        bands.dedup_by(|left, right| (*left - *right).abs() < f32::EPSILON);
 
-    // By where they start: the sweep takes them in as the bands climb, and never looks back.
-    edges.sort_by(|left, right| left.low.total_cmp(&right.low));
+        edges.clear();
 
-    // One crossing of a band: where it is at the band's middle (which is what orders two crossings), which
-    // way its edge runs, and where it meets the band's own bottom and top — one crossing gives a trapezoid
-    // two of its corners.
-    struct Crossing {
-        middle: f32,
-        winding: i32,
-        bottom: f32,
-        top: f32,
-    }
+        for index in 0..polygon.len() {
+            let (a, b) = (polygon[index], polygon[(index + 1) % polygon.len()]);
 
-    let mut crossings: Vec<Crossing> = Vec::new();
-    let mut active: Vec<usize> = Vec::new();
-    let mut next = 0;
-
-    for band in bands.windows(2) {
-        let (bottom, top) = (band[0], band[1]);
-
-        // `bands` is sorted, so `top >= bottom` already — the `.abs()` states that a band of no height is
-        // what is being skipped, rather than a band that happens to be upside down.
-        if (top - bottom).abs() < f32::EPSILON {
-            continue;
-        }
-
-        // The edges that begin at or below this band's top have started.
-        while next < edges.len() && edges[next].low <= top {
-            active.push(next);
-            next += 1;
-        }
-
-        let middle = (bottom + top) * 0.5;
-        crossings.clear();
-
-        for &index in active.iter() {
-            let edge = &edges[index];
-
-            // A band's ends are vertex heights, so an edge either covers it whole or does not reach it.
-            if edge.low > bottom || edge.high < top {
+            if a.1 == b.1 {
                 continue;
             }
 
-            let at = |y: f32| {
-                edge.from.0
-                    + (edge.to.0 - edge.from.0) * (y - edge.from.1) / (edge.to.1 - edge.from.1)
-            };
+            let (low, high) = if a.1 < b.1 { (a, b) } else { (b, a) };
 
-            crossings.push(Crossing {
-                middle: at(middle),
-                winding: edge.winding,
-                bottom: at(bottom),
-                top: at(top),
+            edges.push(Edge {
+                low: low.1,
+                high: high.1,
+                from: a,
+                to: b,
+                winding: if b.1 > a.1 { 1 } else { -1 },
             });
         }
 
-        // The edges that ended at or below this band's top reach no band above it.
-        active.retain(|&index| edges[index].high > top);
+        // By where they start: the sweep takes them in as the bands climb, and never looks back.
+        edges.sort_by(|left, right| left.low.total_cmp(&right.low));
 
-        crossings.sort_by(|left, right| left.middle.total_cmp(&right.middle));
+        active.clear();
+        let mut next = 0;
 
-        let mut winding = 0;
-        let mut span: Option<(f32, f32)> = None;
+        for band in bands.windows(2) {
+            let (bottom, top) = (band[0], band[1]);
 
-        for crossing in &crossings {
-            let before = winding;
-            winding += crossing.winding;
+            // `bands` is sorted, so `top >= bottom` already — the `.abs()` states that a band of no height
+            // is what is being skipped, rather than a band that happens to be upside down.
+            if (top - bottom).abs() < f32::EPSILON {
+                continue;
+            }
 
-            match (before == 0, winding == 0) {
-                (true, false) => span = Some((crossing.bottom, crossing.top)),
-                (false, true) => {
-                    if let Some((left_bottom, left_top)) = span.take() {
-                        trapezoid(
-                            vertices,
-                            (left_bottom, bottom),
-                            (left_top, top),
-                            (crossing.top, top),
-                            (crossing.bottom, bottom),
-                            colour,
-                        );
-                    }
+            // The edges that begin at or below this band's top have started.
+            while next < edges.len() && edges[next].low <= top {
+                active.push(next);
+                next += 1;
+            }
+
+            let middle = (bottom + top) * 0.5;
+            crossings.clear();
+
+            for &index in active.iter() {
+                let edge = &edges[index];
+
+                // A band's ends are vertex heights, so an edge either covers it whole or does not reach it.
+                if edge.low > bottom || edge.high < top {
+                    continue;
                 }
-                _ => {}
+
+                let at = |y: f32| {
+                    edge.from.0
+                        + (edge.to.0 - edge.from.0) * (y - edge.from.1) / (edge.to.1 - edge.from.1)
+                };
+
+                crossings.push(Crossing {
+                    middle: at(middle),
+                    winding: edge.winding,
+                    bottom: at(bottom),
+                    top: at(top),
+                });
+            }
+
+            // The edges that ended at or below this band's top reach no band above it.
+            active.retain(|&index| edges[index].high > top);
+
+            crossings.sort_by(|left, right| left.middle.total_cmp(&right.middle));
+
+            let mut winding = 0;
+            let mut span: Option<(f32, f32)> = None;
+
+            for crossing in crossings.iter() {
+                let before = winding;
+                winding += crossing.winding;
+
+                match (before == 0, winding == 0) {
+                    (true, false) => span = Some((crossing.bottom, crossing.top)),
+                    (false, true) => {
+                        if let Some((left_bottom, left_top)) = span.take() {
+                            trapezoid(
+                                vertices,
+                                (left_bottom, bottom),
+                                (left_top, top),
+                                (crossing.top, top),
+                                (crossing.bottom, bottom),
+                                colour,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -841,7 +979,7 @@ fn trapezoid(
     left_top: (f32, f32),
     right_top: (f32, f32),
     right_bottom: (f32, f32),
-    colour: gpui_kit::Hsla,
+    colour: [u8; 4],
 ) {
     if (right_bottom.0 - left_bottom.0).abs() < f32::EPSILON
         && (right_top.0 - left_top.0).abs() < f32::EPSILON
@@ -849,7 +987,13 @@ fn trapezoid(
         return;
     }
 
-    let vertex = |corner: (f32, f32)| Vertex::new(corner.0, corner.1, colour);
+    // The packed colour, shared by all six corners: the trapezoid's shape is the only thing that differs
+    // between one band and the next, so nothing here converts a colour.
+    let vertex = |corner: (f32, f32)| Vertex {
+        x: corner.0,
+        y: corner.1,
+        colour,
+    };
 
     vertices.extend_from_slice(&[
         vertex(left_bottom),
@@ -1876,6 +2020,24 @@ mod fill_tests {
         gpui_kit::rgba(0x00FF_00FF).into()
     }
 
+    /// [`fill`] with the scratch a single call needs made for it.
+    ///
+    /// The app keeps one polygon and one sweep on the surface and reuses them across a page's strokes; a
+    /// test fills one stroke, so it makes its own and the call reads the way it did before that.
+    fn fill_into(vertices: &mut Vec<Vertex>, stroke: &note_format::ink::Stroke, mapping: &Mapping) {
+        let mut scratch = Vec::new();
+
+        fill(
+            vertices,
+            &mut scratch,
+            &mut Sweep::default(),
+            stroke,
+            mapping,
+            (0.0, 0.0),
+            colour(),
+        );
+    }
+
     use note_format::ink::Tip;
 
     /// Whether a point is inside a triangle: the three edge cross-products share a sign.
@@ -1944,7 +2106,7 @@ mod fill_tests {
         // The outline is what a renderer draws, and the app builds it before the layer ever sees the
         // stroke (`describe_ink`), so the test does the same: a stroke with no outline draws nothing.
         stroke.close_at(1.0);
-        fill(&mut vertices, &stroke, &mapping, (0.0, 0.0), colour());
+        fill_into(&mut vertices, &stroke, &mapping);
 
         // What the band covers: the rectangle the nib sweeps, plus a round cap at each end — the caps are
         // what a nib's round end leaves, and they are half a disc each.
@@ -2002,7 +2164,7 @@ mod fill_tests {
 
         let mut vertices = Vec::new();
         stroke.close_at(1.0);
-        fill(&mut vertices, &stroke, &mapping, (0.0, 0.0), colour());
+        fill_into(&mut vertices, &stroke, &mapping);
 
         // The band is `travel` long however many times the stroke covered it: the region is filled once, and a
         // polygon that crosses itself is ink rather than a second layer. The two ends add a half circle each,
@@ -2055,7 +2217,7 @@ mod fill_tests {
         stroke.close_at(1.0);
 
         let mut vertices = Vec::new();
-        fill(&mut vertices, &stroke, &mapping, (0.0, 0.0), colour());
+        fill_into(&mut vertices, &stroke, &mapping);
 
         // What it must cover: about a disc the size of the nib, since the wobble is far smaller than
         // the band is wide.
@@ -2111,7 +2273,7 @@ mod fill_tests {
         stroke.close_at(1.0);
 
         let mut vertices = Vec::new();
-        fill(&mut vertices, &stroke, &mapping, (0.0, 0.0), colour());
+        fill_into(&mut vertices, &stroke, &mapping);
 
         // Walk the band's own length and check each slice of it was painted. A slice is a window of the
         // stroke's points; the ink under it is whatever the triangles cover there.
@@ -2187,7 +2349,7 @@ mod fill_tests {
             for radius in [6.0f32, 12.0, 30.0] {
                 let stroke = rolling_curve(width, radius, roll);
                 let mut vertices = Vec::new();
-                fill(&mut vertices, &stroke, &mapping, (0.0, 0.0), colour());
+                fill_into(&mut vertices, &stroke, &mapping);
 
                 let points = &stroke.points;
                 let half = width * 0.5;
@@ -2302,7 +2464,7 @@ mod fill_tests {
     /// The ink a stroke's outline is filled with.
     fn ink(stroke: &note_format::ink::Stroke) -> Vec<Vertex> {
         let mut vertices = Vec::new();
-        fill(&mut vertices, stroke, &flat(), (0.0, 0.0), colour());
+        fill_into(&mut vertices, stroke, &flat());
         vertices
     }
 
@@ -2788,7 +2950,7 @@ mod fill_tests {
                                 (left_top, top),
                                 (crossing.3, top),
                                 (crossing.2, bottom),
-                                gpui_kit::Hsla::default(),
+                                Vertex::rgb(gpui_kit::Hsla::default()),
                             );
                         }
                     }

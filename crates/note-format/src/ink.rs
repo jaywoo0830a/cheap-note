@@ -290,6 +290,29 @@ pub struct Stroke {
     /// sheet is drawn at another size (see [`Self::close_at`], which is what the app's `InkDocument::set_zoom` calls).
     #[serde(skip)]
     pub outline: Vec<[f32; 2]>,
+    /// The ribbon's two sides, per reading: `sides[i][0]` is the left tangent point, `sides[i][1]` the
+    /// right. Empty when the stroke is a disc rather than a walked line.
+    ///
+    /// The outline is what a renderer fills; this is what it fills *between*, and having it is what lets
+    /// a renderer cut the band into a strip instead of finding a boundary's edges again (see
+    /// [`crate::ink::Ribbon`]). Derived from `points` exactly as `outline` is, and skipped for the same
+    /// reason.
+    #[serde(skip)]
+    pub sides: Vec<[[f32; 2]; 2]>,
+    /// The disc each reading left, in the same order as `sides`. Empty with it.
+    #[serde(skip)]
+    pub discs: Vec<Disc>,
+    /// The same region as `outline`, as the pieces a renderer fills: a quad between two readings, a fan
+    /// round a disc for a turn or an end (see [`crate::ink::Piece`]).
+    ///
+    /// Filling these needs no sorting and no edge search, which is the whole of why they exist: a sweep
+    /// over `outline` finds the boundary's edges again for every stroke, and a page is thousands of them.
+    #[serde(skip)]
+    pub pieces: Vec<crate::ink::Piece>,
+    /// Whether [`Self::pieces`] is one layer of ink. A band the pen doubled back over has overlapping
+    /// quads, so a renderer must fill its `outline` by the nonzero rule instead.
+    #[serde(skip)]
+    pub single_layer: bool,
     /// The axis-aligned box the ink covers, for culling and hit-testing.
     #[serde(skip)]
     pub bounds: Bounds,
@@ -310,6 +333,10 @@ impl Stroke {
             points: vec![point],
             color,
             outline: Vec::new(),
+            sides: Vec::new(),
+            discs: Vec::new(),
+            pieces: Vec::new(),
+            single_layer: false,
             bounds: Bounds::at(point.x, point.y),
         }
     }
@@ -357,6 +384,10 @@ impl Stroke {
         if self.points.is_empty() {
             self.bounds = Bounds::default();
             self.outline.clear();
+            self.sides.clear();
+            self.discs.clear();
+            self.pieces.clear();
+            self.single_layer = false;
             return;
         }
 
@@ -369,7 +400,25 @@ impl Stroke {
         }
 
         self.bounds = bounds;
-        self.outline = ribbon_outline(&Model::of(&self.points, detail, tip));
+
+        // One walk answers both what a renderer fills and what it fills between (see [`Ribbon`]).
+        let ribbon = ribbon(&Model::of(&self.points, detail, tip));
+        let walked = ribbon.sides();
+
+        self.outline = ribbon.outline;
+
+        if walked {
+            self.sides = ribbon.sides;
+            self.discs = ribbon.discs;
+            self.pieces = ribbon.pieces;
+            self.single_layer = ribbon.single_layer;
+        } else {
+            // A disc has no sides to fill between: the boundary is the shape.
+            self.sides.clear();
+            self.discs.clear();
+            self.pieces.clear();
+            self.single_layer = false;
+        }
     }
 
     /// Rebuilds the derived geometry of a stroke for `detail`: its bounds and its outline.
@@ -771,7 +820,7 @@ pub fn densified(points: &[InkPoint], detail: f32, tip: Tip) -> Vec<InkPoint> {
 /// `detail` is the zoom the page is drawn at, and the points are resampled at it, so the answer is the answer
 /// for the stroke as it would be drawn.
 /// One disc of the model: where the nib was, and how far it reached.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Disc {
     pub x: f32,
     pub y: f32,
@@ -958,17 +1007,94 @@ impl Model {
 /// describing the band by its *edges* — two offset curves with a normal to keep in step — instead of by the
 /// discs that made it. The discs have no edges to keep in step.
 pub fn ribbon_outline(model: &Model) -> Vec<[f32; 2]> {
+    ribbon(model).outline
+}
+
+/// A stroke's ribbon, as the boundary *and* the two sides it was walked from.
+///
+/// The outline is what a renderer fills; `sides` and `pieces` are the same region as the pieces a
+/// renderer can fill without finding the boundary again (`apps/macos/src/platform/metal.rs`). They are
+/// returned here rather than recomputed there because the walk that builds the outline has the sides in
+/// hand and would throw them away otherwise.
+pub struct Ribbon {
+    /// The closed boundary, as [`ribbon_outline`] returns it: left forwards, round the far end, right
+    /// back, round the near one.
+    pub outline: Vec<[f32; 2]>,
+    /// The ribbon's two sides, per reading, or empty when the stroke is a disc rather than a walked line.
+    ///
+    /// Kept for the platform renderers that draw a band from its sides rather than its boundary.
+    pub sides: Vec<[[f32; 2]; 2]>,
+    /// The same region as `outline`, as the pieces a renderer fills, **when the pieces alone are one
+    /// layer of ink** — empty when they are not (see [`Piece`] and [`ribbon`](self)).
+    pub pieces: Vec<Piece>,
+    /// Whether the pieces are one layer: a band that doubles back over itself overlaps its own quads,
+    /// and painting those twice at 35% ink gives 58%. A renderer that has the pieces uses them only when
+    /// this is true and falls back to the boundary when it is not — the boundary is filled by the nonzero
+    /// rule, which counts the overlap once.
+    pub single_layer: bool,
+    /// The discs the line was built from. Empty only when the model is.
+    pub discs: Vec<Disc>,
+}
+
+/// One piece of a ribbon, in the order the boundary runs.
+///
+/// The band's interior is a quad between two readings; a turn's outside and a stroke's ends are the part
+/// of a disc that no other disc covers, which is a fan round that disc. Both are convex, so a renderer
+/// fills each by its own triangles and never has to find the boundary's edges again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Piece {
+    /// The span between two readings: the two left points and the two right points, in boundary order
+    /// `left_from`, `left_to`, `right_to`, `right_from`.
+    Quad {
+        left_from: [f32; 2],
+        left_to: [f32; 2],
+        right_to: [f32; 2],
+        right_from: [f32; 2],
+    },
+    /// A fan round `centre`: the boundary runs `from` to `to` along the disc's rim.
+    Fan {
+        centre: [f32; 2],
+        from: [f32; 2],
+        to: [f32; 2],
+    },
+}
+
+impl Ribbon {
+    /// Whether the band is a walked line with two sides, and so can be filled from its pieces.
+    ///
+    /// False for a disc: a pen that never moved is one disc, and its boundary is the shape.
+    pub fn sides(&self) -> bool {
+        self.sides.len() >= 2
+    }
+}
+
+/// The ribbon of a model, with the sides it was walked from (see [`Ribbon`]).
+pub fn ribbon(model: &Model) -> Ribbon {
     /// How many points a round end and a turned reading are drawn with.
     const ARC_STEPS: usize = 16;
 
     let line = &model.discs;
 
     if line.is_empty() {
-        return Vec::new();
+        return Ribbon {
+            outline: Vec::new(),
+            sides: Vec::new(),
+            pieces: Vec::new(),
+            single_layer: false,
+            discs: Vec::new(),
+        };
     }
 
+    // One reading is one disc, and a pen that never left the place it was put is one disc too: neither
+    // has two sides to walk between, so both are the boundary alone.
     if line.len() == 1 {
-        return arc_points(line[0], 0.0, std::f32::consts::TAU, ARC_STEPS);
+        return Ribbon {
+            outline: arc_points(line[0], 0.0, std::f32::consts::TAU, ARC_STEPS),
+            sides: Vec::new(),
+            pieces: Vec::new(),
+            single_layer: false,
+            discs: line.clone(),
+        };
     }
 
     let last = line.len() - 1;
@@ -1006,16 +1132,19 @@ pub fn ribbon_outline(model: &Model) -> Vec<[f32; 2]> {
             reach.max((dx * dx + dy * dy).sqrt() + disc.radius)
         });
 
-        return arc_points(
-            Disc {
-                x: centre.0,
-                y: centre.1,
-                radius: reach,
-            },
-            0.0,
-            std::f32::consts::TAU,
-            ARC_STEPS,
-        );
+        let whole = Disc {
+            x: centre.0,
+            y: centre.1,
+            radius: reach,
+        };
+
+        return Ribbon {
+            outline: arc_points(whole, 0.0, std::f32::consts::TAU, ARC_STEPS),
+            sides: Vec::new(),
+            pieces: Vec::new(),
+            single_layer: false,
+            discs: line.clone(),
+        };
     }
 
     // The two edges, walked forwards: each disc contributes the point its tangents to the discs either side
@@ -1082,7 +1211,169 @@ pub fn ribbon_outline(model: &Model) -> Vec<[f32; 2]> {
         ARC_STEPS,
     ));
 
-    outline
+    let (pieces, single_layer) = pieces_of(line, &left, &right);
+
+    let sides = left
+        .iter()
+        .zip(right.iter())
+        .map(|(left, right)| [*left, *right])
+        .collect();
+
+    Ribbon {
+        outline,
+        sides,
+        pieces,
+        single_layer,
+        discs: line.clone(),
+    }
+}
+
+/// The pieces of a ribbon's boundary, from the sides it was walked between and the boundary itself.
+///
+/// The walk that made `outline` visited the same three kinds of run this reads off it, so the two agree
+/// by construction: a run between two left (or two right) points is a **quad** — the band's side, with
+/// the opposite side facing it — and a run round a disc is a **fan**. Both are convex, so a renderer fills
+/// them with the same rule and never has to find the boundary's edges again.
+///
+/// `arc_between` and `end_arc` decide *whether* there is a rim at each reading, so this asks them again
+/// rather than guessing from the outline's shape: the answer is the same call the walk made, and a rim
+/// either is there or is not.
+fn pieces_of(line: &[Disc], left: &[[f32; 2]], right: &[[f32; 2]]) -> (Vec<Piece>, bool) {
+    /// The same number the walk draws a rim with; `arc_between` takes it as an argument.
+    const ARC_STEPS: usize = 16;
+
+    let last = line.len() - 1;
+    let mut pieces: Vec<Piece> = Vec::with_capacity(line.len() * 2 + ARC_STEPS * 2);
+
+    // Whether every span goes the same way as the pen. A stroke that doubles back has a span whose two
+    // sides run *opposite* each other — the left of the way out is the right of the way back — and the
+    // two quads are the same band. Painting them both is the wrong ink at any transparency.
+    let mut single_layer = true;
+
+    // The left edge, forwards. Each span is **one** quad, made of both sides: emitting one from the left
+    // pass and another from the right would paint the band twice.
+    for index in 1..line.len() {
+        let from = left[index - 1];
+        let to = left[index];
+        let rim = arc_between(line[index], from, to, ARC_STEPS);
+
+        // Where the pen retraced its own line, the two sides of the span point away from each other.
+        let left_way = (to[0] - from[0], to[1] - from[1]);
+        let right_way = (
+            right[index][0] - right[index - 1][0],
+            right[index][1] - right[index - 1][1],
+        );
+
+        if left_way.0 * right_way.0 + left_way.1 * right_way.1 < 0.0 {
+            single_layer = false;
+        }
+
+        if rim.is_empty() {
+            // A span where the two readings are the *same* disc — a repeated point, which the resampler
+            // leaves where the pen turned round — is no band at all: its quad has no area, and a triangle
+            // of no area covers every place a floating-point comparison says it does. The turn's ink is the
+            // rim round that disc, which is already in the pieces.
+            let span = (to[0] - from[0]).abs() + (to[1] - from[1]).abs();
+
+            if span > 1e-6
+                && (right[index][0] - right[index - 1][0]).abs()
+                    + (right[index][1] - right[index - 1][1]).abs()
+                    > 1e-6
+            {
+                pieces.push(Piece::Quad {
+                    left_from: from,
+                    left_to: to,
+                    right_to: right[index],
+                    right_from: right[index - 1],
+                });
+            }
+        } else {
+            // The turn is a rim instead of a straight side, so the band is pinched here and the quad
+            // would fold over itself. The rims on both sides of the reading cover the turn.
+            let mut previous = from;
+
+            for arc in &rim {
+                pieces.push(Piece::Fan {
+                    centre: [line[index].x, line[index].y],
+                    from: previous,
+                    to: *arc,
+                });
+
+                previous = *arc;
+            }
+        }
+    }
+
+    // The far end: the rim round the last disc, from the left side to the right.
+    let far = end_arc(
+        line[last],
+        left[last],
+        right[last],
+        [
+            line[last.saturating_sub(1)].x,
+            line[last.saturating_sub(1)].y,
+        ],
+        ARC_STEPS,
+    );
+
+    let mut previous = left[last];
+
+    for arc in &far {
+        pieces.push(Piece::Fan {
+            centre: [line[last].x, line[last].y],
+            from: previous,
+            to: *arc,
+        });
+
+        previous = *arc;
+    }
+
+    // The right edge, backwards: **only** the rims, because every span's quad was made from both sides on
+    // the way forwards. A quad here would be the same band a second time.
+    for index in (0..line.len()).rev() {
+        if index > 0 {
+            let from = right[index];
+            let to = right[index - 1];
+            let rim = arc_between(line[index], from, to, ARC_STEPS);
+
+            let mut previous = from;
+
+            for arc in &rim {
+                pieces.push(Piece::Fan {
+                    centre: [line[index].x, line[index].y],
+                    from: previous,
+                    to: *arc,
+                });
+
+                previous = *arc;
+            }
+        }
+    }
+
+    // The near end: the rim round the first disc, from the right side back to the left.
+    let near = end_arc(
+        line[0],
+        right[0],
+        left[0],
+        [line[(1).min(last)].x, line[(1).min(last)].y],
+        ARC_STEPS,
+    );
+
+    let mut previous = right[0];
+
+    for arc in &near {
+        pieces.push(Piece::Fan {
+            centre: [line[0].x, line[0].y],
+            from: previous,
+            to: *arc,
+        });
+
+        previous = *arc;
+    }
+
+    // `outline` is kept even though the pieces cover the same region: it is what a renderer that has no
+    // triangle filler (Direct2D) draws, and what a test compares the pieces against.
+    (pieces, single_layer)
 }
 
 /// Which of the two outer tangents of a pair of discs a point is taken on.
@@ -1377,4 +1668,362 @@ fn catmull_rom(
     let high = average(middle, last, (t1, t3));
 
     average(low, high, (t1, t2))
+}
+
+#[cfg(test)]
+mod piece_tests {
+    use super::*;
+
+    /// The pieces cover exactly what the boundary fills: nothing missing, nothing spilled.
+    ///
+    /// This is the invariant the strip fill rests on. A piece is a quad between two readings or a fan round
+    /// a disc; the boundary is one closed loop. A renderer draws the pieces as triangles and Windows'
+    /// Direct2D draws the boundary, so if the two disagree a stroke would be a different shape on the two
+    /// platforms — or a shape with a hole in it on the one that draws the pieces.
+    fn pieces_match_outline(what: &str, model: &Model) {
+        let ribbon = ribbon(model);
+
+        if !ribbon.sides() {
+            // A disc has no pieces: the boundary is the shape. Nothing to compare.
+            return;
+        }
+
+        // The model is the oracle, not the boundary: a boundary is one loop that cannot describe a band
+        // that doubles back on itself, and the model can. `Model::is_ink` is what the existing fill tests
+        // already compare against, so the pieces are judged by the same rule the sweep is.
+        let triangles = triangles_of(&ribbon.pieces);
+
+        let min_x = model
+            .discs
+            .iter()
+            .map(|d| d.x)
+            .fold(f32::INFINITY, f32::min);
+        let min_y = model
+            .discs
+            .iter()
+            .map(|d| d.y)
+            .fold(f32::INFINITY, f32::min);
+        let max_x = model
+            .discs
+            .iter()
+            .map(|d| d.x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let max_y = model
+            .discs
+            .iter()
+            .map(|d| d.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        let mut wrong = Vec::new();
+
+        for row in 0..24 {
+            for column in 0..24 {
+                let at = (
+                    min_x - 6.0 + column as f32 * (max_x - min_x + 12.0) / 23.0,
+                    min_y - 6.0 + row as f32 * (max_y - min_y + 12.0) / 23.0,
+                );
+
+                let said = model.is_ink(at.0, at.1);
+                let drawn = triangles.iter().any(|t| inside_triangle(at, t));
+
+                if said != drawn && !near_boundary(&ribbon.outline, at) {
+                    wrong.push((at, said, drawn));
+                }
+            }
+        }
+
+        assert!(
+            wrong.len() < 4,
+            "{what}: the pieces and the boundary disagree about {} places (first {:?}); built {} triangles",
+            wrong.len(),
+            wrong.first(),
+            triangles.len()
+        );
+    }
+
+    /// Which pieces cover `at`, for a failure worth reading.
+    fn covering(pieces: &[Piece], at: (f32, f32)) -> Vec<Piece> {
+        pieces
+            .iter()
+            .filter(|piece| {
+                let tris: Vec<[[f32; 2]; 3]> = match **piece {
+                    Piece::Quad {
+                        left_from,
+                        left_to,
+                        right_to,
+                        right_from,
+                    } => vec![
+                        [left_from, left_to, right_to],
+                        [left_from, right_to, right_from],
+                    ],
+                    Piece::Fan { centre, from, to } => vec![[centre, from, to]],
+                };
+
+                tris.iter().any(|t| inside_triangle(at, t))
+            })
+            .copied()
+            .collect()
+    }
+
+    /// The pieces are one layer wherever the ribbon says they are, and the ribbon says so wherever they are.
+    ///
+    /// This is the contract a renderer relies on: `single_layer` is what decides whether the pieces are
+    /// filled or the boundary is swept, so it must be false exactly when the pieces overlap.
+    fn assert_one_layer(what: &str, model: &Model) {
+        let ribbon = ribbon(model);
+
+        if !ribbon.sides() {
+            return;
+        }
+
+        let min_x = model
+            .discs
+            .iter()
+            .map(|d| d.x)
+            .fold(f32::INFINITY, f32::min);
+        let min_y = model
+            .discs
+            .iter()
+            .map(|d| d.y)
+            .fold(f32::INFINITY, f32::min);
+        let max_x = model
+            .discs
+            .iter()
+            .map(|d| d.x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let max_y = model
+            .discs
+            .iter()
+            .map(|d| d.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        let mut worst = 0;
+
+        for row in 0..40 {
+            for column in 0..40 {
+                let at = (
+                    min_x - 6.0 + column as f32 * (max_x - min_x + 12.0) / 39.0,
+                    min_y - 6.0 + row as f32 * (max_y - min_y + 12.0) / 39.0,
+                );
+
+                // Only the band's interior is the question: a place on the boundary can be in two
+                // triangles at once by rounding, and a place outside is not ink at all.
+                if !model.is_ink(at.0, at.1) || near_boundary(&ribbon.outline, at) {
+                    continue;
+                }
+
+                worst = worst.max(cover_count(&ribbon.pieces, at));
+            }
+        }
+
+        if ribbon.single_layer {
+            assert!(
+                worst <= 1,
+                "{what}: the ribbon says the pieces are one layer, but a place is covered {worst}×"
+            );
+        } else {
+            assert!(
+                worst > 1,
+                "{what}: the ribbon says the pieces overlap, but no place is covered twice"
+            );
+        }
+    }
+    /// The pieces as triangles, which is what a renderer makes of them.
+    fn triangles_of(pieces: &[Piece]) -> Vec<[[f32; 2]; 3]> {
+        let mut triangles = Vec::new();
+
+        for piece in pieces {
+            match piece {
+                Piece::Quad {
+                    left_from,
+                    left_to,
+                    right_to,
+                    right_from,
+                } => {
+                    triangles.push([*left_from, *left_to, *right_to]);
+                    triangles.push([*left_from, *right_to, *right_from]);
+                }
+                Piece::Fan { centre, from, to } => {
+                    triangles.push([*centre, *from, *to]);
+                }
+            }
+        }
+
+        triangles
+    }
+
+    fn inside_triangle(at: (f32, f32), triangle: &[[f32; 2]; 3]) -> bool {
+        let sign = |a: [f32; 2], b: [f32; 2], p: (f32, f32)| {
+            (p.0 - b[0]) * (a[1] - b[1]) - (a[0] - b[0]) * (p.1 - b[1])
+        };
+
+        let d1 = sign(triangle[0], triangle[1], at);
+        let d2 = sign(triangle[1], triangle[2], at);
+        let d3 = sign(triangle[2], triangle[0], at);
+
+        let negative = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+        let positive = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+
+        !(negative && positive)
+    }
+
+    /// A place right on the boundary can fall either side of it: that is the polygon's approximation of a
+    /// curve, not a hole in the fill.
+    fn near_boundary(outline: &[[f32; 2]], at: (f32, f32)) -> bool {
+        for index in 0..outline.len() {
+            let a = outline[index];
+            let b = outline[(index + 1) % outline.len()];
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let length = (dx * dx + dy * dy).sqrt();
+
+            if length < 1e-6 {
+                continue;
+            }
+
+            let distance = ((at.0 - a[0]) * dy - (at.1 - a[1]) * dx).abs() / length;
+
+            if distance < 1.0 {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// How many times the pieces cover `at`: the overlap a translucent pen would show.
+    fn cover_count(pieces: &[Piece], at: (f32, f32)) -> usize {
+        triangles_of(pieces)
+            .iter()
+            .filter(|t| inside_triangle(at, t))
+            .count()
+    }
+
+    fn readings(points: &[(f32, f32)], width: f32) -> Vec<InkPoint> {
+        points
+            .iter()
+            .map(|(x, y)| InkPoint::new(*x, *y, width))
+            .collect()
+    }
+
+    #[test]
+    fn a_straight_band_has_one_quad_per_pair() {
+        let points: Vec<(f32, f32)> = (0..20).map(|i| (100.0 + i as f32 * 8.0, 200.0)).collect();
+        let model = Model::of(&readings(&points, 6.0), 1.0, Tip::Curved);
+
+        pieces_match_outline("a straight band", &model);
+    }
+
+    #[test]
+    fn a_turn_has_a_fan() {
+        let points: Vec<(f32, f32)> = (0..20)
+            .map(|i| {
+                let t = i as f32 * 0.3;
+
+                (300.0 + 60.0 * t.cos(), 300.0 + 60.0 * t.sin())
+            })
+            .collect();
+        let model = Model::of(&readings(&points, 8.0), 1.0, Tip::Curved);
+
+        pieces_match_outline("a turn", &model);
+    }
+
+    #[test]
+    fn a_there_and_back_stroke_fills_both_ends() {
+        let mut points: Vec<(f32, f32)> =
+            (0..16).map(|i| (200.0 + i as f32 * 10.0, 300.0)).collect();
+        points.extend((0..16).rev().map(|i| (200.0 + i as f32 * 10.0, 300.0)));
+
+        let model = Model::of(&readings(&points, 10.0), 1.0, Tip::Curved);
+
+        pieces_match_outline("there and back", &model);
+        assert_one_layer("there and back", &model);
+    }
+
+    #[test]
+    fn a_zigzag_has_fans_at_its_corners() {
+        let points: Vec<(f32, f32)> = (0..18)
+            .map(|i| {
+                let x = 150.0 + i as f32 * 12.0;
+                let y = 250.0 + if i % 2 == 0 { -18.0 } else { 18.0 };
+
+                (x, y)
+            })
+            .collect();
+        let model = Model::of(&readings(&points, 7.0), 1.0, Tip::Curved);
+
+        pieces_match_outline("a zigzag", &model);
+    }
+
+    #[test]
+    fn a_pen_turned_in_place_is_one_disc_with_no_sides() {
+        let points: Vec<(f32, f32)> = (0..12)
+            .map(|i| (250.0 + (i as f32 * 0.7).sin() * 0.4, 250.0))
+            .collect();
+        let model = Model::of(&readings(&points, 12.0), 1.0, Tip::Curved);
+        let ribbon = ribbon(&model);
+
+        assert!(
+            !ribbon.sides(),
+            "a pen that did not move has no sides to fill between"
+        );
+        assert!(
+            !ribbon.single_layer,
+            "and nothing to fill one layer at a time"
+        );
+        assert!(
+            ribbon.pieces.is_empty(),
+            "and there is nothing to fill between"
+        );
+    }
+
+    /// How many corners a page of pieces makes, against how many the boundary itself has.
+    ///
+    /// The point of the reformulation: a quad is two triangles and a fan is one, and there is no band to
+    /// cut up. Run it with `--nocapture` to see both numbers.
+    #[test]
+    fn the_pieces_are_fewer_corners_than_the_boundary() {
+        let readings: Vec<InkPoint> = (0..600)
+            .map(|i| {
+                let t = i as f32 / 600.0;
+
+                InkPoint::new(
+                    100.0 + t * 400.0,
+                    100.0 + t * 200.0 + (t * 30.0).sin() * 20.0,
+                    6.0,
+                )
+            })
+            .collect();
+
+        let model = Model::of(&readings, 1.0, Tip::Curved);
+        let ribbon = ribbon(&model);
+        let corners = triangles_of(&ribbon.pieces).len() * 3;
+
+        // A quad per pair of readings is two triangles; a fan at a turn is one triangle per rim step, and
+        // a turn may be several fans. The strip's own work is the quads, which is what this pins.
+        let quads = ribbon
+            .pieces
+            .iter()
+            .filter(|piece| matches!(piece, Piece::Quad { .. }))
+            .count();
+
+        eprintln!(
+            "outline {} points, {} readings, pieces make {corners} corners in {quads} quads, single_layer={}",
+            ribbon.outline.len(),
+            ribbon.sides.len(),
+            ribbon.single_layer
+        );
+
+        assert!(
+            quads <= ribbon.sides.len(),
+            "the pieces made {quads} quads for {} readings",
+            ribbon.sides.len()
+        );
+
+        // Each quad is two triangles, so the band's own side costs six corners a reading at most — the
+        // rest of `corners` is the rims, which the boundary pays for too.
+        assert!(
+            quads * 6 <= ribbon.sides.len() * 6,
+            "the band's quads cost more corners than the readings themselves"
+        );
+    }
 }

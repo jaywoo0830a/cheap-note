@@ -374,6 +374,10 @@ fn page(strokes: usize) -> Canvas {
             points,
             color: 0x1B_1B_1F,
             outline: Vec::new(),
+            sides: Vec::new(),
+            discs: Vec::new(),
+            pieces: Vec::new(),
+            single_layer: false,
             bounds: Bounds::NOTHING,
         };
         stroke.close();

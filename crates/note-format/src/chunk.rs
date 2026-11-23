@@ -424,6 +424,10 @@ fn read_arrays(raw: &[u8]) -> Result<Vec<Stroke>> {
                 points,
                 color,
                 outline: Vec::new(),
+                sides: Vec::new(),
+                discs: Vec::new(),
+                pieces: Vec::new(),
+                single_layer: false,
                 bounds: Bounds::NOTHING,
             };
             // The bounds and the outline are not stored — they are derivable from the points — but

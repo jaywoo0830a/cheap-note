@@ -56,6 +56,13 @@ const SHEET: (f32, f32) = (720.0, 1_000.0);
 /// Where the sheet sits on the desk.
 const MARGIN: f32 = 40.0;
 
+/// The zoom the rebuild's page is re-derived at: a rung above the 1.0 the page is drawn at.
+///
+/// `detail_zoom` rungs a sheet at 1.5× steps, so 1.5 is the next rung up and crossing into it is exactly
+/// what a pinch does when it doubles. A rebuild at the *same* zoom is not a rebuild — `Stroke::freeze`
+/// returns immediately — so timing one would measure nothing.
+const REBUILD_ZOOM: f32 = 1.5;
+
 /// The pages to measure, in strokes: the counts `doc/WINDOWS.md` §5 quotes, plus 8 182 — the page the
 /// macOS figures were taken on.
 const DEFAULT_STROKES: [usize; 5] = [0, 29, 316, 1_000, 8_182];
@@ -343,15 +350,15 @@ fn measure_page(surface: &mut Surface, strokes: usize, frames: usize) -> Result<
     //
     // The strokes are re-derived here, not just the counter bumped. `Ink::revision` is what the layer
     // watches, but what makes a rebuild expensive is the `freeze` below — the ribbon walk, the pieces —
-    // and timing a rebuild that skipped it would measure a page that never has to happen. The zoom is
-    // the one `page` built them at, so the pieces come out the same size and the count is comparable.
-    // Serial, unlike the app's `InkDocument::build_detail`, which spreads the same loop over `rayon`.
-    // A bench that borrowed the pool would owe the harness a dependency for one loop and would hide,
-    // rather than show, what one core pays — and the number that matters here is the whole rebuild's.
+    // and timing a rebuild that skipped it would measure a page that never has to happen.
+    //
+    // The zoom crosses a rung rather than repeating `page`'s. A rebuild *is* a rung change: `Stroke::freeze`
+    // returns at once for a detail it was already built for, so re-freezing at 1.0 would time nothing at
+    // all and report a rebuild that costs 0.07 ms.
     let regrow = Instant::now();
     let list = Arc::make_mut(&mut canvas.ink.strokes);
     for stroke in list.iter_mut() {
-        Arc::make_mut(stroke).close_at(1.0);
+        Arc::make_mut(stroke).close_at(REBUILD_ZOOM);
     }
     let freeze = regrow.elapsed();
     canvas.ink.revision = canvas.ink.revision.wrapping_add(1);
@@ -483,8 +490,9 @@ fn page(strokes: usize) -> Canvas {
             outline: Vec::new(),
             sides: Vec::new(),
             discs: Vec::new(),
-            pieces: Vec::new(),
+            pieces: Arc::new(Vec::new()),
             bounds: Bounds::NOTHING,
+            detailed_at: None,
         };
         stroke.close();
         list.push(Arc::new(stroke));

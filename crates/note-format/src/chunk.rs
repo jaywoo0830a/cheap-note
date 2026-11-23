@@ -426,8 +426,9 @@ fn read_arrays(raw: &[u8]) -> Result<Vec<Stroke>> {
                 outline: Vec::new(),
                 sides: Vec::new(),
                 discs: Vec::new(),
-                pieces: Vec::new(),
+                pieces: std::sync::Arc::new(Vec::new()),
                 bounds: Bounds::NOTHING,
+                detailed_at: None,
             };
             // The bounds and the outline are not stored — they are derivable from the points — but
             // the eraser hit-tests against them and a frame culls by them, so a stroke without them

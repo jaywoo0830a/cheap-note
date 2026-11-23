@@ -307,11 +307,27 @@ pub struct Stroke {
     ///
     /// Filling these needs no sorting and no edge search, which is the whole of why they exist: a sweep
     /// over `outline` finds the boundary's edges again for every stroke, and a page is thousands of them.
+    ///
+    /// **In an `Arc`, and that is not a detail.** These are by far the largest thing a stroke carries —
+    /// a page of 8 182 strokes holds 118 MB of them against 18 MB for the other three vectors together —
+    /// and a rebuild has to clone every stroke before it can freeze it, because a frame may still be
+    /// drawing the one it replaces (`InkDocument::build_detail`, which `Arc::make_mut`s each stroke).
+    /// Cloning an `Arc` is a counter increment; cloning 118 MB is 5.8 ms of a rebuild's 19 — a quarter of
+    /// the step these exist to make cheap. Sharing them is also exactly right: two strokes with the same
+    /// points have the same pieces, and a stroke that is only being re-frozen never had different ones.
     #[serde(skip)]
-    pub pieces: Vec<crate::ink::Piece>,
+    pub pieces: Arc<Vec<crate::ink::Piece>>,
     /// The axis-aligned box the ink covers, for culling and hit-testing.
     #[serde(skip)]
     pub bounds: Bounds,
+    /// The detail the vectors above were built for, as `f32::to_bits` — or `None` when they are empty.
+    ///
+    /// What makes a re-freeze skippable. `freeze` is a pure function of `points` and `detail`, so asking
+    /// for the detail it was last given cannot change a corner; without this every rebuild rebuilt the
+    /// whole page's ribbons to store the numbers it already had. The bits rather than the float so two
+    /// details are the same exactly when they would do the same work, NaN included.
+    #[serde(skip)]
+    pub detailed_at: Option<u32>,
 }
 
 impl Stroke {
@@ -331,8 +347,9 @@ impl Stroke {
             outline: Vec::new(),
             sides: Vec::new(),
             discs: Vec::new(),
-            pieces: Vec::new(),
+            pieces: Arc::new(Vec::new()),
             bounds: Bounds::at(point.x, point.y),
+            detailed_at: None,
         }
     }
 
@@ -381,7 +398,16 @@ impl Stroke {
             self.outline.clear();
             self.sides.clear();
             self.discs.clear();
-            self.pieces.clear();
+            self.pieces = Arc::new(Vec::new());
+            self.detailed_at = None;
+            return;
+        }
+
+        // Already built for this detail: the vectors below are the answer, corner for corner, and walking
+        // the ribbon again would spend the whole page's time to store what is already stored. The tip is
+        // not part of the key because it only ever makes the *live* stroke differ (`close_live`), and a
+        // live stroke is rebuilt by `open_stroke` every frame it is drawn rather than through here.
+        if self.detailed_at == Some(detail.to_bits()) {
             return;
         }
 
@@ -404,13 +430,15 @@ impl Stroke {
         if walked {
             self.sides = ribbon.sides;
             self.discs = ribbon.discs;
-            self.pieces = ribbon.pieces;
+            self.pieces = Arc::new(ribbon.pieces);
         } else {
             // A disc has no sides to fill between: the boundary is the shape.
             self.sides.clear();
             self.discs.clear();
-            self.pieces.clear();
+            self.pieces = Arc::new(Vec::new());
         }
+
+        self.detailed_at = Some(detail.to_bits());
     }
 
     /// Rebuilds the derived geometry of a stroke for `detail`: its bounds and its outline.
@@ -433,6 +461,9 @@ impl Stroke {
             point.y += by.1;
         }
 
+        // The points moved, so what was derived from them is wrong even at the same detail: `freeze` would
+        // see the detail it was last given and skip, leaving an outline where the ink used to be.
+        self.detailed_at = None;
         self.rebuild(detail);
     }
 
@@ -1911,6 +1942,98 @@ mod piece_tests {
         assert!(
             quads * 6 <= ribbon.sides.len() * 6,
             "the band's quads cost more corners than the readings themselves"
+        );
+    }
+
+    /// A stroke shares its pieces when it is cloned, rather than copying them.
+    ///
+    /// This is what makes a page's rebuild cheap: `build_detail` clones every stroke before freezing it,
+    /// because a frame may still be drawing the one it replaces, and `pieces` is 118 MB of a page's 137.
+    /// A bare `Vec` made that clone a copy of the whole page (5.4 ms measured); inside an `Arc` it is a
+    /// counter. The test holds the *sharing*, because that is the property the speed depends on: if this
+    /// ever stops being one allocation, `Arc::strong_count` says so before a benchmark does.
+    #[test]
+    fn a_cloned_stroke_shares_its_pieces_instead_of_copying_them() {
+        let mut stroke = Stroke::new(InkPoint::new(10.0, 10.0, 2.0), 0x11_22_33);
+        for step in 1..20 {
+            stroke
+                .points
+                .push(InkPoint::new(10.0 + step as f32, 10.0, 2.0));
+        }
+        stroke.close();
+
+        assert!(!stroke.pieces.is_empty(), "a walked line has pieces");
+
+        let before = Arc::strong_count(&stroke.pieces);
+        let copy = stroke.clone();
+
+        assert_eq!(
+            Arc::strong_count(&stroke.pieces),
+            before + 1,
+            "the clone shares the list rather than making one"
+        );
+        assert!(
+            Arc::ptr_eq(&stroke.pieces, &copy.pieces),
+            "and it is the same allocation, not an equal one"
+        );
+    }
+
+    /// Freezing for the detail a stroke was already frozen for does nothing at all.
+    ///
+    /// `freeze` is a pure function of the points and the detail, so asking for the detail it was last
+    /// given cannot change a corner — and a rebuild that did not know that rebuilt the whole page's
+    /// ribbons to store what was already stored. The test watches the allocation rather than the clock:
+    /// a second `close_at` must leave `pieces` the same `Arc`, which only happens on the early return.
+    #[test]
+    fn freezing_twice_at_one_detail_builds_nothing_the_second_time() {
+        let mut stroke = Stroke::new(InkPoint::new(10.0, 10.0, 2.0), 0x11_22_33);
+        for step in 1..20 {
+            stroke
+                .points
+                .push(InkPoint::new(10.0 + step as f32, 10.0, 2.0));
+        }
+
+        stroke.close_at(1.0);
+        let built = Arc::as_ptr(&stroke.pieces);
+
+        stroke.close_at(1.0);
+        assert_eq!(
+            Arc::as_ptr(&stroke.pieces),
+            built,
+            "the same detail is the same pieces, not a second list"
+        );
+
+        // A rung above is different geometry, so it is built again.
+        stroke.close_at(1.5);
+        assert_ne!(
+            Arc::as_ptr(&stroke.pieces),
+            built,
+            "another rung is another ribbon"
+        );
+    }
+
+    /// A moved stroke rebuilds, even at the detail it was already frozen for.
+    ///
+    /// The skip above is keyed on the detail, and moving the points does not change the detail — so
+    /// without `translate` invalidating it, a dragged stroke would keep the outline it had where it used
+    /// to be. The test moves one and checks the box went with it.
+    #[test]
+    fn a_moved_stroke_is_rebuilt_even_at_the_same_detail() {
+        let mut stroke = Stroke::new(InkPoint::new(10.0, 10.0, 2.0), 0x11_22_33);
+        for step in 1..20 {
+            stroke
+                .points
+                .push(InkPoint::new(10.0 + step as f32, 10.0, 2.0));
+        }
+        stroke.close_at(1.0);
+
+        let before = stroke.bounds;
+
+        stroke.translate((100.0, 0.0), 1.0);
+
+        assert_ne!(
+            stroke.bounds, before,
+            "the box moved with the ink rather than staying where it was drawn"
         );
     }
 }

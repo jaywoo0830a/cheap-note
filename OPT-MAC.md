@@ -347,4 +347,47 @@ macOS는 명시적인 CPU 피닝을 제공하지 않지만, **QoS 클래스**로
 3. **`refresh`** — 11.5M번 push가 곧 131.5 MB 쓰기다. 할당은 이미 없고(`clear()`가 capacity 유지),
    프로브의 `memcpy` 바닥(2.4 ms)에 가깝다.
 
+## 복사를 없앤 결과 (2026-11)
+
+위 1번을 했다. 두 가지를 함께 바꿨고, 둘 다 **프로브로 먼저 재고** 넣었다.
+
+### 1. `pieces`를 `Arc<Vec<Piece>>`로
+
+한 페이지가 스트로크에 담는 파생 데이터의 대부분이 `pieces`다 — 8 182 스트로크에서
+`outline` 7.9 MB + `sides` 5.9 MB + `discs` 4.4 MB 에 대해 **`pieces` 118.5 MB**, 합계 136.7 MB.
+
+`build_detail`은 `Arc::make_mut`으로 스트로크를 복사한 뒤 `freeze`한다(그리는 중인 프레임이 이전
+것을 아직 읽을 수 있으므로). `pieces`가 맨 `Vec`이면 그 복사가 **페이지 전체 118 MB**를 옮긴다.
+`Arc`로 감싸면 카운터 증가다.
+
+| 페이지 전체 `Arc::make_mut` | 시간 |
+|---|---|
+| 맨 `Vec<Piece>` | **5.4–5.8 ms** |
+| `Arc<Vec<Piece>>` | **0.84–1.07 ms** |
+
+`a_cloned_stroke_shares_its_pieces_instead_of_copying_them`이 `Arc::ptr_eq`와 `strong_count`로
+**공유 그 자체**를 고정한다 — 속도가 의존하는 성질이 그것이므로.
+
+### 2. 같은 detail의 `freeze`는 아무것도 하지 않는다
+
+`freeze`는 `points`와 `detail`만의 **순수 함수**다. 그런데 `Stroke`는 자기가 어떤 detail로
+만들어졌는지 기억하지 않아서, 같은 detail을 다시 요청해도 리본을 처음부터 다시 걸었다.
+`Stroke::detailed_at`(`f32::to_bits`)을 추가하고 같으면 즉시 반환한다.
+
+| 같은 detail 재-freeze (8 182 스트로크) | 시간 |
+|---|---|
+| 이전 | 14.3–14.4 ms |
+| 지금 | **0.04 ms** |
+
+**함정**: `translate`는 `points`를 바꾸면서 detail은 그대로다. 그대로 두면 옮긴 스트로크가
+**예전 자리의 외곽선**을 들고 있게 된다. 그래서 `translate`가 `detailed_at = None`으로 무효화하고,
+`a_moved_stroke_is_rebuilt_even_at_the_same_detail`이 그걸 잡는다.
+
+### 벤치도 함께 고쳤다
+
+리빌드를 `close_at(1.0)`으로 재던 것은 이제 **0.04 ms짜리 no-op**을 재는 일이 됐다. 실제 리빌드는
+**rung을 넘는 것**이므로 `REBUILD_ZOOM = 1.5`(다음 rung)로 바꿨다. 그 결과 8 182 스트로크에서
+정점이 11.5M → 14.9M으로 늘고 `freeze`가 58 ms가 되는데, **이것이 rung을 넘을 때의 실제 값**이다.
+낮은 숫자를 보고 싶어서 쉬운 일을 재는 것이 이 벤치가 이미 한 번 저지른 실수다.
+
 이 계층 구조의 핵심은 **"각 compute unit이 가장 잘하는 일만 하도록 분업"** 하는 것입니다. CPU 코어는 결정론적 기하 생성과 제어 흐름에 집중하고, NEON은 데이터 병렬 벡터 연산을, AMX는 행렬 연산을, GPU는 테셀레이션과 래스터화를, IOSurface 공유 메모리는 이들 사이의 데이터 이동을 각각 전담합니다. 시각적 근사화가 허용됨으로써 각 계층은 **"정확히 같은 값"이 아니라 "시각적으로 구분 불가능한 값"** 을 목표로 최적화할 수 있고, 그 결과 Apple Silicon의 하드웨어 자원을 최대한 활용하면서도 결정론이 필요한 경계(정본 기하 데이터)는 안전하게 보호됩니다.

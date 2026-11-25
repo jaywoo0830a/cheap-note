@@ -12,8 +12,12 @@
 //! | [`platform::canvas`] | the desk, the paper and the ink: Metal geometry, drawn by the platform |
 //!
 //! Plus `main`, which assembles them and installs the one hook the release profile needs.
+//!
+//! The modules themselves live in the crate's library ([`cheap_note_macos::platform`]), because the
+//! measurement adapter (`src/bin/adapter.rs`) draws through the same surface and reads the same counters;
+//! a binary cannot see another binary's modules.
 
-mod platform;
+use cheap_note_macos::platform;
 
 fn main() {
     // The release profile is `panic = "abort"`, and the pen's readings arrive inside an AppKit callback,

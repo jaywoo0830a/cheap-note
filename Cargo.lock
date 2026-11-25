@@ -839,6 +839,7 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "pen-macos",
  "raw-window-handle",
+ "serde_json",
  "sysinfo 0.40.3",
 ]
 

@@ -155,7 +155,34 @@ The shipped gate applies its millisecond limit to each row's `rebuild_work` and 
 
 ### Large-note qualification
 
-**Status:** proposed release criteria. The current CLI implements the renderer smoke test above. The matrix below requires an instrumented interaction runner and windowed measurements. Record each row as pending until its evidence exists. A first implementation can start with the pen-up and blank-erase cases on macOS and retain the current storage format.
+**Status:** proposed release criteria. The renderer smoke test above is the current CLI; the matrix below is
+run by the **measurement adapter** (`apps/macos/src/bin/adapter.rs`, built as `cheap-note-adapter`) under
+the harness `tests/long_note.py`. One invocation is one fresh process: one JSON request on stdin, one JSON
+report on stdout, logs on stderr, exit `0` measured / `2` unavailable on this machine / `1` a bad request.
+
+```sh
+cargo build --release -p cheap-note-macos --bin cheap-note-adapter
+python3 tests/long_note.py --base ./target/release/cheap-note-adapter \
+    --candidate ./target/release/cheap-note-adapter --profile mac4k120 --output /tmp/evidence
+```
+
+What the adapter measures, and what it will not:
+
+| Actions | How | Honest limits |
+|---|---|---|
+| `append`, `blank_erase` (A) | readings through `InkDocument::consume`, drawn through the same Metal `Surface` the app uses; `uploaded_bytes`/`gpu_ns`/`drawable_wait_ns` read from the surface's own stages | `submitted_vertices` is the surface's count after the frame; `regenerated` for an append is the appended stroke's own vertices |
+| `write`, `pan_inside` (C), `extend`, `commit_long` (D) | one batch of readings replayed per operation | a batch is at most a stroke's worth of points |
+| `pan_across`, `zoom_rung`, `undo`, `redo` (E) | the model's own `set_zoom`/`undo`/`redo`, then one frame | — |
+| `cold_open`, `traverse` (B) | first-usable-ink time; a `min(20, size)`-page tour, twice, with `rusage` sampled | `swap_out_bytes` is `ru_ooblock`; it is a floor, not a swap counter |
+| `move_selection` (E) | **not measured** | a reading has no modifier bit, so the app has no pen path for a selection drag; the adapter reports `skipped` (exit 2) rather than invent a figure |
+
+The device is read, not assumed: display pixels and refresh rate from `NSScreen`, RAM from `hw.memsize`,
+the GPU from `system_profiler`, the OS from `sw_vers`. The adapter **exits `2` when the machine does not
+meet the profile it was asked for** — a 2560×1600 laptop answers neither `mac4k120` nor `igpu8` — which
+the harness records as `incomplete`, the truth about that machine. A `synthetic` profile skips the
+hardware gate so the measurement path can be exercised where neither release profile applies; it is never
+evidence, and the harness's own `validate` rejects it against a real profile.
+A first implementation can start with the pen-up and blank-erase cases on macOS and retain the current storage format.
 
 Specify the support claim as **total note strokes / maximum strokes on one page / strokes inside the viewport / drawable pixels / refresh rate / hardware and RAM**. A million strokes spread over a thousand pages and a million strokes on one page exercise different paths. Publish the largest passing row for each distribution and device.
 

@@ -80,6 +80,7 @@
 pub mod cursor;
 pub mod design;
 pub mod error;
+pub mod ink;
 pub mod ink_layer;
 pub mod input;
 pub mod paint;
@@ -90,7 +91,6 @@ mod bookmarks;
 mod canvas;
 mod history;
 mod home;
-mod ink;
 mod keys;
 pub mod memory_report;
 mod note;

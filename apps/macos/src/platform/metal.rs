@@ -143,7 +143,10 @@ struct PageVertex {
 }
 
 /// The window's GPU canvas.
-pub(crate) struct Surface {
+///
+/// Public rather than crate-only: the measurement adapter (`src/bin/adapter.rs`) draws through the same
+/// surface the window and the bench do, which is the whole point of it being one type.
+pub struct Surface {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     /// Fills, ruling and ink: one vertex per corner, one colour each.
@@ -219,7 +222,7 @@ pub(crate) struct Surface {
 
 impl Surface {
     /// Gives a view a Metal layer, and the pipelines a canvas is drawn with.
-    pub(crate) fn install(view: &objc2_app_kit::NSView, scale: f64) -> Option<Self> {
+    pub fn install(view: &objc2_app_kit::NSView, scale: f64) -> Option<Self> {
         let device = objc2_metal::MTLCreateSystemDefaultDevice()?;
         let queue = device.newCommandQueue()?;
 
@@ -298,7 +301,7 @@ impl Surface {
     }
 
     /// Matches the drawable to the view. `width` and `height` are device pixels.
-    pub(crate) fn resize(&mut self, width: usize, height: usize, scale: f64) {
+    pub fn resize(&mut self, width: usize, height: usize, scale: f64) {
         if (self.width, self.height) == (width, height) {
             return;
         }
@@ -1466,7 +1469,7 @@ impl Surface {
     /// still holds the layer's buffers, which is why a frame's total carries one refresh interval even
     /// for an empty page. The benchmark needs the two apart to say what a rebuild actually costs, and a
     /// figure it can only get from inside the first call of the frame.
-    pub(crate) fn draw_with_wait(
+    pub fn draw_with_wait(
         &mut self,
         canvas: &Canvas,
         mark: Option<&Mark>,
@@ -1656,7 +1659,7 @@ impl Surface {
     ///
     /// The wait is on the last committed buffer. Metal runs one queue in order, so the last to be
     /// committed is the last to finish, and waiting on it waits on everything before it too.
-    pub(crate) fn settle(&self) {
+    pub fn settle(&self) {
         // `waitUntilCompleted` is the command buffer's own method, and it is called on a buffer that was
         // committed by `draw` — never on one still being encoded.
         if let Some(last) = &self.last_commit {

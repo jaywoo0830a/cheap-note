@@ -426,7 +426,7 @@ fn read_arrays(raw: &[u8]) -> Result<Vec<Stroke>> {
                 outline: Vec::new(),
                 sides: Vec::new(),
                 discs: Vec::new(),
-                pieces: std::sync::Arc::new(Vec::new()),
+                pieces: None,
                 bounds: Bounds::NOTHING,
                 detailed_at: None,
             };

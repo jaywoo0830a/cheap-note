@@ -972,7 +972,9 @@ Three things follow, and none of them is a leak:
   allocator holding freed blocks but never growing past its first peak, and live heap returned to zero on
   every drop. Undo, redo and page turns are flat for the same reason — they move `Arc`s, they do not copy
   strokes. Undo *keeps* what it took back (that is what makes it undoable), so erased ink stays in memory
-  until [`HISTORY_EDITS`](../crates/note-format/src/history.rs) (256 edits) pushes it out.
+  until [`HISTORY_EDITS`](../crates/note-format/src/history.rs) (256 edits) pushes it out — **in both
+  directions**: the redo branch the reader builds by undoing is bounded the same way, because an edit taken
+  back is an edit still holding its ink, and a held-down undo key is enough to grow it without one.
 - **What grows with a session is bounded by the zoom, not the note.** A reader who zooms to 8x and works
   through forty pages sees the figure above stay put; the one thing that moves it is the zoom itself,
   because a page detailed for 8x is 5.6x the page detailed for 1:1.
@@ -980,6 +982,27 @@ Three things follow, and none of them is a leak:
   nothing derived is ever the only copy. `pieces` and `outline` together are **93%** of a stroke's memory,
   and both are read on the fill path — `pieces` is what is drawn, `outline` is the fallback for a stroke
   written before pieces existed and is still checked as its "is there any ink" test.
+
+### Giving up the polygons
+
+`pieces` is **83% of a stroke** on this repository's own 24-reading fixture (7,740 bytes against 1,600 for
+its points, outline, sides and discs) and nothing outside a renderer's fill reads it, so a page that is not
+being drawn gives it up: `Notes::go_to` calls `InkDocument::shed_pieces` on the page it puts away, and
+`Notes::show` calls `retessellate` on the page it brings back. Measured on `phys_footprint` — the figure
+macOS actually evicts against, not `ps`, which counts pages the allocator is sitting on:
+
+| Strokes on the page | Loaded | After the page is put away | Freed |
+|---:|---:|---:|---:|
+| 11,000 | 140 MiB | — | 81 MiB |
+| 101,000 | 1,262 MiB | **396 MiB** | 746 MiB (−69%) |
+| 1,001,000 | 12,288 MiB | **4,672 MiB** | 7,389 MiB (−62%) |
+
+What is kept is everything a reader can tell: the points, the `bounds` the eraser hit-tests, the `outline`
+a frame culls and counts by, and the history. A page turned back to is tessellated at the detail it is
+already at, which is the same pass a page read out of the note pays, and the triangles it produces are the
+triangles it had (asserted corner for corner, `a_shed_stroke_is_filled_from_its_points`). A frame that draws
+a stroke whose cache is absent builds just that stroke (`Stroke::pieces_at_detail`), so the pages a reader is
+*looking at* are never the ones paying for the bound.
 
 The one cost the bound adds is a **read and a rebuild** when a reader turns back more than eight pages to
 one they have not looked at since. That is the same work as opening a page they had never visited, and it

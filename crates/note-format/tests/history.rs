@@ -336,3 +336,77 @@ fn a_page_whose_flags_are_out_of_step_is_repaired() {
         "the flags are one per stroke, in the same order"
     );
 }
+
+/// Undoing more edits than the history holds keeps the redo branch to the same size.
+///
+/// An edit taken back is still holding its ink — that is what makes it redoable — so a redo branch nobody
+/// bounds is a page's ink held twice, for as long as the session lasts. `done` has been bounded for that
+/// reason since the history was a stack; the branch undo *builds* is the half that could grow without one,
+/// and holding a key down is enough to do it.
+#[test]
+fn undoing_more_than_the_history_holds_bounds_the_redo_branch() {
+    use note_format::history::HISTORY_EDITS;
+
+    let mut ink = Ink::of(Vec::new());
+    let mut history = History::default();
+
+    // More edits than a history keeps, each applied to the page as a real command would apply it.
+    let total = HISTORY_EDITS + 8;
+    for index in 0..total {
+        let line = stroke(1, index as f32, 0.0, 0x1B_1B_1F);
+        let edit = written(index, &line);
+        assert!(edit.apply(&mut ink.view()), "edit {index} did not apply");
+        history.record(edit);
+    }
+
+    assert!(
+        ink.len() >= HISTORY_EDITS,
+        "the page is a whole history's worth of strokes"
+    );
+
+    // Take every edit back: this is what pushes onto the redo branch.
+    let mut taken = 0;
+    while history.undo(&mut ink.view()) {
+        taken += 1;
+    }
+
+    assert_eq!(
+        taken, total,
+        "every edit applied could be taken back, bounded or not"
+    );
+    assert_eq!(ink.len(), 0, "and the page is empty again");
+    assert!(
+        history.forward() <= HISTORY_EDITS,
+        "the redo branch ({}) grew past the history's own bound",
+        history.forward()
+    );
+
+    // And what is left still walks forward, which is what the branch is for.
+    let mut put_back = 0;
+    while history.redo(&mut ink.view()) {
+        put_back += 1;
+    }
+
+    assert_eq!(
+        put_back,
+        HISTORY_EDITS,
+        "every redo left on the branch works"
+    );
+    assert_eq!(ink.len(), HISTORY_EDITS, "and the page came back");
+}
+
+/// A history read out of a note is bounded in both directions, not only the one that was applied.
+#[test]
+fn a_loaded_history_is_bounded_in_both_directions() {
+    use note_format::history::HISTORY_EDITS;
+
+    let line = stroke(1, 0.0, 0.0, 0x1B_1B_1F);
+    let edits: Vec<Edit> = (0..HISTORY_EDITS * 2 + 4)
+        .map(|index| written(index, &line))
+        .collect();
+
+    let history = History::loaded(edits.clone(), edits, 0);
+
+    assert_eq!(history.depth(), HISTORY_EDITS, "the applied branch is held");
+    assert_eq!(history.forward(), HISTORY_EDITS, "and so is the redo one");
+}

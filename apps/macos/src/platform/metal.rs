@@ -799,14 +799,20 @@ fn fill(
     // — every reading's disc is inside it, and two readings are joined by the trapezoid their outer
     // tangents cut — so there is nothing to sort and no case to get wrong.
     //
+    // The pieces are a *cache*, and a page that was given up to save memory has none (see
+    // `Stroke::shed_pieces`). `pieces_at_detail` is what builds the ones this frame needs from the points —
+    // a stroke is a few hundred corners, and the strokes being drawn are the ones on screen — so the band
+    // is filled from polygons however the page arrived.
+    //
     // The pieces overlap by construction (a disc reaches into its neighbour's trapezoid), and the stencil
     // pass is what makes that one layer of ink: it marks which samples the pieces reach and colours each
     // of them once (`Surface::ink_pass`). A stroke with no pieces at all — an older page, a test that made
     // its own outline — falls back to the sweep over the boundary, which fills by the nonzero rule.
     let colour = Vertex::rgb(colour);
+    let polygons = stroke.pieces_at_detail();
 
-    if !stroke.pieces.is_empty() {
-        pieces(vertices, &stroke.pieces, mapping, shift, colour);
+    if !polygons.is_empty() {
+        pieces(vertices, &polygons, mapping, shift, colour);
         return;
     }
 
@@ -1299,13 +1305,44 @@ fn fits(visible: Bounds, built_for: Bounds) -> bool {
 /// strokes, the detail they were built at and the shape of the page are the whole of it. Where the paper is
 /// drawn is *not* here: it is [`Transform`], applied by the shader, which is what makes a scroll a uniform
 /// update instead of a page of geometry rebuilt a hundred times a second.
+/// What the ink's triangles were built from, for the one question that decides whether they have to be
+/// built again.
+///
+/// ## Why the strokes and not the numbers about them
+///
+/// This used to be the *length* of the page and the addresses of its first and last stroke, and that is a
+/// fingerprint that two different pages can share: the list behind it is an `Arc<Vec<Arc<Stroke>>>` that
+/// every edit reallocates (`Arc::make_mut` in `InkDocument::build_detail`), so erasing a stroke in the
+/// middle of a page usually leaves the count one lower and the two ends where they were — a key that says
+/// "nothing changed" about a page with a stroke missing. What the comparison needs is which strokes are
+/// there, in order, and whether *their* geometry was rebuilt, so that is what is kept.
+///
+/// The list is `Arc<Vec<...>>` of `Arc<Stroke>`, so a frame that changed nothing hands over the same
+/// pointers and the comparison is a walk of pointer equality — 100,000 of them, which is a millisecond's
+/// worth of comparisons against the tens of milliseconds a needless rebuild and upload cost.
+///
+/// It was believed that the pointers could not be relied on, because `build_detail` copies a stroke before
+/// freezing it (`Arc::make_mut`, so a frame drawing the old one keeps the ink it started with). They can:
+/// the copy is put back into the vector as the element at that index, which is where the next frame reads it,
+/// and a `freeze` at the detail a stroke already has returns without allocating, so an unchanged page's
+/// elements are their `Arc`s.
 #[derive(PartialEq)]
 struct InkKey {
-    len: usize,
-    first: Option<usize>,
-    last: Option<usize>,
+    /// The strokes the triangles were built from, in the order they were built.
+    strokes: Arc<Vec<Arc<note_format::ink::Stroke>>>,
+    /// The detail they were built at: a rung change rebuilds every stroke's outline without touching which
+    /// strokes are on the page.
     revision: u64,
     rotation: u8,
+    paint: PaintKey,
+}
+
+/// The things about a *drawing* of the ink that the triangles depend on beyond the strokes themselves.
+///
+/// Kept apart from [`InkKey`] so the reason a frame rebuilt stays readable, and so the stroke list — the one
+/// field that is a whole page rather than a handful of numbers — is its own line.
+#[derive(PartialEq)]
+struct PaintKey {
     paper: [u32; 2],
     offset: [u32; 2],
     selection: Option<[u32; 4]>,
@@ -1314,32 +1351,31 @@ struct InkKey {
 
 impl InkKey {
     fn of(canvas: &Canvas) -> Self {
-        let list = canvas.ink.strokes.as_slice();
         let ink = &canvas.ink;
 
         InkKey {
-            len: list.len(),
-            first: list.first().map(|stroke| Arc::as_ptr(stroke) as usize),
-            last: list.last().map(|stroke| Arc::as_ptr(stroke) as usize),
+            strokes: Arc::clone(&ink.strokes),
             revision: ink.revision,
             rotation: ink.rotation.into(),
-            paper: [ink.paper.0.to_bits(), ink.paper.1.to_bits()],
-            offset: [ink.offset.0.to_bits(), ink.offset.1.to_bits()],
-            selection: ink.selection.map(|colour| {
-                [
-                    colour.h.to_bits(),
-                    colour.s.to_bits(),
-                    colour.l.to_bits(),
-                    colour.a.to_bits(),
-                ]
-            }),
-            lasso: ink.lasso.as_ref().map(|stroke| {
-                (
-                    stroke.points.len(),
-                    stroke.outline.len(),
-                    stroke.bounds.into_array().map(f32::to_bits),
-                )
-            }),
+            paint: PaintKey {
+                paper: [ink.paper.0.to_bits(), ink.paper.1.to_bits()],
+                offset: [ink.offset.0.to_bits(), ink.offset.1.to_bits()],
+                selection: ink.selection.map(|colour| {
+                    [
+                        colour.h.to_bits(),
+                        colour.s.to_bits(),
+                        colour.l.to_bits(),
+                        colour.a.to_bits(),
+                    ]
+                }),
+                lasso: ink.lasso.as_ref().map(|stroke| {
+                    (
+                        stroke.points.len(),
+                        stroke.outline.len(),
+                        stroke.bounds.into_array().map(f32::to_bits),
+                    )
+                }),
+            },
         }
     }
 }
@@ -3438,5 +3474,147 @@ mod vertex_tests {
             },
         );
         assert_eq!(clamped.colour[3], 255, "alpha above one is opaque");
+    }
+
+    /// Three strokes in a line, as a page hands them to a frame.
+    fn page_of(three: [u32; 3]) -> Canvas {
+        let mut canvas = Canvas::default();
+        let strokes = three
+            .iter()
+            .enumerate()
+            .map(|(index, colour)| {
+                let mut stroke = note_format::ink::Stroke::new(
+                    note_format::ink::InkPoint::new(index as f32 * 20.0, 0.0, 2.0),
+                    *colour,
+                );
+                stroke
+                    .points
+                    .push(note_format::ink::InkPoint::new(index as f32 * 20.0 + 10.0, 0.0, 2.0));
+                stroke.close();
+                Arc::new(stroke)
+            })
+            .collect::<Vec<_>>();
+
+        canvas.ink.strokes = Arc::new(strokes);
+        canvas
+    }
+
+    /// Erasing a stroke from the *middle* of a page is a new ink key.
+    ///
+    /// This is the bug the length-and-ends key had, and it is invisible in the tests that came before it
+    /// because those only ever changed the count or the ends. An erase of a middle stroke leaves the same
+    /// two ends in the same order, so a key built from them and the count says "nothing changed" — and the
+    /// frame that follows draws the ink it built before the erase, with the stroke the reader just removed
+    /// still on the page. The list is compared element by element now, and the middle stroke going is a
+    /// difference.
+    #[test]
+    fn erasing_inside_a_page_is_a_new_ink_key() {
+        let full = page_of([0x11_11_11, 0x22_22_22, 0x33_33_33]);
+        let before = InkKey::of(&full);
+
+        let mut erased = full.clone();
+        let kept = [0x11_11_11, 0x33_33_33]
+            .iter()
+            .map(|colour| {
+                erased
+                    .ink
+                    .strokes
+                    .iter()
+                    .find(|stroke| stroke.color == *colour)
+                    .unwrap()
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        erased.ink.strokes = Arc::new(kept);
+
+        assert!(
+            before != InkKey::of(&erased),
+            "the key called an erased page the page it was before the erase"
+        );
+    }
+
+    /// A frame that changed nothing is **not** a new key, whatever moved on the page.
+    ///
+    /// The other half of the comparison, and the one that keeps it cheap: the same stroke list is the same
+    /// `Arc` all the way down, so a pan, a repaint or a second frame at one zoom reuses the triangles
+    /// instead of building them again. A key that compared the strokes by *value* would pass the test above
+    /// and lose the whole point of the cache.
+    #[test]
+    fn a_page_that_did_not_change_is_the_same_ink_key() {
+        let canvas = page_of([0x11_11_11, 0x22_22_22, 0x33_33_33]);
+        let before = InkKey::of(&canvas);
+
+        let mut again = canvas.clone();
+        again.ink.strokes = Arc::new(canvas.ink.strokes.as_ref().clone());
+
+        assert!(
+            before == InkKey::of(&again),
+            "a page rebuilt from the same strokes asked for a new tessellation"
+        );
+    }
+
+    /// A stroke that was given up to save memory is filled from its points again, not drawn empty.
+    ///
+    /// `Stroke::shed_pieces` is what makes a 100,000-stroke page cost megabytes instead of gigabytes, and the
+    /// one thing it must not do is change what a frame draws: a shed stroke has no polygons of its own, so
+    /// `fill` builds them — at the detail the stroke was already at, which is what makes the pages the
+    /// reader turns back to identical to the pages they left.
+    #[test]
+    fn a_shed_stroke_is_filled_from_its_points() {
+        let canvas = page_of([0x11_11_11, 0x22_22_22, 0x33_33_33]);
+        let mapping = Mapping {
+            base: (0.0, 0.0),
+            step_x: (1.0, 0.0),
+            step_y: (0.0, 1.0),
+        };
+
+        // The same call the surface makes for one stroke: its own scratch, because a test fills one.
+        let fill_one = |stroke: &note_format::ink::Stroke, mapping: &Mapping| {
+            let mut vertices = Vec::new();
+            fill(
+                &mut vertices,
+                &mut Vec::new(),
+                &mut Sweep::default(),
+                stroke,
+                mapping,
+                (0.0, 0.0),
+                gpui_kit::rgba(0x00FF_00FF).into(),
+            );
+            vertices
+        };
+
+        let before = canvas.ink.strokes[1].pieces_at_detail().len();
+        assert!(before > 0, "an ordinary stroke has pieces");
+
+        let filled_before = fill_one(&canvas.ink.strokes[1], &mapping);
+
+        let mut shed = (*canvas.ink.strokes[1]).clone();
+        assert!(shed.shed_pieces() > 0, "shedding released nothing");
+        assert!(shed.pieces.is_none(), "shedding left the polygons behind");
+        assert!(!shed.outline.is_empty(), "shedding took the outline too");
+
+        let filled_after = fill_one(&shed, &mapping);
+
+        assert!(
+            !filled_after.is_empty(),
+            "a stroke given up to save memory drew as nothing"
+        );
+        assert_eq!(
+            as_numbers(&filled_before),
+            as_numbers(&filled_after),
+            "the stroke drawn after shedding was not the stroke drawn before it"
+        );
+    }
+
+    /// A vertex list as the numbers a renderer would read, so two fills can be compared.
+    ///
+    /// `Vertex` is `#[repr(C)]` for the shader's sake and deliberately carries no `PartialEq`: nothing on the
+    /// drawing path compares corners. This is the comparison a *test* wants, and it is written here rather
+    /// than on the type so the type stays a piece of the buffer format.
+    fn as_numbers(vertices: &[Vertex]) -> Vec<(u32, u32, [u8; 4])> {
+        vertices
+            .iter()
+            .map(|vertex| (vertex.x.to_bits(), vertex.y.to_bits(), vertex.colour))
+            .collect()
     }
 }

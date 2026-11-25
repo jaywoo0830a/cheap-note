@@ -568,6 +568,75 @@ fn a_page_is_re_detailed_when_the_detail_moves() {
     assert_eq!(page.finished()[0].color, Stroke::DEFAULT_COLOR);
 }
 
+/// A page waiting in `taken` holds its ink and not its triangles, and comes back whole.
+///
+/// The polygons a renderer fills from are 83% of what a stroke costs and nothing outside a frame reads them,
+/// so a page the reader has left gives them up (see `InkDocument::shed_pieces`). What it must not give up is
+/// anything a reader can tell: the points, the bounds the eraser hit-tests, the outline a frame culls and
+/// counts by, and the history. And the page turned *back* to has to be the page it was — same strokes, same
+/// geometry, same count — not a page that draws nothing because its cache is empty.
+#[test]
+fn a_page_waiting_in_the_note_holds_its_ink_and_not_its_triangles() {
+    let mut notes = Notes::new();
+    notes.put_page(1, InkDocument::from_strokes(vec![curve(), curve()]));
+    notes.go_to(1);
+
+    let kept = notes_ink(&notes);
+    let before: Vec<_> = notes
+        .finished()
+        .iter()
+        .map(|stroke| {
+            (
+                stroke.points.clone(),
+                stroke.bounds,
+                stroke.outline.clone(),
+                stroke.cached_bytes(),
+            )
+        })
+        .collect();
+
+    assert!(
+        before.iter().all(|(_, _, _, bytes)| *bytes > 0),
+        "the page in front of the reader has its triangles"
+    );
+
+    // Leave the page: it goes into `taken`, and its triangles go with it.
+    notes.go_to(0);
+    let taken = notes.held(1).expect("the page was given up entirely");
+
+    assert!(
+        taken.finished().iter().all(|stroke| stroke.pieces.is_none()),
+        "a page the reader has left is still holding its triangles"
+    );
+    assert!(
+        taken.finished().iter().all(|stroke| !stroke.outline.is_empty()),
+        "and it kept the outline a frame culls by"
+    );
+    assert_eq!(taken.stroke_count(), kept, "the ink itself is untouched");
+
+    // Turn back: the page is the page it was.
+    notes.go_to(1);
+    let after: Vec<_> = notes
+        .finished()
+        .iter()
+        .map(|stroke| {
+            (
+                stroke.points.clone(),
+                stroke.bounds,
+                stroke.outline.clone(),
+                stroke.cached_bytes(),
+            )
+        })
+        .collect();
+
+    assert_eq!(before, after, "the page turned back to is not the page left");
+}
+
+/// How many strokes the page in front of the reader holds.
+fn notes_ink(notes: &Notes) -> usize {
+    notes.finished().len()
+}
+
 /// A page turned to is detailed for the sheet in front of the reader rather than for the 1:1 its
 /// file was read at: otherwise a reader zoomed in would be shown a page of straightened pieces on
 /// every page they turned to, for as long as it took them to touch the zoom.

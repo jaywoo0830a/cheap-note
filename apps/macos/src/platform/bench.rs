@@ -490,7 +490,7 @@ fn page(strokes: usize) -> Canvas {
             outline: Vec::new(),
             sides: Vec::new(),
             discs: Vec::new(),
-            pieces: Arc::new(Vec::new()),
+            pieces: None,
             bounds: Bounds::NOTHING,
             detailed_at: None,
         };

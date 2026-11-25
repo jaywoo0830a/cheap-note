@@ -522,7 +522,7 @@ fn settings() -> Settings {
 fn vertices_of(stroke: &Stroke) -> u64 {
     use note_format::ink::Piece;
     stroke
-        .pieces
+        .pieces_at_detail()
         .iter()
         .map(|piece| match piece {
             Piece::Quad { .. } => 4,

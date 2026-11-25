@@ -926,6 +926,65 @@ impl InkDocument {
         true
     }
 
+    /// Gives up the render polygons of every stroke on this page, keeping the ink itself.
+    ///
+    /// The page-level half of [`Stroke::shed_pieces`], and the answer to what a page costs a note that is
+    /// not drawing it. A page earns them back the only way it can: whatever draws it asks
+    /// [`Self::retessellate`] first, which is a rebuild at the detail the page is already at — so the
+    /// page it draws is pixel for pixel the page it was, and the only cost is the tessellation it would
+    /// have paid to build the page in the first place.
+    ///
+    /// Answers how many bytes were released, because a caller deciding whether this is worth doing wants
+    /// the figure and not an assumption about it.
+    pub fn shed_pieces(&mut self) -> usize {
+        let mut freed = 0;
+
+        for stroke in Arc::make_mut(&mut self.finished).iter_mut() {
+            freed += Arc::make_mut(stroke).shed_pieces();
+        }
+
+        if let Some(open) = self.open.as_mut() {
+            freed += open.shed_pieces();
+        }
+
+        freed
+    }
+
+    /// Whether the page's strokes are still holding the polygons a renderer fills from.
+    ///
+    /// The question [`Self::retessellate`] answers, and the one a caller asks before spending a rebuild it
+    /// does not need: an empty list and a full one are both "ready", and only a shed page is not.
+    pub fn has_pieces(&self) -> bool {
+        self.finished
+            .iter()
+            .all(|stroke| stroke.pieces.is_some())
+    }
+
+    /// Rebuilds the render polygons of a page that has given them up, at the detail it is drawn for.
+    ///
+    /// Deliberately *not* what a frame calls. A frame draws one page and can afford to build the strokes it
+    /// can see (see `refresh_ink`); this is the whole page at once, which is what a page turned *to* needs
+    /// before it becomes the page in front of the reader — the same moment it already pays its detail
+    /// rebuild at, and the same order of cost.
+    ///
+    /// Does nothing to a page whose polygons are all still there, so a caller cannot make it expensive by
+    /// asking twice.
+    pub fn retessellate(&mut self) -> bool {
+        if self.has_pieces() {
+            return false;
+        }
+
+        let detail = detail_of(self.detailed_at);
+
+        Arc::make_mut(&mut self.finished)
+            .par_iter_mut()
+            .for_each(|stroke| {
+                Arc::make_mut(stroke).freeze(detail, Tip::Curved);
+            });
+
+        true
+    }
+
     /// Rebuilds for `zoom` at once, which is what a page read or turned to does before anything draws
     /// it: there is no pinch to keep smooth, and a page nobody has seen yet has no earlier detail worth
     /// keeping.
@@ -1869,6 +1928,12 @@ impl Notes {
         // here: the strokes are gone from the page and still in the model, and a page turn is not an
         // edit. Keeping it is what makes undo, turn the page, turn back, redo work.
         if !leaving.is_blank() || leaving.can_redo() {
+            // The page leaves the screen, and its render polygons go with it: `pieces` is 83% of what a
+            // stroke costs and nothing but a frame that draws this page can use them (see
+            // [`InkDocument::shed_pieces`]). The page keeps its points, its outline and its history, so
+            // turning back to it rebuilds the polygons it had — the same tessellation any page pays when it
+            // is read, spent at the moment a page is already spending a rebuild.
+            leaving.shed_pieces();
             self.taken.insert(self.page, leaving);
             self.stamp(self.page);
         }
@@ -1920,6 +1985,15 @@ impl Notes {
     /// the tests that pin the bound and by the memory report (`crate::memory_report`), which prints it.
     pub fn taken_len(&self) -> usize {
         self.taken.len()
+    }
+
+    /// The ink of a page the note is holding but not showing, for the tests that check what it kept.
+    ///
+    /// Read by this module's tests, which is why the library build sees it as unused — the same reason
+    /// [`InkDocument::detail`] is annotated the same way.
+    #[allow(dead_code)]
+    pub fn held(&self, page: usize) -> Option<&InkDocument> {
+        self.taken.get(&page)
     }
 
     /// Marks `page` as the most recently left, which is the order [`Self::shed_pages`] sheds in.
@@ -2033,6 +2107,12 @@ impl Notes {
         ink.set_mode(self.mode);
         // A page turned back to holds the ink it did, and its outlines were detailed for the sheet as
         // it was drawn when the reader left it. One pass, and only when the detail has moved since.
+        //
+        // Its render polygons came back with it as a *possibility*: a page that was put away shed them
+        // (see [`Self::go_to`]), so they are built again here — before the page is the one in front of the
+        // reader, and at the detail the zoom below asks for, so the pass that puts them back is the pass a
+        // page read out of the note already pays.
+        ink.retessellate();
         ink.set_zoom(self.zoom);
         self.current = ink;
         self.page = page;

@@ -315,8 +315,15 @@ pub struct Stroke {
     /// Cloning an `Arc` is a counter increment; cloning 118 MB is 5.8 ms of a rebuild's 19 — a quarter of
     /// the step these exist to make cheap. Sharing them is also exactly right: two strokes with the same
     /// points have the same pieces, and a stroke that is only being re-frozen never had different ones.
+    ///
+    /// **This is a cache, and it can legitimately be absent.** `None` says the pieces were dropped (not
+    /// built, or given up under memory pressure — see [`Self::shed_pieces`]) and that a renderer must build
+    /// them from `points` at `detailed_at` before it can fill this stroke, or fall back to drawing
+    /// `outline`, which is what the platform layers already know how to do. `outline` is deliberately
+    /// **not** dropped with them: it is a seventh of their size and it is what the hit test, the frame's
+    /// vertex count, and the Windows renderer read.
     #[serde(skip)]
-    pub pieces: Arc<Vec<crate::ink::Piece>>,
+    pub pieces: Option<Arc<Vec<crate::ink::Piece>>>,
     /// The axis-aligned box the ink covers, for culling and hit-testing.
     #[serde(skip)]
     pub bounds: Bounds,
@@ -347,7 +354,7 @@ impl Stroke {
             outline: Vec::new(),
             sides: Vec::new(),
             discs: Vec::new(),
-            pieces: Arc::new(Vec::new()),
+            pieces: None,
             bounds: Bounds::at(point.x, point.y),
             detailed_at: None,
         }
@@ -398,7 +405,7 @@ impl Stroke {
             self.outline.clear();
             self.sides.clear();
             self.discs.clear();
-            self.pieces = Arc::new(Vec::new());
+            self.pieces = Some(Arc::new(Vec::new()));
             self.detailed_at = None;
             return;
         }
@@ -407,7 +414,13 @@ impl Stroke {
         // the ribbon again would spend the whole page's time to store what is already stored. The tip is
         // not part of the key because it only ever makes the *live* stroke differ (`close_live`), and a
         // live stroke is rebuilt by `open_stroke` every frame it is drawn rather than through here.
-        if self.detailed_at == Some(detail.to_bits()) {
+        //
+        // `pieces` being absent is the one exception: the detail and the outline are already right, but the
+        // cache a renderer fills from is gone, and this call is the one that can put it back — see
+        // [`Self::shed_pieces`], which is what leaves a stroke in that state on purpose.
+        let same = self.detailed_at == Some(detail.to_bits());
+
+        if same && self.pieces.is_some() {
             return;
         }
 
@@ -430,15 +443,77 @@ impl Stroke {
         if walked {
             self.sides = ribbon.sides;
             self.discs = ribbon.discs;
-            self.pieces = Arc::new(ribbon.pieces);
+            self.pieces = Some(Arc::new(ribbon.pieces));
         } else {
-            // A disc has no sides to fill between: the boundary is the shape.
+            // A disc has no sides to fill between: the boundary is the shape. Its pieces are an empty list
+            // rather than `None`, because *that* is the answer for a disc, not a cache still to be built.
             self.sides.clear();
             self.discs.clear();
-            self.pieces = Arc::new(Vec::new());
+            self.pieces = Some(Arc::new(Vec::new()));
         }
 
         self.detailed_at = Some(detail.to_bits());
+    }
+
+    /// Gives up the render polygons, keeping the ink and its outline.
+    ///
+    /// **The 83% a page costs that a reader cannot see.** Measured on this repository's own fixture, a
+    /// stroke of 24 readings is 7,740 bytes of `pieces` against 1,600 for its points, outline, sides and
+    /// discs together — a 100,000-stroke page is 1.2 GB, and 1,000,000 is 6.1 GB, almost all of it
+    /// triangles for ink that is mostly off screen. Nothing but a renderer's fill reads them, and
+    /// [`Self::freeze`] puts them back from the points alone, so a page can give them up and be drawn
+    /// again exactly as it was.
+    ///
+    /// What is *not* given up is deliberate: `outline` is a seventh of the size, it is what the platform
+    /// layers cull against and what Windows draws from, and `bounds` and `points` are the ink itself.
+    /// Undoing this is [`Self::freeze`] at [`Self::detailed_at`] — the same detail, so the outline it
+    /// rebuilds is the one that is already there.
+    ///
+    /// **A page that has given its ink up is still a page:** it can be drawn (each stroke it is drawing
+    /// builds its pieces on the way to the frame), erased, selected, undone. What it cannot do is *tell*
+    /// a caller it is culled from polygons it does not have — so the callers that ask whether the pieces
+    /// are there ask, rather than assume.
+    pub fn shed_pieces(&mut self) -> usize {
+        let freed = self.pieces.as_ref().map_or(0, |pieces| {
+            pieces.len() * std::mem::size_of::<crate::ink::Piece>()
+        });
+
+        self.pieces = None;
+
+        freed
+    }
+
+    /// The bytes this stroke is holding that a rebuild can reproduce: its render polygons.
+    ///
+    /// What a page adds up to decide whether it is worth giving them up, and what makes the figure a
+    /// budget is written against measurable rather than estimated. The points are not in it: they are the
+    /// ink, and no amount of memory pressure makes them derivable.
+    pub fn cached_bytes(&self) -> usize {
+        self.pieces
+            .as_ref()
+            .map_or(0, |pieces| pieces.len() * std::mem::size_of::<crate::ink::Piece>())
+    }
+
+    /// Builds the render polygons this stroke would have, if they are not there.
+    ///
+    /// The renderer's half of [`Self::shed_pieces`]: what a frame calls on a stroke whose cache was given up,
+    /// and answers with the list it can fill from either way. It builds for the detail the stroke is
+    /// *already* detailed at, so the polygons it returns are the ones that were dropped rather than a
+    /// coarser or finer set — a page drawn after being given up looks exactly like the page before it.
+    ///
+    /// Nothing is written back: the stroke is not the caller's to change through a shared `Arc`, and a frame
+    /// building the strokes it can see should not resurrect the memory the shed was for. A caller that wants
+    /// the cache back for good calls [`Self::freeze`] through an owned stroke (see
+    /// `InkDocument::retessellate`).
+    pub fn pieces_at_detail(&self) -> Arc<Vec<crate::ink::Piece>> {
+        if let Some(pieces) = &self.pieces {
+            return Arc::clone(pieces);
+        }
+
+        let mut rebuilt = self.clone();
+        rebuilt.freeze(detail_of(self.detailed_at.map(f32::from_bits)), Tip::Curved);
+
+        rebuilt.pieces.unwrap_or_default()
     }
 
     /// Rebuilds the derived geometry of a stroke for `detail`: its bounds and its outline.
@@ -1962,18 +2037,19 @@ mod piece_tests {
         }
         stroke.close();
 
-        assert!(!stroke.pieces.is_empty(), "a walked line has pieces");
+        let pieces = stroke.pieces.as_ref().expect("a walked line has pieces");
+        assert!(!pieces.is_empty(), "a walked line has pieces");
 
-        let before = Arc::strong_count(&stroke.pieces);
+        let before = Arc::strong_count(pieces);
         let copy = stroke.clone();
 
         assert_eq!(
-            Arc::strong_count(&stroke.pieces),
+            Arc::strong_count(pieces),
             before + 1,
             "the clone shares the list rather than making one"
         );
         assert!(
-            Arc::ptr_eq(&stroke.pieces, &copy.pieces),
+            Arc::ptr_eq(pieces, copy.pieces.as_ref().unwrap()),
             "and it is the same allocation, not an equal one"
         );
     }
@@ -1994,11 +2070,11 @@ mod piece_tests {
         }
 
         stroke.close_at(1.0);
-        let built = Arc::as_ptr(&stroke.pieces);
+        let built = Arc::as_ptr(stroke.pieces.as_ref().unwrap());
 
         stroke.close_at(1.0);
         assert_eq!(
-            Arc::as_ptr(&stroke.pieces),
+            Arc::as_ptr(stroke.pieces.as_ref().unwrap()),
             built,
             "the same detail is the same pieces, not a second list"
         );
@@ -2006,7 +2082,7 @@ mod piece_tests {
         // A rung above is different geometry, so it is built again.
         stroke.close_at(1.5);
         assert_ne!(
-            Arc::as_ptr(&stroke.pieces),
+            Arc::as_ptr(stroke.pieces.as_ref().unwrap()),
             built,
             "another rung is another ribbon"
         );

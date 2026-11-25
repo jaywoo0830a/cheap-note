@@ -301,10 +301,24 @@ impl History {
         // them (see [`Self::in_note`]).
         let appended = done.len();
 
+        // The note's own log can be deeper than a session's memory, in the redo direction as much as the
+        // undo one — and an edit one direction holds is ink the page has written twice. The newest are the
+        // ones a reader is walking towards, so the oldest of them go first, exactly as `undo` sheds its own.
+        let mut done = VecDeque::from(done);
+        let mut undone = VecDeque::from(undone);
+
+        while done.len() > HISTORY_EDITS {
+            done.pop_front();
+        }
+
+        while undone.len() > HISTORY_EDITS {
+            undone.pop_front();
+        }
+
         History {
-            done: done.into(),
-            undone: undone.into(),
-            appended,
+            appended: appended.min(done.len()),
+            done,
+            undone,
             applied,
         }
     }
@@ -388,6 +402,19 @@ impl History {
         let edit = self.done.pop_back().expect("it was there a line ago");
         self.undone.push_back(edit);
         self.applied -= 1;
+
+        // The redo branch is bounded too, and for the same reason `done` is: an edit that was taken back is
+        // still holding the ink it was made of, so an undo held open — a key held down, a loop in a script —
+        // would grow it without limit. What goes is the **farthest forward** redo, and that is the safe end:
+        // undo never reaches it at all (it works from `done`), so dropping it takes away something the page
+        // cannot be put forward to rather than something it could be put back from, and what is left is still
+        // the *newest* run of edits, which is the run a reader pressing undo-then-redo walks. The edit's own
+        // revert stays the only thing that decides whether a page can be put forward, so a page whose redo
+        // branch is shorter than it was still has every redo that is left working exactly as it did.
+        while self.undone.len() > HISTORY_EDITS {
+            self.undone.pop_front();
+        }
+
         true
     }
 

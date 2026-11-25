@@ -988,7 +988,8 @@ Three things follow, and none of them is a leak:
 `pieces` is **83% of a stroke** on this repository's own 24-reading fixture (7,740 bytes against 1,600 for
 its points, outline, sides and discs) and nothing outside a renderer's fill reads it, so a page that is not
 being drawn gives it up: `Notes::go_to` calls `InkDocument::shed_pieces` on the page it puts away, and
-`Notes::show` calls `retessellate` on the page it brings back. Measured on `phys_footprint` — the figure
+`Notes::show` restores the returning page at the requested zoom. If the detail rung is unchanged,
+`retessellate` restores the shed polygons. Measured on `phys_footprint` — the figure
 macOS actually evicts against, not `ps`, which counts pages the allocator is sitting on:
 
 | Strokes on the page | Loaded | After the page is put away | Freed |

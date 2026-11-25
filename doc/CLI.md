@@ -129,114 +129,61 @@ it did not earn is worse than a failure.
 
 ## `cheap-note --bench`
 
-Measures what a frame of the canvas costs.
+### Run the shipped renderer benchmark
 
 ```sh
-cheap-note --bench [--format table|json] [--strokes 0,29,316,1000,8182] [--frames 30]
+cheap-note --bench --format json --strokes 0,29,316,1000,8182 --frames 60
+cheap-note --bench --max-ms 8.33
 ```
 
-**One command line on both platforms.** macOS and Windows each implement the drawing half behind their
-own seam and hand the same figures to the same report; the contract is what makes the two tables
-comparable. `cheap-note-bench` still exists on Windows as a thin wrapper, because it used to be the only
-way in and a script may call it.
+The default run measures five synthetic pages and 30 unchanged frames per page. On macOS the fixture uses 24 input points per stroke and a 1280×900 offscreen Metal surface. Windows uses Direct2D and also accepts the legacy `cheap-note-bench` entry point. For Windows GUI-subsystem console and file routing see [the Windows implementation](../apps/windows/src/platform/bench.rs). Keep this inexpensive workload in CI for renderer regressions. Large-note qualification additionally requires the interaction measurements below.
 
-The Windows release image has no console beside its window, so the app hands the buffered table (or
-JSON) to the same `platform::console` route the memory report uses: a console when it can attach to one,
-and `cheap-note-bench.txt` beside the executable when it cannot. `cheap-note-bench` remains the console
-binary, and a redirected run keeps its stdout.
+| Field (ms) | macOS | Windows |
+|---|---|---|
+| `first`, `pan` | First draw or one-unit pan, through GPU settle | Time in draw, before present |
+| `warm`, `worst` | Mean and maximum of unchanged frames through settle, including drawable waits | Mean and maximum unchanged draw time |
+| `present` | Mean CPU wall time waiting in settle after submission | Mean CPU wall time inside present |
+| `rebuild` | Detail generation plus draw through settle | Draw after invalidating the revision |
+| `rebuild_work` | Rebuild draw time less drawable wait, excluding detail generation and settle | Same interval as `rebuild` |
+| `frame` | Legacy sum of `warm + present`; the settle interval is counted twice | Sum of mean draw and mean present time |
 
-A page of synthetic strokes is drawn into an offscreen surface — an `NSView` with a Metal layer on macOS,
-a hidden `STATIC` window on Windows. On macOS the frame is **waited for** rather than merely queued:
-`draw` commits and returns, so `settle` is what turns "queued" into "paid". That is the reason the two
-`present` columns are not comparable row for row — see the note below.
-
-For each stroke count:
-
-| Field | Meaning |
-|---|---|
-| `first` | the first frame, which builds every realization the page needs |
-| `warm` | the mean of the frames after it, where every realization is already baked |
-| `worst` | the slowest warm frame — a mean hides the one frame a hand would feel |
-| `rebuild` | one frame after a detail rebuild, which invalidates every realization |
-| `rebuild_work` | the rebuild's own work, with the display's wait taken out — see below |
-| `pan` | one frame with the sheet moved, which must rebuild nothing |
-| `present` | the GPU's share, timed apart from the drawing — see the note below |
-
-`frame` is the warm draw plus the present — what one frame costs while the page is being panned or
-written on. A `present` much larger than the draw is the compositor and not the renderer, and at
-`Present(0)` it is a cost the app cannot remove by drawing faster.
-
-### The one figure that is not the same shape on both platforms
-
-Windows times `present` as the cost of *handing* the frame to the compositor. macOS's `settle` waits for
-the GPU to finish everything the frame queued, because Metal's command buffer does not separate the
-present from the drawing. So macOS's `present` is "all the GPU did for this frame" and Windows's is "the
-hand-off", and **`frame` is the figure to compare across platforms**, not `present`.
-
-The macOS table says so on its own summary line rather than leaving a reader to find out.
-
-### `warm` on macOS has a floor, and it is the display's clock
-
-`warm` on macOS does not measure the renderer alone: it cannot fall below one refresh interval, because
-the frame's first act is to ask `CAMetalLayer` for a drawable and that call waits when the layer's few
-buffers are all still with the compositor. Measured on an arm64 laptop, `warm` sits at **8.2–8.5 ms for
-every page from 0 to 8 182 strokes** — 8.33 ms is a 120 Hz tick — while `present` grows with the page
-(0.66 ms at 0 strokes, 4.8 ms at 8 182). A sampler attributes **98.3 % of the main thread's samples to
-`IOSurface`** and 0.3 % to this app: the thread is parked in the drawable call, not drawing.
-
-Two things follow, and both are worth knowing before reading the table as a renderer's report:
-
-* **`warm` says nothing about the ink.** A page with no strokes and a page with 8 182 cost the same
-  `warm`, because what is being timed is the wait for the next tick. Comparing `warm` across pages, or
-  across machines with different panels, compares refresh rates rather than code.
-* **`warm` missed by a lot is still the real signal.** A frame whose own work exceeds the interval runs
-  over into the next, so a `warm` of, say, 25 ms is the renderer plus one wait and is not a tie.
-
-`present` is the one figure that responds to the page without also containing the display's clock. `rebuild`
-responds to the page too, but it is timed from the start of a draw and so carries a tick of waiting on top;
-`rebuild_work` is the same frame with that wait measured and subtracted, which is the figure that moves when
-the renderer gets faster. Measured at 8 182 strokes: `rebuild` 30.78 ms, its wait 8.76 ms, `rebuild_work`
-22.28 ms — and at 0 strokes `rebuild` 8.42 ms against `rebuild_work` 0.09 ms. `--frames` does not change the
-floor: 10, 100 and 400 warm frames all read 8.1–8.3 ms.
+Use `warm` for Mac offscreen elapsed time. Use a windowed presentation trace for frame delivery. Each backend has different timing boundaries. Compare changes within a backend and machine. [Mac timing loop](../apps/macos/src/platform/bench.rs) · [Windows timing loop](../apps/windows/src/platform/bench.rs)
 
 ### `--max-ms` — the budget a CI job can hold
 
-```console
-$ cheap-note --bench --max-ms 8.33     # 120 Hz
-FAILED — over the 8.33 ms budget: 8182 strokes rebuild_work 18.44
-$ echo $?
-1
-```
+The shipped gate applies its millisecond limit to each row's `rebuild_work` and `present`. A measured overrun fails (1), all measured rows within budget pass (0), and a required measurement missing without a measured failure skips (2). An offscreen pass covers only these two reported quantities. Thirty unchanged frames contain no pen-up events.
 
-`--max-ms N` fails the run (exit `1`) when any row's **`rebuild_work`** or **`present`** exceeds `N`
-milliseconds, and the sentence names each offending row and the column it broke.
+### Large-note qualification
 
-**Those two columns are the whole point, and choosing them took a correction.** Every other duration in the
-table is timed from the start of a draw, and a draw's first act is to ask `CAMetalLayer` for a drawable — a
-call that waits for the display. `warm` and `rebuild` therefore read ~8.2 ms on an **empty** page, and a
-120 Hz budget on either would fail the app for the panel's clock.
+**Status:** proposed release criteria. The current CLI implements the renderer smoke test above. The matrix below requires an instrumented interaction runner and windowed measurements. Record each row as pending until its evidence exists. A first implementation can start with the pen-up and blank-erase cases on macOS and retain the current storage format.
 
-An earlier version of this budget gated `present` alone. That is a figure with no wait in it — but it was
-also the figure a renderer optimisation barely moves: taking 8 182 strokes of rebuild from 70.7 ms to
-18.2 ms changed `present` by **+1.6 ms**, so the gate passed before the work and after it. A gate that
-cannot see the improvement it exists for is not a gate. `rebuild_work` is the column that moves (62.5 ms of
-work before, 10.0 ms after), so that is what it is measured against.
+Specify the support claim as **total note strokes / maximum strokes on one page / strokes inside the viewport / drawable pixels / refresh rate / hardware and RAM**. A million strokes spread over a thousand pages and a million strokes on one page exercise different paths. Publish the largest passing row for each distribution and device.
 
-The consequence, stated plainly: **this is work-in-a-frame, not latency.** A frame that meets it can still
-miss a tick, because reaching the glass within 8.33 ms also depends on the display's rate and the compositor.
-`frame` is the figure for latency and is deliberately not gated.
+#### Fixture matrix
 
-A budget on a quantity nothing measured is a **skip (exit `2`), never a pass**: `rebuild_work` or `present`
-absent from a row means the gate was not earned. That is the same rule the energy budgets follow.
+Use deterministic 24-point strokes, fixed widths, path lengths, colours and seed. Save the generator revision and fixture digest. Place hidden strokes completely outside the renderer's cache margin. Keep page dimensions, viewport, backing scale and the visible stroke coordinates identical within a comparison. Generate fixtures before timing or open a previously generated note.
 
-On Windows `rebuild_work` equals `rebuild`, because `draw` there is the CPU work alone with the present timed
-after it — there is no display clock inside the number to take out.
+| Case | Change one variable | Measured action and expected signal |
+|---|---|---|
+| A. Hidden ink on the active page | Hold 1,000 visible strokes fixed. Add 0, 10k, 100k, then 1M hidden strokes to that page. | Commit one short stroke at the same location. Trace pen-up through the first presented frame containing the edit. Attribute subsequent deferred rebuilds/uploads separately. Separately move the eraser across empty paper. Detect page-wide scans. |
+| B. Other pages | Keep the active page identical. Use 1, 100 and 1,000 pages of 1,000 strokes each. | Repeat A's append and erase. Cold-open a specified page, visit 20 distinct pages, then return to the first. Measure first usable ink, resident memory, close/reopen and persistence. |
+| C. Visible density | Put 1k, 10k, 100k, then 1M strokes in the viewport. Keep the camera fixed. | Replay active writing and a pan inside the cache margin. Record submitted vertices, GPU time and presented intervals. This is the dense-page ceiling. |
+| D. Long open stroke | Keep 1k finished strokes fixed. Extend one stroke through 24, 256, 2,048 and 16,384 points. | Replay equal-sized input batches. Record work per update by prefix length, regenerated vertices and bytes uploaded. Capture the final commit separately. |
+| E. Cache and edit boundaries | Reuse A at each size. Fix camera start, zoom thresholds and selection rectangle. | Pan inside and across the cache margin, cross one detail threshold, move a selection, undo and redo. Track the initiating frame, delayed work and return to idle separately. |
 
-The default counts are 0, 29, 316, 1 000 and 8 182 strokes, and both platforms default to 30 warm
-frames. The first three counts are the ones the older measurements used, and 8 182 is the page the macOS
-figures in `doc/WINDOWS.md` were taken on — it is in the list because the question this benchmark exists
-for is whether a platform is draw-bound at that page size. `--frames 60` is the longer run §6.4 of that
-document quotes.
+For repeated edits, restore the starting state outside the timed interval and mark the resulting caches warm or cold. Keep the edit visible long enough to attribute work from all rotating buffers. Count a missing visible update or lost stroke as a correctness failure. Verify geometry, order and stroke count after undo/redo and save/reopen against the fixture. Run each large fixture in a fresh process and retain the last completed row on timeout or memory exhaustion.
+
+#### Measurement and acceptance
+
+1. **Two hardware profiles.** Qualify the Mac target in a real 3840×2160 drawable on a verified external 120 Hz display. Qualify an 8 GB integrated-GPU system at its supported, recorded display mode separately. Record commit, release build, device, OS/driver, display mode, power mode, input replay rate and starting memory pressure. Use the same configuration for base and candidate. Record actual pen hardware and driver for device runs.
+2. **Time the user action.** Stamp input delivery, model commit, draw submission, GPU completion and actual presentation with a common monotonic timebase or documented clock conversion. Associate the edit ID with the first presented frame containing it. Record coalesced inputs, absent presentations, skipped deadlines and deferred work. Keep CPU work, drawable waits and GPU intervals separate. App-delivery-to-presentation excludes device sampling and panel scanout.
+3. **Collect tails.** For interactive rows warm up with 100 operations, then collect at least 1,000 measured operations per case per run, three independent runs. Alternate base and candidate order. Report p50/p95/p99 using sorted sample rank `ceil(p × n)`, maximum and sample count for each run. Publish raw observations. Time cold starts and first-page loads independently across 10 fresh processes; report individual values, median and maximum.
+4. **Frame delivery gate.** During continuous active input on the 120 Hz profile, use the actual refresh period (nominally 8.333 ms). Require at most 1% missed target refresh slots and p99 app-delivery-to-first-presented-edit ≤ two refresh periods in each run. Count expected slots across the active interval, including gaps with no presentation; exclude explicitly idle intervals. On slower profiles use their refresh period and label the result with the measured mode. These are proposed targets, pending device baselines.
+5. **Locality gate.** In A and B, count finished-stroke records inspected by the edit, hit test and renderer combined, vertices regenerated and upload bytes attributable to the action, including deferred work. Compare each larger fixture with its 1k-visible control per operation. For a fixed edit require p99 inspected records ≤ control + 64, regenerated vertices ≤ control + one appended stroke's vertex count and uploaded bytes ≤ control + one appended stroke's vertex bytes. For blank erase require zero regenerated ink vertices and zero ink uploads. Count index traversal separately. These initial tolerances permit bounded bookkeeping while exposing a scan even on a fast CPU.
+6. **Memory and correctness gate.** Record process peak and post-close resident bytes, renderer cache bytes, resident page count and OS memory pressure. For swap, record cumulative swap-out bytes before and after each traversal on an otherwise idle device; growth in both of the last two cycles is sustained growth. Use the shipped `--memory-report` allowances for its own close-cycle workloads. Qualifying an 8 GB configuration additionally requires completing the named fixture without OOM, sustained swap growth over the last two identical traversal cycles, data loss or a frame-gate failure during writing. Publish peak bytes and the OS swap samples. Keep load time and edit time as separate results.
+7. **Verdict.** Evaluate each fixture and device independently. Any observed correctness, locality, memory or timing breach fails its applicable gate. Missing required traces, counters, device or samples leave qualification incomplete. An OOM or workload timeout on the target is a failed capacity row; record the predeclared timeout and failure reason. Energy, measured separately under the power protocol below, cannot compensate for an interactive failure.
+
+Keep one record per operation with run ID, fixture digest, action, edit/frame IDs, sample index, timestamps, inspected strokes, regenerated and submitted vertices, uploaded bytes, and memory readings with units. Distinguish measured zero from unavailable. Include both the small and large rows in review so a changed fixture or faster device cannot conceal a regression.
 
 ## `cheap-note --power-report` — what a rebuild costs, in joules (draft)
 
@@ -627,11 +574,11 @@ The benchmark's object is the same shape:
   "command": "bench",
   "platform": "windows",
   "tool": "Direct2D canvas · 1280×900 at 1.0x",
-  "measured": ["strokes", "first", "warm", "worst", "rebuild", "pan", "present", "frame"],
+  "measured": ["strokes", "first", "warm", "worst", "rebuild", "rebuild_work", "pan", "present", "frame"],
   "unmeasured": [],
-  "columns": ["strokes", "first", "warm", "worst", "rebuild", "pan", "present", "frame"],
+  "columns": ["strokes", "first", "warm", "worst", "rebuild", "rebuild_work", "pan", "present", "frame"],
   "rows": [
-    { "label": "316 strokes", "strokes": 316, "first": 12.4, "warm": 4.1, "worst": 6.8, "rebuild": 11.2, "pan": 3.9, "present": 2.2, "frame": 6.3 }
+    { "label": "316 strokes", "strokes": 316, "first": 12.4, "warm": 4.1, "worst": 6.8, "rebuild": 11.2, "rebuild_work": 11.2, "pan": 3.9, "present": 2.2, "frame": 6.3 }
   ],
   "summary": {},
   "verdict": "ok",
@@ -650,14 +597,14 @@ unit — numbers stay numbers, and absence stays `null`.
 
 ## Where this document and the code part company
 
-Everything above except `--power-report` is implemented on both platforms, and the exit codes, field
+The shipped renderer smoke test and memory report are implemented on both platforms, and the exit codes, field
 names and platform table (the shipped rows) are what the tests pin (`crates/note-ui/src/report.rs`,
 `crates/note-ui/src/memory_report.rs`, `apps/macos/src/platform/bench.rs`,
 `apps/windows/src/platform/bench.rs`, `apps/windows/src/platform/report.rs`). The power report is a
 contract only: no parser, no workload and no meter reader is in the tree yet; its section says what
 it will accept and print. Two honest limits remain about the shipped commands:
 
-- **The two `present` columns measure different things** (see above), so `frame` is the comparable figure.
+- **The timing boundaries differ by backend.** On macOS, `frame` counts settle twice. Use per-backend observations and the windowed protocol above for delivery.
 - **`surface_bytes` on macOS reports zero in a headless run.** The graphics column is therefore
   *measured* (it is a real reading) rather than declared absent — `unmeasured` is derived from the rows,
   so the contract never says a column is unmeasured while its cells hold numbers.

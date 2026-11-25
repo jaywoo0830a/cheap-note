@@ -74,7 +74,13 @@ someone as a `.app`:
 
 ```bash
 apps/macos/bundle.sh              # → dist/Cheap Note.app (release build, Info.plist, ad-hoc signature)
+apps/macos/bundle.sh --install-desktop
+                                  # the same, and a copy at ~/Desktop/Cheap Note.app to open from there
 ```
+
+The desktop copy is a copy and not a link, because `bundle.sh` deletes and rebuilds `dist/` on every run;
+it is made after the zip, so a failed pack does not leave an app on the desktop that was never finished.
+Run it again after a change and it replaces the old copy rather than merging into it.
 
 One caution about a green run: the pdf tests that need a real Pdfium skip themselves when none is on the
 machine (`crates/note-ui/src/pdfium/api.rs`'s `available()`), so green is *not* proof that a page renders.

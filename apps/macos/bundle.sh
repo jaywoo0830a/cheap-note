@@ -12,6 +12,9 @@
 #     apps/macos/bundle.sh --binary target/aarch64-apple-darwin/release/cheap-note
 #                                     → the same, with a PGO build instead of a plain one (COMPILE.md),
 #                                       packed as dist/CheapNote-0.1.0-macos-arm64-pgo.zip
+#     apps/macos/bundle.sh --install-desktop
+#                                     → the same, and then a copy in ~/Desktop so it opens from the Dock
+#                                       without going through dist/ first
 #
 # Two things come out of it: the `.app` to open on this machine, and the zip to carry to another one.
 #
@@ -33,13 +36,37 @@ NAME="cheap-note"
 #                    `target/aarch64-apple-darwin/release/` and which a plain `cargo build --release`
 #                    here would overwrite. `COMPILE.md` has the three commands that make it.
 BINARY=""
-if [ "${1:-}" = "--binary" ]; then
-    BINARY="${2:?--binary needs a path}"
-    if [ ! -x "$BINARY" ]; then
-        echo "! $BINARY is not an executable"
-        exit 1
-    fi
-fi
+
+# Whether to also put a copy where it can be opened without going through `dist/`.
+#
+# A copy and not a link: `dist/` is rebuilt from scratch on every run (`rm -rf` below), so a link into it
+# would be a link to a directory that stops existing. `ditto` and not `cp -R`, for the reason the zip uses
+# it: an app bundle is not a folder of files — the extended attributes and the executable's permission bits
+# are part of whether it runs. The old copy is removed first, so a second run replaces the app instead of
+# merging the new bundle into the old one (which would leave a stale `libpdfium.dylib` behind).
+INSTALL_DESKTOP=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --binary)
+            BINARY="${2:?--binary needs a path}"
+            if [ ! -x "$BINARY" ]; then
+                echo "! $BINARY is not an executable"
+                exit 1
+            fi
+            shift 2
+            ;;
+        --install-desktop)
+            INSTALL_DESKTOP="yes"
+            shift
+            ;;
+        *)
+            echo "! unknown argument: $1"
+            echo "  usage: apps/macos/bundle.sh [--binary <path>] [--install-desktop]"
+            exit 1
+            ;;
+    esac
+done
 
 if [ -n "$BINARY" ]; then
     echo "— using $BINARY (no build)"
@@ -122,3 +149,21 @@ echo "  launch it with: open \"$APP\""
 echo "— done: $ZIP"
 du -sh "$ZIP" | cut -f1 | xargs -I{} echo "  {} to carry"
 echo "  check it with: ditto -x -k \"$ZIP\" /tmp/cheap-note-check && open \"/tmp/cheap-note-check/Cheap Note.app\""
+
+# A copy to open from the Dock, asked for with `--install-desktop`.
+#
+# It goes after the zip so that a failed pack does not leave a half-installed app on the desktop: the
+# desktop copy is a convenience, and dishing out a copy of a bundle that did not finish being built would
+# be the one thing worse than not having one. The signature travels with the copy — `ditto` keeps the
+# bundle's `_CodeSignature` — so the copy is still valid on this machine.
+if [ -n "$INSTALL_DESKTOP" ]; then
+    DESKTOP="$HOME/Desktop/Cheap Note.app"
+
+    echo "— installing $DESKTOP"
+    mkdir -p "$HOME/Desktop"
+    rm -rf "$DESKTOP"
+    ditto "$APP" "$DESKTOP"
+
+    echo "— done: $DESKTOP"
+    echo "  launch it with: open \"$DESKTOP\""
+fi

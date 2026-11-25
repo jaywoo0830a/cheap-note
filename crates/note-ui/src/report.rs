@@ -57,6 +57,8 @@ pub enum Command {
     MemoryReport,
     /// `cheap-note-bench`.
     Bench,
+    /// `cheap-note --power-report`.
+    PowerReport,
 }
 
 impl Command {
@@ -65,6 +67,7 @@ impl Command {
         match self {
             Command::MemoryReport => "memory-report",
             Command::Bench => "bench",
+            Command::PowerReport => "power-report",
         }
     }
 
@@ -73,6 +76,7 @@ impl Command {
         match self {
             Command::MemoryReport => "--memory-report",
             Command::Bench => "--bench",
+            Command::PowerReport => "--power-report",
         }
     }
 }
@@ -119,6 +123,19 @@ pub enum Value {
     Millis(f64),
     /// A signed number, in bytes: a delta, where the sign is the point.
     Signed(i64),
+    /// A text word: a phase (`rung`, `frame`), or a named fact in a summary.
+    ///
+    /// The one value kind that is not a number, added for the power report's `phase` column. It renders
+    /// as a bare word in JSON — a script reads `"rung"`, not `"rung"` inside a number's quote — and as
+    /// itself in a table cell.
+    Text(&'static str),
+    /// A float in a physical unit: joules, or operations per joule.
+    ///
+    /// Kept apart from [`Value::Millis`] because they are *not* the same claim — a duration and an
+    /// energy are different quantities in different units — and a consumer that reads `ops_per_joule`
+    /// by position must not be handed a millisecond. It renders as a bare float in JSON and with two
+    /// decimals in a table.
+    Joules(f64),
     /// Nothing to report, and why.
     Absent(&'static str),
 }
@@ -130,6 +147,8 @@ impl Value {
             Value::Count(n) => n.to_string(),
             Value::Millis(ms) => format!("{ms}"),
             Value::Signed(n) => n.to_string(),
+            Value::Text(text) => format!("\"{}\"", json_escape(text)),
+            Value::Joules(energy) => format!("{energy}"),
             Value::Absent(_) => String::from("null"),
         }
     }
@@ -140,6 +159,8 @@ impl Value {
             Value::Count(n) => n.to_string(),
             Value::Millis(ms) => format!("{ms:.2}"),
             Value::Signed(n) => format!("{n:+}"),
+            Value::Text(text) => String::from(*text),
+            Value::Joules(energy) => format!("{energy:.2}"),
             Value::Absent(_) => String::from("—"),
         }
     }
@@ -879,6 +900,22 @@ mod tests {
         assert_eq!(Value::Millis(4.25).json(), "4.25");
         assert_eq!(Value::Millis(4.0).json(), "4");
         assert_eq!(Value::Millis(4.25).cell(), "4.25");
+    }
+
+    /// The two value kinds the power report adds: a bare word, and a float in joules.
+    ///
+    /// A text cell is a JSON *string* — `"rung"`, not a number — and a joule cell is a bare float, so a
+    /// script reads `joules_per_op: 0.08` and compares it without quoting. Measured zero (`0`) is a
+    /// reading; absence is still `null` and a dash.
+    #[test]
+    fn text_and_joules_render_as_themselves() {
+        assert_eq!(Value::Text("rung").json(), "\"rung\"");
+        assert_eq!(Value::Text("rung").cell(), "rung");
+        assert_eq!(Value::Joules(0.08).json(), "0.08");
+        assert_eq!(Value::Joules(0.08).cell(), "0.08");
+        // A joules value that happens to be zero is a measurement, not an absence.
+        assert!(Value::Joules(0.0).is_present());
+        assert_eq!(Value::Joules(0.0).json(), "0");
     }
 
     /// A signed delta keeps its sign — that sign is the whole story of a close.

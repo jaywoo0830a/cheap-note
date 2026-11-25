@@ -229,6 +229,22 @@ pub trait SystemStats {
     fn surface_bytes(&mut self) -> Option<u64> {
         None
     }
+
+    /// The package's cumulative energy use, in microjoules, when the platform can meter it.
+    ///
+    /// The energy half of the seam (see `crate::power_report`). Like [`Self::surface_bytes`], `None` is
+    /// *nothing to report* — there is no package-energy counter this process may read — rather than a
+    /// zero, which would be a claim about an idle machine. A `Some` here is a *cumulative* figure that
+    /// only ever rises (until the hardware's own counter wraps); the power report differences two
+    /// samples around a measurement window to learn what the window cost.
+    ///
+    /// The figure covers the **package**, not the process, which is why the report names its scope
+    /// separately from the meter's: a package counter sees every core whether or not this process used
+    /// them, and a meter at the wall sees the whole machine. Windows answers `None` here — there is no
+    /// standard user-mode API for package energy — and reads a meter instead, or reports CPU time.
+    fn energy_uj(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 /// The surface the desk, the paper and the ink are painted on: the view says what, this says how.

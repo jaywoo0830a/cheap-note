@@ -105,6 +105,32 @@ impl SystemStats for ProcessStats {
     fn surface_bytes(&mut self) -> Option<u64> {
         surface_bytes()
     }
+
+    /// macOS has no user-mode package-energy counter the report may read (`powermetrics` needs root and
+    /// reports watts over an interval, not joules), so this is `None` — absent, never a zero.
+    fn energy_uj(&mut self) -> Option<u64> {
+        None
+    }
+}
+
+impl ProcessStats {
+    /// The process's accumulated CPU time, in milliseconds of core-time (all threads summed).
+    ///
+    /// `sysinfo`'s `accumulated_cpu_time` is user + system together; the power report sums the two fields
+    /// again anyway, so the whole figure is returned as user time with system at zero. The figure is
+    /// already core-time, which is exactly what the report's `cpu` column means.
+    ///
+    /// Kept off the [`SystemStats`] trait on purpose: the energy counter is a seam every platform answers,
+    /// but the CPU-time reader is the app's, handed to the report through `Harness::cpu`.
+    pub fn cpu_time(&mut self) -> Option<note_ui::power_report::CpuTime> {
+        self.system
+            .refresh_processes(ProcessesToUpdate::Some(&[self.pid]), false);
+        let process = self.system.process(self.pid)?;
+        Some(note_ui::power_report::CpuTime {
+            user_ms: process.accumulated_cpu_time(),
+            system_ms: 0,
+        })
+    }
 }
 
 /// How much memory the GPU is holding for this process, from `task_info(TASK_VM_INFO)`.

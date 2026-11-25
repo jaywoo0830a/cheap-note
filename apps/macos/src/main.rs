@@ -98,11 +98,46 @@ fn main() {
         std::process::exit(code);
     }
 
+    // `--power-report`: what a rebuild costs, in joules. The workload core is `note_ui::power_report`;
+    // this half lends the process's CPU time and, for the `frame` phase, the Metal surface — see
+    // `platform::power`.
+    if args.first().map(String::as_str) == Some(note_ui::power_report::FLAG) {
+        let options = match note_ui::report::Options::parse(&args[1..]) {
+            Ok(options) => options,
+            Err(error) => {
+                eprintln!("cheap-note: {error}");
+                std::process::exit(2);
+            }
+        };
+
+        if options.help {
+            print!("{}", note_ui::power_report::usage());
+            std::process::exit(0);
+        }
+
+        let plan = match note_ui::power_report::plan(&options.rest, options.format) {
+            Ok(plan) => plan,
+            // `--help` is the one "error" that is not a mistake.
+            Err(error) if error == "help" => {
+                print!("{}", note_ui::power_report::usage());
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("cheap-note: {error}");
+                eprint!("{}", note_ui::power_report::usage());
+                std::process::exit(2);
+            }
+        };
+
+        let code = platform::power::run(&plan, &mut std::io::stdout());
+        std::process::exit(code);
+    }
+
     // A flag this build does not know is a mistake, not a request to open a window. Saying so is the
     // difference between a typo and an app that seems to ignore what it was asked.
     if let Some(unknown) = args.iter().find(|arg| arg.starts_with('-')) {
         eprintln!("cheap-note: unknown flag: {unknown}");
-        eprintln!("usage: cheap-note [--memory-report <note> ... | --bench] [-h | --help]");
+        eprintln!("usage: cheap-note [--memory-report <note> ... | --bench | --power-report] [-h | --help]");
         std::process::exit(2);
     }
 

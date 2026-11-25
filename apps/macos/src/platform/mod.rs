@@ -6,6 +6,7 @@ pub mod ghost;
 pub mod metal;
 pub mod pen;
 pub mod pointer;
+pub mod power;
 pub mod vitals;
 
 use std::sync::Arc;

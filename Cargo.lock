@@ -821,26 +821,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cheap-note-engine"
-version = "0.1.0"
-dependencies = [
- "note-format",
- "rayon",
-]
-
-[[package]]
-name = "cheap-note-engine-metal"
-version = "0.1.0"
-dependencies = [
- "cheap-note-engine",
- "note-format",
- "objc2 0.6.5",
- "objc2-foundation 0.3.2",
- "objc2-metal 0.3.2",
- "objc2-quartz-core 0.3.2",
-]
-
-[[package]]
 name = "cheap-note-macos"
 version = "0.1.0"
 dependencies = [

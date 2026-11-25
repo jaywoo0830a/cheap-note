@@ -99,6 +99,7 @@ mod pages;
 mod pdf;
 mod pdfium;
 mod pen_gesture;
+pub mod power_report;
 mod prefs;
 mod recent;
 pub mod report;

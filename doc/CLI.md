@@ -185,12 +185,14 @@ For repeated edits, restore the starting state outside the timed interval and ma
 
 Keep one record per operation with run ID, fixture digest, action, edit/frame IDs, sample index, timestamps, inspected strokes, regenerated and submitted vertices, uploaded bytes, and memory readings with units. Distinguish measured zero from unavailable. Include both the small and large rows in review so a changed fixture or faster device cannot conceal a regression.
 
-## `cheap-note --power-report` — what a rebuild costs, in joules (draft)
+## `cheap-note --power-report` — what a rebuild costs, in joules
 
-**This section is a contract, not a description of shipped code.** The command is not in the tree
-yet: its parser, its workload and its meter reader are still to be written. It is written down first
-because the platform half — which counter exists, and what it may claim — is the part that has to be
-agreed before the arithmetic is worth writing. Everything below is the shape it will ship in.
+**Status: implemented on macOS, portable core complete.** The parser, the two workloads, the CSV meter
+reader and the report are in the tree (`crates/note-ui/src/power_report.rs`); the macOS half
+(`apps/macos/src/platform/power.rs`) lends the process's CPU time and, for the `frame` phase, the Metal
+surface. Windows does not yet route the flag; a Windows build added it through the same
+`platform::console` route the other two commands use (see below), and without a package-energy counter it
+reports `wall` and `cpu` with `basis: "cpu-time"`.
 
 The bench answers *how long*. This answers *how many joules, and how many operations per joule* — the
 question a rung rebuild raises, and the one `--bench` cannot answer by itself. It is not a system
@@ -443,9 +445,9 @@ bench's `rebuild_work` and `present` — the two figures with no display clock i
 budget a CI job can hold" for why `warm`, `rebuild` and `frame` cannot be gated. The energy budgets are
 compared against the row's `joules_per_op` and `ops_per_joule`.
 
-`--max-ms` is the one budget flag that exists today, in both benches. `--max-joules-per-op`,
-`--min-ops-per-joule` and `--require-energy` are still the `--power-report` contract below and are not
-parsed by anything yet.
+`--max-ms` exists in both benches and in the power report, where it is compared against the row's
+`wall`. `--max-joules-per-op`, `--min-ops-per-joule` and `--require-energy` are parsed by the power
+report: an energy budget or `--require-energy` turns "no joules" into a skip, never a pass.
 
 ### What this is not
 
@@ -459,14 +461,15 @@ parsed by anything yet.
 - **Not a control.** It does not change the power plan, the frame cap, or the global Rayon pool; it
   reports what it found and measures a scoped pool when asked.
 
-### What would implement it
+### What implements it
 
-A new `Command::PowerReport` and two value kinds — text, and a float with a unit (joules or
-operations per joule) — in the shared report, a portable workload core in `note-ui` (the synthetic
-page, the rung alternation, the scoped pool and the arithmetic), and a platform half per app: process
-CPU time, an optional energy counter, and the power plan/AC state. The platform halves are the same
-seam the memory report and the bench already use; a platform with no energy counter still builds and
-still reports `wall` and `cpu`.
+`Command::PowerReport` and the two value kinds — `Value::Text`, and `Value::Joules` for a float with a
+joules/ratio unit — are in the shared report (`crates/note-ui/src/report.rs`). The portable workload core
+is `crates/note-ui/src/power_report.rs`: the synthetic page, the rung alternation, the scoped pool, the
+CSV meter and its integration, the CPU-time and energy windows, and the arithmetic. A platform half per
+app lends process CPU time, an optional energy counter (through `SystemStats::energy_uj`), and — for the
+`frame` phase — the canvas to draw into. A platform with no energy counter still builds and still reports
+`wall` and `cpu`, with the energy columns `null` and named in `unmeasured`.
 
 ## What a platform has to provide
 
@@ -481,7 +484,7 @@ that supplies none of them still builds, still runs, and says so.
 | a console to print to | inherited `stdout` | attach to the parent console, or a file | inherited `stdout` |
 | frame timing | Metal, waited for with `waitUntilCompleted` | Direct2D + swap chain | — |
 | process CPU time | `task_info` | `GetProcessTimes` | `getrusage` |
-| an energy counter (optional) | `powermetrics`, as root | none — a meter or CPU time | RAPL `energy_uj`, when readable |
+| an energy counter (optional) | none — `SystemStats::energy_uj` is `None`; a meter or CPU time | none — a meter or CPU time | RAPL `energy_uj`, when readable |
 | AC/battery and the active plan | `pmset -g`, `pmset -g batt` | `GetSystemPowerStatus`, `powercfg` | `/sys/class/power_supply`, `scaling_governor` |
 
 The graphics column is the model for how to be honest: Windows **has no** `surface_bytes`, so the
@@ -597,16 +600,24 @@ unit — numbers stay numbers, and absence stays `null`.
 
 ## Where this document and the code part company
 
-The shipped renderer smoke test and memory report are implemented on both platforms, and the exit codes, field
-names and platform table (the shipped rows) are what the tests pin (`crates/note-ui/src/report.rs`,
-`crates/note-ui/src/memory_report.rs`, `apps/macos/src/platform/bench.rs`,
-`apps/windows/src/platform/bench.rs`, `apps/windows/src/platform/report.rs`). The power report is a
-contract only: no parser, no workload and no meter reader is in the tree yet; its section says what
-it will accept and print. Two honest limits remain about the shipped commands:
+The shipped renderer smoke test, the memory report and the power report are implemented on macOS; the
+exit codes, field names and platform table (the shipped rows) are what the tests pin
+(`crates/note-ui/src/report.rs`, `crates/note-ui/src/memory_report.rs`,
+`crates/note-ui/src/power_report.rs`, `apps/macos/src/platform/bench.rs`,
+`apps/macos/src/platform/power.rs`, `apps/windows/src/platform/bench.rs`,
+`apps/windows/src/platform/report.rs`). The power report's portable core is complete; what a platform
+still owes it is its own CPU-time reader and, for the `frame` phase, a canvas — macOS supplies both, and
+Windows routes neither yet. Four honest limits remain about the shipped commands:
 
 - **The timing boundaries differ by backend.** On macOS, `frame` counts settle twice. Use per-backend observations and the windowed protocol above for delivery.
 - **`surface_bytes` on macOS reports zero in a headless run.** The graphics column is therefore
   *measured* (it is a real reading) rather than declared absent — `unmeasured` is derived from the rows,
   so the contract never says a column is unmeasured while its cells hold numbers.
+- **macOS has no package-energy counter.** `SystemStats::energy_uj` is `None` there — `powermetrics` needs
+  root and reports watts, not joules — so a macOS power run without `--meter` reads `basis: "cpu-time"`.
+- **The `frame` phase's energy is on a phase's window, not one operation's.** A rung is milliseconds and a
+  meter samples every tenth of a second, so the report integrates the meter (or differences the counter)
+  across the whole phase and divides by its count; `meter_samples` and `meter_span_ms` say what the window
+  saw, and a window under two samples is a skip.
 
 

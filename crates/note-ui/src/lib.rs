@@ -238,3 +238,6 @@ pub fn run(installer: Installer) {
         cx.activate(true);
     });
 }
+
+#[cfg(test)]
+mod long_note_tests;

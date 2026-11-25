@@ -517,8 +517,8 @@ impl Surface {
     ///
     /// Four samples a pixel, because the ink is a polygon and Metal has no analytic antialiasing to give it
     /// — where Direct2D, on Windows, fills each stroke with *coverage* rather than samples
-    /// (`D2D1_ANTIALIAS_MODE_PER_PRIMITIVE`). The texture is private and lives only on the GPU; the pass
-    /// resolves it into the drawable, which is the one copy the compositor needs.
+    /// (`D2D1_ANTIALIAS_MODE_PER_PRIMITIVE`). Only the resolved drawable survives the pass. Apple GPUs can keep the
+    /// multisample attachment in tile memory.
     fn multisample(&mut self) -> Option<Retained<ProtocolObject<dyn MTLTexture>>> {
         if let Some(texture) = &self.msaa {
             return Some(texture.clone());
@@ -538,8 +538,15 @@ impl Surface {
         unsafe {
             descriptor.setSampleCount(SAMPLES);
         }
-        descriptor.setStorageMode(MTLStorageMode::Private);
         descriptor.setUsage(MTLTextureUsage::RenderTarget);
+        if self.device.supportsFamily(objc2_metal::MTLGPUFamily::Apple1) {
+            descriptor.setStorageMode(MTLStorageMode::Memoryless);
+            if let Some(texture) = self.device.newTextureWithDescriptor(&descriptor) {
+                self.msaa = Some(texture.clone());
+                return Some(texture);
+            }
+        }
+        descriptor.setStorageMode(MTLStorageMode::Private);
 
         self.msaa = self.device.newTextureWithDescriptor(&descriptor);
         self.msaa.clone()

@@ -2105,15 +2105,10 @@ impl Notes {
     /// has taken that document away, what is left in its place holds nothing.
     fn show(&mut self, mut ink: InkDocument, page: usize) {
         ink.set_mode(self.mode);
-        // A page turned back to holds the ink it did, and its outlines were detailed for the sheet as
-        // it was drawn when the reader left it. One pass, and only when the detail has moved since.
-        //
-        // Its render polygons came back with it as a *possibility*: a page that was put away shed them
-        // (see [`Self::go_to`]), so they are built again here — before the page is the one in front of the
-        // reader, and at the detail the zoom below asks for, so the pass that puts them back is the pass a
-        // page read out of the note already pays.
-        ink.retessellate();
-        ink.set_zoom(self.zoom);
+        // A change of detail also restores the polygons shed while this page was away.
+        if !ink.set_zoom(self.zoom) {
+            ink.retessellate();
+        }
         self.current = ink;
         self.page = page;
     }

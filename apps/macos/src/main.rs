@@ -137,13 +137,38 @@ fn main() {
         std::process::exit(code);
     }
 
+    // The usage line below has always offered `-h | --help`, so it has to answer them: a flag an app
+    // advertises and then refuses is worse than one it never mentions, because the reader has been told it
+    // would work. Asked before the unknown-flag check, because these two *are* known flags.
+    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+        print!("{}", usage());
+        std::process::exit(0);
+    }
+
     // A flag this build does not know is a mistake, not a request to open a window. Saying so is the
     // difference between a typo and an app that seems to ignore what it was asked.
     if let Some(unknown) = args.iter().find(|arg| arg.starts_with('-')) {
         eprintln!("cheap-note: unknown flag: {unknown}");
-        eprintln!("usage: cheap-note [--memory-report <note> ... | --bench | --power-report] [-h | --help]");
+        eprint!("{}", usage());
         std::process::exit(2);
     }
 
     note_ui::run(platform::INSTALLER);
+}
+
+/// What this build accepts on the command line, for `-h`, `--help` and a mistaken flag.
+///
+/// One line, listing only what *this* build implements: `--power-report` is macOS-only (it reads the
+/// process's CPU time and the Metal surface), so a line that carried it on every platform would advertise a
+/// flag that answers "unknown" — the exact mismatch `-h` exists to avoid. Each flag's own `--help` has the
+/// detail (see `note_ui::memory_report::usage` and `platform::bench::print_usage`).
+fn usage() -> String {
+    String::from(
+        "usage: cheap-note [--memory-report <note> ... | --bench | --power-report] [-h | --help]\n\n\
+         no flag            open a window\n\
+         --memory-report    what opening, closing and drawing costs, in bytes\n\
+         --bench            what a rebuild, a pan and a frame cost, in milliseconds\n\
+         --power-report     what a rebuild costs, in CPU time and joules\n\n\
+         Each report prints its own usage when given `--help`.\n",
+    )
 }

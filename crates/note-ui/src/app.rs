@@ -861,6 +861,21 @@ fn palette_colours(tool: Tool) -> &'static [Swatch] {
     }
 }
 
+/// Whether picking `tool` on the palette answers it, so the palette goes with the pick.
+///
+/// The palette is a question with two parts — which tool, then which colour — and it stays up after a
+/// pick so a hand that has just taken up the marker can take its colour next, as one gesture. A tool
+/// that writes no colour of its own has no second part: the eraser lays no ink, so the ring behind it
+/// is the *pen's* and pressing one would put the pen back in hand in place of the eraser that was just
+/// chosen (`palette_colour`). Leaving such a pick unanswered keeps a ring of colours in front of a
+/// hand that meant to erase, one press away from a new stroke instead.
+fn palette_pick_answers(tool: Tool) -> bool {
+    match tool {
+        Tool::Pen | Tool::Highlighter => false,
+        Tool::Eraser | Tool::Lasso => true,
+    }
+}
+
 /// The one weight control the bar shows, or none at all (see [`NoteApp::sheet_row`]).
 ///
 /// A pen's weight and a marker's width are the same question — how thick is the next stroke — asked of
@@ -3659,9 +3674,10 @@ impl NoteApp {
     /// Takes what a press on the palette landed on.
     fn palette_take(&mut self, part: PalettePart, cx: &mut Context<Self>) {
         match part {
-            // A tool *stays*: what it changes is the ring of colours around it, and a hand that has
-            // just picked up the marker means to pick a marker's colour next — the two presses the bar
-            // asks for, made as one gesture.
+            // A tool mostly *stays*: what it changes is the ring of colours around it, and a hand that
+            // has just picked up the marker means to pick a marker's colour next — the two presses the
+            // bar asks for, made as one gesture. A tool with no ring of its own is the exception, and
+            // answers the palette on the spot (see [`palette_pick_answers`]).
             PalettePart::Tool(place) => {
                 if let Some(tool) = PALETTE_TOOLS.get(place).copied() {
                     self.palette_tool(tool, cx);
@@ -3699,9 +3715,15 @@ impl NoteApp {
         self.report(format!("writing in {name}"));
     }
 
-    /// Puts a tool in hand from the palette, and leaves the palette up.
+    /// Puts a tool in hand from the palette — and leaves the palette up, unless the tool writes no colour
+    /// of its own, in which case there is nothing left to answer (see [`palette_pick_answers`]).
     fn palette_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
         self.set_tool(tool, cx);
+
+        if palette_pick_answers(tool) {
+            self.close_palette(cx);
+            return;
+        }
 
         // The keyboard goes to the colour in hand *of the ring it is now looking at*: a place on a ring
         // of four is not the place it was on a ring of twelve, and the colour in hand is the one answer

@@ -447,6 +447,12 @@ puts it away, and nothing else a key means reaches the sheet or the bar under it
   twelve o'clock, and the table's order going clockwise (`palette_point`) — so a palette is *learnt* rather
   than hunted for, and the gaps between discs are wider than two reaches, which is what makes a ring of
   twelve pressable with a pen (there is a test for both).
+* **A tool pick is answered at once only when it has no second part** (`palette_pick_answers`). The palette
+  asks two questions — which tool, then which colour — so taking the pen or the marker leaves it up, and the
+  colour that follows is the second press the ring exists for. The eraser has no second question: it lays
+  no ink, and the ring behind it is the pen's, whose colours put the *pen* back in hand — so a hand that
+  meant to erase would be left one press from writing a new stroke. The eraser therefore takes the palette
+  with it, and the first contact after the pick erases.
 * **It is two zones, not thirteen discs on one field.** The colours are on the ring, because a ring is
   what makes them a list; the tools — and the colour in hand — are inside, in a well of the theme's quiet
   grey, so that what the palette *offers* and what it is *set to* are two things to look at rather than

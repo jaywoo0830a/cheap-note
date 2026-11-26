@@ -3,15 +3,15 @@
 use super::{
     bar_line, confirmed, file_label, file_stem, held_by_cap, page_after_insert, page_of_write,
     page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face, palette_id,
-    palette_in_hand, palette_point, parse_zoom, pdf_render_due, pen_cursor_shows,
-    pinch_zoom_factor, quantise_width, samples_vitals, scale_label, screen_in_front, scroll_of,
-    sheet_is_front, sheet_matches, spun, touches_paper, window_px, zoom_text, Confirmation, Edge,
-    EdgeSwipe, FootPills, FootPlace, FootStrips, PaletteGeometry, PalettePart, PenGesture, Screens,
-    SwatchGeometry, Swipe, Turn, WeightControl, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC,
-    PALETTE_DISC_BOX, PALETTE_DISC_PAD, PALETTE_DISC_RING, PALETTE_HUB, PALETTE_HUB_RING,
-    PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS,
-    PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL,
-    WHEEL_PAN_PER_LINE,
+    palette_in_hand, palette_pick_answers, palette_point, parse_zoom, pdf_render_due,
+    pen_cursor_shows, pinch_zoom_factor, quantise_width, samples_vitals, scale_label,
+    screen_in_front, scroll_of, sheet_is_front, sheet_matches, spun, touches_paper, window_px,
+    zoom_text, Confirmation, Edge, EdgeSwipe, FootPills, FootPlace, FootStrips, PaletteGeometry,
+    PalettePart, PenGesture, Screens, SwatchGeometry, Swipe, Turn, WeightControl, EDGE_SWIPE_BAND,
+    EDGE_SWIPE_TRAVEL, PALETTE_DISC, PALETTE_DISC_BOX, PALETTE_DISC_PAD, PALETTE_DISC_RING,
+    PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH,
+    PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL,
+    PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
 use crate::design::{LayoutMetrics, ScaleStep};
@@ -922,6 +922,44 @@ fn the_ring_offers_three_tools_and_not_the_lasso() {
         palette_face(Tool::Lasso),
         None,
         "the lasso stays on the bar, where a sweep belongs"
+    );
+}
+
+/// Picking the eraser answers the palette, and picking a tool that writes in a colour does not.
+///
+/// The palette is a question with two parts — which tool, then which colour — so it stays up after the
+/// pen or the marker is picked, and the colour that follows is the second press the ring exists for
+/// (see [`NoteApp::palette_tool`]). The eraser has no second part: it lays no ink, and the ring behind
+/// it is the pen's, whose colours put the *pen* back in hand (`NoteApp::palette_colour`) — a hand that
+/// meant to erase would be one press from writing a new stroke instead. So the eraser goes with the
+/// pick. A palette left up in front of an eraser is the extra press this closes
+/// ([`OPT-MOVEMENT.md`](../../../OPT-MOVEMENT.md)).
+#[test]
+fn the_eraser_answers_the_palette_and_the_ones_that_write_a_colour_do_not() {
+    assert!(
+        palette_pick_answers(Tool::Eraser),
+        "the eraser has nothing left to answer, so it takes the palette with it"
+    );
+
+    for tool in [Tool::Pen, Tool::Highlighter] {
+        assert!(
+            !palette_pick_answers(tool),
+            "{tool:?} picks a ring of colours next, so the palette stays for it"
+        );
+    }
+
+    // Every tool the ring offers has an answer, and the two kinds are not the same: a ring of nothing
+    // but tools that close it could not pick a marker's colour, and one of nothing but tools that stay
+    // could not put the palette away with a tool at all.
+    let closing = PALETTE_TOOLS
+        .iter()
+        .filter(|tool| palette_pick_answers(**tool))
+        .count();
+
+    assert!(
+        closing > 0 && closing < PALETTE_TOOLS.len(),
+        "the ring offers both kinds of pick: {closing} of {} close it",
+        PALETTE_TOOLS.len()
     );
 }
 

@@ -757,10 +757,13 @@ struct Palette {
 
 /// The tools the palette's inner ring offers, in the order a clock face reads them.
 ///
-/// Three, and not the four the bar carries: the lasso is a *sweep* — what it takes is what a loop
-/// encloses — and a ring of buttons a tap is aimed at has no room for a gesture. It stays where a
-/// sweep belongs, on the bar.
-const PALETTE_TOOLS: [Tool; 3] = [Tool::Pen, Tool::Highlighter, Tool::Eraser];
+/// All four the bar carries. The lasso was left off this ring once, on the argument that a *sweep* has
+/// no place among buttons a tap is aimed at — but a sweep begins with a choice like any other tool, and
+/// the choice is what was missing: a reader who had hidden the bar to write had no way to reach the
+/// lasso at all without bringing it back, which is a trip across the window to take up a tool the hand
+/// already knows the name of. Choosing it is a tap; sweeping with it is the same sweep as from the bar
+/// ([`OPT-MOVEMENT.md`](../../../OPT-MOVEMENT.md)).
+const PALETTE_TOOLS: [Tool; 4] = [Tool::Pen, Tool::Highlighter, Tool::Eraser, Tool::Lasso];
 
 /// What a press on the palette landed on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -934,7 +937,14 @@ fn palette_face(tool: Tool) -> Option<(&'static str, IconName, &'static str)> {
             "Highlighter",
         )),
         Tool::Eraser => Some(("palette-tool-eraser", IconName::Eraser, "Eraser")),
-        Tool::Lasso => None,
+        // The words say what the tool *does*, not just its name: a lasso has no other way to be learned
+        // here, where the bar's own tooltip is the only other place it is explained (see the bar's
+        // `tool-lasso`), and a reader who has hidden the bar has not got that.
+        Tool::Lasso => Some((
+            "palette-tool-lasso",
+            IconName::Lasso,
+            "Lasso: sweep around the ink to take it",
+        )),
     }
 }
 

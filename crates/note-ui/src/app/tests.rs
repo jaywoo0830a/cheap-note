@@ -899,11 +899,18 @@ fn the_ring_starts_on_the_colour_in_hand() {
     assert_eq!(palette_in_hand(inks, HIGHLIGHTER_COLORS[0].color), 0);
 }
 
-/// The inner ring is the pen, the marker and the eraser — and not the lasso, which is a sweep rather
-/// than a press (see [`PALETTE_TOOLS`]).
+/// The inner ring is every tool the bar carries — the pen, the marker, the eraser and the lasso — so a
+/// reader who has hidden the bar can still take up any of them at the nib (see [`PALETTE_TOOLS`]).
 #[test]
-fn the_ring_offers_three_tools_and_not_the_lasso() {
-    assert_eq!(PALETTE_TOOLS.len(), 3);
+fn the_ring_offers_every_tool_the_bar_carries() {
+    assert_eq!(PALETTE_TOOLS.len(), 4);
+
+    for tool in [Tool::Pen, Tool::Highlighter, Tool::Eraser, Tool::Lasso] {
+        assert!(
+            PALETTE_TOOLS.contains(&tool),
+            "{tool:?} is on the bar, so it is on the ring"
+        );
+    }
 
     for tool in PALETTE_TOOLS {
         let (id, _, label) = palette_face(tool).expect("a face for every tool on the ring");
@@ -918,28 +925,34 @@ fn the_ring_offers_three_tools_and_not_the_lasso() {
         );
     }
 
-    assert_eq!(
-        palette_face(Tool::Lasso),
-        None,
-        "the lasso stays on the bar, where a sweep belongs"
+    // The lasso is a sweep, and the ring explains it in words: the bar's tooltip is the only other
+    // place it is taught, and a reader who hid the bar has not got that.
+    let (_, _, label) = palette_face(Tool::Lasso).expect("the lasso has a face on the ring");
+
+    assert!(
+        label.contains("sweep"),
+        "the lasso's label says what it does, not only what it is called: {label}"
     );
 }
 
-/// Picking the eraser answers the palette, and picking a tool that writes in a colour does not.
+/// Picking a tool that lays no ink answers the palette; picking one that writes in a colour does not.
 ///
 /// The palette is a question with two parts — which tool, then which colour — so it stays up after the
 /// pen or the marker is picked, and the colour that follows is the second press the ring exists for
-/// (see [`NoteApp::palette_tool`]). The eraser has no second part: it lays no ink, and the ring behind
-/// it is the pen's, whose colours put the *pen* back in hand (`NoteApp::palette_colour`) — a hand that
-/// meant to erase would be one press from writing a new stroke instead. So the eraser goes with the
-/// pick. A palette left up in front of an eraser is the extra press this closes
+/// (see [`NoteApp::palette_tool`]). The eraser and the lasso lay no ink, so neither has a second part:
+/// the ring behind them is the pen's, whose colours put the *pen* back in hand
+/// (`NoteApp::palette_colour`) — a hand that meant to erase would be one press from writing a new
+/// stroke instead, and a hand that meant to take a loop of ink would have the lasso dropped for a pen.
+/// So both go with the pick, and the next contact does what they were chosen for
 /// ([`OPT-MOVEMENT.md`](../../../OPT-MOVEMENT.md)).
 #[test]
-fn the_eraser_answers_the_palette_and_the_ones_that_write_a_colour_do_not() {
-    assert!(
-        palette_pick_answers(Tool::Eraser),
-        "the eraser has nothing left to answer, so it takes the palette with it"
-    );
+fn a_tool_that_lays_no_ink_answers_the_palette_and_the_ones_that_write_a_colour_do_not() {
+    for tool in [Tool::Eraser, Tool::Lasso] {
+        assert!(
+            palette_pick_answers(tool),
+            "{tool:?} has nothing left to answer, so it takes the palette with it"
+        );
+    }
 
     for tool in [Tool::Pen, Tool::Highlighter] {
         assert!(

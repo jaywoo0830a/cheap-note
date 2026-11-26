@@ -449,17 +449,23 @@ puts it away, and nothing else a key means reaches the sheet or the bar under it
   twelve pressable with a pen (there is a test for both).
 * **A tool pick is answered at once only when it has no second part** (`palette_pick_answers`). The palette
   asks two questions — which tool, then which colour — so taking the pen or the marker leaves it up, and the
-  colour that follows is the second press the ring exists for. The eraser has no second question: it lays
-  no ink, and the ring behind it is the pen's, whose colours put the *pen* back in hand — so a hand that
-  meant to erase would be left one press from writing a new stroke. The eraser therefore takes the palette
-  with it, and the first contact after the pick erases.
+  colour that follows is the second press the ring exists for. The eraser and the lasso have no second
+  question: neither lays ink, and the ring behind them is the pen's, whose colours put the *pen* back in
+  hand — so a hand that meant to erase would be left one press from writing a new stroke, and a hand that
+  meant to take a loop of ink would find the lasso gone. Both therefore take the palette with them, and the
+  first contact after the pick does what the tool was chosen for.
+* **The inner ring is every tool the bar carries** (`PALETTE_TOOLS`): the pen, the marker, the eraser and the
+  lasso. The lasso was once left off on the argument that a *sweep* has no place among buttons a tap is
+  aimed at — but a sweep begins with a choice like any other tool, and a reader who had hidden the bar to
+  write then had no way to reach the lasso at all without bringing the bar back. Its chip names what it does
+  as well as what it is called, because the bar's tooltip is the only other place it is taught.
 * **It is two zones, not thirteen discs on one field.** The colours are on the ring, because a ring is
   what makes them a list; the tools — and the colour in hand — are inside, in a well of the theme's quiet
   grey, so that what the palette *offers* and what it is *set to* are two things to look at rather than
   one field to read. A tool is a chip with its icon in it rather than a bare glyph, which is what the same
   tool is on the bar and for the same reason: an icon alone on a white field is a smudge. The hub is the
   colour the next stroke will be written in, and it is *not* a control, so it is set in a ring of white —
-  the one filled circle in the middle that cannot be pressed does not look like the three that can. Its
+  the one filled circle in the middle that cannot be pressed does not look like the four that can. Its
   measurements are in §12 with the rest of them — and they are the design's, in logical pixels, so what
   is drawn is those numbers at the frame's `ScaleStep`: the palette and the bar beside it are one
   interface scale, and the different physical size of a macOS point and a Windows logical pixel is the
@@ -1267,7 +1273,7 @@ spelled in pixels: the bar's control names, the status pill and the title chip.
 | `PDF_PIXEL_WIDTHS` | 1024, 1536, 2304, 3456 | the ladder a request is quantised onto; the rungs are half again as wide each time because the cost is quadratic |
 | `PDF_RENDER_SCALE` | 2.0 | the bitmap-width multiplier: twice the logical width keeps page text crisp when scaled, and is paid once per page |
 | `PALETTE_KEY` | `Ctrl+Shift+C` | the palette at the pen's one chord, for opening it and for putting it away; the status line says so while it is up |
-| `PALETTE_RING_RADIUS` / `PALETTE_TOOL_RADIUS` | 65 / 32 logical px | how far the colours and the three tools sit from the palette's centre: the tools are in the well inside and the colours are on the ring outside, and both rings are far enough out that no point on the palette is within reach of two controls |
+| `PALETTE_RING_RADIUS` / `PALETTE_TOOL_RADIUS` | 65 / 32 logical px | how far the colours and the four tools sit from the palette's centre: the tools are in the well inside and the colours are on the ring outside, and both rings are far enough out that no point on the palette is within reach of two controls |
 | `PALETTE_DISC` / `PALETTE_DISC_BOX` | 20 / 28 logical px at 100% | a colour disc, and the box it draws in — the box carries the white gap and the ring that marks the keyboard's place, so a placement is measured in the box rather than in the disc |
 | `PALETTE_DISC_PAD` / `PALETTE_DISC_RING` | 2 / 2 logical px | the white gap between a disc and its selection ring, and the ring itself: the gap follows the interface scale with the disc, the ring is a mark and stays two pixels |
 | `PALETTE_TOOL_DISC` / `PALETTE_TOOL_ICON` | 26 / 14 logical px | a tool chip, and the icon inside it: a little over half, which is the proportion the bar's own tool buttons are drawn at |

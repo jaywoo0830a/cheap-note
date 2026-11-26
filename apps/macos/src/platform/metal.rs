@@ -50,12 +50,13 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice, MTLLibrary,
-    MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
+    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction,
+    MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLLibrary, MTLLoadAction,
+    MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
     MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
     MTLResourceOptions, MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerState, MTLSize,
-    MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureType,
-    MTLTextureUsage,
+    MTLStencilDescriptor, MTLStencilOperation, MTLStorageMode, MTLStoreAction, MTLTexture,
+    MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
@@ -96,6 +97,30 @@ vertex Varyings solid_vertex(uint id [[vertex_id]],
 
 fragment float4 solid_fragment(Varyings in [[stage_in]]) {
     return in.colour;
+}
+
+// The same triangles, marking instead of colouring.
+//
+// A translucent stroke is filled from pieces that overlap by construction — a disc at every reading and a
+// trapezoid between neighbours (see `note_format::ink::pieces_of`). Laid down one after another, a 35%
+// highlighter composes to `1 - 0.65^n`, which for a point inside ten of them is 99%: the writing it was
+// meant to mark is hidden. Marking first and colouring once is what keeps one stroke one layer.
+//
+// The fragment returns no colour at all. The pass is answered by whether a sample was written, and a
+// fragment that returned one would be blended into the page — the opposite of marking without drawing.
+struct Stencil { float4 position [[position]]; };
+
+vertex Stencil stencil_vertex(uint id [[vertex_id]],
+                              constant Vertex *vertices [[buffer(0)]],
+                              constant float2 &viewport [[buffer(1)]],
+                              constant float4 &transform [[buffer(2)]]) {
+    Stencil out;
+    out.position = place(float2(vertices[id].position) * transform.xy + transform.zw, viewport);
+    return out;
+}
+
+fragment void stencil_fragment(Stencil in [[stage_in]]) {
+    (void) in;
 }
 
 struct PageVertex { float2 position; float2 uv; };
@@ -153,6 +178,12 @@ pub struct Surface {
     solid: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// The document's page: a textured quad.
     page: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// The ink's mark pass: the same vertices, counting instead of colouring.
+    stencil: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// What the mark pass does to a sample a piece reaches.
+    counting: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
+    /// What the colour pass does: keep a sample this stroke counted and no earlier one did.
+    counted: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
     layer: Retained<CAMetalLayer>,
     /// The finished ink, as triangles. Rebuilt when what it is a function of changes and at no other time:
@@ -178,6 +209,15 @@ pub struct Surface {
     /// The paper and turn `open` was built for: a page turn changes the mapping, not the points.
     open_paper: (f32, f32),
     open_rotation: u8,
+    /// Where each translucent stroke's vertices begin in [`Self::ink`], one entry a stroke, in the order
+    /// they were filled — the ranges the stencil pass needs to keep one stroke one layer (see
+    /// [`Self::ink_pass`]).
+    ///
+    /// Opaque ink is not in here: the same colour over itself is the same colour, so a pen costs nothing to
+    /// draw the way it always has.
+    translucent_ink: Vec<usize>,
+    /// The same for [`Self::open`].
+    translucent_open: Vec<usize>,
     /// The finished ink's buffers, one per frame in flight: the CPU writes the next while the GPU
     /// may still be reading the last.
     ink_buffers: [Option<Retained<ProtocolObject<dyn MTLBuffer>>>; 3],
@@ -211,6 +251,8 @@ pub struct Surface {
     page_texture: Option<(usize, Retained<ProtocolObject<dyn MTLTexture>>)>,
     /// The multisampled target the passes draw into, resolved into the drawable. Made with the size.
     msaa: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
+    /// The stencil the ink's two passes share, made once per size.
+    stencil_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     /// The command buffer committed by the most recent `draw`, kept so that a benchmark can wait for it.
     ///
     /// `None` until the first frame is committed. The app never reads it: it exists for
@@ -232,6 +274,11 @@ impl Surface {
 
         let solid = pipeline(&device, &library, "solid_vertex", "solid_fragment")?;
         let page = pipeline(&device, &library, "page_vertex", "page_fragment")?;
+        // The ink's stencil pass: the same vertices through a shader that marks instead of colouring, with a
+        // fragment shader of its own because it has no colour to hand on.
+        let stencil = pipeline(&device, &library, "stencil_vertex", "stencil_fragment")?;
+        let stenciling = stenciling(&device)?;
+        let stencilled = stencilled(&device)?;
 
         let sampler_descriptor = MTLSamplerDescriptor::new();
         sampler_descriptor.setMinFilter(MTLSamplerMinMagFilter::Linear);
@@ -270,6 +317,9 @@ impl Surface {
             queue,
             solid,
             page,
+            stencil,
+            counting: stenciling,
+            counted: stencilled,
             sampler,
             layer,
             ink: Vec::new(),
@@ -282,6 +332,8 @@ impl Surface {
             open_colour: 0,
             open_paper: (0.0, 0.0),
             open_rotation: 0,
+            translucent_ink: Vec::new(),
+            translucent_open: Vec::new(),
             ink_buffers: [None, None, None],
             ink_slots_valid: [false; 3],
             stage_uploaded: std::time::Duration::ZERO,
@@ -294,6 +346,7 @@ impl Surface {
             sweep: Sweep::default(),
             page_texture: None,
             msaa: None,
+            stencil_texture: None,
             last_commit: None,
             width: 1,
             height: 1,
@@ -318,6 +371,7 @@ impl Surface {
         // The ink's triangles are in pixels, so a resize makes them all stale.
         self.ink_key = None;
         self.msaa = None;
+        self.stencil_texture = None;
     }
 }
 
@@ -335,6 +389,8 @@ fn pipeline(
     descriptor.setVertexFunction(Some(&vertex));
     descriptor.setFragmentFunction(Some(&fragment));
     descriptor.setRasterSampleCount(SAMPLES);
+    // The ink's passes share a stencil (see [`STENCIL`]); the desk and the page ignore it.
+    descriptor.setStencilAttachmentPixelFormat(STENCIL);
 
     // SAFETY: index 0 is the one attachment every pass here renders into, and the descriptor is alive.
     let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
@@ -361,6 +417,74 @@ fn pipeline(
     device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)
         .ok()
+}
+
+/// What the **mark** pass does: count, per sample, the strokes whose pieces have reached it.
+///
+/// `Increment` rather than a set: the count is what tells a stroke from an earlier one (see
+/// [`Surface::ink_pass`]), and it is idempotent for the purpose that matters — a sample covered by ten of
+/// one stroke's pieces is counted once, because the count advances per *pass*, not per triangle.
+///
+/// The front and back faces are treated alike: a triangle here is the shape being filled rather than an edge
+/// of it, and a stroke that crosses itself has pieces wound both ways.
+/// What the **mark** pass does: mark the samples a stroke's pieces reach, so the colour pass leaves them.
+///
+/// The comparison is `Always` and every sample a fragment touches is overwritten with [`STENCIL_MARKED`].
+/// Because the write is a `Replace` rather than a count, it is idempotent — a point inside the band that
+/// thirty-odd pieces cover ends up marked exactly as a point one piece grazes, which is the property that
+/// makes one stroke one layer.
+///
+/// The front and back faces are treated alike: a triangle here is the shape being filled rather than an edge
+/// of it, and a stroke that crosses itself has pieces wound both ways.
+fn stenciling(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> Option<Retained<ProtocolObject<dyn MTLDepthStencilState>>> {
+    let counts = MTLStencilDescriptor::new();
+    counts.setStencilCompareFunction(MTLCompareFunction::Always);
+    counts.setStencilFailureOperation(MTLStencilOperation::Keep);
+    counts.setDepthFailureOperation(MTLStencilOperation::Keep);
+    counts.setDepthStencilPassOperation(MTLStencilOperation::Replace);
+    counts.setReadMask(u32::MAX);
+    counts.setWriteMask(u32::MAX);
+
+    let state = MTLDepthStencilDescriptor::new();
+    state.setFrontFaceStencil(Some(&counts));
+    state.setBackFaceStencil(Some(&counts));
+    // The ink is one flat layer: nothing is behind anything, and depth is not written.
+    state.setDepthCompareFunction(MTLCompareFunction::Always);
+    state.setDepthWriteEnabled(false);
+
+    device.newDepthStencilStateWithDescriptor(&state)
+}
+
+/// What the **colour** pass does: colour the samples the stroke covers, once each.
+///
+/// `Equal` against the reference, which is [`STENCIL_MARKED`] — what the mark pass wrote over every sample the
+/// stroke's pieces reach. The first fragment to reach a sample colours it and writes [`STENCIL_EMPTY`] back,
+/// so the thirty-odd fragments that follow fail the same test and leave it alone. That single fact is what
+/// makes one stroke one layer of its alpha.
+///
+/// Every outcome writes, so a sample a fragment merely passes over is cleared of its mark too — which is
+/// harmless: it was not the stroke's to colour.
+fn stencilled(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> Option<Retained<ProtocolObject<dyn MTLDepthStencilState>>> {
+    let counted = MTLStencilDescriptor::new();
+    counted.setStencilCompareFunction(MTLCompareFunction::Equal);
+    // A sample this pass colours loses its mark, so no later piece of the stroke can colour it again.
+    counted.setStencilFailureOperation(MTLStencilOperation::Zero);
+    counted.setDepthFailureOperation(MTLStencilOperation::Zero);
+    counted.setDepthStencilPassOperation(MTLStencilOperation::Zero);
+    counted.setReadMask(u32::MAX);
+    counted.setWriteMask(u32::MAX);
+
+    let state = MTLDepthStencilDescriptor::new();
+    state.setFrontFaceStencil(Some(&counted));
+    state.setBackFaceStencil(Some(&counted));
+    state.setDepthCompareFunction(MTLCompareFunction::Always);
+    state.setDepthWriteEnabled(false);
+
+    device.newDepthStencilStateWithDescriptor(&state)
 }
 
 impl Surface {
@@ -424,14 +548,22 @@ impl Surface {
             ink: vertices,
             scratch,
             sweep,
+            translucent_ink,
             ..
         } = self;
+
+        // A stroke that is not opaque is filled through the stencil, one stroke at a time, so the draw needs
+        // to know where each one's pieces begin. Only those are recorded: opaque ink is drawn as it always
+        // was, and a page of pen pays nothing for a feature it does not use.
+        translucent_ink.clear();
 
         for (index, stroke) in list.iter().enumerate() {
             if in_hand(index) || !stroke.visible_in(cull) {
                 continue;
             }
 
+            let colour = ink_colour(stroke.color);
+            open(translucent_ink, vertices.len(), colour);
             fill(
                 vertices,
                 scratch,
@@ -439,7 +571,7 @@ impl Surface {
                 stroke,
                 &mapping,
                 (0.0, 0.0),
-                ink_colour(stroke.color),
+                colour,
             );
         }
 
@@ -450,17 +582,14 @@ impl Surface {
                     continue;
                 }
 
+                let colour = ink_colour(stroke.color);
+                open(translucent_ink, vertices.len(), colour);
                 fill(
-                    vertices,
-                    scratch,
-                    sweep,
-                    stroke,
-                    &mapping,
-                    ink.offset,
-                    ink_colour(stroke.color),
+                    vertices, scratch, sweep, stroke, &mapping, ink.offset, colour,
                 );
 
                 if let Some(colour) = ink.selection {
+                    open(translucent_ink, vertices.len(), colour);
                     fill(
                         vertices, scratch, sweep, stroke, &mapping, ink.offset, colour,
                     );
@@ -471,6 +600,7 @@ impl Surface {
         // The lasso's loop: the ring the reader is drawing, in the selection's colour.
         if let Some(stroke) = &ink.lasso {
             let colour = ink.selection.unwrap_or_else(|| ink_colour(stroke.color));
+            open(translucent_ink, vertices.len(), colour);
             fill(
                 vertices,
                 scratch,
@@ -555,6 +685,50 @@ impl Surface {
         self.msaa.clone()
     }
 
+    /// The stencil the ink's two passes share, made once per size.
+    ///
+    /// Multisampled to match [`Self::multisample`], as Metal requires of attachments in one pass — and as
+    /// the question needs: a band's edge is a fraction of a pixel, so marking whole pixels would undo the
+    /// coverage `SAMPLES` exists to give.
+    ///
+    /// `None` when the device refuses it, in which case [`Self::ink_pass`] draws the ink without one: a
+    /// translucent band that reads as opaque is better than no ink at all.
+    fn stencil(&mut self) -> Option<Retained<ProtocolObject<dyn MTLTexture>>> {
+        if let Some(texture) = &self.stencil_texture {
+            return Some(texture.clone());
+        }
+
+        // SAFETY: a 2D descriptor for the size this surface draws at.
+        let descriptor = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                STENCIL,
+                self.width,
+                self.height,
+                false,
+            )
+        };
+        descriptor.setTextureType(MTLTextureType::Type2DMultisample);
+        // SAFETY: the sample count the colour target was made with, which this must equal.
+        unsafe {
+            descriptor.setSampleCount(SAMPLES);
+        }
+        descriptor.setUsage(MTLTextureUsage::RenderTarget);
+        if self
+            .device
+            .supportsFamily(objc2_metal::MTLGPUFamily::Apple1)
+        {
+            descriptor.setStorageMode(MTLStorageMode::Memoryless);
+            if let Some(texture) = self.device.newTextureWithDescriptor(&descriptor) {
+                self.stencil_texture = Some(texture.clone());
+                return Some(texture);
+            }
+        }
+        descriptor.setStorageMode(MTLStorageMode::Private);
+
+        self.stencil_texture = self.device.newTextureWithDescriptor(&descriptor);
+        self.stencil_texture.clone()
+    }
+
     /// The stroke under the pen, rebuilt whenever it grew.
     ///
     /// The open stroke is the one piece of ink that moves, and like the finished ink it is drawn as its
@@ -570,6 +744,7 @@ impl Surface {
     fn open_stroke(&mut self, canvas: &Canvas) {
         let Some(stroke) = &canvas.ink.open else {
             self.open.clear();
+            self.translucent_open.clear();
             self.open_id = 0;
             self.open_points = 0;
             return;
@@ -605,6 +780,8 @@ impl Surface {
         }
 
         self.open.clear();
+        self.translucent_open.clear();
+        open(&mut self.translucent_open, 0, colour);
         fill(
             &mut self.open,
             &mut self.scratch,
@@ -614,6 +791,10 @@ impl Surface {
             (0.0, 0.0),
             colour,
         );
+        if self.translucent_open.first() == Some(&self.open.len()) {
+            // `fill` drew nothing, so there is nothing to mark.
+            self.translucent_open.pop();
+        }
         self.open_points = points.len();
     }
 
@@ -737,6 +918,25 @@ impl Surface {
         self.page_texture
             .as_ref()
             .map(|(_, texture)| texture.clone())
+    }
+}
+
+/// Notes that the vertices after `at` are one translucent stroke's pieces.
+///
+/// The stencil pass is what keeps a stroke one layer, and it needs a stroke at a time: mark this stroke's
+/// pieces, colour the marked area once, then clear the stencil for the next. Two strokes therefore stay two
+/// layers, which is what the reader drew — `1 − 0.65²` where a second band crosses the first — while the
+/// pieces *within* one stroke stay one.
+///
+/// A stroke that filled nothing has nothing to mark, and one that is opaque is drawn without the stencil
+/// (`fill` already made its colour opaque), so neither is recorded.
+fn open(translucent: &mut Vec<usize>, at: usize, colour: gpui_kit::Hsla) {
+    if colour.a >= 1.0 {
+        return;
+    }
+
+    if at > translucent.last().copied().unwrap_or(0) {
+        translucent.push(at);
     }
 }
 
@@ -1265,6 +1465,25 @@ fn disc(vertices: &mut Vec<Vertex>, centre: (f32, f32), radius: f32, colour: gpu
 /// Windows: Metal has no per-primitive coverage, so the edge is sampled instead.
 const SAMPLES: usize = 4;
 
+/// The stencil the ink's two passes share: eight bits, and no depth at all.
+///
+/// The ink needs an *order*, not a distance — the first piece of a stroke to reach a sample takes it — so
+/// the stencil is the whole of what the two passes share. Eight bits is one layer per sample rather than a
+/// counter, which is what makes it safe: any piece that reaches a sample sets it, so how many pieces overlap
+/// cannot overflow it.
+const STENCIL: MTLPixelFormat = MTLPixelFormat::Stencil8;
+
+/// The value the stencil holds where nothing has been coloured: what the frame clears to.
+const STENCIL_EMPTY: u32 = 0;
+
+/// The value written where a sample has been coloured, and so must not be coloured again.
+///
+/// `MTLStencilOperation::Replace` writes the encoder's **reference value**, not a value in the descriptor, so
+/// the two passes take turns setting it (see [`ink_pass`]): the mark pass runs with this, marking every sample
+/// a stroke's pieces reach; the colour pass runs with [`STENCIL_EMPTY`], keeps only the samples nothing has
+/// reached, and writes this over each one it colours.
+const STENCIL_MARKED: u32 = 1;
+
 /// How far the sheet may move before the built ink is thrown away, as a fraction of the screen.
 ///
 /// The model, stated once: the ink is built for a **region of the paper**, and a frame reuses it while the
@@ -1599,6 +1818,17 @@ impl Surface {
         attachment.setLoadAction(MTLLoadAction::Clear);
         attachment.setStoreAction(MTLStoreAction::MultisampleResolve);
 
+        // The stencil the ink's two passes share. Cleared once a frame, here: what it holds during the ink is
+        // per stroke, and it is cleared again between strokes because two strokes are two layers.
+        let stencil = self.stencil();
+        if let Some(texture) = &stencil {
+            let target = pass.stencilAttachment();
+            target.setTexture(Some(texture));
+            target.setLoadAction(MTLLoadAction::Clear);
+            target.setStoreAction(MTLStoreAction::DontCare);
+            target.setClearStencil(STENCIL_EMPTY);
+        }
+
         let Some(buffer) = self.queue.commandBuffer() else {
             return (false, waited);
         };
@@ -1645,11 +1875,37 @@ impl Surface {
         // The finished ink, then the stroke under the pen: the order the page was painted in when Core
         // Graphics drew it.
         if let Some(buffer) = &self.ink_buffers[slot] {
-            self.solid(&encoder, buffer, self.ink.len(), width, height, sheet);
+            ink_pass(
+                &encoder,
+                &self.solid,
+                &self.stencil,
+                &self.counting,
+                &self.counted,
+                buffer,
+                self.ink.len(),
+                &self.translucent_ink,
+                width,
+                height,
+                sheet,
+                stencil.as_deref(),
+            );
         }
 
         if let Some(buffer) = &self.open_buffers[slot] {
-            self.solid(&encoder, buffer, self.open.len(), width, height, sheet);
+            ink_pass(
+                &encoder,
+                &self.solid,
+                &self.stencil,
+                &self.counting,
+                &self.counted,
+                buffer,
+                self.open.len(),
+                &self.translucent_open,
+                width,
+                height,
+                sheet,
+                stencil.as_deref(),
+            );
         }
 
         // The pen, over everything the canvas drew: a cursor is the one thing on the sheet that has to be
@@ -1738,29 +1994,7 @@ impl Surface {
         height: f32,
         transform: Transform,
     ) {
-        let viewport: [f32; 2] = [width, height];
-        let transform: [f32; 4] = [
-            transform.scale[0],
-            transform.scale[1],
-            transform.shift[0],
-            transform.shift[1],
-        ];
-
-        // SAFETY: the buffer holds the vertices the draw call reads, and the two values after it are bytes
-        // the encoder copies before this function returns.
-        unsafe {
-            encoder.setVertexBuffer_offset_atIndex(Some(buffer), 0, 0);
-            encoder.setVertexBytes_length_atIndex(
-                NonNull::new(viewport.as_ptr() as *mut c_void).unwrap(),
-                std::mem::size_of_val(&viewport),
-                1,
-            );
-            encoder.setVertexBytes_length_atIndex(
-                NonNull::new(transform.as_ptr() as *mut c_void).unwrap(),
-                std::mem::size_of_val(&transform),
-                2,
-            );
-        }
+        bind(encoder, buffer, width, height, transform)
     }
 
     /// One run of coloured vertices, in one draw call.
@@ -1780,6 +2014,208 @@ impl Surface {
         unsafe {
             encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, count);
         }
+    }
+}
+
+/// The ink: opaque runs as they always were, and every translucent stroke counted so it is one layer.
+///
+/// A free function rather than a method because the test that guards it reads pixels back through it, and a
+/// [`Surface`] needs a view and a window to exist at all (see [`a_highlighter_band_comes_out_at_its_alpha`]).
+///
+/// ## The problem it solves
+///
+/// A stroke is filled from *pieces* — a disc at every reading and a trapezoid between neighbours — and they
+/// overlap by construction (see `note_format::ink::pieces_of`). That costs nothing for a pen: the same colour
+/// over itself is the same colour. A highlighter is not: 35% over itself is 58%, and a point under ten of
+/// them is `1 − 0.65¹⁰` — 99%, opaque, hiding the writing it was meant to mark.
+///
+/// ## What is drawn
+///
+/// The vertices are one list, and `translucent` says where each translucent stroke begins in it. Walking the
+/// list, a run no stroke claims is opaque ink and goes out in one draw; a run a stroke claims is drawn twice
+/// — once to count the samples its pieces reach, once to colour them. Where the pieces overlap the count
+/// advances once, so the colour pass sees one layer, which is the whole of the fix.
+///
+/// ## Why the stencil needs no clearing between strokes
+///
+/// Because two strokes are two things the reader drew. A band that crosses itself, or doubles back over its
+/// own path, is one stroke and one layer of 35%; a band laid over another is a second layer, and composes to
+/// `1 − 0.65²` where they overlap — what a highlighter used twice leaves, and what `HIGHLIGHTER-BUG.md` asks
+/// for. A stencil cannot be cleared inside a pass, and a pass per stroke would cost a full-screen clear for
+/// every band on the page.
+///
+/// It does not have to be cleared. A stroke's colour pass writes a sample's mark *away* as it colours it
+/// ([`MTLStencilOperation::Zero`]), so when the stroke is done the stencil is exactly as it found it, and the
+/// next stroke's mark pass starts from nothing. The stencil never needs to know how many strokes there are,
+/// so the frame clears it once and no stroke pays for a pass of its own.
+///
+/// `stencil_texture` is what the frame's pass was given. Without one — a device that refused it — the ink is
+/// drawn straight through as before: bands that read as opaque rather than no ink at all.
+#[allow(clippy::too_many_arguments)]
+fn ink_pass(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    solid: &ProtocolObject<dyn MTLRenderPipelineState>,
+    stencil: &ProtocolObject<dyn MTLRenderPipelineState>,
+    counting: &ProtocolObject<dyn MTLDepthStencilState>,
+    counted: &ProtocolObject<dyn MTLDepthStencilState>,
+    buffer: &ProtocolObject<dyn MTLBuffer>,
+    count: usize,
+    translucent: &[usize],
+    width: f32,
+    height: f32,
+    transform: Transform,
+    stencil_texture: Option<&ProtocolObject<dyn MTLTexture>>,
+) {
+    if count == 0 {
+        return;
+    }
+
+    if stencil_texture.is_none() || translucent.is_empty() {
+        echo(encoder, solid, buffer, 0, count, width, height, transform);
+        return;
+    }
+
+    // The runs: whatever precedes the first translucent stroke, then each stroke, then the rest. A run no
+    // stroke claims is opaque ink, and goes out as it always did.
+    let mut opaque_from = 0;
+    for (index, &from) in translucent.iter().enumerate() {
+        let to = translucent.get(index + 1).copied().unwrap_or(count);
+
+        echo(
+            encoder,
+            solid,
+            buffer,
+            opaque_from,
+            from,
+            width,
+            height,
+            transform,
+        );
+        band(
+            encoder, solid, stencil, counting, counted, buffer, from, to, width, height, transform,
+        );
+        opaque_from = to;
+    }
+
+    echo(
+        encoder,
+        solid,
+        buffer,
+        opaque_from,
+        count,
+        width,
+        height,
+        transform,
+    );
+}
+
+/// Vertices `from..to` in one draw, with no stencil: the same colour over itself is the same colour.
+#[allow(clippy::too_many_arguments)]
+fn echo(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    solid: &ProtocolObject<dyn MTLRenderPipelineState>,
+    buffer: &ProtocolObject<dyn MTLBuffer>,
+    from: usize,
+    to: usize,
+    width: f32,
+    height: f32,
+    transform: Transform,
+) {
+    if to <= from {
+        return;
+    }
+
+    encoder.setRenderPipelineState(solid);
+    encoder.setDepthStencilState(None);
+    bind(encoder, buffer, width, height, transform);
+
+    // SAFETY: these vertices, in the buffer just bound.
+    unsafe {
+        encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, from, to - from);
+    }
+}
+
+/// One translucent stroke: counted so its pieces read once, then coloured where it reaches.
+///
+/// `stroke` is which translucent stroke this is, from nought. After the count pass the stencil reads the
+/// number of strokes that have reached each sample, so `stroke` is the value the colour pass compares
+/// against — see [`ink_pass`] for why that is the test.
+#[allow(clippy::too_many_arguments)]
+fn band(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    solid: &ProtocolObject<dyn MTLRenderPipelineState>,
+    stencil: &ProtocolObject<dyn MTLRenderPipelineState>,
+    counting: &ProtocolObject<dyn MTLDepthStencilState>,
+    counted: &ProtocolObject<dyn MTLDepthStencilState>,
+    buffer: &ProtocolObject<dyn MTLBuffer>,
+    from: usize,
+    to: usize,
+    width: f32,
+    height: f32,
+    transform: Transform,
+) {
+    if to <= from {
+        return;
+    }
+
+    // The mark pass marks every sample this stroke's pieces reach, so the colour pass below skips exactly
+    // what they cover. The mark is idempotent: the thirty-odd triangles over a point inside the band leave
+    // what one of them would.
+    // SAFETY: the encoder this frame is being drawn through.
+    let _: () = unsafe { objc2::msg_send![encoder, setStencilReferenceValue: STENCIL_MARKED] };
+    encoder.setRenderPipelineState(stencil);
+    encoder.setDepthStencilState(Some(counting));
+    bind(encoder, buffer, width, height, transform);
+
+    // SAFETY: this stroke's vertices, in the buffer just bound.
+    unsafe {
+        encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, from, to - from);
+    }
+
+    // The colour pass colours exactly the samples the mark pass covered, one fragment at a time, and clears
+    // the mark under each so the pieces after it are skipped. The reference stays the mark: the same value
+    // the mark pass wrote, and the only value the colour pass will colour.
+    encoder.setRenderPipelineState(solid);
+    encoder.setDepthStencilState(Some(counted));
+
+    // SAFETY: the same vertices, now through the stencil that decides which samples they colour.
+    unsafe {
+        encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, from, to - from);
+    }
+}
+
+/// Binds `buffer` as the vertices, with the viewport and the transform the shader places them by.
+fn bind(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    buffer: &ProtocolObject<dyn MTLBuffer>,
+    width: f32,
+    height: f32,
+    transform: Transform,
+) {
+    let viewport: [f32; 2] = [width, height];
+    let transform: [f32; 4] = [
+        transform.scale[0],
+        transform.scale[1],
+        transform.shift[0],
+        transform.shift[1],
+    ];
+
+    // SAFETY: the buffer holds the vertices the draw call reads, and the two values after it are bytes the
+    // encoder copies before this function returns.
+    unsafe {
+        encoder.setVertexBuffer_offset_atIndex(Some(buffer), 0, 0);
+        let _: () = objc2::msg_send![
+            encoder,
+            setVertexBytes: viewport.as_ptr() as *const std::ffi::c_void,
+            length: std::mem::size_of_val(&viewport),
+            atIndex: 1usize
+        ];
+        let _: () = objc2::msg_send![
+            encoder,
+            setVertexBytes: transform.as_ptr() as *const std::ffi::c_void,
+            length: std::mem::size_of_val(&transform),
+            atIndex: 2usize
+        ];
     }
 }
 
@@ -3411,6 +3847,306 @@ mod fill_tests {
             outline > resample,
             "the resampling cost more than the outline: {resample:?} against {outline:?}"
         );
+    }
+
+    /// Every pass the renderer needs builds on this device.
+    ///
+    /// A pipeline that fails to build is not a frame drawn wrongly — [`Surface::install`] returns `None` and
+    /// the window never gets a surface at all, so the failure is a blank canvas rather than a bad colour. The
+    /// stencil shaders are the ones with something to get wrong (a fragment that writes no colour, a sample
+    /// count that has to match the colour target), so they are built here and asserted rather than assumed.
+    #[test]
+    fn every_pipeline_the_renderer_needs_builds() {
+        let Some(device) = objc2_metal::MTLCreateSystemDefaultDevice() else {
+            return;
+        };
+
+        let library = device
+            .newLibraryWithSource_options_error(&NSString::from_str(SHADERS), None)
+            .expect("the shaders compile");
+
+        pipeline(&device, &library, "solid_vertex", "solid_fragment").expect("the solid pass");
+        pipeline(&device, &library, "page_vertex", "page_fragment").expect("the page pass");
+        pipeline(&device, &library, "stencil_vertex", "stencil_fragment").expect("the mark pass");
+        stenciling(&device).expect("a counting stencil");
+        stencilled(&device).expect("a counted stencil");
+    }
+
+    /// A highlighter's band over paper comes out 35% of the way to its colour — measured, not counted.
+    ///
+    /// [`a_highlighter_band_is_painted_exactly_once`] asks whether the pieces *cover* the band, and a band
+    /// laid down ten times over covers it perfectly. That is why the regression it was written for came
+    /// back: the pieces of a highlighter overlap by construction, so a renderer that draws them one after
+    /// another composites `1 − 0.65ⁿ`, and at the centre of a mark a reader made `n` is some tens. The
+    /// pixels come out opaque and a coverage test is happy.
+    ///
+    /// This draws the band through the renderer's own passes and reads the pixel back, so the number that
+    /// matters — how many times a point was coloured — is the number asserted.
+    #[test]
+    fn a_highlighter_band_comes_out_at_its_alpha() {
+        let Some(device) = objc2_metal::MTLCreateSystemDefaultDevice() else {
+            // No GPU to ask: a machine without one cannot disagree about this.
+            return;
+        };
+
+        let library = device
+            .newLibraryWithSource_options_error(&NSString::from_str(SHADERS), None)
+            .expect("the shaders compile");
+
+        // A band across the middle of a small page, in the app's own colour and width for it.
+        let band = 18.0_f32;
+        let spacing = note_format::settings::Settings::default().resample_spacing;
+
+        let mut stroke = note_format::ink::Stroke::new(
+            note_format::ink::InkPoint::new(40.0, 100.0, band),
+            note_format::ink::with_alpha(0xFFEB3B, note_ui::ink::HIGHLIGHTER_ALPHA),
+        );
+        let mut x = 40.0_f32;
+        while x < 360.0 {
+            x += spacing;
+            stroke
+                .points
+                .push(note_format::ink::InkPoint::new(x, 100.0, band));
+        }
+        stroke.close_at(1.0);
+
+        let mapping = Mapping {
+            base: (0.0, 0.0),
+            step_x: (1.0, 0.0),
+            step_y: (0.0, 1.0),
+        };
+        let mut vertices = Vec::new();
+        let mut scratch = Vec::new();
+        fill(
+            &mut vertices,
+            &mut scratch,
+            &mut Sweep::default(),
+            &stroke,
+            &mapping,
+            (0.0, 0.0),
+            ink_colour(stroke.color),
+        );
+
+        // One translucent stroke, and nothing else: the range the renderer would record for it.
+        let blue = band_over_white(&device, &library, &vertices, &[0], (400, 200));
+
+        // The paper is white and the band is `0xFF, 0xEB, 0x3B` at 35%, so blue is the channel that moves
+        // furthest: `255 - 0.35 * (255 - 59)` is about 186. Drawn once per piece it would be 59 — the
+        // highlight's own blue, which is the smear this is here to keep from coming back.
+        let once = 255.0 - note_ui::ink::HIGHLIGHTER_ALPHA * (255.0 - 59.0);
+
+        assert!(
+            (blue as f32 - once).abs() <= 4.0,
+            "the band is not one layer of {}%: blue {blue} at the centre, where one layer is {once:.0} \
+             and one layer per piece would be 59",
+            note_ui::ink::HIGHLIGHTER_ALPHA * 100.0
+        );
+    }
+
+    /// Two strokes over the same place are two layers; one stroke over itself is still one.
+    ///
+    /// Which is the line `HIGHLIGHTER-BUG.md` draws, and the one thing a stencil that simply marked "coloured"
+    /// would get wrong: it would make the second band invisible, though the reader drew it twice and expects
+    /// the darker mark that follows. The stencil is cleared of its mark as each stroke colours, so the second
+    /// stroke starts from nothing and composes — `1 − 0.65²`, about 58% — while the pieces *within* either
+    /// stroke still count once.
+    #[test]
+    fn two_strokes_over_the_same_point_are_two_layers() {
+        let Some(device) = objc2_metal::MTLCreateSystemDefaultDevice() else {
+            return;
+        };
+        let library = device
+            .newLibraryWithSource_options_error(&NSString::from_str(SHADERS), None)
+            .expect("the shaders compile");
+
+        let band = 18.0_f32;
+        let mapping = Mapping {
+            base: (0.0, 0.0),
+            step_x: (1.0, 0.0),
+            step_y: (0.0, 1.0),
+        };
+        let colour = note_format::ink::with_alpha(0xFFEB3B, note_ui::ink::HIGHLIGHTER_ALPHA);
+
+        // Two strokes drawn over the same line, each filled from its own pieces.
+        let mut vertices = Vec::new();
+        let mut scratch = Vec::new();
+        let mut sweep = Sweep::default();
+        let mut starts = Vec::new();
+
+        for _ in 0..2 {
+            let mut stroke = note_format::ink::Stroke::new(
+                note_format::ink::InkPoint::new(40.0, 100.0, band),
+                colour,
+            );
+            let mut x = 40.0_f32;
+            while x < 360.0 {
+                x += note_format::settings::Settings::default().resample_spacing;
+                stroke
+                    .points
+                    .push(note_format::ink::InkPoint::new(x, 100.0, band));
+            }
+            stroke.close_at(1.0);
+
+            starts.push(vertices.len());
+            fill(
+                &mut vertices,
+                &mut scratch,
+                &mut sweep,
+                &stroke,
+                &mapping,
+                (0.0, 0.0),
+                ink_colour(stroke.color),
+            );
+        }
+
+        let blue = band_over_white(&device, &library, &vertices, &starts, (400, 200));
+
+        // Twice 35% over white: `255 - (1 - 0.65²) * (255 - 59)`, about 139.
+        let twice =
+            255.0 - (1.0 - (1.0 - note_ui::ink::HIGHLIGHTER_ALPHA).powi(2)) * (255.0 - 59.0);
+
+        assert!(
+            (blue as f32 - twice).abs() <= 6.0,
+            "two strokes are not two layers: blue {blue} at the centre, where two layers are {twice:.0} \
+             (one layer is 186, and one layer per piece would be 59)"
+        );
+    }
+
+    /// Draws `vertices` over white through the renderer's ink passes, and answers the centre pixel's blue.
+    ///
+    /// A multisampled target resolved into one the CPU can read, matching what the window draws into: the
+    /// pipelines are built for `SAMPLES`, and a target of a different count is a pass Metal refuses.
+    fn band_over_white(
+        device: &ProtocolObject<dyn MTLDevice>,
+        library: &ProtocolObject<dyn MTLLibrary>,
+        vertices: &[Vertex],
+        translucent: &[usize],
+        (width, height): (usize, usize),
+    ) -> u8 {
+        use objc2_metal::MTLClearColor;
+
+        let solid = pipeline(device, library, "solid_vertex", "solid_fragment").expect("solid");
+        let stencil =
+            pipeline(device, library, "stencil_vertex", "stencil_fragment").expect("stencil");
+        let counting = stenciling(device).expect("a counting stencil");
+        let counted = stencilled(device).expect("a counted stencil");
+
+        // SAFETY: every byte these describe is in `vertices`, which outlives this call.
+        let buffer = unsafe {
+            let pointer = std::ptr::NonNull::new(vertices.as_ptr() as *mut std::ffi::c_void)
+                .expect("a band is not empty");
+            device.newBufferWithBytes_length_options(
+                pointer,
+                std::mem::size_of_val(vertices),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+        .expect("a vertex buffer");
+
+        let multisampled = |format| {
+            // SAFETY: a 2D descriptor for the size this draws at.
+            let descriptor = unsafe {
+                MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                    format, width, height, false,
+                )
+            };
+            descriptor.setTextureType(MTLTextureType::Type2DMultisample);
+            // SAFETY: the count the pipelines were built with.
+            unsafe {
+                descriptor.setSampleCount(SAMPLES);
+            }
+            descriptor.setUsage(MTLTextureUsage::RenderTarget);
+            device
+                .newTextureWithDescriptor(&descriptor)
+                .expect("a target")
+        };
+
+        let target = multisampled(MTLPixelFormat::BGRA8Unorm);
+        let mask = multisampled(STENCIL);
+
+        // SAFETY: a 2D descriptor for the size this reads back.
+        let resolve = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::BGRA8Unorm,
+                width,
+                height,
+                false,
+            )
+        };
+        resolve.setUsage(MTLTextureUsage::RenderTarget);
+        let resolved = device
+            .newTextureWithDescriptor(&resolve)
+            .expect("a readable target");
+
+        let pass = MTLRenderPassDescriptor::new();
+        // SAFETY: index 0 is the one attachment these pipelines were built for.
+        let attachment = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
+        attachment.setTexture(Some(&target));
+        attachment.setResolveTexture(Some(&resolved));
+        attachment.setLoadAction(MTLLoadAction::Clear);
+        attachment.setStoreAction(MTLStoreAction::MultisampleResolve);
+        attachment.setClearColor(MTLClearColor {
+            red: 1.0,
+            green: 1.0,
+            blue: 1.0,
+            alpha: 1.0,
+        });
+
+        let mask_attachment = pass.stencilAttachment();
+        mask_attachment.setTexture(Some(&mask));
+        mask_attachment.setLoadAction(MTLLoadAction::Clear);
+        mask_attachment.setStoreAction(MTLStoreAction::DontCare);
+        mask_attachment.setClearStencil(STENCIL_EMPTY);
+
+        let queue = device.newCommandQueue().expect("a queue");
+        let command = queue.commandBuffer().expect("a command buffer");
+        let encoder = command
+            .renderCommandEncoderWithDescriptor(&pass)
+            .expect("an encoder");
+
+        ink_pass(
+            &encoder,
+            &solid,
+            &stencil,
+            &counting,
+            &counted,
+            &buffer,
+            vertices.len(),
+            translucent,
+            width as f32,
+            height as f32,
+            Transform::WINDOW,
+            Some(&mask),
+        );
+
+        encoder.endEncoding();
+        command.commit();
+        command.waitUntilCompleted();
+
+        let mut pixel = [0u8; 4];
+        let region = MTLRegion {
+            origin: MTLOrigin {
+                x: width / 2,
+                y: height / 2,
+                z: 0,
+            },
+            size: MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        };
+        // SAFETY: `pixel` is four bytes and the region is the one pixel they hold.
+        unsafe {
+            let out = std::ptr::NonNull::new(pixel.as_mut_ptr() as *mut std::ffi::c_void)
+                .expect("a stack array is never null");
+            resolved.getBytes_bytesPerRow_bytesPerImage_fromRegion_mipmapLevel_slice(
+                out, 4, 4, region, 0, 0,
+            );
+        }
+
+        // A `BGRA8Unorm` pixel: blue is the first byte.
+        pixel[0]
     }
 }
 

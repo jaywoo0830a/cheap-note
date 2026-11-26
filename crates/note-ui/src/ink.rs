@@ -903,7 +903,7 @@ impl InkDocument {
                     let id = StrokeId::of(stroke);
 
                     if offset == last && index + 1 == self.finished.len() {
-                        changes.push(InkChange::Append { id });
+                        changes.push(InkChange::Append { id, at: index });
                     } else {
                         changes.push(InkChange::Insert {
                             id,
@@ -915,9 +915,10 @@ impl InkDocument {
             }
 
             Edit::Erased { removed } => {
-                for (_, stroke) in removed {
+                for (index, stroke) in removed {
                     changes.push(InkChange::Remove {
                         id: StrokeId::of(stroke),
+                        at: *index,
                         old_bounds: stroke.bounds,
                     });
                 }
@@ -934,6 +935,7 @@ impl InkDocument {
                     let new_bounds = stroke.bounds;
                     changes.push(InkChange::Update {
                         id: StrokeId::of(stroke),
+                        at: *index,
                         old_bounds: new_bounds.shifted((-by.0, -by.1)),
                         new_bounds,
                     });
@@ -988,9 +990,10 @@ impl InkDocument {
         let mut changes = Vec::new();
 
         // What left: from the page it was on, box and all.
-        for stroke in &before[start..before.len() - end] {
+        for (index, stroke) in before.iter().enumerate().take(before.len() - end).skip(start) {
             changes.push(InkChange::Remove {
                 id: StrokeId::of(stroke),
+                at: index,
                 old_bounds: stroke.bounds,
             });
         }
@@ -1001,6 +1004,7 @@ impl InkDocument {
             if index + 1 == after.len() {
                 changes.push(InkChange::Append {
                     id: StrokeId::of(stroke),
+                    at: index,
                 });
             } else {
                 changes.push(InkChange::Insert {
@@ -1017,11 +1021,6 @@ impl InkDocument {
         // app's own edits does this; the arm exists so that the answer is never a *wrong* delta.
         let proven = !changes.is_empty() || before.len() == after.len();
         self.pending = proven.then(|| PageDelta::new(revision, changes));
-    }
-
-    /// The change the page was given most recently, if no caller has taken it yet.
-    pub fn pending(&self) -> Option<&PageDelta> {
-        self.pending.as_ref()
     }
 
     /// Gives the caller the change since it last asked — the one notification a renderer acts on.
@@ -2349,6 +2348,36 @@ impl Notes {
         self.current = ink;
         self.page = page;
     }
+
+    /// The page in front of the reader, for the tests that check where its ink is.
+    ///
+    /// `crate`-visible rather than public: a renderer is handed this as the `Canvas`, and only this
+    /// module's tests need it directly.
+    pub fn held_page(&self) -> &InkDocument {
+        &self.current
+    }
+
+    /// What has happened to the page in front of the reader, to be published once.
+    ///
+    /// The change is handed over as the *page's own* newest step, whatever page number it was stamped
+    /// with. That is the one thing a page turn breaks: a document read from a note keeps a revision of its
+    /// own, so a change it was still holding arrives numbered against a page no renderer has ever seen. A
+    /// renderer compares revisions to find a change it has missed, and a number from another page would
+    /// read as exactly that — so the change is renumbered to the one that follows the page in front of the
+    /// reader, which is what makes it applicable.
+    pub fn published(&mut self) -> Option<PageDelta> {
+        let change = self.current.take_delta()?;
+        let page = self.current.revision();
+        let before = page.saturating_sub(1);
+
+        Some(if change.before == before {
+            change
+        } else {
+            let restamped = PageDelta::new(before, change.changes);
+            self.current.pending = Some(restamped.clone());
+            restamped
+        })
+    }
 }
 
 // ── What changed ────────────────────────────────────────────────────────────────────────────────────
@@ -2396,6 +2425,9 @@ pub enum InkChange {
     Append {
         /// The stroke, which is the last entry of the page the change is applied to.
         id: StrokeId,
+        /// Where it landed: the page's length before the change. Carried so that a consumer keeping a
+        /// cache per stroke can rebuild from here instead of walking the page to find out.
+        at: usize,
     },
     /// A stroke taken out, and the box it used to occupy.
     ///
@@ -2403,6 +2435,8 @@ pub enum InkChange {
     /// sees this, and what has to be redrawn is the *region* it was in, not the stroke.
     Remove {
         id: StrokeId,
+        /// Where it was in the page's order.
+        at: usize,
         old_bounds: Bounds,
     },
     /// A stroke put back among others, at a place in the drawing order.
@@ -2421,12 +2455,27 @@ pub enum InkChange {
     /// the stroke left *and* where it arrived.
     Update {
         id: StrokeId,
+        /// Where it sits in the page's order.
+        at: usize,
         old_bounds: Bounds,
         new_bounds: Bounds,
     },
 }
 
 impl InkChange {
+    /// Where in the page this change begins.
+    ///
+    /// The one number every consumer needs: geometry at or after it is built from ink that is no longer
+    /// the page's. Two changes in one transaction may name the same index, and the earliest wins.
+    pub fn at(&self) -> usize {
+        match self {
+            InkChange::Append { at, .. }
+            | InkChange::Remove { at, .. }
+            | InkChange::Insert { at, .. }
+            | InkChange::Update { at, .. } => *at,
+        }
+    }
+
     /// The box the change touches, in the paper's own units: where ink was, or now is.
     ///
     /// One box rather than `InkChange::Update`'s two, for a caller asking "is this change on screen

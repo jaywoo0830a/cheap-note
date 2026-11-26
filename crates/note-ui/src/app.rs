@@ -1874,7 +1874,7 @@ impl NoteApp {
             // What has happened to the page since the last frame asked. Taken, so one edit is reported
             // once; a frame that is skipped leaves a gap in the revisions and the renderer rebuilds,
             // which is the safe answer (see `PageDelta`).
-            delta: self.ink.take_delta(),
+            delta: self.ink.published(),
             visible: sheet.visible(),
             // Which way up the page is, and the paper's own shape: the layer turns the ink with the
             // page, because the ink is written *on* the page (see [`crate::ink::drawn_of_paper`]).

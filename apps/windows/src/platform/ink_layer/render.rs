@@ -74,6 +74,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use note_format::ink::{alpha_of, detail_zoom, Bounds, Stroke};
 use note_format::pages::Quarters;
+use note_ui::ink::InkChange;
 use note_ui::ink_layer::canvas::{Canvas, Fill, Page, Rect};
 use note_ui::ink_layer::ink_colour;
 
@@ -750,22 +751,66 @@ impl Renderer {
     /// shape: every outline it is built from was rebuilt when the zoom crossed into another detail
     /// rung, and the flattening has to be as well (see [`Renderer::realization_for`]).
     ///
-    /// The cache is rebuilt **from the first stroke that changed**, not from the whole page. An
-    /// append keeps every chunk before the tail and builds only the new stroke's realization; a
-    /// detail rung invalidates every chunk and rebuilds them at the new zoom. The tail stays
-    /// per-stroke so that writing does not rebuild the chunk behind the pen.
+    /// The cache is rebuilt **from the first stroke that changed**, not from the whole page, and three
+    /// different questions find that place — cheapest first:
+    ///
+    /// * A rung crossed: every realization is stale, so everything is built again.
+    /// * A change the page published: an append keeps every chunk before it and builds only the new
+    ///   stroke; an erase of the third stroke keeps two. This is the model telling the renderer what it
+    ///   did instead of the renderer looking (see [`first_touch`]).
+    /// * No change to go on: the page is compared with the cache element by element. Correct however
+    ///   they differ, and the price is a walk of pointer comparisons rather than a rebuild.
+    ///
+    /// The tail stays per-stroke so that writing does not rebuild the chunk behind the pen.
     fn refresh_ink(&mut self, canvas: &Canvas) -> Result<()> {
         let strokes = &canvas.ink.strokes;
 
+        // Every outline was rebuilt for a different rung: nothing cached is the same geometry.
         if self.ink.revision != canvas.ink.revision {
-            self.ink.identities.clear();
-            self.ink.realizations.clear();
-            self.ink.chunks.clear();
-            self.ink.chunked = 0;
             self.ink.revision = canvas.ink.revision;
+            return self.whole(canvas, strokes);
         }
 
+        // What the model said happened. This is what makes the cache a *diff* rather than a guess: a pen's
+        // stroke, an undo of one and a redo of an erase all arrive as the one change they are, naming the
+        // place they happened, so the rebuild starts there instead of being found by a walk.
+        let kept = match &canvas.ink.delta {
+            Some(change) if change.before + 1 == canvas.ink.edit => match first_touch(&change.changes) {
+                Some(at) => at,
+                // An empty change: nothing the names describe, so the page is compared.
+                None => return self.compare(canvas, strokes),
+            },
+            // No change to go on — a caller that cannot say, or one the cache never saw. The page is
+            // compared element by element, which is right however the two differ.
+            _ => return self.compare(canvas, strokes),
+        };
+
+        self.reset(strokes, canvas.ink.zoom, kept)
+    }
+
+    /// Throws the whole cache away and builds the page again.
+    fn whole(&mut self, canvas: &Canvas, strokes: &[Arc<Stroke>]) -> Result<()> {
+        self.ink.identities.clear();
+        self.ink.realizations.clear();
+        self.ink.chunks.clear();
+        self.ink.chunked = 0;
+
+        self.reset(strokes, canvas.ink.zoom, 0)
+    }
+
+    /// Finds the place the cache and the page differ, and rebuilds from there.
+    fn compare(&mut self, canvas: &Canvas, strokes: &[Arc<Stroke>]) -> Result<()> {
         let keep = unchanged_prefix(&self.ink.identities, strokes.iter().map(identity));
+
+        self.reset(strokes, canvas.ink.zoom, keep)
+    }
+
+    /// Brings the cache down to `keep` strokes and builds everything after them.
+    ///
+    /// The one place the cache and the page are put back in step, whichever question above found where
+    /// they differ. `keep` is never past a stroke whose geometry is not the one cached.
+    fn reset(&mut self, strokes: &[Arc<Stroke>], zoom: f32, keep: usize) -> Result<()> {
+        let keep = keep.min(self.ink.identities.len());
 
         if keep < self.ink.identities.len() {
             self.ink.identities.truncate(keep);
@@ -775,10 +820,10 @@ impl Renderer {
 
         self.ink
             .identities
-            .extend(strokes.iter().skip(self.ink.identities.len()).map(identity));
+            .extend(strokes.iter().skip(keep).map(identity));
         self.ink.realizations.resize_with(strokes.len(), || None);
 
-        self.rebuild_from_chunked(strokes, canvas.ink.zoom)
+        self.rebuild_from_chunked(strokes, zoom)
     }
 
     /// Drops the chunks that cover a stroke at or after `index`, and moves the cache boundary back
@@ -1085,8 +1130,17 @@ fn identity(stroke: &Arc<Stroke>) -> usize {
     Arc::as_ptr(stroke) as usize
 }
 
-/// How many of the cached stroke identities still match the page, from the start.
+/// Where in the page a change first makes the cached geometry wrong.
 ///
+/// The whole point of the model publishing what it did: a pen writing the last stroke of a page means the
+/// cache keeps every stroke before it, and an erase of the third means it keeps two. Without this the
+/// layer has to walk the page looking for the place the lists stop agreeing — correct, but the cost is
+/// the page rather than the edit.
+fn first_touch(changes: &[InkChange]) -> Option<usize> {
+    changes.iter().map(InkChange::at).min()
+}
+
+/// How many of the cached stroke identities still match the page, from the start.
 /// A pure function of two lists, so "appending a stroke keeps every geometry before it" is a fact a
 /// test can pin rather than a hope about a loop. The revision is handled by the caller, which clears
 /// the cache before asking when the outlines themselves were rebuilt.
@@ -1251,6 +1305,52 @@ mod tests {
     use gpui_kit::rgba;
     use note_format::ink::InkPoint;
     use note_ui::ink_layer::canvas::Ink;
+
+    /// A change names the place geometry has to be rebuilt from, and the earliest place wins.
+    ///
+    /// The whole of what the model's change buys this backend: an append keeps every stroke before it,
+    /// and an erase of the third stroke keeps two. A transaction that touches several places starts at
+    /// the first, because everything after a changed stroke may overlap it.
+    #[test]
+    fn a_change_names_where_the_cache_has_to_start_again() {
+        use note_format::ink::Bounds;
+        use note_ui::ink::StrokeId;
+
+        let id = StrokeId::of(&Arc::new(Stroke::new(InkPoint::new(0.0, 0.0, 1.0), 0)));
+
+        assert_eq!(
+            first_touch(&[InkChange::Append { id, at: 41 }]),
+            Some(41),
+            "an append keeps every stroke before it"
+        );
+        assert_eq!(
+            first_touch(&[InkChange::Remove {
+                id,
+                at: 2,
+                old_bounds: Bounds::NOTHING,
+            }]),
+            Some(2),
+            "an erase of the third stroke keeps two"
+        );
+        assert_eq!(
+            first_touch(&[
+                InkChange::Update {
+                    id,
+                    at: 9,
+                    old_bounds: Bounds::NOTHING,
+                    new_bounds: Bounds::NOTHING,
+                },
+                InkChange::Insert {
+                    id,
+                    at: 4,
+                    bounds: Bounds::NOTHING,
+                },
+            ]),
+            Some(4),
+            "the earliest place in a transaction is where the rebuild starts"
+        );
+        assert_eq!(first_touch(&[]), None, "a change of nothing names nothing");
+    }
 
     /// A still page takes the bitmap path, and a second frame reuses it.
     ///

@@ -3775,6 +3775,69 @@ fn a_notes_memory_does_not_grow_with_its_page_count() {
 
 // ── What changed ────────────────────────────────────────────────────────────────────────────────
 
+/// A change that arrives after the reader has turned the page is renumbered to the new page's own step.
+///
+/// The one place the revision a change carries cannot be trusted: a document read from a note keeps a
+/// revision of its own, so a change it was still holding is numbered against a page no renderer has
+/// seen. A renderer compares revisions to find a change it missed, so a stray number would read as
+/// exactly that — and it would rebuild a page it had just drawn.
+#[test]
+fn a_change_from_another_page_is_renumbered() {
+    // The note is on page 0, and the page the reader is about to leave is the one that gets held.
+    let mut notes = Notes::new();
+
+    // A page the note was holding with a change it still has not published: its own revision, its own
+    // numbering, no renderer told yet. The erase is what makes one — three strokes, the middle gone,
+    // and the ink it took still held in the history.
+    let mut held = three_strokes();
+    held.set_mode(Tool::Eraser);
+    let mut eraser = reading(7, Phase::Down, 350.0, 120.0, None);
+    eraser.eraser = true;
+    held.consume(&[eraser], &id(), &settings());
+    assert_eq!(held.stroke_count(), 2, "the nib took one stroke");
+
+    // The note holds the page under the key the reader turns back to it by, which is the one it was on.
+    // The reader turns away first, so what the note holds for page 0 is this page and not a blank one
+    // written over it.
+    notes.go_to(1);
+    notes.put_page(0, held);
+    let kept: &InkDocument = notes
+        .held(0)
+        .expect("the note keeps a page it was given");
+    assert!(
+        kept.revision() > 0,
+        "the page the note holds has a revision of its own ({} strokes)",
+        kept.finished().len()
+    );
+
+    // Turning back brings it to the front with the change it still had, numbered against the revision it
+    // was read with. The note re-keys the page as the one it was shown under, so turning back to it is
+    // turning to where it now is — `go_to(0)` alone would leave it behind and arrive at a blank sheet.
+    notes.go_to(0);
+    notes.go_to(1);
+    notes.go_to(0);
+
+    let change = notes.published().expect("the arriving page had a change");
+    let page = notes.held_page().revision();
+
+    // The page keeps the revision it was written at, so the change that arrives is numbered against
+    // that: a renderer holding this page would read `before = 3` as a change it never saw, and rebuild.
+    // The one it is handed is stamped for the page in front of the reader instead.
+    assert_ne!(
+        change.before, 0,
+        "the arriving page had a revision of its own, which is what makes this a restamp"
+    );
+    assert_eq!(
+        change.after(),
+        page,
+        "the change is numbered against the page in front of the reader, not the one it was written on"
+    );
+    assert!(
+        notes.published().is_none(),
+        "and it is published once, like any other"
+    );
+}
+
 /// A pen write is one `Append` of the stroke that landed, and nothing else.
 ///
 /// The whole first step of the explicit-rebuild design rests on this: a renderer told "one stroke
@@ -3800,8 +3863,8 @@ fn a_written_stroke_is_one_append() {
     assert_eq!(delta.after(), 1, "the revision moves by one");
     assert_eq!(delta.changes.len(), 1, "one stroke was written");
     assert!(
-        matches!(delta.changes[0], InkChange::Append { id } if id == StrokeId::of(&page.finished()[0])),
-        "the change names the stroke that landed: {:?}",
+        matches!(delta.changes[0], InkChange::Append { id, at: 0 } if id == StrokeId::of(&page.finished()[0])),
+        "the change names the stroke that landed, and where: {:?}",
         delta.changes[0]
     );
     assert!(delta.rebuilds(), "an append is new geometry");

@@ -584,6 +584,15 @@ pub struct InkDocument {
     wanted_at: Option<f32>,
     /// What the model has done since the app started.
     stats: InkStats,
+    /// The last edit's revision, counting from zero.
+    ///
+    /// One step per *edit this page has been given* — the number a [`PageDelta`] is stamped with, and
+    /// the one that lets a renderer tell "the change after the one I have" from "I have missed one".
+    /// It counts edits and not frames: a page nobody has written on has the same revision after a
+    /// thousand frames of a pan, which is what makes it a fact about the *ink*.
+    revision: u64,
+    /// The change the page was given most recently, until a caller takes it.
+    pending: Option<PageDelta>,
     /// Which strokes are in hand, one flag per stroke in [`Self::finished`], in the same order.
     ///
     /// Behind an `Arc` for the same reason the strokes are: a frame is handed the flags rather than a copy
@@ -620,6 +629,8 @@ impl Default for InkDocument {
             detailed_at: None,
             wanted_at: None,
             stats: InkStats::default(),
+            revision: 0,
+            pending: None,
             selected: Arc::new(Vec::new()),
             lasso: None,
             shifted: 0,
@@ -708,17 +719,26 @@ impl InkDocument {
     /// Returns whether anything was taken back. A caller uses that to decide whether to repaint, and the
     /// interface uses [`Self::can_undo`] to say so *before* it is asked.
     pub fn undo(&mut self) -> bool {
-        let mut page = editable(
-            &mut self.finished,
-            &mut self.selected,
-            &mut self.shifted,
-            self.detailed_at,
-        );
+        let before = self.finished.clone();
 
-        if !self.history.undo(&mut page) {
+        let went = {
+            let mut page = editable(
+                &mut self.finished,
+                &mut self.selected,
+                &mut self.shifted,
+                self.detailed_at,
+            );
+
+            self.history.undo(&mut page)
+        };
+
+        if !went {
             return false;
         }
 
+        // What came back is read off the two pages rather than asked of the history: undo already held the
+        // edit's ink, and the page is the place where "where it went back" is a fact.
+        self.stamp_rearranged(&before);
         self.forget_erase();
         true
     }
@@ -728,18 +748,28 @@ impl InkDocument {
     /// Nothing is *copied* by undoing and nothing is invented by redoing: the ink comes back exactly as it was,
     /// because an edit holds the strokes themselves (see [`Edit`]). A redo branch is ended by any new edit, so
     /// this can never put ink back into a drawing it does not belong to.
+    ///
+    /// A redo of a pen stroke is an **append** to a renderer, and that is not a special case here: [`InkChange`]
+    /// is read off where the ink landed, so redoing the last stroke and writing it both produce one `Append`.
     pub fn redo(&mut self) -> bool {
-        let mut page = editable(
-            &mut self.finished,
-            &mut self.selected,
-            &mut self.shifted,
-            self.detailed_at,
-        );
+        let before = self.finished.clone();
 
-        if !self.history.redo(&mut page) {
+        let went = {
+            let mut page = editable(
+                &mut self.finished,
+                &mut self.selected,
+                &mut self.shifted,
+                self.detailed_at,
+            );
+
+            self.history.redo(&mut page)
+        };
+
+        if !went {
             return false;
         }
 
+        self.stamp_rearranged(&before);
         self.forget_erase();
         true
     }
@@ -818,7 +848,8 @@ impl InkDocument {
     ///
     /// The edit is *applied* here and then filed, in that order and through one piece of code: a command that
     /// changes the page runs the same [`Edit::apply`] a redo runs, so the two cannot come to disagree about what
-    /// an edit does. An edit that changes nothing is not history.
+    /// an edit does. An edit that changes nothing is not history — and, for the same reason, is not a change
+    /// anyone has to hear about.
     fn record(&mut self, edit: Edit) -> bool {
         let applied = {
             let mut page = editable(
@@ -832,10 +863,174 @@ impl InkDocument {
         };
 
         if applied {
+            self.stamp(&edit);
             self.history.record(edit);
         }
 
         applied
+    }
+
+    /// Says what an edit that has just been applied did to the ink.
+    ///
+    /// Called once, after [`Edit::apply`] and for the same reason: the change is read off the edit that
+    /// actually happened rather than invented from the command that asked for it. A pen, a redo of a pen
+    /// and a redo of an undo all arrive here as `Written` or `Erased`, so there is no `Append`-versus-`Insert`
+    /// decision to get wrong anywhere but here — see [`InkChange`].
+    ///
+    /// ## Why an unread change is given up rather than merged
+    ///
+    /// A frame draws what has happened since the last one, and it can be several edits behind: two strokes
+    /// written between two frames are two deltas, not one that a renderer would have to replay in order
+    /// against a page that has already moved past both. Only the newest is kept, and an older one is
+    /// replaced — the renderer then sees a gap in its revisions and recovers from the page it holds, which
+    /// is the safe direction. Merging them would mean the delta has to be applied as a *log*, and one
+    /// applied read-only against a page that already contains both would add everything twice.
+    fn stamp(&mut self, edit: &Edit) {
+        let before = self.revision;
+        self.revision = self.revision.wrapping_add(1);
+
+        let mut changes = Vec::new();
+
+        match edit {
+            // Ink written where the page now ends is an append; anywhere else is an insert. The two are the
+            // *same* edit — a redo of a stroke puts it back where it first went — so which it is comes from
+            // the index it landed at rather than from who asked.
+            Edit::Written { at, strokes } => {
+                let last = strokes.len().saturating_sub(1);
+
+                for (offset, stroke) in strokes.iter().enumerate() {
+                    let index = at + offset;
+                    let id = StrokeId::of(stroke);
+
+                    if offset == last && index + 1 == self.finished.len() {
+                        changes.push(InkChange::Append { id });
+                    } else {
+                        changes.push(InkChange::Insert {
+                            id,
+                            at: index,
+                            bounds: stroke.bounds,
+                        });
+                    }
+                }
+            }
+
+            Edit::Erased { removed } => {
+                for (_, stroke) in removed {
+                    changes.push(InkChange::Remove {
+                        id: StrokeId::of(stroke),
+                        old_bounds: stroke.bounds,
+                    });
+                }
+            }
+
+            // Read *after* the shift, because the page has already been moved: the stroke is where it is
+            // now, and the box it came from is that box moved back.
+            Edit::Shifted { strokes, by } => {
+                for index in strokes {
+                    let Some(stroke) = self.finished.get(*index) else {
+                        continue;
+                    };
+
+                    let new_bounds = stroke.bounds;
+                    changes.push(InkChange::Update {
+                        id: StrokeId::of(stroke),
+                        old_bounds: new_bounds.shifted((-by.0, -by.1)),
+                        new_bounds,
+                    });
+                }
+            }
+        }
+
+        self.pending = Some(PageDelta::new(before, changes));
+    }
+
+    /// The detail rung the page's outlines are actually built for, as bits.
+    ///
+    /// The pair [`Self::detail`] reports: what the strokes were detailed at, and what a frame has asked
+    /// for. A renderer compares the first; the second is what the pump still owes.
+    pub fn detailed_at(&self) -> Option<f32> {
+        self.detailed_at
+    }
+
+    /// The page's revision: one step per edit it has been given.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Says what undo or redo did, by comparing the page with the one it was a moment ago.
+    ///
+    /// A pen's edit says what it did (see [`Self::stamp`]) but a history edit does not: undo is "the last
+    /// edit, backwards", and which kind that was is the history's business and not the caller's. Comparing
+    /// the two pages is the one way to answer it that cannot drift from [`Edit`]'s own rules, and it costs a
+    /// walk of two pointer lists — undo is a keystroke, not a frame.
+    ///
+    /// The two pages are almost always the same list with one stroke added or taken at one end, so the
+    /// shared prefix and the shared suffix are found in one walk each and everything between them is what
+    /// the edit touched.
+    fn stamp_rearranged(&mut self, before: &Arc<Vec<Arc<Stroke>>>) {
+        let revision = self.revision;
+        self.revision = self.revision.wrapping_add(1);
+
+        let after = &self.finished;
+        let shared = before.len().min(after.len());
+        let mut start = 0;
+        while start < shared && Arc::ptr_eq(&before[start], &after[start]) {
+            start += 1;
+        }
+
+        let mut end = 0;
+        while end < shared - start
+            && Arc::ptr_eq(&before[before.len() - 1 - end], &after[after.len() - 1 - end])
+        {
+            end += 1;
+        }
+
+        let mut changes = Vec::new();
+
+        // What left: from the page it was on, box and all.
+        for stroke in &before[start..before.len() - end] {
+            changes.push(InkChange::Remove {
+                id: StrokeId::of(stroke),
+                old_bounds: stroke.bounds,
+            });
+        }
+
+        // What arrived, at the place it arrived at.
+        let last = after.len() - end;
+        for (index, stroke) in after.iter().enumerate().take(last).skip(start) {
+            if index + 1 == after.len() {
+                changes.push(InkChange::Append {
+                    id: StrokeId::of(stroke),
+                });
+            } else {
+                changes.push(InkChange::Insert {
+                    id: StrokeId::of(stroke),
+                    at: index,
+                    bounds: stroke.bounds,
+                });
+            }
+        }
+
+        // A page whose ink holds more than these identities can tell apart — a stroke written over a copy of
+        // itself, a drag that is not in the list at all — is still a page that changed, so a delta with more
+        // in it than the walk could prove is reported as `None` and the renderer rebuilds. Nothing in the
+        // app's own edits does this; the arm exists so that the answer is never a *wrong* delta.
+        let proven = !changes.is_empty() || before.len() == after.len();
+        self.pending = proven.then(|| PageDelta::new(revision, changes));
+    }
+
+    /// The change the page was given most recently, if no caller has taken it yet.
+    pub fn pending(&self) -> Option<&PageDelta> {
+        self.pending.as_ref()
+    }
+
+    /// Gives the caller the change since it last asked — the one notification a renderer acts on.
+    ///
+    /// Taken rather than peeked, so a frame that draws twice from one edit reports it once. What a renderer
+    /// must *not* do is depend on being called every frame: a renderer that finds nothing here and a revision
+    /// it does not recognise recovers from the page itself (see [`PageDelta`]).
+    pub fn take_delta(&mut self) -> Option<PageDelta> {
+        self.pending.take()
     }
 
     /// Forgets where the eraser last removed ink, because the ink under it has just changed.
@@ -2153,6 +2348,148 @@ impl Notes {
         }
         self.current = ink;
         self.page = page;
+    }
+}
+
+// ── What changed ────────────────────────────────────────────────────────────────────────────────────
+
+/// Which strokes a change is about.
+///
+/// A **session** identity: it is not written to the note and does not have to survive a page turn or
+/// a reopen, because nothing downstream of it outlives one either. The value a change carries is the
+/// stroke's own address (`Arc::as_ptr`), which is what a renderer can compare against the strokes it
+/// built from without either side having to remember a number.
+///
+/// A vector *index* is deliberately not this: a stroke's index moves when an earlier one is erased
+/// or put back, and a change that named an index would act on whatever the index happened to hold
+/// when it arrived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StrokeId(usize);
+
+impl StrokeId {
+    /// The identity of a stroke: the `Arc`'s address (see the type's own note).
+    pub fn of(stroke: &Arc<Stroke>) -> Self {
+        StrokeId(Arc::as_ptr(stroke) as *const () as usize)
+    }
+
+    /// The raw value, for a renderer keeping it in a cache of its own.
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// One change a page's ink has been through, in the form a renderer can act on.
+///
+/// The list is what tells a renderer *what to fix*, which is the half a revision cannot do: a
+/// revision says something is stale, and this says which strokes moved and where they used to be.
+/// Both are needed (see [`PageDelta`]) because a revision alone would make every frame rebuild the
+/// page to find out what changed, and a change alone would be silent when one goes missing.
+///
+/// ## Why the strokes are not in here
+///
+/// A stroke is up to a few thousand points and lives behind an `Arc` on the page. A change names it,
+/// and the renderer reads it from the page it is already holding — a notification that copied point
+/// arrays would cost the very work it exists to avoid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum InkChange {
+    /// A stroke put at the end of the page. What a pen does, and what a redo of one does.
+    Append {
+        /// The stroke, which is the last entry of the page the change is applied to.
+        id: StrokeId,
+    },
+    /// A stroke taken out, and the box it used to occupy.
+    ///
+    /// The box is carried because the stroke itself is gone from the page by the time a renderer
+    /// sees this, and what has to be redrawn is the *region* it was in, not the stroke.
+    Remove {
+        id: StrokeId,
+        old_bounds: Bounds,
+    },
+    /// A stroke put back among others, at a place in the drawing order.
+    ///
+    /// What undoing an erase is: the ink comes back where it was, so anything it overlaps has to be
+    /// settled in the same order it was originally laid down.
+    Insert {
+        id: StrokeId,
+        /// Where in the page's order the stroke now sits.
+        at: usize,
+        bounds: Bounds,
+    },
+    /// A stroke that was already there, in a different place.
+    ///
+    /// What a lasso's drag is, put down. Both boxes travel, because what has to be redrawn is what
+    /// the stroke left *and* where it arrived.
+    Update {
+        id: StrokeId,
+        old_bounds: Bounds,
+        new_bounds: Bounds,
+    },
+}
+
+impl InkChange {
+    /// The box the change touches, in the paper's own units: where ink was, or now is.
+    ///
+    /// One box rather than `InkChange::Update`'s two, for a caller asking "is this change on screen
+    /// at all" — a question that has to answer yes if either side is.
+    pub fn touched(&self) -> Bounds {
+        match self {
+            InkChange::Append { .. } => Bounds::NOTHING,
+            InkChange::Remove { old_bounds, .. } => *old_bounds,
+            InkChange::Insert { bounds, .. } => *bounds,
+            InkChange::Update {
+                old_bounds,
+                new_bounds,
+                ..
+            } => old_bounds.union(*new_bounds),
+        }
+    }
+}
+
+/// Everything one edit did to one page, and what a renderer can rely on having seen.
+///
+/// ## Why a revision *and* a list
+///
+/// The two answer different questions, and neither can do the other's job:
+///
+/// * `before`/`after` say whether this is the change that follows the last one received. A renderer
+///   that sees `after = 43` when it last applied `41` has *missed* one, and must not guess at what
+///   it was: it rebuilds the visible region from the page it is holding. That is the failure a
+///   silently dropped notification causes — a stroke erased on screen and never taken away — and
+///   the one thing an incremental renderer has to be able to recover from.
+/// * `changes` says exactly which strokes to fix, so applying a change does not have to compare the
+///   page against a copy of it. Comparing two stroke lists every frame to find the difference would
+///   make a cache *hit* cost as much as the rebuild it avoids.
+///
+/// A transaction is one `Vec` rather than one delta per stroke because a single edit can touch
+/// several strokes (an erased selection, a moved group), and a renderer that applied half of it
+/// would draw a page that never existed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageDelta {
+    /// The revision this change applies to; the page is at `before + 1` once it has.
+    pub before: u64,
+    /// What the edit did, in the order it did it.
+    pub changes: Vec<InkChange>,
+}
+
+impl PageDelta {
+    /// A delta taking a page from `before` to `before + 1`.
+    pub fn new(before: u64, changes: Vec<InkChange>) -> Self {
+        PageDelta { before, changes }
+    }
+
+    /// The revision the page is at once this has been applied.
+    pub fn after(&self) -> u64 {
+        self.before + 1
+    }
+
+    /// Whether applying this would make any new geometry.
+    ///
+    /// False for a change that only takes ink *out*: the vertices before it are still where they
+    /// were, and only how many of them are drawn changes.
+    pub fn rebuilds(&self) -> bool {
+        self.changes
+            .iter()
+            .any(|change| !matches!(change, InkChange::Remove { .. }))
     }
 }
 

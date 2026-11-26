@@ -114,6 +114,22 @@ impl Bounds {
             .covering(other.max.0, other.max.1)
     }
 
+    /// This box moved by `by`, in the paper's own units.
+    ///
+    /// What a lasso's drag does to a stroke's box: the *shape* is unchanged and only where it sits
+    /// moves, so the new box is the old corners each shifted. A box that covers nothing stays
+    /// nothing rather than becoming a real box at the infinities.
+    pub fn shifted(self, by: (f32, f32)) -> Self {
+        if self.is_empty() {
+            return self;
+        }
+
+        Bounds {
+            min: (self.min.0 + by.0, self.min.1 + by.1),
+            max: (self.max.0 + by.0, self.max.1 + by.1),
+        }
+    }
+
     /// Whether the two boxes share any part of the plane.
     ///
     /// Inclusive, and that is the point: a stroke whose last pixel is exactly the screen's first is

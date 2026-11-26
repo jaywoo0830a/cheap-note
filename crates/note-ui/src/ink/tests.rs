@@ -3772,3 +3772,218 @@ fn a_notes_memory_does_not_grow_with_its_page_count() {
         );
     }
 }
+
+// ── What changed ────────────────────────────────────────────────────────────────────────────────
+
+/// A pen write is one `Append` of the stroke that landed, and nothing else.
+///
+/// The whole first step of the explicit-rebuild design rests on this: a renderer told "one stroke
+/// arrived at the end" can add it and leave the page alone. An edit that reported the *page* instead
+/// — a rebuild, a list of strokes — would put back the very work a change exists to avoid.
+#[test]
+fn a_written_stroke_is_one_append() {
+    let mut page = InkDocument::blank();
+
+    page.consume(
+        &[
+            reading(1, Phase::Down, 100.0, 100.0, None),
+            reading(1, Phase::Move, 140.0, 120.0, None),
+            reading(1, Phase::Up, 180.0, 100.0, None),
+        ],
+        &id(),
+        &settings(),
+    );
+
+    let delta = page.take_delta().expect("writing a stroke is a change");
+
+    assert_eq!(delta.before, 0, "the page had no edits before this one");
+    assert_eq!(delta.after(), 1, "the revision moves by one");
+    assert_eq!(delta.changes.len(), 1, "one stroke was written");
+    assert!(
+        matches!(delta.changes[0], InkChange::Append { id } if id == StrokeId::of(&page.finished()[0])),
+        "the change names the stroke that landed: {:?}",
+        delta.changes[0]
+    );
+    assert!(delta.rebuilds(), "an append is new geometry");
+}
+
+/// A delta is taken once: a second frame does not hear about the same edit again.
+#[test]
+fn a_change_is_reported_once() {
+    let mut page = InkDocument::from_strokes(vec![curve()]);
+
+    page.consume(
+        &[
+            reading(1, Phase::Down, 100.0, 300.0, None),
+            reading(1, Phase::Up, 160.0, 300.0, None),
+        ],
+        &id(),
+        &settings(),
+    );
+
+    assert!(page.take_delta().is_some(), "the stroke was a change");
+    assert!(page.take_delta().is_none(), "and it was reported once");
+    assert_eq!(page.revision(), 1, "one edit, one revision");
+}
+
+/// A frame that is skipped loses nothing permanent: the revision still says what happened.
+///
+/// This is the recovery path. Two strokes written between two frames leave the newest delta only,
+/// and the gap between the revision a renderer holds and the page's is what tells it to rebuild
+/// rather than apply a change it never received.
+#[test]
+fn a_skipped_frame_shows_as_a_gap_in_the_revisions() {
+    let mut page = InkDocument::blank();
+
+    for (down, up) in [(100.0, 160.0), (200.0, 260.0)] {
+        page.consume(
+            &[
+                reading(1, Phase::Down, down, 100.0, None),
+                reading(1, Phase::Up, up, 100.0, None),
+            ],
+            &id(),
+            &settings(),
+        );
+    }
+
+    let delta = page.take_delta().expect("the newest edit is still reported");
+
+    assert_eq!(page.revision(), 2, "two edits happened");
+    assert_eq!(
+        delta.after(),
+        page.revision(),
+        "the delta is the newest edit, so a renderer holding 0 sees a gap from 1 to 2"
+    );
+    assert_eq!(
+        delta.changes.len(),
+        1,
+        "one change, and it is the second stroke: {:?}",
+        delta.changes
+    );
+}
+
+/// A redo of a pen stroke reaches a renderer as the same append a pen does.
+///
+/// The design document's own example: writing a stroke and redoing one are different *actions* and
+/// the same *change*. If they were told apart, every renderer would have to decide again which of
+/// them appends.
+#[test]
+fn a_redone_stroke_is_an_append_too() {
+    let mut page = InkDocument::from_strokes(vec![curve()]);
+    page.take_delta();
+
+    page.consume(
+        &[
+            reading(1, Phase::Down, 400.0, 600.0, None),
+            reading(1, Phase::Up, 460.0, 600.0, None),
+        ],
+        &id(),
+        &settings(),
+    );
+    assert!(page.take_delta().is_some(), "the stroke is a change");
+
+    assert!(page.undo(), "the stroke can be taken back");
+    let undone = page.take_delta().expect("undo is a change");
+    assert!(
+        matches!(undone.changes.as_slice(), [InkChange::Remove { .. }]),
+        "undoing the last stroke takes it away: {:?}",
+        undone.changes
+    );
+
+    assert!(page.redo(), "and put forward again");
+    let redone = page.take_delta().expect("redo is a change");
+    assert!(
+        matches!(redone.changes.as_slice(), [InkChange::Append { .. }]),
+        "redoing it puts a stroke at the end: {:?}",
+        redone.changes
+    );
+}
+
+/// Undoing an erase puts the ink back where it was: an insert, with the index it went back to.
+///
+/// The other half of the document's example. A highlighter restored in the middle of a page has to be
+/// drawn in its original order, and a renderer told only "a stroke is back, somewhere" could not tell
+/// a tail insert from a middle one.
+#[test]
+fn undoing_an_erase_is_an_insert_where_the_ink_was() {
+    let middle = flick();
+    let mut page = InkDocument::from_strokes(vec![curve(), middle.clone(), doubled_back()]);
+    page.take_delta();
+
+    // Erase the one in the middle. `Edit::Erased` is what the eraser, a deleted selection and Clear
+    // all file, so this is the same edit a hand makes.
+    assert!(
+        page.record(Edit::Erased {
+            removed: vec![(1, Arc::new(middle))],
+        }),
+        "the middle stroke was there to erase"
+    );
+
+    let erased = page.take_delta().expect("erasing is a change");
+    assert!(
+        matches!(erased.changes.as_slice(), [InkChange::Remove { .. }]),
+        "one stroke left: {:?}",
+        erased.changes
+    );
+    assert!(!erased.rebuilds(), "taking ink away makes no new geometry");
+
+    assert!(page.undo(), "the erase can be taken back");
+    let back = page.take_delta().expect("undo is a change");
+
+    assert!(
+        matches!(back.changes.as_slice(), [InkChange::Insert { at: 1, .. }]),
+        "the ink came back in the middle: {:?}",
+        back.changes
+    );
+}
+
+/// An edit that changes nothing is not a change: it reports nothing and does not move the revision.
+#[test]
+fn an_edit_that_changes_nothing_is_not_reported() {
+    let mut page = InkDocument::from_strokes(vec![curve()]);
+
+    assert!(
+        !page.record(Edit::Erased { removed: Vec::new() }),
+        "nothing was removed"
+    );
+
+    assert_eq!(page.revision(), 0, "a no-op edit is not a revision");
+    assert!(page.take_delta().is_none(), "and it is not a change");
+}
+
+/// A drag that is put down tells a renderer both boxes: where the ink was, and where it now is.
+#[test]
+fn a_piece_of_ink_that_moved_reports_both_places() {
+    let mut page = InkDocument::from_strokes(vec![curve()]);
+    page.take_delta();
+
+    let before = page.finished()[0].bounds;
+
+    assert!(
+        page.record(Edit::Shifted {
+            strokes: vec![0],
+            by: (30.0, -10.0),
+        }),
+        "the stroke moved"
+    );
+
+    let moved = page.take_delta().expect("moving ink is a change");
+
+    match moved.changes.as_slice() {
+        [InkChange::Update {
+            old_bounds,
+            new_bounds,
+            ..
+        }] => {
+            assert!(
+                (old_bounds.min.0 - before.min.0).abs() < 1e-3,
+                "the box it came from is the box it had: {old_bounds:?} vs {before:?}"
+            );
+            assert!(
+                ((new_bounds.min.0 - before.min.0) - 30.0).abs() < 1e-3,
+                "and the box it went to is moved by as much: {new_bounds:?}"
+            );
+        }
+        other => panic!("a moved stroke is one update: {other:?}"),
+    }
+}

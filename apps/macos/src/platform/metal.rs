@@ -41,7 +41,7 @@ use note_ui::cursor::{
     BODY_HALO_ALPHA, BODY_HALO_GROW, NIB_ALPHA, NIB_BLOOM_ALPHA, NIB_BLOOM_SPREAD, NIB_RADIUS_MAX,
     NIB_RADIUS_MIN,
 };
-use note_ui::ink_layer::canvas::Rect;
+use note_ui::ink_layer::canvas::{Ink, Rect};
 use note_ui::ink_layer::{ink_colour, Canvas};
 use note_ui::paint::finite_or_one;
 
@@ -223,6 +223,14 @@ pub struct Surface {
     ink_buffers: [Option<Retained<ProtocolObject<dyn MTLBuffer>>>; 3],
     /// Which of the finished ink's buffers hold the current ink.
     ink_slots_valid: [bool; 3],
+    /// How many of [`Self::ink`]'s vertices each buffer already holds, in order.
+    ///
+    /// The explicit-rebuild design's one piece of per-slot state. A rebuild makes every buffer hold
+    /// nothing (`filled` goes to zero) and a frame refills its slot with the whole list; an append
+    /// leaves the buffers holding the vertices they had and the next frame copies only the tail past
+    /// this. That is what turns an append's upload from a page into a stroke, without asking a buffer
+    /// of unknown contents to vouch for the front of itself.
+    filled: [usize; 3],
     /// Time spent copying the finished ink into a frame's buffer, and how much was copied.
     ///
     /// Instrumentation for the bench's breakdown (`CHEAP_NOTE_BENCH_BREAKDOWN`): a rebuild's wall time
@@ -247,6 +255,28 @@ pub struct Surface {
     /// surface is what stops a rebuild from making and freeing one set per stroke (`OPT-MAC.md`).
     scratch: Vec<(f32, f32)>,
     sweep: Sweep,
+    /// What the surface knows about the page it drew: the revision it was built from, how many of the
+    /// page's strokes it covers, and the rung and turn they were baked for.
+    ///
+    /// The explicit-rebuild state — the whole point being that it answers "is this the page below" without
+    /// walking the page. `covered` is the number of strokes at the *front* that the triangles below already
+    /// are: appending lengthens that prefix, and an edit anywhere else shortens it.
+    ///
+    /// `None` until a page has been built, which is what makes the first frame a build rather than an
+    /// append onto triangles that do not exist.
+    delta: Option<DeltaState>,
+    /// The reason of each rebuild, oldest first, bounded by [`RECORDED_REASONS`].
+    ///
+    /// Not diagnostics for a human to read: an append that had to become a rebuild leaves its reason
+    /// here, and a test asserts on it. "The page grew a stroke" and "the page grew a stroke but the
+    /// renderer rebuilt anyway" are different runs with the same byte count in some scenarios, and this
+    /// is what tells them apart.
+    recorded: Vec<Demotion>,
+    /// The strokes in hand, as of the last build: which of the page's strokes the caller draws itself.
+    ///
+    /// Kept on the surface rather than passed down, because the fill has to know which strokes to skip and
+    /// the surface is the only thing that knows the page it is filling.
+    ink_in_hand: Arc<Vec<bool>>,
     /// The document's page on the GPU, and the identity of the rasterisation it holds.
     page_texture: Option<(usize, Retained<ProtocolObject<dyn MTLTexture>>)>,
     /// The multisampled target the passes draw into, resolved into the drawable. Made with the size.
@@ -324,6 +354,9 @@ impl Surface {
             layer,
             ink: Vec::new(),
             ink_key: None,
+            delta: None,
+            ink_in_hand: Arc::new(Vec::new()),
+            recorded: Vec::new(),
             // Nothing built yet: a region that covers nothing, so the first frame always builds.
             ink_covered: Bounds::NOTHING,
             open: Vec::new(),
@@ -336,6 +369,7 @@ impl Surface {
             translucent_open: Vec::new(),
             ink_buffers: [None, None, None],
             ink_slots_valid: [false; 3],
+            filled: [0; 3],
             stage_uploaded: std::time::Duration::ZERO,
             uploaded_bytes: 0,
             upload_count: 0,
@@ -505,26 +539,68 @@ impl Surface {
 
     /// Rebuilds the finished ink, when what the triangles are a function of has changed.
     ///
-    /// Two reasons to build: the ink *is* different (a stroke added, a zoom rung, a turn of the page — the
-    /// [`InkKey`]), or the region it was built for no longer covers what the screen shows ([`fits`]). The
-    /// second is what has to be right for a scroll and a zoom to cost nothing, and it is a containment test
-    /// rather than a distance for the reason [`CULL_SPAN`] gives.
+    /// Brings the triangles below up to the page the caller is describing.
     ///
-    /// `true` when it rebuilt, which is the only thing that makes the uploaded buffers stale. A frame that
-    /// reuses the ink must not upload it again: the triangle list has not changed, and copying a page's
-    /// worth of it into a buffer three frames in flight — every frame of a pan — is megabytes a frame of
-    /// `memcpy` for nothing. The slots keep their validity across such frames, so each of the three is
-    /// written once per rebuild rather than once per frame.
+    /// There are exactly three answers, and which one is right is decided from numbers the surface
+    /// already holds — the page's revision, how many of its strokes are covered, the rung and turn they
+    /// were baked for — plus the change the model published. Nothing here walks the page:
+    ///
+    /// * **Nothing.** The page is the one below. A pan, a frame while the hand is still, a second draw
+    ///   from one edit.
+    /// * **An append.** One stroke was added at the end (see [`Self::append_ink`]). The triangles before
+    ///   it are kept and only the tail is filled.
+    /// * **A rebuild**, with the reason recorded ([`Demotion`]): a rung crossed, the page turned, a
+    ///   change that went by unread, an edit that was not an append, a selection.
+    ///
+    /// `true` when triangles were made, which is the only thing that makes the uploaded buffers stale. A
+    /// frame that reuses the ink must not upload it again: the triangle list has not changed, and copying
+    /// a page's worth of it into a buffer three frames in flight — every frame of a pan — is megabytes a
+    /// frame of `memcpy` for nothing. The slots keep their validity across such frames, so each of the
+    /// three is written once per rebuild rather than once per frame.
     fn refresh_ink(&mut self, canvas: &Canvas) -> bool {
         let key = InkKey::of(canvas);
         let ink = &canvas.ink;
 
         // A build covers the visible rectangle grown by the margin; every frame after it is free while the
         // screen still fits inside that.
-        let covered = fits(ink.visible, self.ink_covered);
+        let within = fits(ink.visible, self.ink_covered);
 
-        if self.ink_key.as_ref() == Some(&key) && covered {
-            return false;
+        // What the edit was, decided from the page's own revision and the change the model published —
+        // never from a walk of the page. `None` means the page below is already exactly this page.
+        let demotion = match self.delta {
+            Some(state)
+                if state.revision == ink.edit
+                    && state.covered == ink.strokes.len()
+                    && state.paper == paper_of(canvas)
+                    && state.detail == detail_of(ink)
+                    && state.rotation == u8::from(ink.rotation)
+                    && within =>
+            {
+                // The same ink, at the same rung, the same way up, and it fits: the triangles below are
+                // still the page the caller is describing, so there is nothing to rebuild and nothing to
+                // upload. What the triangles are drawn *through* is a `Transform` the shader applies, and
+                // the tint a selection and a drag bake in are re-baked by `demoted` (it names `Paint`),
+                // so neither is this arm's business.
+                return false;
+            }
+            Some(state) => self.demoted(canvas, &state),
+            None => Some(Demotion::Cold),
+        };
+
+        let Some(reason) = demotion else {
+            // An append: the page only got longer, so the vertices it already had are still right and the
+            // only new triangles are the appended stroke's.
+            let started = std::time::Instant::now();
+            self.append_ink(canvas);
+            self.stage_refresh += started.elapsed();
+            return true;
+        };
+
+        // Every rebuild names why it had to happen: the record the design document asks a measurement to
+        // keep, so that "it rebuilt" is never an answer without a reason (see `Demotion`).
+        self.recorded.push(reason);
+        if self.recorded.len() > RECORDED_REASONS {
+            self.recorded.remove(0);
         }
 
         let started = std::time::Instant::now();
@@ -533,6 +609,17 @@ impl Surface {
         self.ink_key = Some(key);
         self.ink_covered = cull_of(ink.visible);
 
+        // The page this rebuild *is*, not the one it replaced: a rung change or a page turn arrives with
+        // the new revision already on the page, and recording the old one would make the frame after this
+        // read as a gap and rebuild again for nothing.
+        self.delta = Some(DeltaState {
+            revision: ink.edit,
+            covered: ink.strokes.len(),
+            detail: detail_of(ink),
+            rotation: ink.rotation.into(),
+            paper: paper_of(canvas),
+        });
+
         if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
             report::rebuilt();
         }
@@ -540,49 +627,30 @@ impl Surface {
         let list = ink.strokes.as_slice();
         let mapping = Mapping::of(canvas);
         let cull = self.ink_covered;
-        let in_hand = |index: usize| ink.selected.get(index).copied().unwrap_or(false);
 
-        // The polygon and the sweep are the surface's own: neither depends on which stroke is being
-        // filled, and a page is thousands of them.
-        let Self {
-            ink: vertices,
-            scratch,
-            sweep,
-            translucent_ink,
-            ..
-        } = self;
+        // Whose strokes are the caller's to draw: the fill skips them, and the loop below lays them down
+        // where the drag has taken them.
+        self.ink_in_hand = Arc::clone(&ink.selected);
 
-        // A stroke that is not opaque is filled through the stencil, one stroke at a time, so the draw needs
-        // to know where each one's pieces begin. Only those are recorded: opaque ink is drawn as it always
-        // was, and a page of pen pays nothing for a feature it does not use.
-        translucent_ink.clear();
-
-        for (index, stroke) in list.iter().enumerate() {
-            if in_hand(index) || !stroke.visible_in(cull) {
-                continue;
-            }
-
-            let colour = ink_colour(stroke.color);
-            open(translucent_ink, vertices.len(), colour);
-            fill(
-                vertices,
-                scratch,
-                sweep,
-                stroke,
-                &mapping,
-                (0.0, 0.0),
-                colour,
-            );
-        }
+        // The page itself: every finished stroke that can be seen, in the order it was written.
+        self.fill_ink(list, &mapping, cull);
 
         // The ink in hand, where a drag has taken it, and once more in the selection's colour.
         if ink.selection.is_some() || ink.offset != (0.0, 0.0) {
             for (index, stroke) in list.iter().enumerate() {
-                if !in_hand(index) {
+                if !ink.selected.get(index).copied().unwrap_or(false) {
                     continue;
                 }
 
                 let colour = ink_colour(stroke.color);
+                let Self {
+                    ink: vertices,
+                    scratch,
+                    sweep,
+                    translucent_ink,
+                    ..
+                } = self;
+
                 open(translucent_ink, vertices.len(), colour);
                 fill(
                     vertices, scratch, sweep, stroke, &mapping, ink.offset, colour,
@@ -600,6 +668,14 @@ impl Surface {
         // The lasso's loop: the ring the reader is drawing, in the selection's colour.
         if let Some(stroke) = &ink.lasso {
             let colour = ink.selection.unwrap_or_else(|| ink_colour(stroke.color));
+            let Self {
+                ink: vertices,
+                scratch,
+                sweep,
+                translucent_ink,
+                ..
+            } = self;
+
             open(translucent_ink, vertices.len(), colour);
             fill(
                 vertices,
@@ -612,9 +688,11 @@ impl Surface {
             );
         }
 
-        // The ink changed: every slot is stale until its frame uploads it. Said here so the build and the
-        // invalidation cannot drift apart — the caller only has to know that a rebuild happened.
+        // The ink changed: every slot is stale until its frame uploads it, and every slot now holds
+        // nothing of the list (see `fill_ink`). Said here so the build and the invalidation cannot drift
+        // apart — the caller only has to know that a rebuild happened.
         self.ink_slots_valid = [false; 3];
+        self.filled = [0; 3];
 
         self.stage_refresh += started.elapsed();
 
@@ -624,6 +702,134 @@ impl Surface {
     /// How many corners the last build made: what the upload copies and the draw reads.
     pub fn vertices(&self) -> usize {
         self.ink.len()
+    }
+
+    /// The reasons the last few rebuilds happened, oldest first.
+    ///
+    /// Read by this module's tests — an append that became a rebuild is a bug with a name, and this is
+    /// where the name is.
+    #[allow(dead_code)]
+    pub fn reasons(&self) -> &[Demotion] {
+        &self.recorded
+    }
+
+    /// Re-fills the page's own strokes into `self.ink`, from `list`.
+    ///
+    /// The one loop that turns finished ink into triangles, in the order the ink was written, and the
+    /// only place a stroke is culled. Both the whole-page build and an append end here, which is what
+    /// keeps "the page, drawn" one definition rather than two that can drift.
+    ///
+    /// A stroke in hand is skipped: it is drawn where the drag has taken it, in the selection's colour,
+    /// by the caller — and drawing it here as well would lay it down twice.
+    fn fill_ink(&mut self, list: &[Arc<note_format::ink::Stroke>], mapping: &Mapping, cull: Bounds) {
+        let in_hand = Arc::clone(&self.ink_in_hand);
+
+        let Self {
+            ink: vertices,
+            scratch,
+            sweep,
+            translucent_ink,
+            ..
+        } = self;
+
+        // A stroke that is not opaque is filled through the stencil, one stroke at a time, so the draw needs
+        // to know where each one's pieces begin. Only those are recorded: opaque ink is drawn as it always
+        // was, and a page of pen pays nothing for a feature it does not use.
+        translucent_ink.clear();
+
+        for (index, stroke) in list.iter().enumerate() {
+            // A mask that is short is not an error — a frame describes what it has — and a stroke the
+            // caller draws itself is skipped wherever its flag says so.
+            let held = index < in_hand.len() && in_hand[index];
+            if held || !stroke.visible_in(cull) {
+                continue;
+            }
+
+            let colour = ink_colour(stroke.color);
+            open(translucent_ink, vertices.len(), colour);
+            fill(
+                vertices,
+                scratch,
+                sweep,
+                stroke,
+                mapping,
+                (0.0, 0.0),
+                colour,
+            );
+        }
+    }
+
+    /// Decides what a frame whose page is not the one below would have to do, and whether an append is
+    /// enough.
+    ///
+    /// `None` means the page below is the one that was drawn plus one stroke at its end, and every
+    /// triangle already there is still right — [`Self::append_ink`] can extend it. `Some(reason)` means a
+    /// rebuild, and names the condition that decided it, so a measurement never has to say "it rebuilt,
+    /// for some reason".
+    ///
+    /// Everything here is read from numbers the surface already holds: the page's revision, how much of
+    /// it is covered, and what the change *said*. Nothing walks the strokes, which is what makes an
+    /// append's bookkeeping O(1) rather than O(page).
+    fn demoted(&self, canvas: &Canvas, state: &DeltaState) -> Option<Demotion> {
+        decide(canvas, state, self.ink_covered)
+    }
+
+    /// Extends the triangles below with the page's last stroke, which is all an append adds.
+    ///
+    /// The one path the explicit-rebuild design exists for. It fills the appended stroke alone — a
+    /// hundred-odd corners — and leaves every vertex before it untouched, so what the next upload copies
+    /// is still the whole list but the *work* is one stroke's. Everything before it is reused as it stands.
+    fn append_ink(&mut self, canvas: &Canvas) {
+        let ink = &canvas.ink;
+        let list = ink.strokes.as_slice();
+        let mapping = Mapping::of(canvas);
+        let cull = self.ink_covered;
+
+        // The number of strokes the triangles below already are: `demoted` proved they run from the
+        // front of the page, so the one that is new is at this index.
+        let drawn = self.delta.map_or(0, |state| state.covered);
+
+        // How many vertices the triangles below already are: what the buffers hold and the upload past
+        // which has to copy. Taken before the new stroke is filled, so the count is the *old* list's.
+        let covered = self.ink.len();
+
+        if let Some(stroke) = list.get(drawn) {
+            if stroke.visible_in(cull) {
+                let colour = ink_colour(stroke.color);
+
+                let Self {
+                    ink: vertices,
+                    scratch,
+                    sweep,
+                    translucent_ink,
+                    ..
+                } = self;
+
+                open(translucent_ink, vertices.len(), colour);
+                fill(
+                    vertices,
+                    scratch,
+                    sweep,
+                    stroke,
+                    &mapping,
+                    (0.0, 0.0),
+                    colour,
+                );
+            }
+        }
+
+        // A stroke's vertices are *added* to the buffer, so an append's upload is this stroke's bytes on
+        // top of what the slot already holds. The front of the buffer must not be written again: it holds
+        // the ink the triangle list already had (see `upload_at`).
+        self.delta = Some(DeltaState {
+            revision: ink.edit,
+            covered: list.len(),
+            detail: detail_of(ink),
+            rotation: ink.rotation.into(),
+            paper: paper_of(canvas),
+        });
+        self.filled = [covered; 3];
+        self.ink_slots_valid = [false; 3];
     }
 
     /// Clears the stages and totals, so a measurement starts from nothing.
@@ -800,6 +1006,10 @@ impl Surface {
 
     /// Uploads the finished ink into the current frame's buffer.
     ///
+    /// One buffer holds the whole list because that is what the draw reads — a page of ink is one draw
+    /// call — so the copy is the list, and the explicit-rebuild design does not change that. What it
+    /// changes is how much *work* there is before the copy: an append fills one stroke, not the page.
+    ///
     /// The stage most of a rebuild's wall time goes into at page size, and the one with a surprise in
     /// it: `StorageModeShared` is memory both the CPU and the GPU read, and on Apple silicon writing it
     /// is not a `memcpy` — the 137 MB a page of 8 182 strokes makes costs several times what copying
@@ -807,14 +1017,23 @@ impl Surface {
     /// doing when the list has not changed, and `ink_slots_valid` is what says it has not.
     fn upload_ink(&mut self, slot: usize) {
         let started = std::time::Instant::now();
-        let bytes = std::mem::size_of_val(&self.ink[..]);
+
+        // What this slot already holds decides what has to be copied: a rebuild emptied it, and an append
+        // left everything before the new stroke in it. Either way the tail is what is missing.
+        let from = self.filled[slot].min(self.ink.len());
+        let tail = &self.ink[from..];
+        let bytes = std::mem::size_of_val(tail);
 
         let buffer = self.ink_buffers[slot].take();
         let reused = buffer
             .as_ref()
-            .is_some_and(|buffer| buffer.length() >= bytes);
-        self.ink_buffers[slot] = Self::upload(&self.device, &self.ink, buffer);
+            .is_some_and(|buffer| buffer.length() >= std::mem::size_of_val(&self.ink[..]));
+        self.ink_buffers[slot] = Self::upload_at(&self.device, tail, from, buffer);
 
+        // A buffer that had to be *made* holds the tail and nothing before it, so the slot no longer has
+        // the front of the list and the next frame to use it copies from zero. A refilled one still has
+        // everything it had.
+        self.filled[slot] = if reused { self.ink.len() } else { from };
         self.stage_uploaded += started.elapsed();
         self.uploaded_bytes += bytes as u64;
         if !reused {
@@ -834,23 +1053,42 @@ impl Surface {
         vertices: &[T],
         buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
     ) -> Option<Retained<ProtocolObject<dyn MTLBuffer>>> {
+        Self::upload_at(device, vertices, 0, buffer)
+    }
+
+    /// Copies `vertices` into `buffer` at element `offset`, growing it when it is too small.
+    ///
+    /// The offset is what makes an append's upload a stroke: the bytes before it are already in the
+    /// buffer, put there by an earlier frame, and copying them again would be the page's worth of
+    /// `memcpy` this exists to remove. `offset` is a count of `T`s, so the destination is `offset`
+    /// elements in rather than `offset` bytes.
+    fn upload_at<T>(
+        device: &ProtocolObject<dyn MTLDevice>,
+        vertices: &[T],
+        offset: usize,
+        buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    ) -> Option<Retained<ProtocolObject<dyn MTLBuffer>>> {
         if vertices.is_empty() {
-            return None;
+            return buffer;
         }
 
         let bytes = std::mem::size_of_val(vertices);
-        let buffer = match buffer.filter(|buffer| buffer.length() >= bytes) {
+        let start = offset * std::mem::size_of::<T>();
+        let buffer = match buffer.filter(|buffer| buffer.length() >= start + bytes) {
             Some(buffer) => buffer,
-            None => {
-                device.newBufferWithLength_options(bytes, MTLResourceOptions::StorageModeShared)?
-            }
+            // A buffer too small for the tail: one big enough for the whole thing, so that the front the
+            // caller is not copying has somewhere to be. It is *not* copied here — the slot's `filled`
+            // says how much of it is real, and the frame that rebuilds refills it.
+            None => device
+                .newBufferWithLength_options(start + bytes, MTLResourceOptions::StorageModeShared)?,
         };
 
-        // SAFETY: a buffer of at least this many bytes, written once before anything reads it.
+        // SAFETY: a buffer of at least `start + bytes`, and this range of it is written once here before
+        // anything reads it. The bytes before `start` belong to vertices an earlier frame copied.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 vertices.as_ptr().cast::<u8>(),
-                buffer.contents().as_ptr().cast::<u8>(),
+                buffer.contents().as_ptr().cast::<u8>().add(start),
                 bytes,
             );
         }
@@ -1524,14 +1762,132 @@ fn fits(visible: Bounds, built_for: Bounds) -> bool {
     visible.within(built_for)
 }
 
-/// What the finished ink's triangles were built from.
+/// How many rebuild reasons a surface keeps for a test to read.
 ///
-/// Every triangle is in the **paper's own units** — the same numbers at every zoom and every scroll — so the
-/// strokes, the detail they were built at and the shape of the page are the whole of it. Where the paper is
-/// drawn is *not* here: it is [`Transform`], applied by the shader, which is what makes a scroll a uniform
-/// update instead of a page of geometry rebuilt a hundred times a second.
-/// What the ink's triangles were built from, for the one question that decides whether they have to be
-/// built again.
+/// A few frames' worth: enough to see the reason a measured append demoted, and small enough that it
+/// is not a log. Nothing in the app reads it.
+const RECORDED_REASONS: usize = 32;
+
+/// Decides what a frame whose page is not the one below would have to do, and whether an append is
+/// enough.
+///
+/// `None` means the page below is the one that was drawn plus one stroke at its end, and every triangle
+/// already there is still right — the append path can extend it. `Some(reason)` means a rebuild, and
+/// names the condition that decided it, so a measurement never has to say "it rebuilt, for some
+/// reason".
+///
+/// Everything here is read from numbers the surface already holds: the page's revision, how much of it
+/// is covered, and what the change *said*. Nothing walks the strokes, which is what makes an append's
+/// bookkeeping O(1) rather than O(page). A free function rather than a method so that it can be tested
+/// without a Metal device.
+fn decide(canvas: &Canvas, state: &DeltaState, built_for: Bounds) -> Option<Demotion> {
+    let ink = &canvas.ink;
+
+    // The detail or the turn moved: every triangle is stale, whatever the edit was.
+    if state.detail != detail_of(ink) {
+        return Some(Demotion::Rung);
+    }
+    if state.rotation != u8::from(ink.rotation) {
+        return Some(Demotion::Rotation);
+    }
+    if state.paper != paper_of(canvas) {
+        return Some(Demotion::Paper);
+    }
+
+    // A selection, a drag or a lasso changes what is baked, not only what the change appended.
+    if ink.selection.is_some() || ink.offset != (0.0, 0.0) || ink.lasso.is_some() {
+        return Some(Demotion::Paint);
+    }
+
+    // The region the build covers has to still hold the screen, or the append would add a stroke nothing
+    // can see and leave paper the view now shows with no triangles at all.
+    if !fits(ink.visible, built_for) {
+        return Some(Demotion::Uncovered);
+    }
+
+    // The change has to follow the one that was applied. A revision that is not the next one is a change
+    // that went by unread, and what it did cannot be guessed: rebuild.
+    let change = ink.delta.as_ref()?;
+    if change.before != state.revision {
+        return Some(Demotion::Gap);
+    }
+
+    // And it has to be exactly one append at the end. Anything else — a removal, an insert, a drag —
+    // moves ink the triangles below were built from.
+    match change.changes.as_slice() {
+        [_] if state.covered + 1 == ink.strokes.len() => None,
+        _ => Some(Demotion::NotAnAppend),
+    }
+}
+
+/// What this surface knows about the page it drew, without looking at it.
+///
+/// The explicit-rebuild design's state, and the thing that decides whether a frame costs anything:
+///
+/// * `revision` is the page's own edit count as of the last build. A frame whose page has the same
+///   revision and a change that reaches the same result has nothing to do (see [`Self::lean_on`]).
+/// * `covered` is how many strokes at the front of the page the triangles below already are. An
+///   append extends it; any other edit shortens it to the place the edit started.
+/// * `detail` and `paper` are the two things the triangles are a function of *besides* the strokes.
+///   A rung change or a page turn rebuilds every triangle, and no delta can avoid it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DeltaState {
+    revision: u64,
+    covered: usize,
+    detail: u32,
+    rotation: u8,
+    paper: [u32; 2],
+}
+
+/// The detail rung the ink of a description is drawn for, as the bits a comparison can hold.
+///
+/// `Ink::revision` is what says the outlines themselves were rebuilt — a zoom that crossed a rung does
+/// not change a single stroke's identity (see `InkLayer`'s own note on it in the canvas description),
+/// so the rung is the only other thing the triangles are a function of that the strokes cannot say.
+fn detail_of(ink: &Ink) -> u32 {
+    ink.detail
+        .unwrap_or_else(|| note_format::ink::detail_zoom(1.0).to_bits())
+}
+
+/// The paper's own shape, as bits: the triangles are baked in the paper's units, so a different paper is
+/// a different set of triangles.
+fn paper_of(canvas: &Canvas) -> [u32; 2] {
+    let paper = canvas.ink.paper;
+    [paper.0.to_bits(), paper.1.to_bits()]
+}
+
+/// Why a frame did not append, when it looked like it could have.
+///
+/// The design document's §5 asks a measurement to record a *reason* for every rebuild it allows, and
+/// this is the reason set: an append that had to become a rebuild names which condition it failed,
+/// so "the page grew a stroke" is never an unexplained page of `memcpy`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Demotion {
+    /// Nothing to append to: the surface has never built this page.
+    Cold,
+    /// The page's revision is not the one after the last one seen: a change went by unread.
+    Gap,
+    /// The edit was not an append — a removal, an insert in the middle, a drag.
+    NotAnAppend,
+    /// The detail rung the zoom asks for moved, so every outline is stale whatever the edit was.
+    Rung,
+    /// The page was turned, so the mapping the triangles were baked through is not this one.
+    Rotation,
+    /// The paper's own shape changed: a page was read, or the sheet's units did.
+    Paper,
+    /// The view shows paper the build never covered.
+    Uncovered,
+    /// The stroke in hand, the selection or the lasso changed what is drawn.
+    Paint,
+}
+
+/// What the ink's triangles were built from, for the question of whether they were built from *this*
+/// drawing.
+///
+/// Kept even though a build is now ordered by the page's own revision (see [`DeltaState`]): this is the
+/// finer question of whether the triangles are the ones this description bakes — the stroke list, the
+/// re-baking counter, the turn, and what a selection or a drag paints over them. A rebuild always stores
+/// it; an append leaves it for the next rebuild to store.
 ///
 /// ## Why the strokes and not the numbers about them
 ///
@@ -1558,6 +1914,9 @@ struct InkKey {
     /// The detail they were built at: a rung change rebuilds every stroke's outline without touching which
     /// strokes are on the page.
     revision: u64,
+    /// The page's own revision: an edit is a change to the ink, whatever it was, and a frame whose page has
+    /// a different one is not the frame below (see `crate::ink::PageDelta`).
+    edit: u64,
     rotation: u8,
     paint: PaintKey,
 }
@@ -1581,6 +1940,7 @@ impl InkKey {
         InkKey {
             strokes: Arc::clone(&ink.strokes),
             revision: ink.revision,
+            edit: ink.edit,
             rotation: ink.rotation.into(),
             paint: PaintKey {
                 paper: [ink.paper.0.to_bits(), ink.paper.1.to_bits()],
@@ -2325,6 +2685,77 @@ mod tests {
         assert!(
             fits(visible, covered),
             "a screen inside the covered rectangle asked for a rebuild"
+        );
+    }
+
+    /// An append is decided from numbers, not from a walk of the page, and every rebuild has a reason.
+    ///
+    /// The design document's §5 wants each rebuild to say why it was allowed. This pins the decisions
+    /// themselves: a change that follows the last one and adds exactly one stroke at the end is an
+    /// append; the same page one revision out of step is a `Gap` — the case that must never be quietly
+    /// treated as an append, because the stroke that went by unread could have been an erase.
+    #[test]
+    fn an_append_is_decided_by_the_revision_and_the_change() {
+        use note_format::ink::InkPoint;
+        use note_ui::ink::{InkChange, PageDelta, Stroke, StrokeId};
+        use std::sync::Arc;
+
+        let state = DeltaState {
+            revision: 7,
+            covered: 3,
+            detail: note_format::ink::detail_zoom(1.0).to_bits(),
+            rotation: 0,
+            paper: [0, 0],
+        };
+
+        let mut canvas = Canvas::default();
+        canvas.ink.visible = Bounds::new((10.0, 10.0), (400.0, 300.0));
+        canvas.ink.edit = 8;
+        // Both the page and the surface are at the same rung and the same way up, which is what an
+        // append is decided on top of.
+        canvas.ink.detail = Some(note_format::ink::detail_zoom(1.0).to_bits());
+        canvas.ink.strokes = Arc::new(
+            (0..4)
+                .map(|_| Arc::new(Stroke::new(InkPoint::new(0.0, 0.0, 1.0), 0)))
+                .collect(),
+        );
+        let id = StrokeId::of(&canvas.ink.strokes[3]);
+        let covered = Bounds::new((0.0, 0.0), (800.0, 600.0));
+
+        canvas.ink.delta = Some(PageDelta::new(7, vec![InkChange::Append { id }]));
+        assert_eq!(
+            decide(&canvas, &state, covered),
+            None,
+            "one stroke added at the end of the page is an append"
+        );
+
+        // The same page, but the change that arrived is not the one after the last: something went by
+        // unread, and the surface cannot know whether it was this append or an erase.
+        canvas.ink.delta = Some(PageDelta::new(5, vec![InkChange::Append { id }]));
+        assert_eq!(
+            decide(&canvas, &state, covered),
+            Some(Demotion::Gap),
+            "a revision that does not follow the last one is never an append"
+        );
+
+        // A transaction that adds more than one stroke is not the append path.
+        canvas.ink.delta = Some(PageDelta::new(
+            7,
+            vec![InkChange::Append { id }, InkChange::Append { id }],
+        ));
+        assert_eq!(
+            decide(&canvas, &state, covered),
+            Some(Demotion::NotAnAppend),
+            "a transaction that adds more than one stroke is not the append path"
+        );
+
+        // A selection changes what is baked, whatever the edit was.
+        canvas.ink.delta = Some(PageDelta::new(7, vec![InkChange::Append { id }]));
+        canvas.ink.selection = Some(gpui_kit::Hsla::default());
+        assert_eq!(
+            decide(&canvas, &state, covered),
+            Some(Demotion::Paint),
+            "a selection re-bakes the ink in hand"
         );
     }
 

@@ -254,9 +254,22 @@ fn replay_rate() -> f64 {
 /// Deterministic — fixed seed arithmetic, no clock — so two builds measure the same ink and a difference
 /// in a number is a difference in the code. The hidden strokes sit at `HIDDEN_ORIGIN`, 8,000 px right of
 /// the paper's right edge, which is far outside any cache margin the renderer builds for.
-fn fixture(hidden: usize) -> (InkDocument, String) {
-    let total = CONTROL + hidden;
-    let strokes: Vec<Stroke> = (0..total).map(|index| stroke_at(index)).collect();
+///
+/// The same page with `visible` strokes in the viewport instead of [`CONTROL`] is [`fixture_of`].
+
+/// The same page with `visible` strokes in the viewport instead of [`CONTROL`].
+///
+/// The design document's test A ("visible ink size") sweeps the *prepared visible strokes* to 100, 1,000
+/// and 10,000 and asks for the same stroke appended at each size, so that the uploaded bytes of an append
+/// can be compared with the control row. That is this function's `visible`: every stroke it makes lies
+/// inside the sheet, so all of them are visible and every one of them is a record the renderer keeps.
+///
+/// The strokes tile a 25-wide grid with a 26 × 14 px cell, the sheet is 720 × 1,000, and the grid grows
+/// downward past the paper's foot on purpose: what a page *holds* is what an append must not touch, and
+/// culling is a separate question with its own case (C).
+fn fixture_of(visible: usize, hidden: usize) -> (InkDocument, String) {
+    let total = visible + hidden;
+    let strokes: Vec<Stroke> = (0..total).map(|index| stroke_of(visible, index)).collect();
 
     let digest = digest_owned(&strokes);
     let mut page = InkDocument::from_strokes(strokes);
@@ -267,10 +280,15 @@ fn fixture(hidden: usize) -> (InkDocument, String) {
 
 /// One 24-point stroke. Visible ones tile the top-left of the sheet; hidden ones start at `HIDDEN_ORIGIN`.
 fn stroke_at(index: usize) -> Stroke {
-    let (x0, y0) = if index < CONTROL {
+    stroke_of(CONTROL, index)
+}
+
+/// [`stroke_at`] for a page of `visible` strokes: the first `visible` are on the sheet, the rest hidden.
+fn stroke_of(visible: usize, index: usize) -> Stroke {
+    let (x0, y0) = if index < visible {
         ((index % 25) as f32 * 26.0, (index / 25) as f32 * 14.0)
     } else {
-        (HIDDEN_ORIGIN, (index - CONTROL) as f32 * 3.0)
+        (HIDDEN_ORIGIN, (index - visible) as f32 * 3.0)
     };
 
     let mut stroke = Stroke::new(InkPoint::new(x0, y0, 2.0), Stroke::DEFAULT_COLOR);
@@ -441,6 +459,15 @@ fn surface() -> Option<Surface> {
 
 /// The canvas description a page is drawn through: the sheet, its shadow, and the ink.
 fn canvas_of(page: &InkDocument, zoom: f32, origin: (f32, f32)) -> Canvas {
+    canvas_with(page, zoom, origin, None)
+}
+
+fn canvas_with(
+    page: &InkDocument,
+    zoom: f32,
+    origin: (f32, f32),
+    delta: Option<note_ui::ink::PageDelta>,
+) -> Canvas {
     let sheet = Rect {
         x: MARGIN,
         y: MARGIN,
@@ -461,6 +488,9 @@ fn canvas_of(page: &InkDocument, zoom: f32, origin: (f32, f32)) -> Canvas {
             paper: SHEET,
             visible: note_format::ink::Bounds::new((0.0, 0.0), SHEET),
             revision: 1,
+            detail: page.detailed_at().map(f32::to_bits),
+            edit: page.revision(),
+            delta,
             strokes: page.finished().clone(),
             ..Default::default()
         },
@@ -562,12 +592,17 @@ fn interactive(
     let mut surface = surface().ok_or("no Metal device")?;
 
     // Case A/E vary the hidden stroke count; C varies visible density; D the long stroke's length.
-    let hidden = match case {
-        "A" | "E" => size,
-        _ => 0,
+    //
+    // C's `size` is the number of *visible* strokes — the design document's test A sweep (100, 1,000,
+    // 10,000 prepared strokes, the same stroke appended at each). Every other case keeps the control
+    // page's 1,000 visible strokes so that its fixture digest is unchanged from the first runs.
+    let (visible, hidden) = match case {
+        "A" | "E" => (CONTROL, size),
+        "C" => (size, 0),
+        _ => (CONTROL, 0),
     };
-    let (mut page, fixture_digest) = fixture(hidden);
-    let viewport_digest = format!("{}x{POINTS}@1.0x", CONTROL);
+    let (mut page, fixture_digest) = fixture_of(visible, hidden);
+    let viewport_digest = format!("{visible}x{POINTS}@1.0x");
 
     let settings = settings();
     let view = InkTransform::identity();
@@ -614,7 +649,7 @@ fn interactive(
             ),
             "pan_inside" => pan(&mut surface, &page, index, false),
             "pan_across" => pan(&mut surface, &page, index, true),
-            "zoom_rung" => zoom_rung(&mut surface, &mut page, index),
+            "zoom_rung" => zoom_rung(&mut surface, &mut canvas, &mut page, index),
             "undo" => undo_redo(
                 &mut surface,
                 &mut canvas,
@@ -650,13 +685,19 @@ fn interactive(
         if page.open().is_some() {
             page.consume(&[reading(Phase::Up, 0.0, 0.0, None)], &view, &settings);
         }
-        while page.finished().len() > baseline_strokes {
-            page.undo();
-        }
-        page.redo();
         if page.finished().len() > baseline_strokes {
             page.undo();
         }
+        // The page is back as the sample found it. The change that brought it back is *not* handed to
+        // the renderer — it was already drawn, measured, and is not what the next sample measures — so
+        // the description is only brought level with the page.
+        let _ = page.take_delta();
+        canvas.ink.edit = page.revision();
+        canvas.ink.strokes = page.finished().clone();
+        // The undo took a stroke out of what the surface had drawn: the next rebuild is the safe answer,
+        // and it is not this sample's cost.
+        canvas.ink.delta = None;
+        catch_up(&mut surface, &mut canvas, &mut page);
         rows.push(row);
         if let Some(window) = window {
             windows.push(window);
@@ -692,6 +733,10 @@ fn interactive(
 }
 
 /// Draws the page through the surface with the model's current ink, and returns the frame's cost.
+///
+/// A caller that has not been keeping the description up to date uses this; it describes the page from
+/// scratch, which is a renderer being told about the whole page and nothing about what changed. A caller
+/// measuring an edit uses [`draw_after`] instead.
 fn draw_frame(
     surface: &mut Surface,
     canvas: &mut Canvas,
@@ -699,10 +744,63 @@ fn draw_frame(
     zoom: f32,
     origin: (f32, f32),
 ) -> FrameCost {
-    // The frame describes the page as it is *now*: the stroke list is re-read each frame so an edit is
-    // what the next frame draws, as it is in the app.
     canvas.ink = canvas_of(page, zoom, origin).ink;
     frame(surface, canvas)
+}
+
+/// Draws the page through the description the caller already has, carrying the change it was just given.
+///
+/// The description is *reused*, which is what the app does and what an incremental renderer needs: a
+/// fresh `Canvas` every frame would be a renderer that has never seen this page before, and every frame
+/// would be its first. Only the fields an edit can change are moved.
+fn draw_after(
+    surface: &mut Surface,
+    canvas: &mut Canvas,
+    page: &mut InkDocument,
+    zoom: f32,
+    origin: (f32, f32),
+) -> FrameCost {
+    let change = page.take_delta();
+    let fresh = canvas_with(page, zoom, origin, change);
+
+    canvas.ink.strokes = fresh.ink.strokes;
+    canvas.ink.edit = fresh.ink.edit;
+    canvas.ink.detail = fresh.ink.detail;
+    // A frame that saw no edit describes the page it is drawing, with no change to report: a renderer
+    // given `None` and a revision it already has has nothing to do, which is what keeps the frames
+    // between edits from being read as gaps.
+    canvas.ink.delta = fresh.ink.delta;
+    canvas.ink.open = fresh.ink.open;
+    canvas.ink.open_id = fresh.ink.open_id;
+
+    frame(surface, canvas)
+}
+
+/// Keeps the description's page in step without telling the renderer about an edit.
+///
+/// What the restore between samples needs: undo and redo happen, and the *next* sample's edit is the
+/// one the renderer has to hear about. The undo's own change is deliberately not handed over — it is
+/// not being measured, and a renderer given it would apply it and then read the next change as the one
+/// that follows, which it does not.
+fn keep_in_step(canvas: &mut Canvas, page: &mut InkDocument) {
+    let _ = page.take_delta();
+    canvas.ink.edit = page.revision();
+    canvas.ink.strokes = page.finished().clone();
+    canvas.ink.detail = page.detailed_at().map(f32::to_bits);
+}
+
+/// One more frame, drawn after the sample — past the restore, so it is the *restored* page the next
+/// sample extends.
+///
+/// A sample's append is undone as soon as it is measured, and an undo takes a stroke out of what the
+/// surface has. The next append is only an append onto a page the surface already has, so the surface
+/// has to be brought up to date first; this is that frame, and it is not part of any sample's timing.
+fn catch_up(surface: &mut Surface, canvas: &mut Canvas, page: &mut InkDocument) {
+    keep_in_step(canvas, page);
+    // The undo took a stroke out of what the surface had drawn: the next rebuild is the safe answer,
+    // and it is not this sample's cost.
+    canvas.ink.delta = None;
+    let _ = frame(surface, canvas);
 }
 
 /// The sequence of readings one append sends: a short stroke over the control page's top-left.
@@ -739,7 +837,18 @@ fn append(
     let appended_vertices = appended.as_deref().map_or(0, vertices_of);
     let appended_vertex_bytes = appended_vertices * VERTEX_BYTES;
 
-    let cost = draw_frame(surface, canvas, page, 1.0, (MARGIN, MARGIN));
+    // The change the edit published, handed to the frame with the page: this is the notification the
+    // explicit-rebuild contract is about, and without it every frame is a renderer that cannot say
+    // what happened and builds the page.
+    let cost = draw_after(surface, canvas, page, 1.0, (MARGIN, MARGIN));
+
+    // The pen has lifted: the open stroke is over, and the next frame is the page without one. Both
+    // (it was measured) and (the tear-down that would inflate the next sample's first frame) make it
+    // wrong to carry the stroke into the description.
+    canvas.ink.open = None;
+    canvas.ink.open_id = 0;
+    keep_in_step(canvas, page);
+
     let submit_ns = commit_ns;
     let gpu_done_ns = commit_ns + cost.drawable_wait_ns + cost.cpu_work_ns + cost.gpu_ns;
     let presented_ns = gpu_done_ns;
@@ -965,6 +1074,7 @@ fn measure(
 /// A zoom that crosses a detail rung: every stroke's outline is rebuilt, and the next frame draws it.
 fn zoom_rung(
     surface: &mut Surface,
+    canvas: &mut Canvas,
     page: &mut InkDocument,
     index: usize,
 ) -> (Observation, Option<ActiveWindow>) {
@@ -975,8 +1085,13 @@ fn zoom_rung(
     page.set_zoom(zoom);
     let commit_ns = started.elapsed().as_nanos() as u64;
 
-    let mut canvas = canvas_of(page, zoom, (MARGIN, MARGIN));
-    let cost = frame(surface, &mut canvas);
+    // The same description the app keeps, with the sheet drawn at the new size: a zoom is a transform
+    // and a rung, not a new canvas.
+    canvas.ink.zoom = zoom;
+    canvas.ink.strokes = page.finished().clone();
+    canvas.ink.detail = page.detailed_at().map(f32::to_bits);
+    canvas.ink.delta = page.take_delta();
+    let cost = frame(surface, canvas);
     let gpu_done_ns = commit_ns + cost.drawable_wait_ns + cost.cpu_work_ns + cost.gpu_ns;
 
     let observation = Observation {

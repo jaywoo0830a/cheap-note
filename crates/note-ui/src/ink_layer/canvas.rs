@@ -116,7 +116,34 @@ pub struct Ink {
     /// Counts the rebuilds of the outlines themselves: a zoom that crosses into another detail rung
     /// changes every stroke's outline without changing any of their identities, and this is what
     /// says so.
+    ///
+    /// See [`Ink::detail`]: the rung a renderer compares is that, and this is the count a caller may
+    /// report.
     pub revision: u64,
+    /// The detail rung the outlines were built at, as `f32::to_bits`.
+    ///
+    /// The triangles are baked from an outline that is cut for one rung (see `note_format::ink::FACET`),
+    /// so a renderer comparing only stroke identities would keep a page drawn at 1.0 through a pinch to
+    /// 4.0. This is what makes a rung change visible to it — a number the *page* has, rather than one
+    /// the renderer has to be told separately that it changed.
+    pub detail: Option<u32>,
+    /// The page's own revision: one step per edit it has been given (see [`crate::ink::PageDelta`]).
+    ///
+    /// Not [`Ink::revision`], which counts re-bakes. This is the number a change is stamped against and
+    /// the one a renderer compares, because an edit is what makes new geometry — a font change, a theme,
+    /// a zoom that rebuilt the outlines is a different axis entirely.
+    pub edit: u64,
+    /// What the page's last edit did, when the caller has one to hand.
+    ///
+    /// The [explicit-rebuild](../EXPLICIT-REBUILD.md) contract: a renderer is told *what changed* as
+    /// well as that something did, so a stroke appended at the end of a page costs that stroke rather
+    /// than the page. `None` is a caller that cannot say — a first frame after a page was read, a
+    /// renderer whose change went by unread — and a renderer answers it by building the page, which is
+    /// the answer that is never wrong.
+    ///
+    /// See [`crate::ink::PageDelta`]: the revision it carries is `before`/`after` against
+    /// [`Ink::revision`], which is what lets a renderer tell a change it has from one it has missed.
+    pub delta: Option<crate::ink::PageDelta>,
     /// The part of the sheet that is on screen, in the paper's own units: what a frame culls against
     /// (see [`Stroke::visible_in`]).
     ///
@@ -167,6 +194,9 @@ impl Default for Ink {
             open: None,
             open_id: 0,
             revision: 0,
+            detail: None,
+            edit: 0,
+            delta: None,
             visible: Ink::ALL_VISIBLE,
             rotation: Quarters::UPRIGHT,
             paper: (0.0, 0.0),

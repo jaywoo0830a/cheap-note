@@ -534,7 +534,9 @@ pub fn plan(args: &[String], format: Format) -> Result<Plan, String> {
     // The two contradictions and the one missing dependency, checked after the whole line is read so
     // that the order the flags were typed in cannot matter.
     if plan.energy == EnergyChoice::Meter && plan.meter.is_none() {
-        return Err(String::from("--energy-source meter needs --meter <meter.csv>"));
+        return Err(String::from(
+            "--energy-source meter needs --meter <meter.csv>",
+        ));
     }
     if plan.require_energy && plan.energy == EnergyChoice::None {
         return Err(String::from(
@@ -788,7 +790,11 @@ impl Clock<'_> {
                 Energy {
                     joules,
                     source: "platform",
-                    basis: if joules.is_some() { "platform" } else { "cpu-time" },
+                    basis: if joules.is_some() {
+                        "platform"
+                    } else {
+                        "cpu-time"
+                    },
                     meter_samples: None,
                     meter_span_ms: None,
                 }
@@ -1259,7 +1265,9 @@ fn assemble(
 
     report.summarise(
         "threads",
-        plan.threads.map_or(Value::Absent("global"), |threads| Value::Count(threads as u64)),
+        plan.threads.map_or(Value::Absent("global"), |threads| {
+            Value::Count(threads as u64)
+        }),
     );
     report.summarise("threads_source", Value::Text(threads_source(plan)));
     report.summarise("repeats", Value::Count(plan.repeats as u64));
@@ -1277,7 +1285,10 @@ fn assemble(
     );
     report.summarise("basis", Value::Text(basis));
 
-    if let Some(energy) = energies.iter().find(|energy| energy.meter_samples.is_some()) {
+    if let Some(energy) = energies
+        .iter()
+        .find(|energy| energy.meter_samples.is_some())
+    {
         if let Some(samples) = energy.meter_samples {
             report.summarise("meter_samples", Value::Count(samples as u64));
         }
@@ -1303,7 +1314,9 @@ fn assemble(
         // quantity cannot meet a budget.
         report.conclude(
             Verdict::Skipped,
-            Some(String::from("no energy was measured; a budget on it cannot be met")),
+            Some(String::from(
+                "no energy was measured; a budget on it cannot be met",
+            )),
         )
     } else {
         let (verdict, note) = judge(&report.columns, &report.rows, &plan.budgets);
@@ -1377,7 +1390,10 @@ fn judge(columns: &[&'static str], rows: &[Row], budgets: &Budgets) -> (Verdict,
         if let Some(min_ops) = budgets.min_ops_per_joule {
             match row.get(columns, "ops_per_joule") {
                 Some(Value::Joules(ops)) if *ops < min_ops => {
-                    over.push(format!("{} ops_per_joule {ops:.3} < {min_ops:.3}", row.label));
+                    over.push(format!(
+                        "{} ops_per_joule {ops:.3} < {min_ops:.3}",
+                        row.label
+                    ));
                 }
                 Some(Value::Joules(_)) => {}
                 _ => missing = true,
@@ -1394,7 +1410,9 @@ fn judge(columns: &[&'static str], rows: &[Row], budgets: &Budgets) -> (Verdict,
     if missing {
         return (
             Verdict::Skipped,
-            Some(String::from("a budget was given but its column was not measured")),
+            Some(String::from(
+                "a budget was given but its column was not measured",
+            )),
         );
     }
     (Verdict::Ok, None)
@@ -1495,8 +1513,11 @@ mod tests {
     /// The two flags that contradict, and the one that needs a dependency, are refused.
     #[test]
     fn contradictions_are_refused() {
-        let error = plan(&args(&["--require-energy", "--energy-source", "none"]), Format::Table)
-            .unwrap_err();
+        let error = plan(
+            &args(&["--require-energy", "--energy-source", "none"]),
+            Format::Table,
+        )
+        .unwrap_err();
         assert!(error.contains("opposite"), "{error}");
 
         let error = plan(&args(&["--energy-source", "meter"]), Format::Table).unwrap_err();
@@ -1516,9 +1537,9 @@ mod tests {
         assert!(matches!(good, MeterState::Ready(ref samples) if samples.len() == 3));
 
         for bad in [
-            "epoch_s,watts\n1.0,10\n",         // one row: a moment, not an integral
-            "epoch_s,watts\n2.0,10\n1.0,12\n", // out of order
-            "epoch_s,watts\n1.0,-5\n1.1,12\n", // negative
+            "epoch_s,watts\n1.0,10\n",          // one row: a moment, not an integral
+            "epoch_s,watts\n2.0,10\n1.0,12\n",  // out of order
+            "epoch_s,watts\n1.0,-5\n1.1,12\n",  // negative
             "epoch_s,watts\n1.0,abc\n1.1,12\n", // not a number
         ] {
             assert!(
@@ -1631,7 +1652,14 @@ mod tests {
     /// with three cells and two blanks.
     #[test]
     fn no_energy_still_names_every_column() {
-        let plan = json_plans(&["--strokes", "100", "--repeats", "3", "--energy-source", "none"]);
+        let plan = json_plans(&[
+            "--strokes",
+            "100",
+            "--repeats",
+            "3",
+            "--energy-source",
+            "none",
+        ]);
         let mut harness = harness();
         let mut out = Vec::new();
         assert_eq!(run(&plan, &mut harness, &mut out), 0);
@@ -1674,7 +1702,14 @@ mod tests {
     /// The platform counter is differenced across the phase, so a closed seam gives `joules_per_op`.
     #[test]
     fn a_platform_counter_gives_joules() {
-        let plan = json_plans(&["--strokes", "100", "--repeats", "3", "--energy-source", "platform"]);
+        let plan = json_plans(&[
+            "--strokes",
+            "100",
+            "--repeats",
+            "3",
+            "--energy-source",
+            "platform",
+        ]);
 
         // A counter that advances by 3 000 000 µJ (3 J) across the phase: read when the phase opens, and
         // again when it closes.
@@ -1704,4 +1739,3 @@ mod tests {
         assert_eq!(parsed["summary"]["basis"], "platform");
     }
 }
-

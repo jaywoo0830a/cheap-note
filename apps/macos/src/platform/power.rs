@@ -36,7 +36,11 @@ pub fn run(plan: &Plan, out: &mut impl std::io::Write) -> i32 {
     // The surface, only when the frame phase will use it. `None` here means the phase reports
     // `no-surface` rather than timing the model alone and calling it a frame.
     let wants_frame = plan.workload.includes(PhaseKind::Frame);
-    let mut surface = if wants_frame { offscreen_surface() } else { None };
+    let mut surface = if wants_frame {
+        offscreen_surface()
+    } else {
+        None
+    };
 
     let mut draw = |canvas: &Canvas| -> Result<(), String> {
         let surface = surface

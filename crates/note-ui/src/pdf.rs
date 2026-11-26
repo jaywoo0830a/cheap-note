@@ -175,11 +175,7 @@ impl RenderedPage {
     /// taller than it is wide: the shape the reader sees is the shape these two numbers describe, and
     /// the bitmap behind them was rendered at the same turn.
     pub fn display_size(&self, logical_width: f32) -> (f32, f32) {
-        let (width, height) = if swaps_axes(self.rotation) {
-            (self.point_height, self.point_width)
-        } else {
-            (self.point_width, self.point_height)
-        };
+        let (width, height) = self.rotation.draws((self.point_width, self.point_height));
 
         if width <= 0.0 {
             return (logical_width, logical_width);

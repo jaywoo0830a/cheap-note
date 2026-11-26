@@ -344,13 +344,11 @@ impl PenCursor {
 /// A scale factor of nought, a negative, or a NaN is a scale of one.
 ///
 /// One bad number should leave the cursor at its shipped size rather than erase it or fill the
-/// window with it.
+/// window with it. [`crate::paint::finite_or_one`]'s rule, and the same one the ghost and the overlay
+/// apply to the scale they draw at — so a bad number leaves the pen where the ink is rather than where
+/// a second opinion put it.
 fn sane_unit(unit: f32) -> f32 {
-    if unit.is_finite() && unit > 0.0 {
-        unit
-    } else {
-        1.0
-    }
+    crate::paint::finite_or_one(unit)
 }
 
 /// The pen's body: a slender spindle from the nib, swelling to a round far end.

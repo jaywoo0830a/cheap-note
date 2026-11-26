@@ -575,6 +575,16 @@ side has its lines running the other way — paper that was turned, rather than 
 reading is likewise checked against the paper and not the drawn rectangle: a page on its side has a strip
 of desk beside it that must not write.
 
+**One conversion, in one place.** Every one of those steps lives in `paint.rs`, the seam a renderer
+already depends on: `paint::logical` divides a pen's physical pixels by the DPI scale, `InkTransform`'s
+`sheet_point` and `drawn_point` are the two directions between the window and the paper, and
+`InkTransform::basis` gives a renderer the three numbers its own transform is built from. A quarter turn
+swaps a sheet's sides through `Quarters::draws`, which is the one place that swap is written. Nothing
+else subtracts an origin, divides by a zoom, or works out which way up a page is: each of those had a
+copy in the view and on each platform, and the copies had begun to disagree — a `NaN` guard that refused
+a bad scale everywhere but the macOS ghost, a turning table in the ruling beside the mapping the ink
+used, and three renderers each composing the same transform from the same paper and turn.
+
 The interface offers the four as two pairs of buttons, and the page in front's two also answer to
 `Ctrl+R` and `Ctrl+Shift+R` (with `Alt` for every page). The status line says which way up the page is
 while it is not the right way up, and says nothing when it is.

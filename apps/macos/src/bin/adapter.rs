@@ -91,7 +91,9 @@ fn run() -> Result<i32, String> {
     let device = device(&profile)?;
 
     let mut out = std::io::stdout();
-    let code = measure(&action, &case, size, samples, warmups, &profile, device, &mut out)?;
+    let code = measure(
+        &action, &case, size, samples, warmups, &profile, device, &mut out,
+    )?;
     let _ = out.flush();
     Ok(code)
 }
@@ -140,7 +142,9 @@ fn device(profile: &str) -> Result<serde_json::Value, String> {
 
     // The profile is a promise the machine has to keep, not a label the caller may assume.
     let ok = match profile {
-        "mac4k120" => external && (width, height) == (3840, 2160) && (refresh_hz - 120.0).abs() <= 0.5,
+        "mac4k120" => {
+            external && (width, height) == (3840, 2160) && (refresh_hz - 120.0).abs() <= 0.5
+        }
         "igpu8" => integrated_gpu && (7u64 << 30) <= ram_bytes && ram_bytes <= (8u64 << 30),
         // A device the adapter invents, so its measurement path can be exercised on hardware that meets
         // neither release profile. Never used for evidence: the harness's own `validate` rejects its
@@ -165,8 +169,8 @@ fn device(profile: &str) -> Result<serde_json::Value, String> {
 
 /// The main display's pixels, nominal refresh rate, and whether it is external.
 fn display() -> Result<(u64, u64, f64, bool), String> {
-    use objc2_app_kit::NSScreen;
     use objc2::MainThreadMarker;
+    use objc2_app_kit::NSScreen;
 
     let marker = MainThreadMarker::new().ok_or("the adapter must run on the main thread")?;
     let screen = NSScreen::mainScreen(marker).ok_or("this Mac reports no main screen")?;
@@ -177,7 +181,11 @@ fn display() -> Result<(u64, u64, f64, bool), String> {
     let width = (frame.size.width * scale).round() as u64;
     let height = (frame.size.height * scale).round() as u64;
     let refresh_hz = screen.maximumFramesPerSecond() as f64;
-    let external = !screen.localizedName().to_string().to_lowercase().contains("built-in");
+    let external = !screen
+        .localizedName()
+        .to_string()
+        .to_lowercase()
+        .contains("built-in");
 
     Ok((width, height, refresh_hz, external))
 }
@@ -206,8 +214,12 @@ fn gpu_name() -> Option<String> {
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&output.stdout).to_string();
-    text.lines()
-        .find_map(|line| line.trim().strip_prefix("Chipset Model:").map(str::trim).map(str::to_string))
+    text.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Chipset Model:")
+            .map(str::trim)
+            .map(str::to_string)
+    })
 }
 
 /// `macOS 15.1 (24B83)`, from `sw_vers`.
@@ -575,19 +587,61 @@ fn interactive(
 
     for index in 0..samples {
         let (row, window) = match action {
-            "append" => append(&mut surface, &mut canvas, &mut page, &view, &settings, index),
-            "blank_erase" => blank_erase(&mut surface, &mut canvas, &mut page, &view, &settings, index),
-            "write" | "extend" => {
-                write(&mut surface, &mut canvas, &mut page, &view, &settings, index, size)
-            }
+            "append" => append(
+                &mut surface,
+                &mut canvas,
+                &mut page,
+                &view,
+                &settings,
+                index,
+            ),
+            "blank_erase" => blank_erase(
+                &mut surface,
+                &mut canvas,
+                &mut page,
+                &view,
+                &settings,
+                index,
+            ),
+            "write" | "extend" => write(
+                &mut surface,
+                &mut canvas,
+                &mut page,
+                &view,
+                &settings,
+                index,
+                size,
+            ),
             "pan_inside" => pan(&mut surface, &page, index, false),
             "pan_across" => pan(&mut surface, &page, index, true),
             "zoom_rung" => zoom_rung(&mut surface, &mut page, index),
-            "undo" => undo_redo(&mut surface, &mut canvas, &mut page, &view, &settings, index, false),
-            "redo" => undo_redo(&mut surface, &mut canvas, &mut page, &view, &settings, index, true),
-            "commit_long" => {
-                write(&mut surface, &mut canvas, &mut page, &view, &settings, index, size)
-            }
+            "undo" => undo_redo(
+                &mut surface,
+                &mut canvas,
+                &mut page,
+                &view,
+                &settings,
+                index,
+                false,
+            ),
+            "redo" => undo_redo(
+                &mut surface,
+                &mut canvas,
+                &mut page,
+                &view,
+                &settings,
+                index,
+                true,
+            ),
+            "commit_long" => write(
+                &mut surface,
+                &mut canvas,
+                &mut page,
+                &view,
+                &settings,
+                index,
+                size,
+            ),
             other => return Err(format!("unhandled action: {other}")),
         };
 
@@ -732,7 +786,8 @@ fn scanned(page: &InkDocument, readings: &[Reading]) -> u64 {
             )
         },
     );
-    let rect = note_format::ink::Bounds::new((min_x - 8.0, min_y - 8.0), (max_x + 8.0, max_y + 8.0));
+    let rect =
+        note_format::ink::Bounds::new((min_x - 8.0, min_y - 8.0), (max_x + 8.0, max_y + 8.0));
     page.finished()
         .iter()
         .filter(|stroke| stroke.visible_in(rect))
@@ -806,7 +861,12 @@ fn write(
 
     let mut batch: Vec<Reading> = vec![reading(Phase::Down, 300.0, 24.0, Some(0.5))];
     for step in 1..=points {
-        batch.push(reading(Phase::Move, 300.0 + step as f32 * STEP, 24.0, Some(0.5)));
+        batch.push(reading(
+            Phase::Move,
+            300.0 + step as f32 * STEP,
+            24.0,
+            Some(0.5),
+        ));
     }
 
     let started = Instant::now();
@@ -927,7 +987,11 @@ fn zoom_rung(
         submit_ns: commit_ns,
         gpu_done_ns,
         presented_ns: gpu_done_ns,
-        regenerated: page.finished().iter().map(|stroke| vertices_of(stroke)).sum(),
+        regenerated: page
+            .finished()
+            .iter()
+            .map(|stroke| vertices_of(stroke))
+            .sum(),
         submitted_vertices: cost.vertices,
         uploaded_bytes: cost.uploaded_bytes,
         gpu_ns: cost.gpu_ns,
@@ -1117,5 +1181,3 @@ fn cold_open(size: usize, device: serde_json::Value, out: &mut impl Write) -> Re
     writeln!(out, "{body}").map_err(|e| e.to_string())?;
     Ok(0)
 }
-
-

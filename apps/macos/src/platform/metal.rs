@@ -43,7 +43,7 @@ use note_ui::cursor::{
 };
 use note_ui::ink_layer::canvas::Rect;
 use note_ui::ink_layer::{ink_colour, Canvas};
-use note_ui::paint::drawn_of_paper;
+use note_ui::paint::finite_or_one;
 
 use crate::platform::ghost::Mark;
 use objc2::rc::Retained;
@@ -539,7 +539,10 @@ impl Surface {
             descriptor.setSampleCount(SAMPLES);
         }
         descriptor.setUsage(MTLTextureUsage::RenderTarget);
-        if self.device.supportsFamily(objc2_metal::MTLGPUFamily::Apple1) {
+        if self
+            .device
+            .supportsFamily(objc2_metal::MTLGPUFamily::Apple1)
+        {
             descriptor.setStorageMode(MTLStorageMode::Memoryless);
             if let Some(texture) = self.device.newTextureWithDescriptor(&descriptor) {
                 self.msaa = Some(texture.clone());
@@ -1139,12 +1142,8 @@ const BODY_SHADOW_ALPHA: f32 = 0.26;
 /// constants — so a pen looks the same on both platforms. It is drawn here, in the canvas's pass, rather
 /// than in a window of its own: a cursor is above the ink and below the interface, and only this pass is.
 fn cursor_vertices(vertices: &mut Vec<Vertex>, mark: &Mark, scale: f32) {
-    let scale = if scale > 0.0 { scale } else { 1.0 };
-    let unit = if mark.unit.is_finite() && mark.unit > 0.0 {
-        mark.unit
-    } else {
-        1.0
-    };
+    let scale = finite_or_one(scale);
+    let unit = finite_or_one(mark.unit);
     let position = mark.cursor.position();
     let nib = (position[0] * scale, position[1] * scale);
     let fade = mark.cursor.body_fade();
@@ -1402,16 +1401,14 @@ struct Mapping {
 
 impl Mapping {
     fn of(canvas: &Canvas) -> Self {
-        let paper = canvas.ink.paper;
-        let turns = canvas.ink.rotation;
-        let base = drawn_of_paper((0.0, 0.0), paper, turns);
-        let along_x = drawn_of_paper((1.0, 0.0), paper, turns);
-        let along_y = drawn_of_paper((0.0, 1.0), paper, turns);
+        // The paper's origin and its two unit steps, turned the way the page is turned: the one
+        // conversion, asked of the view rather than worked out here (see `InkTransform::basis`).
+        let (base, step_x, step_y) = canvas.ink.transform().basis();
 
         Mapping {
             base,
-            step_x: (along_x.0 - base.0, along_x.1 - base.1),
-            step_y: (along_y.0 - base.0, along_y.1 - base.1),
+            step_x,
+            step_y,
         }
     }
 
@@ -1455,11 +1452,7 @@ impl Transform {
 
     /// The sheet, where the view has put it and as large as it is drawn.
     fn of(canvas: &Canvas) -> Self {
-        let scale = if canvas.scale > 0.0 {
-            canvas.scale
-        } else {
-            1.0
-        };
+        let scale = finite_or_one(canvas.scale);
         let ink = &canvas.ink;
 
         Transform {
@@ -1512,11 +1505,7 @@ impl Surface {
     /// still holds the layer's buffers, which is why a frame's total carries one refresh interval even
     /// for an empty page. The benchmark needs the two apart to say what a rebuild actually costs, and a
     /// figure it can only get from inside the first call of the frame.
-    pub fn draw_with_wait(
-        &mut self,
-        canvas: &Canvas,
-        mark: Option<&Mark>,
-    ) -> (bool, Duration) {
+    pub fn draw_with_wait(&mut self, canvas: &Canvas, mark: Option<&Mark>) -> (bool, Duration) {
         let scale = if canvas.scale > 0.0 {
             canvas.scale
         } else {
@@ -3494,9 +3483,11 @@ mod vertex_tests {
                     note_format::ink::InkPoint::new(index as f32 * 20.0, 0.0, 2.0),
                     *colour,
                 );
-                stroke
-                    .points
-                    .push(note_format::ink::InkPoint::new(index as f32 * 20.0 + 10.0, 0.0, 2.0));
+                stroke.points.push(note_format::ink::InkPoint::new(
+                    index as f32 * 20.0 + 10.0,
+                    0.0,
+                    2.0,
+                ));
                 stroke.close();
                 Arc::new(stroke)
             })

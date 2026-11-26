@@ -388,8 +388,7 @@ fn undoing_more_than_the_history_holds_bounds_the_redo_branch() {
     }
 
     assert_eq!(
-        put_back,
-        HISTORY_EDITS,
+        put_back, HISTORY_EDITS,
         "every redo left on the branch works"
     );
     assert_eq!(ink.len(), HISTORY_EDITS, "and the page came back");

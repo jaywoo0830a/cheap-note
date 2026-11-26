@@ -105,6 +105,20 @@ impl Quarters {
     pub const fn turned(self, turns: i32) -> Self {
         Quarters::from_turns(self.0 as i32 + turns)
     }
+
+    /// A sheet of paper `size`, as a page at this rotation is drawn: a quarter turn swaps its width and
+    /// its height, and the two other turns leave it as it was.
+    ///
+    /// The one place the swap is written. It was three — a PDF page's display size, the sheet the app
+    /// lays out, and the box a reading is checked against — and the three had to agree or a turned page
+    /// put ink on the desk past its edges. Every caller that has a paper size *and* a rotation asks here.
+    pub const fn draws(self, size: (f32, f32)) -> (f32, f32) {
+        if self.swaps_axes() {
+            (size.1, size.0)
+        } else {
+            size
+        }
+    }
 }
 
 impl From<Quarters> for u8 {
@@ -650,5 +664,25 @@ mod tests {
         // And the shape written back out, so that a change to either side is a change to this test.
         let now = serde_json::to_string(&[page(Page::Blank).turned(3)]).expect("writing a layout");
         assert_eq!(now, r#"[{"show":"blank","rotation":3}]"#);
+    }
+
+    /// A page turned on its side is drawn the other way round; the two turns that are not upside down
+    /// leave its shape alone.
+    ///
+    /// The one place the swap is written, so this is the one place it is checked: a PDF page's display
+    /// size, the sheet the app lays out, and the box a pen reading is checked against all ask here.
+    #[test]
+    fn a_quarter_turn_swaps_the_sheets_sides() {
+        let sheet = (600.0, 800.0);
+
+        assert_eq!(Quarters::UPRIGHT.draws(sheet), sheet);
+        assert_eq!(Quarters::from_turns(1).draws(sheet), (800.0, 600.0));
+        assert_eq!(Quarters::from_turns(2).draws(sheet), sheet);
+        assert_eq!(Quarters::from_turns(3).draws(sheet), (800.0, 600.0));
+
+        // Turning it twice is the shape it started as, which is why a swap and not a rotation.
+        for turns in Quarters::ALL {
+            assert_eq!(turns.turned(2).draws(sheet), turns.draws(sheet));
+        }
     }
 }

@@ -38,7 +38,7 @@ use crate::canvas::{
 use crate::cursor::{nib_radius_for_width, PenCursor};
 use crate::design::{LayoutMetrics, LayoutPx, ScaleStep, TypeRamp};
 use crate::home::Home;
-use crate::ink::{paper_of_drawn, InkTransform, Notes, Stroke, Tool};
+use crate::ink::{InkTransform, Notes, Stroke, Tool};
 use crate::ink_layer::{Canvas, Ink, Page, Rect};
 use crate::input::PenBatch;
 use crate::input::PenInbox;
@@ -46,7 +46,7 @@ use crate::input::Reading;
 use crate::keys;
 use crate::note::{self, Note, NoteWriter, Report};
 use crate::outline::{Outline, OutlinePages};
-use crate::pages::{swaps_axes, Pages, Quarters};
+use crate::pages::{Pages, Quarters};
 use crate::pdf::{PageRequest, PdfDocumentView, Progress, RenderedPage};
 use crate::platform::{GhostFeed, InkSurface, PenSource, Platform, Screen, SystemPointer};
 use crate::prefs::Prefs;
@@ -523,12 +523,11 @@ impl Sheet {
     /// on it is measured on the paper. It is also the box a reading is checked against — see
     /// [`InkTransform::on_paper`] — which is why getting it the wrong way round would put ink on the
     /// desk at the ends of a turned page.
+    ///
+    /// [`Quarters::draws`] is the swap, and it is the only place it is written: this is the same
+    /// question a PDF page's display size asks, one step earlier in the chain.
     fn ink_paper(&self) -> (f32, f32) {
-        if swaps_axes(self.rotation) {
-            (self.paper.1, self.paper.0)
-        } else {
-            self.paper
-        }
+        self.rotation.draws(self.paper)
     }
 
     /// Where a reading in physical client pixels lands on the sheet.
@@ -555,35 +554,20 @@ impl Sheet {
     /// screen's rectangle at an angle to the paper's axes. A box and not a polygon: what this decides
     /// is whether a stroke is worth *drawing*, and including a stroke that is only near the screen
     /// costs one draw call while excluding one that is on it costs a missing line.
+    ///
+    /// The corners go through [`InkTransform::sheet_point`] — the same conversion a pen's readings take
+    /// — with the DPI scale set to one, because the window's own size is already logical. Composing the
+    /// two steps here instead was a second copy of the arithmetic that decides which way up a page is.
     fn visible(&self) -> crate::ink::Bounds {
-        let zoom = if self.zoom.is_finite() && self.zoom > 0.0 {
-            self.zoom
-        } else {
-            1.0
-        };
-
-        let paper = self.ink_paper();
-        let corner = |window: (f32, f32)| {
-            paper_of_drawn(
-                (
-                    (window.0 - self.origin.0) / zoom,
-                    (window.1 - self.origin.1) / zoom,
-                ),
-                paper,
-                self.rotation,
-            )
-        };
+        let window = self.transform(1.0, 0.0, 0.0);
 
         let corners = [
-            corner((0.0, 0.0)),
-            corner((self.window.0, 0.0)),
-            corner((0.0, self.window.1)),
-            corner(self.window),
+            window.sheet_point((0.0, 0.0)),
+            window.sheet_point((self.window.0, 0.0)),
+            window.sheet_point((0.0, self.window.1)),
+            window.sheet_point(self.window),
         ];
 
-        // Grown over the four corners one at a time: the same four comparisons the old code folded
-        // twice over, said once, and starting from a box that covers nothing rather than from a
-        // corner of the plane.
         corners
             .iter()
             .fold(crate::ink::Bounds::NOTHING, |box_, at| {
@@ -678,6 +662,10 @@ impl FootStrips {
     ///
     /// `foot` is the line the pills begin at ([`NoteApp::foot_edge`]): above it is page whatever the x
     /// is, because a reading above the row is not near a pill at all.
+    ///
+    /// `y >= foot` is the foot half of [`InkTransform::in_interface`] — the same line the ink model
+    /// refuses every reading below — so this *adds* the two rectangles a pill covers rather than deciding
+    /// the row again: the row is one line across the window, and only the pills are not the whole of it.
     fn held(&self, (x, y): (f32, f32), foot: f32) -> bool {
         y >= foot
             && [self.page, self.zoom]
@@ -2272,16 +2260,15 @@ impl NoteApp {
         // and a reader may well be writing on the paper behind the gap between the two. Which readings
         // are refused is decided here, before the model sees them (see [`Self::pills`] and
         // [`FootStrips`]).
+        //
+        // The physical-to-logical conversion is [`crate::paint::logical`]'s, and the line the strips are
+        // below is the transform's own foot — one number, measured once, by the `foot_edge()` call above.
         let strips = self.pills.get().strips(self.metrics.foot_slack);
-        let foot = self.foot_edge();
-        let scale = if self.scale.is_finite() && self.scale > 0.0 {
-            self.scale
-        } else {
-            1.0
-        };
+        let refused = |sample: &Reading| {
+            let at = crate::paint::logical((sample.pixel.x, sample.pixel.y), transform.scale);
 
-        let refused =
-            |sample: &Reading| strips.held((sample.pixel.x / scale, sample.pixel.y / scale), foot);
+            strips.held(at, transform.foot)
+        };
 
         // The common case is a batch that is all page, and it is the hot path: nothing is allocated for
         // it, and only a batch with a reading on a pill is copied. An unmeasured pill is no strip, so a
@@ -5577,18 +5564,11 @@ impl NoteApp {
             // The blank sheet takes both its shape and its scale from the chosen canvas size — and a
             // page the reader has turned is that shape on its side, because the paper in hand is the
             // same sheet either way: it is the *screen* that shows it the other way round.
-            None => {
-                let (width, height) = self
-                    .settings
+            None => turns.draws(
+                self.settings
                     .canvas_size
-                    .display_size(self.settings.page_display_width);
-
-                if swaps_axes(turns) {
-                    (height, width)
-                } else {
-                    (width, height)
-                }
-            }
+                    .display_size(self.settings.page_display_width),
+            ),
         };
 
         let margin = self.page_margin();

@@ -489,9 +489,9 @@ impl Stroke {
     /// budget is written against measurable rather than estimated. The points are not in it: they are the
     /// ink, and no amount of memory pressure makes them derivable.
     pub fn cached_bytes(&self) -> usize {
-        self.pieces
-            .as_ref()
-            .map_or(0, |pieces| pieces.len() * std::mem::size_of::<crate::ink::Piece>())
+        self.pieces.as_ref().map_or(0, |pieces| {
+            pieces.len() * std::mem::size_of::<crate::ink::Piece>()
+        })
     }
 
     /// Builds the render polygons this stroke would have, if they are not there.

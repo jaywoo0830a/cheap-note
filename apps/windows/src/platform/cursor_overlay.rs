@@ -219,11 +219,7 @@ pub fn surface_span(scale: f32) -> i32 {
 /// The body grows with [`Screen::unit`], so the window has to grow with it or a leaning pen's far
 /// end is clipped. `unit` is the factor of the interface scale, not the display's density.
 pub fn surface_span_at(scale: f32, unit: f32) -> i32 {
-    let scale = if scale.is_finite() && scale > 0.0 {
-        scale
-    } else {
-        1.0
-    };
+    let scale = sane_scale(scale);
 
     ((reach(unit) * 2.0 * scale).ceil() as i32).max(16) | 1
 }
@@ -665,21 +661,16 @@ fn rgb_of(colour: u32) -> [u8; 3] {
 }
 
 /// A scale factor that can be multiplied by, and by 1.0 when the window gave one that cannot.
+///
+/// [`note_ui::paint::finite_or_one`]'s rule, spelled with a name this file reads better with: the same
+/// question the view asks of a DPI scale and a zoom is the one an overlay asks of its own scale.
 fn sane_scale(scale: f32) -> f32 {
-    if scale.is_finite() && scale > 0.0 {
-        scale
-    } else {
-        1.0
-    }
+    note_ui::paint::finite_or_one(scale)
 }
 
 /// An interface scale that can be multiplied by, and by 1.0 when it cannot.
 fn sane_unit(unit: f32) -> f32 {
-    if unit.is_finite() && unit > 0.0 {
-        unit
-    } else {
-        1.0
-    }
+    note_ui::paint::finite_or_one(unit)
 }
 
 /// A nib mark's radius that can be draw with, held between the two the shape declares.

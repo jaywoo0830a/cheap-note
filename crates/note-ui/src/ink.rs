@@ -102,6 +102,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::history::{Edit, History};
 use crate::pages::Quarters;
+use crate::paint::finite_or_one;
 use crate::settings::{HighlighterWeight, Settings};
 
 /// The ink itself, from the format crate — and the geometry that is arithmetic over it.
@@ -247,17 +248,17 @@ impl InkTransform {
     }
 
     /// Where a reading in physical client pixels lands on the sheet.
+    ///
+    /// Three conversions in one place, and the only place any of them is written: physical pixels to
+    /// logical ones by the DPI scale, logical ones to the sheet's drawn rectangle by the origin and the
+    /// zoom, and that rectangle back onto the paper by [`paper_of_drawn`] — so a reading lands on the page
+    /// the reader wrote on, not the one a turn left facing them.
     pub fn sheet_point(&self, pixel: (f32, f32)) -> (f32, f32) {
-        // A window that reports a zero scale or a zero zoom would divide every point into a
-        // corner, and a NaN would poison every rectangle derived from it. Both mean "no
-        // transform", which draws the ink where the pen is.
-        let scale = finite_or_one(self.scale);
+        // Physical pixels to logical ones, then off the sheet's placement: the two halves of the
+        // conversion, each written once — the second is the inverse of [`Self::drawn_point`].
+        let (x, y) = crate::paint::logical(pixel, self.scale);
         let zoom = finite_or_one(self.zoom);
-
-        let drawn = (
-            (pixel.0 / scale - self.origin.0) / zoom,
-            (pixel.1 / scale - self.origin.1) / zoom,
-        );
+        let drawn = ((x - self.origin.0) / zoom, (y - self.origin.1) / zoom);
 
         // Turned back into the page's own coordinates: with no paper there is no page to be turned,
         // and a rotation of a shape with no size would be a mapping of nothing into itself.
@@ -266,6 +267,23 @@ impl InkTransform {
         }
 
         paper_of_drawn(drawn, self.paper, self.rotation)
+    }
+
+    /// The inverse of the *first half* of [`Self::sheet_point`]: a point of the sheet's drawn rectangle,
+    /// where it sits in the window's own logical pixels.
+    ///
+    /// A renderer draws through a transform built from a paper's origin and its two unit steps, and this
+    /// is the placement half of that transform — `origin + drawn * zoom` — so a caller placing something
+    /// on the drawn sheet asks here instead of composing a zoom and an origin of its own. The turn is not
+    /// in it: what comes back is already in the sheet's drawn coordinates, and a renderer applies the
+    /// turn to the *paper's* coordinates as it builds its transform (see [`Self::basis`]).
+    ///
+    /// The DPI scale is **not** applied: what comes back is in logical pixels, the units the layout is
+    /// measured in. A surface that rasterises multiplies by its own scale, once, at the end.
+    pub fn drawn_point(&self, (x, y): (f32, f32)) -> (f32, f32) {
+        let zoom = finite_or_one(self.zoom);
+
+        (self.origin.0 + x * zoom, self.origin.1 + y * zoom)
     }
 
     /// Whether a point in the sheet's own coordinates is on the paper.
@@ -292,25 +310,32 @@ impl InkTransform {
         (x.clamp(0.0, self.paper.0), y.clamp(0.0, self.paper.1))
     }
 
+    /// Whether a point of the window's **logical** pixels is on the interface rather than on the page:
+    /// above [`Self::bar`], or below [`Self::foot`].
+    ///
+    /// The line version of [`Self::on_bar`], and the one the app asks: it has already converted the
+    /// reading through [`crate::paint::logical`] — because it needs the logical point for its own
+    /// reason, to know whether a pill is under the nib — and dividing a second time here would be the
+    /// same arithmetic answered twice.
+    ///
+    /// A line of no height refuses nothing. A point exactly on one is the interface's: the line is the
+    /// bar's last pixel, and a pixel of ink behind a button is a dot the user never saw themselves
+    /// write.
+    pub fn in_interface(&self, y: f32) -> bool {
+        (self.bar > 0.0 && y <= self.bar) || (self.foot > 0.0 && y >= self.foot)
+    }
+
     /// Whether a reading, at a vertical position in **physical client** pixels, landed on the
     /// interface rather than on the page: the bar at the top of the window, or the desk's own row at
     /// the foot.
     ///
     /// Both lines are the *window's*, not the sheet's: a page panned up out from under the bar is
     /// still covered where the two overlap, so this is asked of the reading's own pixels — which is
-    /// also why the DPI scale divides here, exactly as [`Self::sheet_point`] divides it.
-    ///
-    /// A line of no height (or no line at all) refuses nothing, and a reading exactly on one of them
-    /// is the interface's: the line is the bar's last pixel, and one pixel of ink behind a button is a
-    /// dot on the page that the user never saw themselves write. The two edges are the same rule
-    /// because they are the same thing — a floating control the pen presses — even though only one of
-    /// them was ever meant to be written on. Neither is a rectangle: the desk *beside* a pill is still
-    /// page, because each line is one line across the window and a pill is not the whole of it.
+    /// why the DPI scale divides here, exactly as [`Self::sheet_point`] divides it. The rule itself is
+    /// [`Self::in_interface`]'s, written once, because the two edges are the same thing — a floating
+    /// control the pen presses — even though only one of them was ever meant to be written on.
     pub fn on_bar(&self, pixel_y: f32) -> bool {
-        let scale = finite_or_one(self.scale);
-        let y = pixel_y / scale;
-
-        (self.bar > 0.0 && y <= self.bar) || (self.foot > 0.0 && y >= self.foot)
+        self.in_interface(pixel_y / finite_or_one(self.scale))
     }
 
     /// Whether there is a paper to be off.
@@ -320,14 +345,33 @@ impl InkTransform {
     fn has_paper(&self) -> bool {
         self.paper.0 > 0.0 && self.paper.1 > 0.0
     }
-}
 
-/// `value` when it is a usable divisor, and `1.0` when it is not.
-fn finite_or_one(value: f32) -> f32 {
-    if value.is_finite() && value > 0.0 {
-        value
-    } else {
-        1.0
+    /// The three numbers a renderer's transform is built from: the paper's origin, and its two unit
+    /// steps, as the paper is *drawn* — turned the way the page is turned.
+    ///
+    /// A renderer does not need a matrix from here: it needs these, and then its own multiplication,
+    /// because each surface has its own idea of what a transform is (Direct2D's row-vector matrix, a
+    /// Metal uniform). What it must not do is work them out for itself — three calls to
+    /// [`drawn_of_paper`] with a paper and a turn of its own is a second opinion about which way up a
+    /// page is, and both platforms had one.
+    ///
+    /// **No zoom and no origin.** What comes back maps the paper's own units onto the sheet's drawn
+    /// units — `(0, 0)` sits at `(0, 0)`, and one paper unit is one drawn unit — so the caller applies
+    /// the zoom and the placement itself, which is what lets a layer draw a page whose zoom changes
+    /// without rebuilding a single vertex. Applying the zoom here would apply it twice.
+    ///
+    /// The steps are the mapping's *derivative*, and for a quarter turn that is exact rather than
+    /// approximate: each of `drawn_of_paper`'s four cases is an axis exchange with one reflection, so a
+    /// step is always `±1` in one direction and `0` in the other. The test
+    /// `the_steps_reproduce_every_point` is what holds them to the mapping itself.
+    pub fn basis(&self) -> ((f32, f32), (f32, f32), (f32, f32)) {
+        if self.has_paper() {
+            crate::paint::drawn_basis(self.paper, self.rotation)
+        } else {
+            // No paper is the identity: nothing to turn, and a rotation of a shape with no size would
+            // be a mapping of nothing into itself.
+            ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0))
+        }
     }
 }
 
@@ -955,9 +999,7 @@ impl InkDocument {
     /// The question [`Self::retessellate`] answers, and the one a caller asks before spending a rebuild it
     /// does not need: an empty list and a full one are both "ready", and only a shed page is not.
     pub fn has_pieces(&self) -> bool {
-        self.finished
-            .iter()
-            .all(|stroke| stroke.pieces.is_some())
+        self.finished.iter().all(|stroke| stroke.pieces.is_some())
     }
 
     /// Rebuilds the render polygons of a page that has given them up, at the detail it is drawn for.

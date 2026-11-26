@@ -427,7 +427,7 @@ the seam the platforms implement.
 | `pages` | what a note's pages are, and what each one shows |
 | **The drawing** | |
 | `ink_layer` | the canvas's own renderer *interface*: the description the app hands over (`Canvas`), in logical pixels |
-| `paint` | what a canvas may call back into — the seam the layer and a frame's own painting share |
+| `paint` | what a canvas may call back into — the seam the layer and a frame's own painting share, and the one place a point is converted between physical pixels, logical ones and the paper |
 | `app` | every screen, the two pumps, and the canvas description — see [VIEW.md](VIEW.md) |
 | **The document** | |
 | `pdf` | the Pdfium document, page rendering, and the page cache |

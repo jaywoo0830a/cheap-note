@@ -1138,11 +1138,7 @@ fn signed_area(points: &[[f32; 2]]) -> f32 {
 /// the same quarter of a paper unit — a pixel of chord error on a curve at 4x, which is where the
 /// difference stops showing on the width of a pen.
 fn flattening_tolerance(zoom: f32) -> f32 {
-    let zoom = if zoom.is_finite() && zoom > 0.0 {
-        zoom
-    } else {
-        1.0
-    };
+    let zoom = note_ui::paint::finite_or_one(zoom);
 
     (DEFAULT_FLATTENING / zoom.min(1.0)).max(DEFAULT_FLATTENING)
 }
@@ -1166,17 +1162,17 @@ fn ink_matrix(
     turns: Quarters,
 ) -> Matrix3x2 {
     let drawn = scale * zoom;
-    let (ox, oy) = note_ui::paint::drawn_of_paper((0.0, 0.0), paper, turns);
-    let (xx, xy) = note_ui::paint::drawn_of_paper((1.0, 0.0), paper, turns);
-    let (yx, yy) = note_ui::paint::drawn_of_paper((0.0, 1.0), paper, turns);
+    // The paper's origin and its two unit steps on the drawn sheet, turned the way the page is turned:
+    // asked of the view rather than worked out with three calls of its own (see `InkTransform::basis`).
+    let (base, along_x, along_y) = note_ui::paint::drawn_basis(paper, turns);
 
     Matrix3x2 {
-        M11: (xx - ox) * drawn,
-        M12: (xy - oy) * drawn,
-        M21: (yx - ox) * drawn,
-        M22: (yy - oy) * drawn,
-        M31: origin.0 * scale + ox * drawn,
-        M32: origin.1 * scale + oy * drawn,
+        M11: along_x.0 * drawn,
+        M12: along_x.1 * drawn,
+        M21: along_y.0 * drawn,
+        M22: along_y.1 * drawn,
+        M31: origin.0 * scale + base.0 * drawn,
+        M32: origin.1 * scale + base.1 * drawn,
     }
 }
 

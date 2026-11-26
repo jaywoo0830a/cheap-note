@@ -21,8 +21,10 @@ use std::sync::Arc;
 
 use gpui_kit::*;
 
+use crate::ink::drawn_of_paper;
 use crate::ink_layer::canvas::{Fill, Rect};
 use crate::pages::Quarters;
+use crate::paint::finite_or_one;
 
 /// The paper a note is written on: the sizes, and what is printed on it.
 ///
@@ -361,11 +363,7 @@ fn build_ruling(sheet: Bounds<Pixels>, style: CanvasStyle, color: Hsla, zoom: f3
     };
 
     // A zoom of zero or NaN would make every rule land on top of every other one.
-    let zoom = if zoom.is_finite() && zoom > 0.0 {
-        zoom
-    } else {
-        1.0
-    };
+    let zoom = finite_or_one(zoom);
     let spacing = spacing * zoom;
 
     let x: f32 = sheet.origin.x.into();
@@ -418,45 +416,34 @@ fn build_ruling(sheet: Bounds<Pixels>, style: CanvasStyle, color: Hsla, zoom: f3
 /// the page.
 ///
 /// A quarter turn takes an axis-aligned rectangle to another one, so each mark is still one fill — and
-/// the mapping is [`crate::ink::drawn_of_paper`]'s, applied to whole rectangles, which is what keeps the
-/// ruling and the ink agreeing about which way up the page is.
+/// the two corners that define it are mapped by [`crate::ink::drawn_of_paper`] itself rather than by a
+/// table of rectangles here. That is what keeps the ruling and the ink agreeing about which way up the
+/// page is: there is one mapping, and this is it applied to a rectangle's two opposite corners.
 fn place(rules: Vec<Fill>, at: RulingSheet, origin: (f32, f32)) -> Vec<Fill> {
     let (x, y) = origin;
     let (width, height) = (
         f32::from(at.paper.size.width),
         f32::from(at.paper.size.height),
     );
+    let paper = (width, height);
 
     rules
         .into_iter()
         .map(|mut fill| {
             let rect = fill.rect;
 
-            fill.rect = match at.turns.turns() {
-                1 => Rect {
-                    x: x + height - rect.y - rect.height,
-                    y: y + rect.x,
-                    width: rect.height,
-                    height: rect.width,
-                },
-                2 => Rect {
-                    x: x + width - rect.x - rect.width,
-                    y: y + height - rect.y - rect.height,
-                    width: rect.width,
-                    height: rect.height,
-                },
-                3 => Rect {
-                    x: x + rect.y,
-                    y: y + width - rect.x - rect.width,
-                    width: rect.height,
-                    height: rect.width,
-                },
-                _ => Rect {
-                    x: x + rect.x,
-                    y: y + rect.y,
-                    width: rect.width,
-                    height: rect.height,
-                },
+            // The un-turned rect is the rectangle it is described by, so mapping its top-left and its
+            // bottom-right and taking the box between them is the whole of the turn — a quarter turn
+            // reflects one axis and swaps the two, and a box is symmetric under both.
+            let (left, top) = drawn_of_paper((rect.x, rect.y), paper, at.turns);
+            let (right, bottom) =
+                drawn_of_paper((rect.x + rect.width, rect.y + rect.height), paper, at.turns);
+
+            fill.rect = Rect {
+                x: x + left.min(right),
+                y: y + top.min(bottom),
+                width: (right - left).abs(),
+                height: (bottom - top).abs(),
             };
 
             fill

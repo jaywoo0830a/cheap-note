@@ -73,7 +73,7 @@ impl Ghost {
         // edge is a place the pen presses rather than writes, and so is a page or zoom pill at the foot
         // of the window. Beside those pills is desk, and the ghost is the pen's there as it is
         // everywhere else — the row is full-width and the pills do not fill it.
-        let scale = sane_scale(screen.scale);
+        let scale = note_ui::paint::finite_or_one(screen.scale);
         let at = cursor.position();
         let (x, y) = (at[0], at[1]);
         if y <= screen.sheet_top / scale {
@@ -117,7 +117,7 @@ impl GhostFeed for Ghost {
         };
 
         if let Ok(mut state) = self.state.lock() {
-            let scale = sane_scale(state.screen.scale);
+            let scale = note_ui::paint::finite_or_one(state.screen.scale);
 
             state.cursor = if Ghost::app_is_active() {
                 PenCursor::from_sample(*reading, scale)
@@ -135,14 +135,5 @@ impl GhostFeed for Ghost {
 
     fn is_alive(&self) -> bool {
         true
-    }
-}
-
-/// A scale of nought is a scale of one.
-fn sane_scale(scale: f32) -> f32 {
-    if scale > 0.0 {
-        scale
-    } else {
-        1.0
     }
 }

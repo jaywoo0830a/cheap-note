@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use gpui_kit::{Hsla, RenderImage};
 
-use crate::ink::{Bounds, Stroke};
+use crate::ink::{Bounds, InkTransform, Stroke};
 use crate::pages::Quarters;
 
 /// A rectangle in logical window pixels.
@@ -188,6 +188,27 @@ impl Ink {
         (f32::NEG_INFINITY, f32::NEG_INFINITY),
         (f32::INFINITY, f32::INFINITY),
     );
+
+    /// This ink's geometry as the [transform](InkTransform) it is drawn through.
+    ///
+    /// The description carries the same four numbers the transform does — where the paper sits, how large
+    /// it is drawn, its own size, and which way up it is — so a renderer that wants the paper's origin and
+    /// its unit steps asks *here* rather than composing them itself. That is what both platforms do (see
+    /// [`InkTransform::basis`]), and it is why a page turned the wrong way is one bug and not two.
+    ///
+    /// No interface lines: a canvas description is about the sheet, and the bar and the foot are the
+    /// window's, refused before a reading ever reaches the model.
+    pub fn transform(&self) -> InkTransform {
+        InkTransform {
+            scale: 1.0,
+            zoom: self.zoom,
+            origin: self.origin,
+            paper: self.paper,
+            bar: 0.0,
+            foot: 0.0,
+            rotation: self.rotation,
+        }
+    }
 }
 
 /// One frame of canvas: the desk, what is printed on it, and the ink in front of it.

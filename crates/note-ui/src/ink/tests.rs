@@ -605,11 +605,17 @@ fn a_page_waiting_in_the_note_holds_its_ink_and_not_its_triangles() {
     let taken = notes.held(1).expect("the page was given up entirely");
 
     assert!(
-        taken.finished().iter().all(|stroke| stroke.pieces.is_none()),
+        taken
+            .finished()
+            .iter()
+            .all(|stroke| stroke.pieces.is_none()),
         "a page the reader has left is still holding its triangles"
     );
     assert!(
-        taken.finished().iter().all(|stroke| !stroke.outline.is_empty()),
+        taken
+            .finished()
+            .iter()
+            .all(|stroke| !stroke.outline.is_empty()),
         "and it kept the outline a frame culls by"
     );
     assert_eq!(taken.stroke_count(), kept, "the ink itself is untouched");
@@ -629,7 +635,10 @@ fn a_page_waiting_in_the_note_holds_its_ink_and_not_its_triangles() {
         })
         .collect();
 
-    assert_eq!(before, after, "the page turned back to is not the page left");
+    assert_eq!(
+        before, after,
+        "the page turned back to is not the page left"
+    );
 }
 
 /// How many strokes the page in front of the reader holds.
@@ -1492,6 +1501,78 @@ fn the_eraser_removes_only_what_it_touches() {
     assert_eq!(ink.stroke_count(), 1);
     assert_eq!(ink.finished()[0].points[0].x, 500.0);
     assert_eq!(ink.stats().erased_strokes, 1);
+}
+
+/// The two directions of the conversion are inverses: a paper point placed on the sheet comes back
+/// as itself, at every zoom, every turn, and with the window's scale in it.
+///
+/// This is the invariant that lets one function be the definition and the other be derived from it —
+/// `sheet_point` is what a pen's readings take and `drawn_point` is what a renderer places things with,
+/// and a page turned the wrong way by one of them would show as ink off the page rather than as a
+/// failure here.
+#[test]
+fn placing_a_paper_point_and_reading_it_back_is_the_same_point() {
+    let paper = (600.0, 800.0);
+
+    for turns in crate::pages::Quarters::ALL {
+        for zoom in [0.5, 1.0, 1.5, 4.0] {
+            let transform = InkTransform {
+                scale: 2.0,
+                zoom,
+                origin: (40.0, -120.0),
+                paper,
+                bar: 0.0,
+                foot: 0.0,
+                rotation: turns,
+            };
+
+            for point in [(0.0, 0.0), (12.5, 40.0), (599.0, 799.0), (300.0, 400.0)] {
+                // Where it is drawn, in logical pixels, and then in the window's physical ones.
+                let placed =
+                    transform.drawn_point(crate::paint::drawn_of_paper(point, paper, turns));
+                let physical = (placed.0 * transform.scale, placed.1 * transform.scale);
+                let back = transform.sheet_point(physical);
+
+                assert!(
+                    (back.0 - point.0).abs() < 1e-3 && (back.1 - point.1).abs() < 1e-3,
+                    "{point:?} at {turns} turns and {zoom}x came back as {back:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A renderer's basis and the transform's own point conversion agree about which way up the page is.
+///
+/// Two renderers build their transforms from `basis` and the ink model maps every reading through
+/// `sheet_point`; if the two disagreed, ink would be drawn beside where it was written.
+#[test]
+fn the_basis_and_the_point_conversion_are_one_mapping() {
+    let paper = (600.0, 800.0);
+
+    for turns in crate::pages::Quarters::ALL {
+        let transform = InkTransform {
+            zoom: 1.0,
+            origin: (0.0, 0.0),
+            paper,
+            rotation: turns,
+            ..InkTransform::identity()
+        };
+        let (base, along_x, along_y) = transform.basis();
+
+        for point in [(0.0, 0.0), (37.5, 12.25), (599.0, 799.0)] {
+            let through = (
+                base.0 + point.0 * along_x.0 + point.1 * along_y.0,
+                base.1 + point.0 * along_x.1 + point.1 * along_y.1,
+            );
+            let expected = crate::paint::drawn_of_paper(point, paper, turns);
+
+            assert!(
+                (through.0 - expected.0).abs() < 1e-3 && (through.1 - expected.1).abs() < 1e-3,
+                "{point:?} at {turns} turns: {through:?} against {expected:?}"
+            );
+        }
+    }
 }
 
 /// Ink belongs to the paper, not to the window: a reading becomes the place on the sheet that

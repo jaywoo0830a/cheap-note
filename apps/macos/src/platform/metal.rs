@@ -1998,6 +1998,11 @@ impl Surface {
     }
 
     /// One run of coloured vertices, in one draw call.
+    ///
+    /// The stencil is released here rather than left to the caller: this is the draw everything that is not
+    /// the ink goes through — the desk, the page, the pen — and the ink leaves a stencil state behind it (see
+    /// [`ink_pass`]). A cursor drawn under a `Equal`-against-the-mark test would be drawn nowhere that the
+    /// ink had not already been, which is the one place a cursor is not needed and every place it is.
     fn solid(
         &self,
         encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
@@ -2008,6 +2013,7 @@ impl Surface {
         transform: Transform,
     ) {
         encoder.setRenderPipelineState(&self.solid);
+        encoder.setDepthStencilState(None);
         self.bind(encoder, buffer, width, height, transform);
 
         // SAFETY: `count` vertices, all of them in the buffer just bound.
@@ -2107,6 +2113,8 @@ fn ink_pass(
         height,
         transform,
     );
+
+    encoder.setDepthStencilState(None);
 }
 
 /// Vertices `from..to` in one draw, with no stencil: the same colour over itself is the same colour.
@@ -2126,6 +2134,8 @@ fn echo(
     }
 
     encoder.setRenderPipelineState(solid);
+    // No stencil: this run is opaque, and the same colour over itself is the same colour. Saying so here also
+    // keeps the state from leaking out of the ink into whatever is drawn next (see [`ink_pass`]).
     encoder.setDepthStencilState(None);
     bind(encoder, buffer, width, height, transform);
 
@@ -3849,6 +3859,114 @@ mod fill_tests {
         );
     }
 
+    /// The pen's cursor is drawn after the ink, and the ink must not take it with it.
+    ///
+    /// The cursor is the last thing in a frame and shares the frame's encoder. The ink leaves a stencil state
+    /// behind it, and a cursor drawn under the last stroke's test appears only where that stroke already is —
+    /// nowhere a reader is about to write, which is every place the cursor is for. It went unnoticed because a
+    /// cursor over blank paper has no ink to be hidden by and no test to fail; it disappears exactly when a
+    /// stroke has been drawn, which is when the reader is looking.
+    #[test]
+    fn the_cursor_survives_the_stencil_the_ink_leaves() {
+        let Some(device) = objc2_metal::MTLCreateSystemDefaultDevice() else {
+            return;
+        };
+        let library = device
+            .newLibraryWithSource_options_error(&NSString::from_str(SHADERS), None)
+            .expect("the shaders compile");
+
+        // A highlight near the middle, so the ink runs through the test's two sample points.
+        let band = 18.0_f32;
+        let mapping = Mapping {
+            base: (0.0, 0.0),
+            step_x: (1.0, 0.0),
+            step_y: (0.0, 1.0),
+        };
+        let mut stroke = note_format::ink::Stroke::new(
+            note_format::ink::InkPoint::new(0.0, 100.0, band),
+            note_format::ink::with_alpha(0xFFEB3B, note_ui::ink::HIGHLIGHTER_ALPHA),
+        );
+        let mut x = 0.0_f32;
+        while x < 400.0 {
+            x += note_format::settings::Settings::default().resample_spacing;
+            stroke
+                .points
+                .push(note_format::ink::InkPoint::new(x, 100.0, band));
+        }
+        stroke.close_at(1.0);
+
+        let mut vertices = Vec::new();
+        let mut scratch = Vec::new();
+        fill(
+            &mut vertices,
+            &mut scratch,
+            &mut Sweep::default(),
+            &stroke,
+            &mapping,
+            (0.0, 0.0),
+            ink_colour(stroke.color),
+        );
+
+        // What the frame draws last: a black square where the pen is. Drawn through `Surface::solid`'s own
+        // sequence, minus the `Surface` — the pipeline, the released stencil, the draw.
+        let pen = quad_vertices((50.0, 50.0), (60.0, 60.0), 0x000000);
+
+        let (centre, corner) =
+            band_then(&device, &library, &vertices, &[0], (400, 200), |encoder| {
+                // SAFETY: a buffer and a pipeline that outlive the closure, drawn the way a frame draws the pen.
+                let buffer = unsafe {
+                    let pointer = std::ptr::NonNull::new(pen.as_ptr() as *mut std::ffi::c_void)
+                        .expect("the pen has vertices");
+                    device
+                        .newBufferWithBytes_length_options(
+                            pointer,
+                            std::mem::size_of_val(&pen[..]),
+                            MTLResourceOptions::StorageModeShared,
+                        )
+                        .expect("a buffer for the pen")
+                };
+                let solid =
+                    pipeline(&device, &library, "solid_vertex", "solid_fragment").expect("solid");
+                encoder.setRenderPipelineState(&solid);
+                encoder.setDepthStencilState(None);
+                bind(&encoder, &buffer, 400.0, 200.0, Transform::WINDOW);
+
+                // SAFETY: the pen's own vertices, in the buffer just bound.
+                unsafe {
+                    encoder.drawPrimitives_vertexStart_vertexCount(
+                        MTLPrimitiveType::Triangle,
+                        0,
+                        pen.len(),
+                    );
+                }
+            });
+
+        // Black pen over white paper: if the state leaked, the pixel is untouched paper.
+        assert!(
+            corner < 40,
+            "the cursor was not drawn: blue {corner} where it should be black (white paper is 255)"
+        );
+    }
+
+    /// The two triangles of an axis-aligned rectangle, in `rgb` at full opacity.
+    fn quad_vertices((x, y): (f32, f32), (right, bottom): (f32, f32), rgb: u32) -> Vec<Vertex> {
+        let mut vertices = Vec::new();
+        quad(
+            &mut vertices,
+            Rect {
+                x,
+                y,
+                width: right - x,
+                height: bottom - y,
+            },
+            // Opaque black: `ink_colour` is the app's own packing, so the bytes the vertex carries are the
+            // ones a pen would carry.
+            ink_colour(rgb),
+        );
+
+        vertices
+    }
+
     /// Every pass the renderer needs builds on this device.
     ///
     /// A pipeline that fails to build is not a frame drawn wrongly — [`Surface::install`] returns `None` and
@@ -4023,6 +4141,31 @@ mod fill_tests {
         translucent: &[usize],
         (width, height): (usize, usize),
     ) -> u8 {
+        band_then(
+            device,
+            library,
+            vertices,
+            translucent,
+            (width, height),
+            |_| {},
+        )
+        .0
+    }
+
+    /// [`band_over_white`], with `after` run through the same encoder once the ink is drawn.
+    ///
+    /// What `after` exists for is the state the ink leaves behind it. The pen's cursor is drawn last, through
+    /// the same encoder, so a stencil state the ink forgot to release is a state the cursor inherits — and a
+    /// cursor inheriting `Equal`-against-the-mark is drawn only where ink already is, which is to say not at
+    /// all in the place a reader is about to write.
+    fn band_then(
+        device: &ProtocolObject<dyn MTLDevice>,
+        library: &ProtocolObject<dyn MTLLibrary>,
+        vertices: &[Vertex],
+        translucent: &[usize],
+        (width, height): (usize, usize),
+        after: impl FnOnce(&ProtocolObject<dyn MTLRenderCommandEncoder>),
+    ) -> (u8, u8) {
         use objc2_metal::MTLClearColor;
 
         let solid = pipeline(device, library, "solid_vertex", "solid_fragment").expect("solid");
@@ -4119,34 +4262,41 @@ mod fill_tests {
             Some(&mask),
         );
 
+        // Anything the caller wants drawn after the ink, through the same encoder and whatever state the
+        // ink left: this is where the pen's cursor goes in a frame.
+        after(&encoder);
+
         encoder.endEncoding();
         command.commit();
         command.waitUntilCompleted();
 
-        let mut pixel = [0u8; 4];
-        let region = MTLRegion {
-            origin: MTLOrigin {
-                x: width / 2,
-                y: height / 2,
-                z: 0,
-            },
-            size: MTLSize {
-                width: 1,
-                height: 1,
-                depth: 1,
-            },
-        };
-        // SAFETY: `pixel` is four bytes and the region is the one pixel they hold.
-        unsafe {
-            let out = std::ptr::NonNull::new(pixel.as_mut_ptr() as *mut std::ffi::c_void)
-                .expect("a stack array is never null");
-            resolved.getBytes_bytesPerRow_bytesPerImage_fromRegion_mipmapLevel_slice(
-                out, 4, 4, region, 0, 0,
-            );
-        }
+        // Two pixels: the middle of the band, and one inside the pen's square (see the caller), which is a
+        // place no ink reaches — the only place the cursor can be missed. The square the caller draws spans
+        // 50..60 in both axes, so its interior is 55, 55 whatever the target's size.
+        let mut read = |x: usize, y: usize| {
+            let mut pixel = [0u8; 4];
+            let region = MTLRegion {
+                origin: MTLOrigin { x, y, z: 0 },
+                size: MTLSize {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                },
+            };
+            // SAFETY: `pixel` is four bytes and the region is the one pixel they hold.
+            unsafe {
+                let out = std::ptr::NonNull::new(pixel.as_mut_ptr() as *mut std::ffi::c_void)
+                    .expect("a stack array is never null");
+                resolved.getBytes_bytesPerRow_bytesPerImage_fromRegion_mipmapLevel_slice(
+                    out, 4, 4, region, 0, 0,
+                );
+            }
 
-        // A `BGRA8Unorm` pixel: blue is the first byte.
-        pixel[0]
+            // A `BGRA8Unorm` pixel: blue is the first byte.
+            pixel[0]
+        };
+
+        (read(width / 2, height / 2), read(55, 55))
     }
 }
 

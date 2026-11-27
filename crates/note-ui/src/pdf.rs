@@ -30,7 +30,7 @@ use gpui_kit::RenderImage;
 
 use crate::error::{AppError, Result};
 use crate::pages::{swaps_axes, Quarters};
-use crate::pdfium::{Document, OutlineEntry, RenderJob};
+use crate::pdfium::{Document, OutlineEntry, Pixels, RenderJob};
 use note_format::mapped::MappedBytes;
 use note_format::paper::MemoryMode;
 
@@ -613,8 +613,14 @@ impl PdfDocumentView {
     }
 
     /// Turns a finished job's pixels into a page the frames can draw.
+    ///
+    /// The pixels are taken as they are when they can be: a colour page's buffer is the one Pdfium
+    /// drew into, and taking it whole avoids a second buffer of a page's size existing at once —
+    /// which is the peak the external-buffer path is for. The renderer's own image type owns a
+    /// `Vec`, so the bytes are handed over rather than shared past this point; what the external
+    /// buffer removes is Pdfium's allocation, and with it the moment when a page's pixels exist twice.
     fn page_from_job(&self, job: &RenderJob, request: PageRequest) -> Result<RenderedPage> {
-        let (width, height, pixels) = job
+        let (width, height, pixels): (u32, u32, Pixels) = job
             .pixels()
             .ok_or_else(|| AppError::Pdf(String::from("the rendered page had no pixels")))?;
 
@@ -622,11 +628,12 @@ impl PdfDocumentView {
             .page_point_size(request.page)
             .unwrap_or((width as f32, height as f32));
 
-        let buffer = image::RgbaImage::from_raw(width, height, pixels).ok_or_else(|| {
-            AppError::Pdf(String::from(
-                "the rendered page did not match the buffer size Pdfium reported",
-            ))
-        })?;
+        let buffer =
+            image::RgbaImage::from_raw(width, height, pixels.into_vec()).ok_or_else(|| {
+                AppError::Pdf(String::from(
+                    "the rendered page did not match the buffer size Pdfium reported",
+                ))
+            })?;
 
         Ok(RenderedPage {
             image: Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])),

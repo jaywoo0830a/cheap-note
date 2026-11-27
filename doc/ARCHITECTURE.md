@@ -258,6 +258,18 @@ Four decisions keep that from being the thing that makes writing stutter:
   unfinished bitmap. The wrapper exposes no raw handle and declares only the thirty-two public entry
   points it uses; a page keeps its document alive, and every failure to resolve a symbol is reported
   by name when the library is loaded.
+* **A colour page is drawn into a buffer this app owns.** `FPDFBitmap_CreateEx` takes an external
+  buffer and a stride, so Pdfium writes the page into memory the job allocated rather than into one
+  of its own that would then have to be copied out — on a 4K page that copy is about 31.6 MiB, paid
+  each time a PDF is opened or zoomed. The buffer outlives the bitmap handle (the job's `Drop`
+  destroys the handle before releasing it), and it is already filled with paper before Pdfium is
+  handed it, because the progressive renderer draws *over* what it finds. Grayscale stays on the
+  other path: one channel becomes four on the way out, so that copy is the conversion rather than an
+  avoidable one.
+* **A slice's budget is checked before Pdfium is entered.** `advance` answers `Unfinished` without
+  calling into the library at all when its budget is zero, and a failed render names the page, the
+  size and which of the two calls failed — `FPDF_GetLastError` is asked only after a *document* load
+  failure, which is the one case the header promises it for.
 * **The cache key is what the bitmap depends on**: page, rung, whether it is grayscale, and which way
   the reader has turned the page. The grayscale toggle therefore invalidates nothing by hand — the
   bitmaps it changed are simply not the bitmaps the cache holds — and a page turned after it was read
@@ -604,7 +616,7 @@ readable is a session a person starts and stops** (`Ctrl+M`), which reports the 
   `pages`, `settings` and `history` modules are re-exports of the format's, so no path inside the view
   changed.
 * **Pdfium is not in the repository.** It is downloaded into `vendor/` (`vendor/README.md`; the current
-  build is 158.0.8125.0), and a build copies the platform's library (`pdfium.dll`; the loader also
+  build is 160.0.8179.0), and a build copies the platform's library (`pdfium.dll`; the loader also
   knows `libpdfium.dylib` and `libpdfium.so`) from `vendor/lib` next to the executable it produces, so
   a release build is a *pair* of files that work from anywhere. A fresh clone starts, draws and writes
   ink without it; only opening a PDF needs it, and the status line says so when it is missing. The

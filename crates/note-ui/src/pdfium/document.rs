@@ -151,9 +151,12 @@ impl Document {
         };
 
         if handle.is_null() {
+            // The one place an error code is worth asking for: the header names `FPDF_GetLastError`
+            // for the *document loaders*, so a code read here is the code for *this* failure. Read
+            // immediately, because the next Pdfium call may well overwrite it.
             return Err(AppError::Pdf(format!(
-                "{name} could not be read (Pdfium error {})",
-                unsafe { (api.last_error)() }
+                "{name} could not be read ({})",
+                super::api::error_name(unsafe { (api.last_error)() })
             )));
         }
 

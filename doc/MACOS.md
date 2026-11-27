@@ -88,8 +88,10 @@ The next subsection puts the library in place, and §7 is where rendering is act
 
 ### Pdfium's `libpdfium.dylib`
 
-`vendor/` in the repository holds the **Windows** build (`pdfium.dll`, 158.0.8125.0 — `vendor/README.md`
-describes that archive), so a Mac needs its own copy before a PDF can be opened:
+`vendor/` in this tree holds the macOS build (`libpdfium.dylib`, 160.0.8179.0 — `vendor/README.md`
+describes both that archive and the Windows one from the same release), so a Mac is ready to open a
+PDF. A tree set up on Windows holds `pdfium.dll` instead, and replacing one with the other is the
+three steps below:
 
 1. Take the `mac-arm64` archive from `pdfium-binaries` (Apple Silicon; `mac-x64` for Intel).
 2. `libpdfium.dylib` goes to `vendor/lib/`; the headers in `include/` replace the ones there.
@@ -310,7 +312,7 @@ pen, and stay unchecked in the repository because they need the hardware in hand
 |---|---|---|
 | `cargo build` / `--workspace` on the Mac | `apps/windows` used to be a workspace member that could not build there (its `pen-windows` is Windows-only) | **fixed**: `pen-windows` is now a `cfg(windows)` dependency and `apps/windows` compiles to a stub off Windows, so `--workspace` builds and tests on both platforms |
 | bundled SQLite | `libsqlite3-sys` compiles C | `xcode-select --install` |
-| `vendor/` | the repository's copy is the **Windows** build (`pdfium.dll`, 158.0.8125.0) | download the mac archive from `pdfium-binaries` (`mac-arm64`), `libpdfium.dylib` into `vendor/lib/` |
+| `vendor/` | a tree holds one platform's build — this one has macOS arm64 (`libpdfium.dylib`, 160.0.8179.0); a Windows tree has `pdfium.dll` from the same release | download the other platform's archive from `pdfium-binaries` and replace `vendor/lib/` and `vendor/include/` together |
 | `apps/macos/build.rs` | filters `.dylib`, no icon step | a release build now carries its Pdfium beside it |
 | AppKit's "valid only for this event kind" properties | `-[NSEvent subtype]` and `isEnteringProximity` raise `NSInternalInconsistencyException` for kinds that have no such field — a `MouseEntered` did it | ask them only of the kinds that carry one (`subtype_of` in `pen-macos`) |
 | a release crash says nothing | `panic = "abort"` drops the message of a panic inside an AppKit callback | `std::panic::set_hook` in `main` prints it before the abort (and a backtrace with `RUST_BACKTRACE`) |

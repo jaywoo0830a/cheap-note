@@ -99,5 +99,45 @@ fn the_c_types_have_the_layout_the_vendored_header_declares() {
     assert_eq!(offset_of!(LibraryConfig, version), 0);
     assert_eq!(offset_of!(LibraryConfig, user_font_paths), 8);
     assert_eq!(offset_of!(LibraryConfig, isolate), 16);
-    assert_eq!(offset_of!(LibraryConfig, v8_embedder_slot), 24);
+    assert_eq!(
+        offset_of!(LibraryConfig, v8_embedder_slot),
+        24,
+        "the embedder slot is the last field of the version-2 prefix"
+    );
+
+    // `FPDF_DWORD` is `unsigned long`, and the fill colour is declared as one: the same width as
+    // `c_ulong` on every platform this ships for (32 bits on Windows, 64 on macOS), and the width
+    // the header names. A `c_uint` here would be right only where `unsigned long` happens to be
+    // 32 bits, which is why the declaration is checked rather than assumed.
+    assert_eq!(
+        size_of::<FpdfDword>(),
+        size_of::<c_ulong>(),
+        "FPDF_DWORD is unsigned long"
+    );
+    assert_eq!(
+        size_of::<FpdfBool>(),
+        size_of::<c_int>(),
+        "FPDF_BOOL is int"
+    );
+}
+
+/// Pdfium's error codes are turned into sentences rather than shown as numbers.
+///
+/// A number alone says nothing to whoever tried to open a file: code 4 is a password the app never
+/// asked for, and saying *that* is the whole value of asking for the code at all. The number is kept
+/// beside the words, and a code from a newer Pdfium than this one keeps only the number.
+#[test]
+fn a_pdfium_error_code_is_reported_as_a_sentence() {
+    assert_eq!(
+        error_name(3),
+        "it is not a PDF, or it is damaged (Pdfium error 3)"
+    );
+    assert_eq!(error_name(4), "it needs a password (Pdfium error 4)");
+    assert_eq!(
+        error_name(0),
+        "no error was recorded, so the file was refused without a reason (Pdfium error 0)"
+    );
+
+    // A code this build has never heard of is not invented into a meaning.
+    assert_eq!(error_name(99), "Pdfium error 99");
 }

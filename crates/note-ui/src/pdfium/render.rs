@@ -35,6 +35,7 @@
 //! crosses into C and must not unwind.
 
 use std::ffi::c_int;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::api::{api, FpdfBitmap, Pause};
@@ -84,6 +85,11 @@ const RENDER_DONE: c_int = 2;
 /// The render failed and cannot be continued.
 const RENDER_FAILED: c_int = 3;
 
+/// The two Pdfium calls a slice can be, named so that a failure says which one it was.
+const CALL_START: &str = "FPDF_RenderPageBitmap_Start";
+/// Every slice after the first.
+const CALL_CONTINUE: &str = "FPDF_RenderPage_Continue";
+
 /// Draw the page's own annotations into the bitmap.
 const RENDER_ANNOTATIONS: c_int = 1;
 
@@ -94,7 +100,19 @@ const BITMAP_BGRA: c_int = 4;
 
 /// What a page's bitmap is filled with before anything is drawn on it: opaque white, in the
 /// bitmap's own byte order (which is why no channel can be told from another here).
+///
+/// Kept as a `u32` because that is what a colour *is*, and widened at the one call that takes it:
+/// `FPDFBitmap_FillRect` takes a `FPDF_DWORD`, which is `unsigned long` — 32 bits on Windows and 64
+/// elsewhere, and the same four bytes of colour either way (see [`super::api::Api::bitmap_fill`]).
 const PAPER: u32 = 0xffff_ffff;
+
+/// The same paper as [`PAPER`] written into a buffer this app allocates, in the byte order a BGRA
+/// bitmap holds it.
+///
+/// `0xffff_ffff` is four `0xff` bytes in any order, which is why this is written as bytes and not
+/// computed from [`PAPER`]: an opaque white pixel is all-ones in every channel, and saying so in the
+/// layout the buffer actually has is clearer than three shifts that happen to agree.
+const PAPER_BYTES: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
 
 /// The largest bitmap a job will ask Pdfium to allocate, in bytes of its BGRA form.
 ///
@@ -137,11 +155,27 @@ unsafe extern "C" fn need_to_pause_now(pause: *mut Pause) -> c_int {
 /// Destroying the bitmap is what ends a render that has not finished, so the owner's field order is
 /// part of the cancellation story: a job declares its bitmap before its page, which is the order
 /// Rust drops them in.
+///
+/// **A colour bitmap is rendered into a buffer of this struct's own.** `FPDFBitmap_CreateEx` takes
+/// `first_scan` and `stride`, and a bitmap made over an external buffer writes straight into it — so
+/// a finished page is handed on without the full-image copy `FPDFBitmap_GetBuffer` would otherwise
+/// need. On a 4K page that copy is about 31.6 MiB, paid exactly when a PDF is opened or zoomed, when
+/// the reader is waiting.
 struct Bitmap {
     /// The handle Pdfium handed out.
     handle: FpdfBitmap,
     /// The format the bytes are in, which decides how they are read out.
     format: Format,
+    /// The pixels, when this bitmap was made over a buffer of this app's own.
+    ///
+    /// `None` for a grayscale bitmap, which asks Pdfium to allocate and widens on the way out: one
+    /// channel becomes four, so there is no arrangement of it that the renderer could use as it
+    /// stands. The copy that path makes is a conversion rather than an avoidable one.
+    ///
+    /// An `Arc` rather than a `Vec` because the finished pixels leave while the bitmap may still
+    /// exist: [`Bitmap::pixels`] shares the buffer with the caller instead of copying it out, and
+    /// the last of the two references to drop is what frees it.
+    buffer: Option<Arc<[u8]>>,
 }
 
 impl Bitmap {
@@ -149,17 +183,76 @@ impl Bitmap {
     ///
     /// `None` means Pdfium refused: the dimensions were rejected, or the allocator could not supply
     /// the buffer. Either way the caller gets a sentence rather than a handle it cannot use.
+    ///
+    /// A BGRA bitmap is made over a buffer allocated here, already filled with paper — see
+    /// [`Bitmap::fill`] for why it is written before Pdfium ever sees it.
     fn new(width: c_int, height: c_int, format: Format) -> Option<Self> {
         let api = api().ok()?;
-        let handle = unsafe {
-            (api.bitmap_create_ex)(width, height, format.code(), std::ptr::null_mut(), 0)
+
+        // Rendering into an external buffer needs a stride this app decides, and Pdfium's own advice
+        // is to pass it: a row is exactly its pixels with no alignment padding, which is what makes
+        // the buffer the renderer's own bytes rather than something it has to unpick.
+        let buffer: Option<(Arc<[u8]>, c_int)> = match format {
+            Format::Bgra => {
+                let row = usize::try_from(width).ok()?.checked_mul(4)?;
+                let length = row.checked_mul(usize::try_from(height).ok()?)?;
+                let mut pixels = vec![0u8; length].into_boxed_slice();
+
+                // Paper, written before Pdfium is handed the buffer: the progressive renderer draws
+                // *over* what is there and never clears it, so a page with nothing on it would be a
+                // transparent hole in the window (see `RenderJob::new`). Doing it here rather than
+                // through `FPDFBitmap_FillRect` is the same bytes written once, in memory this side
+                // of the boundary.
+                //
+                // A row of four bytes is one pixel, and `as_chunks` is how that is said without an
+                // iterator that has to handle a remainder that cannot exist (the length is
+                // `width * 4`, checked above).
+                let (rows, _) = pixels.as_chunks_mut::<4>();
+
+                for pixel in rows {
+                    pixel.copy_from_slice(&PAPER_BYTES);
+                }
+
+                Some((Arc::from(pixels), row as c_int))
+            }
+            Format::Grayscale => None,
         };
 
-        (!handle.is_null()).then_some(Bitmap { handle, format })
+        let (first_scan, stride) = match &buffer {
+            Some((pixels, row)) => (pixels.as_ptr() as *mut std::ffi::c_void, *row),
+            None => (std::ptr::null_mut(), 0),
+        };
+
+        // SAFETY: `first_scan` is either null — Pdfium allocates, and nothing of ours is involved —
+        // or the first byte of `buffer`, which is `stride * height` bytes by construction and is kept
+        // alive by the `Arc` stored beside the handle. Pdfium's contract for an external buffer is
+        // that the caller keeps it valid until `FPDFBitmap_Destroy`, and it is: `Bitmap::drop`
+        // destroys the handle, and the `Arc` lives exactly as long as this struct. The buffer is
+        // `u8`, so no alignment is required of it.
+        let handle =
+            unsafe { (api.bitmap_create_ex)(width, height, format.code(), first_scan, stride) };
+
+        (!handle.is_null()).then_some(Bitmap {
+            handle,
+            format,
+            buffer: buffer.map(|(pixels, _)| pixels),
+        })
     }
 
-    /// Writes opaque paper across the whole bitmap.
+    /// Writes opaque paper across the whole bitmap, when it was not written before Pdfium saw it.
+    ///
+    /// A bitmap with a buffer of its own has already had its paper written — a second write across
+    /// the whole image would be exactly the cost the external buffer exists to remove. One Pdfium
+    /// allocated is filled through Pdfium, because this side cannot see inside it.
+    ///
+    /// The colour is widened to Pdfium's `FPDF_DWORD` here, explicitly: the declaration takes a
+    /// `unsigned long` because the header says so, and a `u32` that reached it without a widening
+    /// would be the wrong width the day one is added.
     fn fill(&self) -> bool {
+        if self.buffer.is_some() {
+            return true;
+        }
+
         let Ok(api) = api() else {
             return false;
         };
@@ -168,32 +261,65 @@ impl Bitmap {
 
         width > 0
             && height > 0
-            && unsafe { (api.bitmap_fill)(self.handle, 0, 0, width, height, PAPER) != 0 }
+            && unsafe {
+                (api.bitmap_fill)(
+                    self.handle,
+                    0,
+                    0,
+                    width,
+                    height,
+                    std::ffi::c_ulong::from(PAPER),
+                ) != 0
+            }
     }
 
-    /// Copies the rendered pixels out: width, height, and rows of BGRA.
+    /// The rendered pixels: width, height, and rows of BGRA.
     ///
-    /// Copied rather than borrowed because the bitmap belongs to Pdfium, and the app hands the
-    /// pixels to GPUI, which keeps them for as long as the image is on screen. A grayscale page is
-    /// widened to BGRA here, because that is what the renderer uploads: its one channel becomes all
-    /// three, at full brightness, with an opaque alpha.
+    /// For a colour bitmap this is a *share* of the buffer Pdfium drew into — no copy, and no second
+    /// allocation of a page's worth of pixels. For a grayscale one it copies, because that is the
+    /// conversion rather than a copy of the same bytes: Pdfium's one channel becomes three at full
+    /// brightness with an opaque alpha, which is what the renderer uploads.
     ///
     /// Every size is checked against the stride before any pointer arithmetic: Pdfium owns these
     /// values, but a bad one must produce no pixels rather than a slice that reads past the buffer.
-    fn pixels(&self) -> Option<(u32, u32, Vec<u8>)> {
+    fn pixels(&self) -> Option<(u32, u32, Pixels)> {
         let api = api().ok()?;
 
-        let width = unsafe { (api.bitmap_width)(self.handle) };
-        let height = unsafe { (api.bitmap_height)(self.handle) };
-        let stride = unsafe { (api.bitmap_stride)(self.handle) };
-        let buffer = unsafe { (api.bitmap_buffer)(self.handle) } as *const u8;
+        let width = usize::try_from(unsafe { (api.bitmap_width)(self.handle) }).ok()?;
+        let height = usize::try_from(unsafe { (api.bitmap_height)(self.handle) }).ok()?;
 
-        if width <= 0 || height <= 0 || stride <= 0 || buffer.is_null() {
+        if width == 0 || height == 0 {
             return None;
         }
 
-        let width = width as usize;
-        let height = height as usize;
+        // The buffer this bitmap was made over, when it has one: its stride is the row written by
+        // `Bitmap::new`, so its bytes are already the shape the renderer wants and can be shared
+        // rather than read back out.
+        if let Some(pixels) = &self.buffer {
+            return Some((
+                width as u32,
+                height as u32,
+                Pixels::Shared(Arc::clone(pixels)),
+            ));
+        }
+
+        self.copied(width, height)
+    }
+
+    /// The grayscale path: Pdfium's own buffer, widened a row at a time into a `Vec`.
+    ///
+    /// Split out so that the mismatch it exists for is visible in one place: four bytes per pixel
+    /// out, one byte per pixel in.
+    fn copied(&self, width: usize, height: usize) -> Option<(u32, u32, Pixels)> {
+        let api = api().ok()?;
+
+        let stride = unsafe { (api.bitmap_stride)(self.handle) };
+        let buffer = unsafe { (api.bitmap_buffer)(self.handle) } as *const u8;
+
+        if stride <= 0 || buffer.is_null() {
+            return None;
+        }
+
         let stride = stride as usize;
 
         // How many bytes of a row are pixels rather than Pdfium's alignment padding. The stride may
@@ -242,19 +368,89 @@ impl Bitmap {
             }
         }
 
-        Some((width as u32, height as u32, pixels))
+        Some((width as u32, height as u32, Pixels::Copied(pixels)))
     }
 }
 
 impl Drop for Bitmap {
     fn drop(&mut self) {
         if let Ok(api) = api() {
+            // SAFETY: the handle invariant — this is the bitmap `Bitmap::new` made, and this is the
+            // only place it is destroyed.
+            //
+            // The order is what makes the external buffer sound: Pdfium requires the caller's buffer
+            // to stay valid until the bitmap is destroyed, and `drop` runs *before* the fields are
+            // dropped, so `buffer` is still held here and is released only afterwards.
             unsafe { (api.bitmap_destroy)(self.handle) }
         }
     }
 }
 
-/// What state a job is in, so that a terminal answer stays terminal.
+/// The pixels of a finished page: rows of BGRA, and whether they were shared or made.
+///
+/// The distinction is the whole point of the external buffer and is worth carrying to the caller:
+/// `Shared` is the buffer Pdfium drew into, with the bitmap's own reference dropped and this one
+/// left — no copy, no second allocation. `Copied` is the grayscale path, where every byte was
+/// written here because Pdfium's one channel had to become four.
+///
+/// Both are read the same way once they are in hand (`Deref` to `[u8]`), so a caller that does not
+/// care about the difference does not have to know it.
+/// The pixels of a finished page: rows of BGRA, and whether they were shared or made.
+///
+/// The distinction is the whole point of the external buffer and is worth carrying to the caller:
+/// `Shared` is the buffer Pdfium drew into, with the bitmap's own reference dropped and this one
+/// left — no copy, no second allocation. `Copied` is the grayscale path, where every byte was
+/// written here because Pdfium's one channel had to become four.
+///
+/// Both are read the same way once they are in hand (`Deref` to `[u8]`), so a caller that does not
+/// care about the difference does not have to know it.
+#[derive(Clone, Debug)]
+pub enum Pixels {
+    /// The buffer the page was rendered into, shared rather than copied.
+    Shared(Arc<[u8]>),
+    /// A buffer made by widening Pdfium's grayscale output to BGRA.
+    Copied(Vec<u8>),
+}
+
+impl Pixels {
+    /// Whether this is the renderer's own buffer, which is what the external-buffer path exists for.
+    ///
+    /// `#[cfg(test)]` because nothing in the app branches on it: a caller hands the bytes on either
+    /// way, and this is here so the tests can tell "the page was copied" from "the page was not" —
+    /// which is the difference the whole change is about.
+    #[cfg(test)]
+    pub fn is_shared(&self) -> bool {
+        matches!(self, Pixels::Shared(_))
+    }
+
+    /// The bytes of the page.
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Pixels::Shared(pixels) => pixels,
+            Pixels::Copied(pixels) => pixels,
+        }
+    }
+
+    /// The bytes, taking them over when they are already a `Vec` and copying only a shared buffer.
+    ///
+    /// The difference matters on the path that matters: a grayscale page was widened into a `Vec`
+    /// here in the first place, so handing it on costs nothing, and a colour page's shared buffer is
+    /// copied exactly once — into the image that keeps it.
+    pub fn into_vec(self) -> Vec<u8> {
+        match self {
+            Pixels::Shared(pixels) => pixels.to_vec(),
+            Pixels::Copied(pixels) => pixels,
+        }
+    }
+}
+
+impl std::ops::Deref for Pixels {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.bytes()
+    }
+}
 enum State {
     /// Nothing has been rendered yet.
     Ready,
@@ -290,6 +486,13 @@ pub struct RenderJob {
     pause: Box<Pause>,
     /// The size of the bitmap, which is the size the page was asked to fill.
     size: (c_int, c_int),
+    /// Which page of which document this is, for a failure that has to name them.
+    ///
+    /// The index is Pdfium's (zero-based) and the name is the document's own, kept as two values
+    /// rather than as a borrow of the document: a job outlives the value the caller opened it from,
+    /// and the failure sentence is written long after that.
+    page_index: usize,
+    page_name: String,
     /// The page's rotation, in quarter turns, as Pdfium wants it.
     rotation: c_int,
     /// The render flags: whether the page's own annotations are drawn in.
@@ -321,15 +524,19 @@ impl RenderJob {
         format: Format,
         annotations: bool,
     ) -> Result<Self> {
-        let api = api()?;
+        // Resolved first, so that a machine with no Pdfium says *that* rather than that the page was
+        // not found: the lookup below would fail on a missing library for the same shape of reason.
+        api()?;
 
         let (point_width, point_height) = document.page_point_size(index).ok_or_else(|| {
+            // No `FPDF_GetLastError` here: the header defines it for the *document* loaders, and a
+            // page-size lookup that failed says only that the page is not there. The count beside it
+            // is what makes the sentence useful, and it is a number Pdfium is willing to give.
             AppError::Pdf(format!(
-                "page {} of {} was not found: it has {} pages, and Pdfium reports error {}",
+                "page {} of {} was not found: it has {} pages",
                 index + 1,
                 document.name(),
-                document.page_count(),
-                unsafe { (api.last_error)() }
+                document.page_count()
             ))
         })?;
 
@@ -376,11 +583,13 @@ impl RenderJob {
         }
 
         let page = Page::load(document, index).ok_or_else(|| {
+            // The same rule as the size lookup above: a page that will not load is reported as that,
+            // with its number and the document's name, and with no error code the header never
+            // promised for this call.
             AppError::Pdf(format!(
-                "page {} of {} could not be loaded (Pdfium error {})",
+                "page {} of {} could not be loaded",
                 index + 1,
-                document.name(),
-                unsafe { (api.last_error)() }
+                document.name()
             ))
         })?;
 
@@ -421,6 +630,8 @@ impl RenderJob {
             control,
             pause,
             size: (pixel_width, pixel_height),
+            page_index: index,
+            page_name: document.name().to_owned(),
             rotation: turns.turns() as c_int,
             flags: if annotations { RENDER_ANNOTATIONS } else { 0 },
             started: false,
@@ -430,16 +641,25 @@ impl RenderJob {
 
     /// Renders for up to `budget`, then stops.
     ///
-    /// A budget of zero renders nothing and answers [`Progress::Unfinished`]: the pause callback is
-    /// asked before the first piece of work, so "no time" and "stop now" are the same answer.
+    /// A budget of zero renders nothing and answers [`Progress::Unfinished`] without calling Pdfium
+    /// at all. The pause callback would end the slice at the first piece of work anyway, but only
+    /// *after* Pdfium had been entered and had done that first piece — a parse, a resource load, a
+    /// page's worth of setup — which is work the caller said it had no time for. The check is here
+    /// rather than in the callback because the callback cannot see the budget, only the deadline.
     ///
     /// A finished job answers [`Progress::Finished`] for as long as it is asked, and a failed one
     /// repeats its failure: `advance` never restarts work whose answer is already in hand.
     pub fn advance(&mut self, budget: Duration) -> Progress {
+        // The terminal answers first, and then the budget: a job that has finished is finished
+        // whatever it is asked, and one that is given no time is not entered at all.
         match &self.state {
             State::Finished => return Progress::Finished,
             State::Failed(message) => return Progress::Failed(message.clone()),
             State::Ready | State::InProgress => {}
+        }
+
+        if budget.is_zero() {
+            return Progress::Unfinished;
         }
 
         let Ok(api) = api() else {
@@ -453,11 +673,16 @@ impl RenderJob {
             .checked_add(budget)
             .unwrap_or_else(|| now + Duration::from_secs(60));
 
-        let status = unsafe {
-            if self.started {
-                (api.render_continue)(self.page.handle(), &mut *self.pause)
-            } else {
-                self.started = true;
+        // Which call this slice was, so a failure can name it: `Start` is the call that sets a render
+        // up and `Continue` is every one after it, and a page that fails on the first is a different
+        // bug from one that fails half-way through.
+        let (call, status) = if self.started {
+            let status = unsafe { (api.render_continue)(self.page.handle(), &mut *self.pause) };
+
+            (CALL_CONTINUE, status)
+        } else {
+            self.started = true;
+            let status = unsafe {
                 (api.render_start)(
                     self.bitmap.handle,
                     self.page.handle(),
@@ -469,7 +694,9 @@ impl RenderJob {
                     self.flags,
                     &mut *self.pause,
                 )
-            }
+            };
+
+            (CALL_START, status)
         };
 
         match status {
@@ -481,26 +708,54 @@ impl RenderJob {
                 self.state = State::InProgress;
                 Progress::Unfinished
             }
+            // A failed render is *not* looked up in `FPDF_GetLastError`. That function is only
+            // defined for the calls whose header says so — the document and page loaders, and the
+            // page-size and text lookups — and reading it after a render answers whatever the last
+            // such call left behind, or nothing at all. What a render failure can honestly say is
+            // which call failed and what it returned, which is what this names.
             RENDER_FAILED => {
-                let message = format!("Pdfium could not render the page (error {})", unsafe {
-                    (api.last_error)()
-                });
+                let message = self.failure(call, RENDER_FAILED, "Pdfium could not render the page");
                 self.state = State::Failed(message.clone());
                 Progress::Failed(message)
             }
             other => {
-                let message = format!("Pdfium returned {other} for a progressive render");
+                let message = self.failure(
+                    call,
+                    other,
+                    "Pdfium returned a status a progressive render does not define",
+                );
                 self.state = State::Failed(message.clone());
                 Progress::Failed(message)
             }
         }
     }
 
-    /// Copies the rendered pixels out: width, height, and rows of BGRA.
+    /// The sentence a failed render is reported with: the page, the size, the call and its status.
+    ///
+    /// The four things that make a screenful of log useful when a PDF will not draw: which page of
+    /// which document, how large it was being drawn, whether it was the `Start` call or a
+    /// `Continue`, and the number Pdfium answered with. Deliberately no `FPDF_GetLastError` — that
+    /// function is documented only for the calls that name it, and a renderer is not one (see
+    /// [`Self::advance`]).
+    fn failure(&self, call: &str, status: c_int, what: &str) -> String {
+        format!(
+            "{what}: page {} of {}, drawn at {}×{} px, failed in {call} with status {status}",
+            self.page_index + 1,
+            self.page_name,
+            self.size.0,
+            self.size.1
+        )
+    }
+
+    /// The rendered pixels out: width, height, and rows of BGRA.
     ///
     /// `None` unless the page finished: a bitmap that is still being drawn, or one whose render
     /// failed, is not a page the caller may show.
-    pub fn pixels(&self) -> Option<(u32, u32, Vec<u8>)> {
+    ///
+    /// A colour page's bytes are the buffer Pdfium drew into, shared rather than copied — the job
+    /// keeps no other reference to them, so the caller holds the only one. The pixels therefore stay
+    /// valid after the job is dropped, which is what lets the app hand them to an image.
+    pub fn pixels(&self) -> Option<(u32, u32, Pixels)> {
         if !matches!(self.state, State::Finished) {
             return None;
         }

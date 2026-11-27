@@ -103,6 +103,20 @@ pub(super) struct SizeF {
     pub(super) height: f32,
 }
 
+/// Pdfium's `FPDF_BOOL`: a C `int` that means yes or no, not a boolean subscript.
+///
+/// Named rather than written as `c_int` because the distinction matters at the call site: `0` is
+/// false and every other value is true, so a `!= 0` is the test — an `== 1` would be a guess about
+/// which true Pdfium returns.
+pub(super) type FpdfBool = c_int;
+
+/// Pdfium's `FPDF_DWORD`: an `unsigned long`, which is 32 bits on Windows and 64 on macOS.
+///
+/// A colour passed to a fill is one of these, and `PAPER` in `render` is a `u32` widened to it at
+/// the call site. Naming it rather than writing `c_ulong` there is what keeps the header's own
+/// word — `unsigned long`, not `unsigned int` — visible where the declaration is checked.
+pub(super) type FpdfDword = c_ulong;
+
 /// Pdfium's `IFSDK_PAUSE`: the callback that decides when a render may stop.
 ///
 /// `user` is the hook the render job hangs its own control block on, which is why that block is
@@ -165,8 +179,39 @@ const VENDORED_VERSION: &str = match option_env!("CHEAP_NOTE_PDFIUM_VERSION") {
     None => "an unpinned build",
 };
 
-/// The functions this app calls, resolved once and kept for the process.
+/// What `FPDF_GetLastError` answered, as a sentence a reader can act on.
 ///
+/// Pdfium's codes are a small closed set (`FPDF_ERR_*` in `fpdfview.h`), and a number alone says
+/// nothing to whoever opened the file: "Pdfium error 4" is a password prompt the app never showed,
+/// while "it needs a password" is the answer. The number is kept beside the words for a report that
+/// has to be matched to the header, and an unknown code keeps only the number.
+pub(super) fn error_name(code: c_ulong) -> String {
+    let meaning = match code {
+        // FPDF_ERR_SUCCESS — the loader said no and left no reason, which is worth saying plainly.
+        0 => "no error was recorded, so the file was refused without a reason",
+        // FPDF_ERR_UNKNOWN.
+        1 => "an unknown error",
+        // FPDF_ERR_FILE.
+        2 => "the file could not be opened",
+        // FPDF_ERR_FORMAT.
+        3 => "it is not a PDF, or it is damaged",
+        // FPDF_ERR_PASSWORD.
+        4 => "it needs a password",
+        // FPDF_ERR_SECURITY.
+        5 => "its security scheme is not supported",
+        // FPDF_ERR_PAGE.
+        6 => "a page in it is missing or its content is damaged",
+        // FPDF_ERR_XFALOAD, FPDF_ERR_XFALAYOUT — the two XFA codes, which this build of Pdfium has
+        // no XFA in and so should never produce.
+        7 => "its XFA form could not be loaded",
+        8 => "its XFA form could not be laid out",
+        _ => return format!("Pdfium error {code}"),
+    };
+
+    format!("{meaning} (Pdfium error {code})")
+}
+
+/// The functions this app calls, resolved once and kept for the process.
 /// Typed as the C API declares them rather than as the loader's untyped pointer: the cast in
 /// [`resolve`] is the one place the two are made to agree, and every call site after it looks like
 /// an ordinary call.
@@ -182,8 +227,13 @@ pub(super) struct Api {
     pub(super) page_rotation: unsafe extern "C" fn(FpdfPage) -> c_int,
     pub(super) bitmap_create_ex:
         unsafe extern "C" fn(c_int, c_int, c_int, *mut c_void, c_int) -> FpdfBitmap,
+    /// `FPDFBitmap_FillRect`, whose colour is a `FPDF_DWORD` and whose answer is a `FPDF_BOOL`.
+    ///
+    /// `FPDF_DWORD` is `unsigned long` in the vendored header — 32 bits on Windows and 64 on macOS —
+    /// rather than `unsigned int`, so the parameter is named for what the header says. The return is
+    /// `int`, and `0` is the only false (`fpdfview.h`).
     pub(super) bitmap_fill:
-        unsafe extern "C" fn(FpdfBitmap, c_int, c_int, c_int, c_int, c_uint) -> c_int,
+        unsafe extern "C" fn(FpdfBitmap, c_int, c_int, c_int, c_int, FpdfDword) -> FpdfBool,
     pub(super) bitmap_buffer: unsafe extern "C" fn(FpdfBitmap) -> *mut c_void,
     pub(super) bitmap_stride: unsafe extern "C" fn(FpdfBitmap) -> c_int,
     pub(super) bitmap_width: unsafe extern "C" fn(FpdfBitmap) -> c_int,
@@ -202,6 +252,12 @@ pub(super) struct Api {
     ) -> c_int,
     pub(super) render_continue: unsafe extern "C" fn(FpdfPage, *mut Pause) -> c_int,
     pub(super) render_page_close: unsafe extern "C" fn(FpdfPage),
+    /// `FPDF_GetLastError`, for the calls whose header documents it — the document loaders.
+    ///
+    /// **Not** for a render or a page load: the header names this function only for
+    /// `FPDF_LoadDocument`/`FPDF_LoadMemDocument64` and their siblings (`fpdfview.h`), so a code read
+    /// after any other failure is whatever the last such call left behind. `document.rs` is the only
+    /// caller, immediately after a document that would not open (see [`error_name`]).
     pub(super) last_error: unsafe extern "C" fn() -> c_ulong,
     pub(super) bookmark_first_child:
         unsafe extern "C" fn(FpdfDocument, FpdfBookmark) -> FpdfBookmark,

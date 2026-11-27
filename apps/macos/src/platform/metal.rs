@@ -250,6 +250,13 @@ pub struct Surface {
     /// A page that grows past a buffer's length allocates again, and an allocation of 137 MB is not
     /// free — worth telling apart from the copy itself.
     upload_count: u32,
+    /// How many times this surface has built the finished ink's triangles.
+    ///
+    /// The process-wide count in [`report`] is what the status line prints, and it is every surface's; this
+    /// is *this* one's, which is what a test can hold a figure about. Counted where `refresh_ink` decides a
+    /// rebuild — a reuse, an append and a build the surface did before the test started are not counted —
+    /// so "the page was built exactly twice" is a fact about the sequence rather than about a return value.
+    builds: u64,
     /// The open stroke's buffers, one per frame in flight.
     open_buffers: [Option<Retained<ProtocolObject<dyn MTLBuffer>>>; 3],
     /// Which of the three the next frame writes.
@@ -275,6 +282,20 @@ pub struct Surface {
     /// Kept on the surface rather than passed down, because the fill has to know which strokes to skip and
     /// the surface is the only thing that knows the page it is filling.
     ink_in_hand: Arc<Vec<bool>>,
+    /// What the last build baked *about the selection*: the mask it read, the colour it tinted the ink in
+    /// hand with, and where a drag had taken that ink.
+    ///
+    /// The selection is not an edit. A loop swept around a stroke leaves the page's revision alone, and the
+    /// ink in hand is drawn a second time in the selection's colour by [`Surface::rebuild_ink`] — so a
+    /// selection that changed is a page whose triangles are stale without the page having changed, which is
+    /// the one thing the revision cannot say. This is the state that says it instead, and it is a *state*
+    /// rather than a flag because a frame after the first one has to be able to say "that is what I drew"
+    /// as well as "that is not" (see [`Paint`]).
+    ///
+    /// Remembered as the build read it rather than as the description arrived, because those are two
+    /// different things in a page nobody has selected anything on: an empty mask, whatever `Vec` it came in,
+    /// is no selection.
+    ink_paint: Paint,
     /// The document's page on the GPU, and the identity of the rasterisation it holds.
     page_texture: Option<(usize, Retained<ProtocolObject<dyn MTLTexture>>)>,
     /// The multisampled target the passes draw into, resolved into the drawable. Made with the size.
@@ -353,6 +374,7 @@ impl Surface {
             ink: Vec::new(),
             delta: None,
             ink_in_hand: Arc::new(Vec::new()),
+            ink_paint: Paint::nothing(),
             // Nothing built yet: a region that covers nothing, so the first frame always builds.
             ink_covered: Bounds::NOTHING,
             open: Vec::new(),
@@ -368,6 +390,7 @@ impl Surface {
             stage_uploaded: std::time::Duration::ZERO,
             uploaded_bytes: 0,
             upload_count: 0,
+            builds: 0,
             stage_refresh: std::time::Duration::ZERO,
             open_buffers: [None, None, None],
             buffer_slot: 0,
@@ -559,11 +582,16 @@ impl Surface {
     fn refresh_ink(&mut self, canvas: &Canvas) -> bool {
         // What the edit was, decided from the page's own revision and the change the model published —
         // never from a walk of the page. A page that is the one below, at the same rung and the same way
-        // up, and whose screen still fits is nothing to do: what the triangles are drawn *through* is a
-        // `Transform` the shader applies, and the tint a selection and a drag bake in are re-baked by the
-        // other half (they name `Paint`), so neither is a reuse's business.
+        // up, whose screen still fits, and whose selection is the one baked below is nothing to do: what
+        // the triangles are drawn *through* is a `Transform` the shader applies, and the tint a selection
+        // and a drag bake in are re-baked only when they move (they name `Paint`).
+        //
+        // No state at all is not the same as a state that matches: a surface that has never built this
+        // page has no drawing of it to compare a selection against, and says a rebuild (see `Demotion`
+        // `Cold`) — which is where `ink_paint` starts, though The empty bake is a selection nobody has made,
+        // so a cold surface asked for no selection with nothing below it reads a reuse and draws nothing.
         let plan = match self.delta {
-            Some(state) => decide(canvas, &state, self.ink_covered),
+            Some(state) => decide(canvas, &state, self.ink_covered, &self.ink_paint),
             None => InkPlan::Rebuild(Demotion::Cold),
         };
 
@@ -571,7 +599,8 @@ impl Surface {
             InkPlan::Reuse => false,
             InkPlan::Append => {
                 // The page only got longer, so the vertices it already had are still right and the only
-                // new triangles are the appended stroke's.
+                // new triangles are the appended stroke's. The selection this frame found is what every
+                // slot is then given as it catches up, so it is the one baked.
                 let started = std::time::Instant::now();
                 self.append_ink(canvas);
                 self.stage_refresh += started.elapsed();
@@ -607,8 +636,13 @@ impl Surface {
         });
 
         if std::env::var_os("CHEAP_NOTE_TRACE").is_some() {
-            report::rebuilt(reason);
+            report::trace(reason);
         }
+        self.builds += 1;
+        // Counted whether or not the trace is on: the status line reads this the same way, and "how many times
+        // did this page rebuild" is not a fact that should need an environment variable to exist. The *print*
+        // is what the variable turns on, not the count.
+        report::rebuilt();
 
         let list = ink.strokes.as_slice();
         let mapping = Mapping::of(canvas);
@@ -617,6 +651,11 @@ impl Surface {
         // Whose strokes are the caller's to draw: the fill skips them, and the loop below lays them down
         // where the drag has taken them.
         self.ink_in_hand = Arc::clone(&ink.selected);
+
+        // What the triangles below are about to bake about the selection, recorded before the bake: the
+        // next frame compares against this, and a selection left out of it would be a selection the surface
+        // would bake again on every frame it is still in hand.
+        self.ink_paint = Paint::of(ink);
 
         // The page itself: every finished stroke that can be seen, in the order it was written.
         self.fill_ink(list, &mapping, cull);
@@ -685,6 +724,16 @@ impl Surface {
     /// How many corners the last build made: what the upload copies and the draw reads.
     pub fn vertices(&self) -> usize {
         self.ink.len()
+    }
+
+    /// How many times this surface has decided to rebuild the finished ink's triangles.
+    ///
+    /// A reuse and an append are not rebuilds, so a page held still on screen reads the same figure however
+    /// many frames it draws — which is the point. `pub(super)` for the tests in this module: the app has the
+    /// status line's process-wide count (see [`report`]), and nothing in a frame needs this one.
+    #[cfg(test)]
+    pub(super) fn builds(&self) -> u64 {
+        self.builds
     }
 
     /// How many finished-ink buffers are in flight — the frames a measurement has to give a turn to
@@ -818,6 +867,9 @@ impl Surface {
     }
 
     /// Clears the stages and totals, so a measurement starts from nothing.
+    ///
+    /// The tuple is a `Duration` spent filling, a `Duration` spent copying, the bytes copied, and the number
+    /// of copies — the four numbers a frame's cost is read from.
     pub fn take_stages(&mut self) -> (std::time::Duration, std::time::Duration, u64, u32) {
         let taken = (
             self.stage_refresh,
@@ -1222,6 +1274,7 @@ impl Surface {
             ink: Vec::new(),
             delta: None,
             ink_in_hand: Arc::new(Vec::new()),
+            ink_paint: Paint::nothing(),
             ink_covered: Bounds::NOTHING,
             open: Vec::new(),
             open_id: 0,
@@ -1236,6 +1289,7 @@ impl Surface {
             stage_uploaded: std::time::Duration::ZERO,
             uploaded_bytes: 0,
             upload_count: 0,
+            builds: 0,
             stage_refresh: std::time::Duration::ZERO,
             open_buffers: [None, None, None],
             buffer_slot: 0,
@@ -1984,6 +2038,114 @@ fn ink_copy_start(filled: usize, reused: bool) -> usize {
     }
 }
 
+/// What a build baked about the selection: the mask it read, the colour it tinted the ink in hand with, and
+/// where a drag had taken it.
+///
+/// The page's revision says what the *ink* is; this says what was drawn over it. A selection is not an edit
+/// — a loop swept around a stroke, Escape letting it go, a colour the theme changed — so none of those
+/// moves [`Ink::edit`], and a renderer comparing only the revision would keep drawing the ink in the
+/// colour of a selection that is no longer there. This is the state [`decide`] compares instead.
+///
+/// Two ways of holding "no selection", and both are needed:
+///
+/// * [`Paint::nothing`] — no mask, no tint. The configured value for a surface that has baked nothing, and
+///   what a page nobody has selected anything on reduces to whatever `Vec` its empty mask came in: a
+///   description that carries `Arc::new(Vec::new())` one frame and `vec![false; n]` the next with nothing in
+///   hand is the same frame, and comparing the `Arc`s would rebuild for it.
+/// * a mask with no flags set — what [`note_ui::ink::InkDocument::deselect`] hands a frame. It is *not* the
+///   same as `NOTHING`, because a tint over a mask with nothing in it draws nothing: a surface that baked a
+///   colour with no ink in hand and one that baked none at all are the same picture, so both reduce here.
+///
+/// The remaining fields are compared only while the mask is a selection, which is the case a tint is drawn
+/// in. That is why a drag's offset is part of this and not of [`DeltaState`]: a drag moves the ink in hand
+/// and the page has not been touched, so the offset has to make a frame a `Paint` rebuild on its own.
+#[derive(Debug)]
+struct Paint {
+    /// The strokes in hand. Compared by `Arc::ptr_eq` and then by content, so a mask that was not rebuilt is
+    /// O(1) to compare and one that was is compared only until it differs — a handful of flags in practice.
+    mask: Arc<Vec<bool>>,
+    /// The colour the ink in hand is drawn in, and the lasso's loop, which share one number. `None` is a
+    /// frame with nothing to show; see [`Paint::of`] for why that is decided from the mask rather than from
+    /// the colour alone.
+    tint: Option<[u32; 4]>,
+    /// How far a drag has taken the ink in hand, as the bits of the two numbers — `f32` has no `Eq`, and a
+    /// NaN in a drag would make a comparison that never matches. `+0.0` and `-0.0` are one offset; the app
+    /// drags in paper units and the one it uses for "not dragging" is `(0.0, 0.0)`.
+    offset: [u32; 2],
+}
+
+impl Paint {
+    /// A surface that has baked no selection: no mask, no tint, no drag.
+    ///
+    /// A function rather than a `const`, because an empty mask is an `Arc` and a `const` may not allocate. It
+    /// is made where a surface is made and nowhere per frame, so the allocation is a surface's start.
+    fn nothing() -> Paint {
+        Paint {
+            mask: Arc::new(Vec::new()),
+            tint: None,
+            offset: [0, 0],
+        }
+    }
+
+    /// What baking `ink` records: no selection when there is nothing in hand, and otherwise the mask, the
+    /// colour in hand and the drag.
+    ///
+    /// The mask is shared rather than copied — the description's `Arc` is the page's, and rebuilding it would
+    /// turn this bookkeeping into a page-sized walk once per build.
+    ///
+    /// A colour with no ink in hand and no loop is no selection: the bake draws the tinted copy only for the
+    /// flags that are set and the loop only while one is being swept, so a mask with nothing in it draws
+    /// exactly what a frame that carries no colour does. That is the pair of cases
+    /// [`crate::ink::InkDocument::deselect`] leaves behind — its mask is one flag per stroke, all clear, and
+    /// the app still names the selection colour — and reading them as the same picture is what keeps a
+    /// deselected page from rebuilding on every frame after it.
+    fn of(ink: &Ink) -> Self {
+        let tint = ink.selection.map(colour_key);
+        let shown =
+            tint.is_some() && (ink.selected.iter().any(|flag| *flag) || ink.lasso.is_some());
+
+        if !shown {
+            return Paint::nothing();
+        }
+
+        Paint {
+            mask: Arc::clone(&ink.selected),
+            tint,
+            offset: [ink.offset.0.to_bits(), ink.offset.1.to_bits()],
+        }
+    }
+
+    /// Whether this is the `other` bake: the same strokes in hand, in the same colour, where the drag has
+    /// taken them.
+    ///
+    /// O(1) while the mask is the same `Arc`, which is the still selection this whole type exists for: a
+    /// selection held across a pan is one pointer compare per frame, not a walk of a page's flags.
+    fn is(&self, other: &Paint) -> bool {
+        if self.tint != other.tint || self.offset != other.offset {
+            return false;
+        }
+        if Arc::ptr_eq(&self.mask, &other.mask) {
+            return true;
+        }
+
+        // A mask that was rebuilt with the same flags — a lasso swept round the same strokes again — is the
+        // same picture. Its length is compared first, so the empty masks that are not one `Arc` (a cold
+        // surface's, a description's, a page's) cost one compare rather than a walk of a page's flags.
+        self.mask.len() == other.mask.len() && self.mask.iter().eq(other.mask.iter())
+    }
+}
+
+/// A selection colour as the bits a comparison can hold.
+///
+/// Taken from the four numbers the shader is handed rather than from `Hsla` itself, so that the comparison
+/// is on what is drawn and a NaN — which no caller makes, the theme's colours being constants — cannot make
+/// a bake that never matches itself. That is the one failure mode this must not have: a comparison that
+/// cannot settle is a rebuild on every frame of a selection that is standing still.
+fn colour_key(colour: gpui_kit::Hsla) -> [u32; 4] {
+    [colour.h, colour.s, colour.l, colour.a]
+        .map(|number| if number.is_nan() { f32::NAN } else { number }.to_bits())
+}
+
 /// What a frame's page needs: the triangles below as they are, one stroke more, or a rebuild.
 ///
 /// `refresh_ink` and the tests share this one answer, which is the point: reuse, append and rebuild
@@ -2010,11 +2172,13 @@ enum InkPlan {
 /// rebuilt, for some reason".
 ///
 /// Everything here is read from numbers the surface already holds: the page's revision, how much of it
-/// is covered, and what the change *said*. Nothing walks the strokes, which is what makes an append's
-/// bookkeeping O(1) rather than O(page) — the one stroke it reads is the page's last, to prove the
-/// append named the stroke that is actually there, and not one put back in the middle. A free function
-/// rather than a method so that it can be tested without a Metal device.
-fn decide(canvas: &Canvas, state: &DeltaState, built_for: Bounds) -> InkPlan {
+/// is covered, what the change *said*, and what the last build baked about the selection. Nothing walks
+/// the strokes, which is what makes an append's bookkeeping O(1) rather than O(page) — the one stroke it
+/// reads is the page's last, to prove the append named the stroke that is actually there, and not one put
+/// back in the middle. The mask the selection comparison reads is the page's own `Arc`, compared by
+/// pointer first, so a selection standing still costs one compare and not a walk of the page's flags. A
+/// free function rather than a method so that it can be tested without a Metal device.
+fn decide(canvas: &Canvas, state: &DeltaState, built_for: Bounds, painted: &Paint) -> InkPlan {
     let ink = &canvas.ink;
 
     // The detail or the turn moved: every triangle is stale, whatever the edit was.
@@ -2028,8 +2192,19 @@ fn decide(canvas: &Canvas, state: &DeltaState, built_for: Bounds) -> InkPlan {
         return InkPlan::Rebuild(Demotion::Paper);
     }
 
-    // A selection, a drag or a lasso changes what is baked, not only what the change appended.
-    if ink.selection.is_some() || ink.offset != (0.0, 0.0) || ink.lasso.is_some() {
+    // A selection, a drag or a lasso changes what is baked, not only what the change appended — and it is
+    // the *difference* from the last bake that changes it, not the presence. A selected stroke is drawn
+    // twice: once in the page, once where the drag has taken it and in the selection's colour. That second
+    // copy is not a stroke of the page and no revision counts it, so a frame whose selection is not the one
+    // below rebuilds — and a frame whose selection is the one below reuses, which is what stops a held
+    // selection from walking the page on every frame the view happens to draw.
+    //
+    // A lasso is not compared: its loop is a stroke that changes with every reading, so a *dragging* lasso
+    // is always a rebuild, and the sweep that ends in a selection is a rebuild on the frame that names it.
+    // Reading `lasso.is_some()` as "always rebuild" is the same answer for less bookkeeping, and it keeps
+    // this rule one comparison (see `Paint`).
+    let now = Paint::of(ink);
+    if ink.lasso.is_some() || !painted.is(&now) {
         return InkPlan::Rebuild(Demotion::Paint);
     }
 
@@ -2784,15 +2959,22 @@ mod report {
     static REBUILDS: AtomicU64 = AtomicU64::new(0);
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
 
-    /// One build of the finished ink's triangles.
-    pub fn rebuilt(reason: super::Demotion) {
-        REBUILDS.fetch_add(1, Ordering::Relaxed);
-
+    /// One build of the finished ink's triangles, printed when `CHEAP_NOTE_TRACE` asked for a trace.
+    ///
+    /// The explain line names the condition that forced the build: the answer to "why is this frame
+    /// rebuilding" without a debugger, and the reason [`Demotion`] has names.
+    pub fn trace(reason: super::Demotion) {
         if std::env::var_os("CHEAP_NOTE_TRACE_EXPLAIN").is_some() {
-            // One line per rebuild, naming the condition that forced it: the answer to "why is this
-            // frame rebuilding" without a debugger, and the reason `Demotion` has names.
             eprintln!("ink: rebuilt ({reason:?})");
         }
+    }
+
+    /// One build of the finished ink's triangles, counted.
+    ///
+    /// Counted always, and not only under a trace: a rebuild is a fact about the renderer whether or not
+    /// anyone is watching, and the status line's `rebuilds/s` is the count this figure is read from.
+    pub fn rebuilt() {
+        REBUILDS.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn drawn(finished: usize, open: usize, pointer: usize) {
@@ -2876,7 +3058,7 @@ mod tests {
         let mut panned = canvas.clone();
         panned.ink.visible = Bounds::new((-40.0, -30.0), (1200.0, 900.0));
         assert_eq!(
-            decide(&panned, &settled(&canvas), COVERED),
+            decide(&panned, &settled(&canvas), COVERED, &Paint::nothing()),
             InkPlan::Reuse,
             "a pan asked for the ink to be drawn again"
         );
@@ -2995,6 +3177,30 @@ mod tests {
     /// The page's change, stamped as the app stamps it: from the revision before to this one.
     fn note_page_delta(after: u64, change: InkChange) -> note_ui::ink::PageDelta {
         note_ui::ink::PageDelta::new(after - 1, vec![change])
+    }
+
+    /// The same page as the app describes one with something in hand: `mask` for strokes in hand and `tint`
+    /// for the colour they are drawn in.
+    ///
+    /// The page is untouched — `edit`, `delta` and the strokes are the ones it came with — because that is
+    /// exactly what a selection is: a thing drawn *over* the page that the page's revision has never heard
+    /// of. A test that moved the revision as well would pass whether or not the renderer noticed the mask.
+    fn strictly(page: &Canvas, mask: Arc<Vec<bool>>, tint: Option<gpui_kit::Hsla>) -> Canvas {
+        let mut canvas = page.clone();
+        canvas.ink.selected = mask;
+        canvas.ink.selection = tint;
+
+        canvas
+    }
+
+    /// A selection colour for the tests, distinct from any stroke's own.
+    fn colour() -> gpui_kit::Hsla {
+        gpui_kit::Hsla {
+            h: 0.58,
+            s: 0.9,
+            l: 0.55,
+            a: 0.35,
+        }
     }
 
     /// What a buffer holding `vertices` holds byte for byte, which is what [`Surface::contents`] reads
@@ -3263,6 +3469,98 @@ mod tests {
         );
     }
 
+    /// A held selection is baked once, and letting it go is baked once more — never once per frame.
+    ///
+    /// `decide` used to answer `Rebuild(Paint)` for any frame whose selection was `Some`, so a page with a
+    /// stroke in hand was a page rebuilt on every frame the view drew, whatever the reason for the frame. The
+    /// other half was the silence: `deselect` cleared the mask and moved no revision, and the selection's
+    /// colour was already baked into the vertices the frame had drawn — a frame after it that found everything
+    /// else unchanged read a reuse, and the tint of a selection that was no longer there stayed on screen.
+    ///
+    /// So the whole contract in one sequence, on a real surface over a real page: select one stroke, draw the
+    /// same frame several times, let it go, draw the same frame again. Exactly two `Paint` rebuilds — the one
+    /// that tints and the one that takes the tint off — and the last frame's vertices are byte for byte the
+    /// page the first frame drew, which is what says the tint is gone rather than merely not added again.
+    ///
+    /// The frames *after* the deselect are the half a test of one frame cannot see: a surface that never
+    /// reuses a page the app still names a selection colour on is a surface that rebuilt the page on every
+    /// frame of a page nobody had selected anything on, and the figure it would present is right either way.
+    #[test]
+    fn a_held_selection_is_rebuilt_once_and_deselecting_rebuilds_once() {
+        let Some((mut surface, page)) = surface_on_a_page() else {
+            return;
+        };
+
+        let plain = surface.ink.clone();
+
+        // The builds counted from here on: the fixture above is one this sequence did not make, and what is
+        // asserted is what the selection costs, not what the page did before it had one.
+        let start = surface.builds();
+        let builds = |surface: &Surface| surface.builds() - start;
+
+        // The lasso took the second stroke: one flag per stroke, in the page's order.
+        let mut flag = vec![false; page.ink.strokes.len()];
+        flag[1] = true;
+        let selected = strictly(&page, Arc::new(flag), Some(colour()));
+        assert!(
+            surface.refresh_ink(&selected),
+            "a selection that was not below drew the page it was already drawn"
+        );
+        assert_eq!(
+            builds(&surface),
+            1,
+            "selecting a stroke was not exactly one build"
+        );
+
+        let tinted = surface.ink.clone();
+        assert_ne!(
+            drawn_from(&tinted),
+            drawn_from(&plain),
+            "the selected stroke was not drawn again in the selection's colour"
+        );
+
+        // The same frame, five times: nothing to do, five times.
+        for frame in 0..5 {
+            assert!(
+                !surface.refresh_ink(&selected),
+                "frame {frame} of a selection standing still rebuilt the page"
+            );
+        }
+
+        // Escape: the mask cleared, the strokes untouched, and the colour the app still names — which is the
+        // case that has to be read as *no* selection rather than as a tint whose mask happens to be empty.
+        let mut cleared = selected.clone();
+        cleared.ink.selected = Arc::new(vec![false; page.ink.strokes.len()]);
+        assert!(
+            surface.refresh_ink(&cleared),
+            "letting the selection go reused vertices still tinted for it"
+        );
+        assert_eq!(
+            builds(&surface),
+            2,
+            "letting the selection go was not exactly one build"
+        );
+        assert_eq!(
+            drawn_from(&surface.ink),
+            drawn_from(&plain),
+            "the deselect left something of the tinted stroke behind"
+        );
+
+        // And once it is gone it stays gone: the page below is a page with no selection on it, so the frames
+        // after it have nothing to do — which is what a deselected page costs for the rest of its life.
+        for frame in 0..3 {
+            assert!(
+                !surface.refresh_ink(&cleared),
+                "frame {frame} after a deselect rebuilt the page again"
+            );
+        }
+        assert_eq!(
+            builds(&surface),
+            2,
+            "a page with nothing in hand kept rebuilding after the one that took the tint off"
+        );
+    }
+
     /// An append is decided from numbers, not from a walk of the page, and every rebuild has a reason.
     ///
     /// The design document's §5 wants each rebuild to say why it was allowed. This pins the decisions
@@ -3300,7 +3598,7 @@ mod tests {
         // `at` is the page's length *before* the change: the fourth stroke landed where three ended.
         canvas.ink.delta = Some(PageDelta::new(7, vec![InkChange::Append { id, at: 3 }]));
         assert_eq!(
-            decide(&canvas, &state, covered),
+            decide(&canvas, &state, covered, &Paint::nothing()),
             InkPlan::Append,
             "one stroke added at the end of the page is an append"
         );
@@ -3309,7 +3607,7 @@ mod tests {
         // through; the append path fills `list[covered]`, which here is not the stroke the change named.
         canvas.ink.delta = Some(PageDelta::new(7, vec![InkChange::Append { id, at: 4 }]));
         assert_eq!(
-            decide(&canvas, &state, covered),
+            decide(&canvas, &state, covered, &Paint::nothing()),
             InkPlan::Rebuild(Demotion::NotAnAppend),
             "an append whose `at` is not where the page ended is not the append path"
         );
@@ -3324,7 +3622,7 @@ mod tests {
             }],
         ));
         assert_eq!(
-            decide(&canvas, &state, covered),
+            decide(&canvas, &state, covered, &Paint::nothing()),
             InkPlan::Rebuild(Demotion::NotAnAppend),
             "an append must name the stroke that is actually last"
         );
@@ -3333,7 +3631,7 @@ mod tests {
         // unread, and the surface cannot know whether it was this append or an erase.
         canvas.ink.delta = Some(PageDelta::new(5, vec![InkChange::Append { id, at: 3 }]));
         assert_eq!(
-            decide(&canvas, &state, covered),
+            decide(&canvas, &state, covered, &Paint::nothing()),
             InkPlan::Rebuild(Demotion::Gap),
             "a revision that does not follow the last one is never an append"
         );
@@ -3341,7 +3639,7 @@ mod tests {
         // A page that moved with no change to say what it did cannot be appended to either.
         canvas.ink.delta = None;
         assert_eq!(
-            decide(&canvas, &state, covered),
+            decide(&canvas, &state, covered, &Paint::nothing()),
             InkPlan::Rebuild(Demotion::Gap),
             "a page that changed without a delta is a gap, not an append"
         );
@@ -3355,18 +3653,33 @@ mod tests {
             ],
         ));
         assert_eq!(
-            decide(&canvas, &state, covered),
+            decide(&canvas, &state, covered, &Paint::nothing()),
             InkPlan::Rebuild(Demotion::NotAnAppend),
             "a transaction that adds more than one stroke is not the append path"
         );
 
-        // A selection changes what is baked, whatever the edit was.
+        // A selection that was not the one below changes what is baked, whatever the edit was. The frame
+        // before it baked no selection, so the ink in hand has to be drawn a second time.
         canvas.ink.delta = Some(PageDelta::new(7, vec![InkChange::Append { id, at: 3 }]));
+        canvas.ink.selected = Arc::new(vec![false, true, false, false]);
         canvas.ink.selection = Some(gpui_kit::Hsla::default());
         assert_eq!(
-            decide(&canvas, &state, covered),
+            decide(&canvas, &state, covered, &Paint::nothing()),
             InkPlan::Rebuild(Demotion::Paint),
             "a selection re-bakes the ink in hand"
+        );
+
+        // The same selection on the next frame is what is already below: a selection standing still is one
+        // compare of the mask's `Arc`, and drawing the page again would be the cost this exists to remove.
+        // The page is the one that bake left: its change applied, its revision where the state says.
+        canvas.ink.delta = None;
+        canvas.ink.edit = state.revision;
+        canvas.ink.strokes = Arc::new(canvas.ink.strokes[..state.covered].to_vec());
+        let painted = Paint::of(&canvas.ink);
+        assert_eq!(
+            decide(&canvas, &state, covered, &painted),
+            InkPlan::Reuse,
+            "a selection that did not move asked for the ink to be drawn again"
         );
     }
 
@@ -3383,7 +3696,7 @@ mod tests {
         canvas.ink.origin = (0.0, -120.0);
 
         assert_eq!(
-            decide(&canvas, &state, COVERED),
+            decide(&canvas, &state, COVERED, &Paint::nothing()),
             InkPlan::Reuse,
             "a scroll asked for the ink to be drawn again"
         );
@@ -3405,7 +3718,7 @@ mod tests {
         canvas.ink.zoom = 1.5;
 
         assert_eq!(
-            decide(&canvas, &state, COVERED),
+            decide(&canvas, &state, COVERED, &Paint::nothing()),
             InkPlan::Reuse,
             "a zoom asked for the ink to be drawn again"
         );
@@ -3417,7 +3730,7 @@ mod tests {
         // The pump finished a rebuild for a larger rung: every outline is new, so every triangle is.
         canvas.ink.detail = Some(note_format::ink::detail_zoom(2.0).to_bits());
         assert_eq!(
-            decide(&canvas, &state, COVERED),
+            decide(&canvas, &state, COVERED, &Paint::nothing()),
             InkPlan::Rebuild(Demotion::Rung),
             "a new detail left the ink alone"
         );
@@ -3432,7 +3745,7 @@ mod tests {
 
         canvas.ink.rotation = note_format::pages::Quarters::from_turns(1);
         assert_eq!(
-            decide(&canvas, &state, COVERED),
+            decide(&canvas, &state, COVERED, &Paint::nothing()),
             InkPlan::Rebuild(Demotion::Rotation),
             "a turn left the ink alone"
         );
@@ -3445,7 +3758,10 @@ mod tests {
     fn the_same_page_needs_nothing() {
         let canvas = Canvas::default();
 
-        assert_eq!(decide(&canvas, &settled(&canvas), COVERED), InkPlan::Reuse);
+        assert_eq!(
+            decide(&canvas, &settled(&canvas), COVERED, &Paint::nothing()),
+            InkPlan::Reuse
+        );
     }
 
     /// The transform places the paper exactly where the old mapping did: a point of the paper lands at
@@ -5459,7 +5775,7 @@ mod vertex_tests {
         );
 
         assert_eq!(
-            decide(&erased, &state, COVERED),
+            decide(&erased, &state, COVERED, &Paint::nothing()),
             InkPlan::Rebuild(Demotion::NotAnAppend),
             "an erase is never an append, wherever on the page it was"
         );
@@ -5494,7 +5810,7 @@ mod vertex_tests {
         ));
 
         assert_eq!(
-            decide(&restored, &state, COVERED),
+            decide(&restored, &state, COVERED, &Paint::nothing()),
             InkPlan::Rebuild(Demotion::NotAnAppend),
             "a stroke put back in the middle is not an append, and must not be drawn at the end"
         );

@@ -1610,6 +1610,16 @@ impl InkDocument {
     }
 
     /// Lets the selection go, answering whether there was one.
+    ///
+    /// **No edit, and no revision.** The strokes are exactly what they were, so nothing about the *ink*
+    /// changed: an edit here would be counted by the status line, written to the note, and put in the history
+    /// — and a revision with no `InkChange` to go with it is a change a renderer cannot read (see
+    /// [`PageDelta`]), so the `Paint` rebuild it caused would be reported as a gap.
+    ///
+    /// What does change is what a frame *draws*: the selection's colour is baked into the triangles (see
+    /// [`crate::ink_layer`]), so the renderer has to be able to tell a page it tinted from one it did not. It
+    /// does: a frame records the selection it baked and compares the next one against it, which is what makes
+    /// the frame after this one rebuild out of the tint and every frame after *that* a reuse.
     pub fn deselect(&mut self) -> bool {
         if !self.has_selection() {
             return false;

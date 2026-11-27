@@ -1088,13 +1088,13 @@ impl Surface {
             },
         };
 
-        // A slot never claims a front its buffer was not given: a reused buffer is copied past what it
-        // holds, and a new one from its first corner.
-        let start = match from {
-            Some(from) if reused => ink_copy_start(from.min(vertices.len()), reused),
-            _ => 0,
-        };
-        let tail = &vertices[start..];
+        // A slot never claims a front its buffer was not given: `ink_write` is the one place the window is
+        // decided, from what the slot's figure claims and whether the device kept the buffer.
+        let (start, end) = ink_write(from.unwrap_or(0), vertices.len(), reused)
+            .map_or((vertices.len(), vertices.len()), |range| {
+                (range.start, range.end)
+            });
+        let tail = &vertices[start..end];
         let copied = std::mem::size_of_val(tail);
         if copied == 0 {
             return (Some(buffer), Some(0));
@@ -1248,6 +1248,87 @@ impl Surface {
             width: 1,
             height: 1,
         })
+    }
+
+    /// Puts slot `slot` in the state a frame that was given the first `corners` vertices of the page
+    /// leaves it in: a buffer with room for `room` vertices holding exactly those, and the figure.
+    ///
+    /// `room` is the buffer's whole length in vertices, which is what decides whether the next frame keeps
+    /// it or makes another — so a test says which of the two states it is starting from instead of leaving
+    /// it to whatever size the page happens to be. The front past `corners` is uninitialised, honestly:
+    /// nothing has copied it, and the frames a test drives are what writes it.
+    fn give_front(&mut self, slot: usize, corners: usize, room: usize) {
+        let corners = corners.min(self.ink.len());
+        let buffer = self
+            .device
+            .newBufferWithLength_options(
+                (room * std::mem::size_of::<Vertex>()).max(1),
+                MTLResourceOptions::StorageModeShared,
+            )
+            .expect("a buffer");
+        let bytes = corners * std::mem::size_of::<Vertex>();
+
+        // SAFETY: the buffer has room for `room` vertices, which is at least `corners`, so at least
+        // `bytes`; the front is `bytes`, written once before anything reads.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.ink.as_ptr().cast::<u8>(),
+                buffer.contents().as_ptr().cast::<u8>(),
+                bytes,
+            );
+        }
+
+        self.ink_buffers[slot] = Some(buffer);
+        self.filled[slot] = corners;
+    }
+
+    /// Gives every slot the front `fronts` says, with room for the whole list and its next stroke: what a
+    /// rebuild followed by some frames leaves behind, and what keeps an append's upload a tail.
+    fn stage_fronts(&mut self, fronts: [usize; 3]) {
+        let room = (self.ink.len() * 2).max(self.ink.len() + 1);
+
+        for (slot, corners) in fronts.into_iter().enumerate() {
+            self.give_front(slot, corners, room);
+        }
+    }
+
+    /// The bytes of slot `slot`'s `MTLBuffer`: the page the GPU would draw from it.
+    ///
+    /// A blit this surface's own queue runs, because a device's buffer may be `StorageModePrivate` and its
+    /// `contents()` is then not to be read. The copy is into a shared buffer of the same length, on the GPU,
+    /// with a wait before a byte is read — which is the same round trip a frame's present makes.
+    fn contents(&self, slot: usize) -> Vec<u8> {
+        // The trait that declares `blitCommandEncoder`, imported here because only this helper asks the
+        // device for one: the app's frames encode render passes, never blits.
+        use objc2_metal::MTLBlitCommandEncoder;
+
+        let buffer = self.ink_buffers[slot].as_ref().expect("a slot's buffer");
+        let bytes = buffer.length();
+        let read = self
+            .device
+            .newBufferWithLength_options(bytes, MTLResourceOptions::StorageModeShared)
+            .expect("a buffer to read back into");
+
+        let commands = self.queue.commandBuffer().expect("a command buffer");
+        let blit = commands.blitCommandEncoder().expect("a blit encoder");
+        // SAFETY: two buffers of `bytes` each, copied whole.
+        unsafe {
+            blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                buffer, 0, &read, 0, bytes,
+            );
+        }
+        blit.endEncoding();
+        commands.commit();
+        commands.waitUntilCompleted();
+
+        // SAFETY: the shared buffer's own memory, `bytes` long, written by the blit above before it
+        // completed.
+        (0..bytes)
+            .map(|byte| {
+                // SAFETY: `byte` is inside the buffer, which is `bytes` long and aligned for a `u8`.
+                unsafe { *read.contents().as_ptr().cast::<u8>().add(byte) }
+            })
+            .collect()
     }
 }
 
@@ -1871,17 +1952,25 @@ fn ink_upload(filled: usize, longest: usize) -> Option<usize> {
     }
 }
 
-/// The range of `list` a slot's next copy is — `None` when it already holds the list.
+/// The range of `vertices` a copy writes: from where a slot's buffer was given vertices to the list's end.
 ///
-/// The draw loop and `upload_ink` share it, so a slot that is decided to be current is a slot that is
-/// not copied for.
-#[cfg(test)]
-fn ink_copy_range(filled: usize, list_len: usize) -> Option<std::ops::Range<usize>> {
-    ink_upload(filled, list_len).map(|from| from..list_len)
+/// The one place the window is decided, so what a slot's figure claims and what its buffer was actually
+/// given cannot be two decisions. `None` when the slot already holds the list — the frame's whole point is
+/// that it then copies nothing — and otherwise from where the buffer's own contents end: a reused buffer
+/// past those `filled` vertices, a made one from its first.
+///
+/// A figure past the list's end (a page undone to a shorter one) is the list's end: an empty copy, which
+/// is what a slot that holds everything gets too.
+fn ink_write(filled: usize, vertices: usize, reused: bool) -> Option<std::ops::Range<usize>> {
+    ink_upload(filled, vertices).map(|from| {
+        let start = ink_copy_start(from, reused);
+
+        start..vertices
+    })
 }
 
-/// Where a copy into `buffer` begins, given the figure the slot claims and whether the device gave back
-/// the buffer it was handed or a new one.
+/// Where a copy begins, given the figure the slot claims and whether the device gave back the buffer it
+/// was handed.
 ///
 /// A new buffer holds nothing, so it is copied into from zero however far the slot's figure had got; a
 /// buffer the device kept holds the first `filled` corners, so only the tail past them is copied. This is
@@ -2764,41 +2853,63 @@ mod tests {
     /// dense page that is the largest cost a still page had. The rule is that the invalidation belongs to
     /// the build, the build is announced by `refresh_ink` returning `true`, and a slot is drawn from only
     /// when its `filled` figure is the list's length.
+    ///
+    /// A real surface with a real page, because "nothing was copied" is a claim about a buffer: the page
+    /// is drawn, every slot given it, and then the upload asked for each of the three.
     #[test]
     fn a_reused_ink_is_not_uploaded_again() {
-        let canvas = Canvas::default();
-        let state = settled(&canvas);
-        let list = corners(INK_130);
+        let Some(mut surface) = Surface::with_device() else {
+            return;
+        };
+        let canvas = page_of([0x11_11_11, 0x22_22_22, 0x33_33_33]);
+        surface.rebuild_ink(&canvas, Demotion::Cold);
+        let arena = surface.ink.clone();
+        assert!(!arena.is_empty(), "the page is not triangles");
+        for slot in 0..surface.slots() {
+            surface.upload_ink(slot);
+        }
+        surface.take_stages();
+        let longest = surface.ink.len();
 
-        // A pan: the page, the rung, the turn and the screen all say the same thing as the last build.
-        let plan = decide(&canvas, &state, COVERED);
+        // A pan asks for the ink as it is: the decision is a reuse, the slot already holds the list, and
+        // the upload loop asks `ink_starts_at`, gets nothing back, and copies nothing.
+        let mut panned = canvas.clone();
+        panned.ink.visible = Bounds::new((-40.0, -30.0), (1200.0, 900.0));
         assert_eq!(
-            plan,
+            decide(&panned, &settled(&canvas), COVERED),
             InkPlan::Reuse,
             "a pan asked for the ink to be drawn again"
         );
-
-        // Nothing rebuilt, so no slot is emptied: each of the three still holds the list, which is what
-        // makes the frame's `filled[slot] != ink.len()` check find nothing to copy.
-        let mut slots = Slots::holding(&list);
-        let copied = slots.draw(plan, &list);
-        assert_eq!(copied.bytes, 0, "a pan copied ink into a slot that held it");
+        assert!(!surface.refresh_ink(&panned), "a pan rebuilt the ink");
+        assert_eq!(
+            surface.ink_starts_at(0),
+            None,
+            "a pan asked for a copy into a slot that holds the list"
+        );
+        for slot in 0..surface.slots() {
+            surface.upload_ink(slot);
+        }
+        assert_eq!(
+            (surface.filled, surface.uploaded_bytes),
+            ([longest; 3], 0),
+            "a pan copied ink into a slot that held it"
+        );
 
         // A rebuild is what empties them: the frame that draws it copies the page.
-        slots = Slots::holding(&list);
-        let copied = slots.draw(InkPlan::Rebuild(Demotion::NotAnAppend), &list);
+        surface.rebuild_ink(&canvas, Demotion::NotAnAppend);
         assert_eq!(
-            copied,
-            Copy {
-                from: 0,
-                bytes: INK_130 * std::mem::size_of::<u32>(),
-                outgrown: false,
-            },
-            "a rebuild left a slot holding the list it replaced"
+            surface.filled, [0; 3],
+            "a rebuild left a slot holding the list"
+        );
+        surface.upload_ink(0);
+        assert_eq!(
+            surface.uploaded_bytes,
+            (longest * std::mem::size_of::<Vertex>()) as u64,
+            "a rebuild copied something other than the page"
         );
         assert_eq!(
-            slots.last_buffer(),
-            &list[..],
+            surface.contents(0),
+            drawn_from(&arena),
             "the rebuild drew another page"
         );
     }
@@ -2806,209 +2917,170 @@ mod tests {
     /// The corners a slot's copy is counted in. The account tests use small counts so that "which range
     /// was copied" is a figure a reader can check by eye — and a corner is one element of the list
     /// `Surface::upload_at` copies, twelve bytes each.
-    const INK_130: usize = 130;
     const INK_120: usize = 120;
     const INK_100: usize = 100;
 
-    /// The three slots' buffers and figures, and the rules the surface applies to them.
+    /// A page a hand actually wrote, as the describing side sees it: strokes at the app's own resampling
+    /// and nib, so a page is a few thousand vertices and a front part-way through it is part-way through
+    /// the page.
     ///
-    /// `Surface::draw` owns the figures and `Surface::upload_at` owns the copy; the surface itself needs a
-    /// device and a drawable, a window's worth of machinery, and its *fill* needs the device's shaders.
-    /// So the tests here drive the figures and hold a plain `Vec` per slot in place of a GPU buffer, and
-    /// every decision — whether a slot has to copy, where the copy begins, when its figure moves — is the
-    /// production function's: [`ink_upload`], [`ink_copy_range`], [`ink_copy_start`]. What the test adds is
-    /// the bytes and the slot they land in, which is the thing a drawn page is made of.
-    #[derive(Clone, Debug)]
-    struct Slots {
-        filled: [usize; 3],
-        buffers: [Vec<u32>; 3],
-        next: usize,
-    }
+    /// The one page the tests here start from. The `decide` tests only need a page that is a page — three
+    /// strokes at three colours, removed and restored — and the slot tests need one big enough that "the
+    /// front this slot was given" is a real distance into it, which the same fixture gives both without a
+    /// second definition of what a page is. Every stroke is closed, so every one of them is triangles.
+    pub(super) fn page_of(colours: [u32; 3]) -> Canvas {
+        use note_format::ink::{InkPoint, Stroke};
 
-    impl Slots {
-        /// Three slots that hold all of a list `list.len()` corners long.
-        fn holding(list: &[u32]) -> Self {
-            Slots {
-                filled: [list.len(); 3],
-                buffers: [list.to_vec(), list.to_vec(), list.to_vec()],
-                next: 0,
-            }
-        }
-
-        /// Three slots at these figures, the next frame on slot 0.
-        ///
-        /// The buffers are `front` corners long — what a slot that had been filled for that part of the
-        /// list would hold — and the front is the list's own, so a slot that copies the wrong range shows
-        /// a hole rather than a plausible-looking page.
-        fn at(filled: [usize; 3], list: &[u32]) -> Self {
-            let mut slots = Slots {
-                filled,
-                buffers: [Vec::new(), Vec::new(), Vec::new()],
-                next: 0,
-            };
-            for slot in 0..3 {
-                slots.buffers[slot] = list[..filled[slot].min(list.len())].to_vec();
-            }
-            slots
-        }
-
-        /// One append: the page grew to `list.len()` corners, and what `Surface::append_ink` does to the
-        /// bookkeeping is nothing.
-        ///
-        /// The figures are left exactly where they were, so the frames that use the slots after this one
-        /// copy the corners each is missing — not the ones that arrived since the *last* append.
-        fn append(&mut self, _list: &[u32]) {}
-
-        /// One frame: the plan the draw loop decided and the list as it now is.
-        ///
-        /// A rebuild empties every slot's figure, as `rebuild_ink` does. Answers what went into the
-        /// frame's slot.
-        fn draw(&mut self, plan: InkPlan, list: &[u32]) -> Copy {
-            if let InkPlan::Rebuild(_) = plan {
-                self.filled = [0; 3];
-            }
-            let copy = self.fill(list, false);
-            self.next = (self.next + 1) % 3;
-            copy
-        }
-
-        /// `Surface::upload_ink`'s copy for the frame's slot.
-        ///
-        /// The draw loop's question ([`ink_upload`]), the range it answers ([`ink_copy_range`]), a buffer
-        /// that had to be made copied from zero ([`ink_copy_start`]), and the figure moved only once the
-        /// copy has landed — the order `upload_ink` keeps.
-        fn fill(&mut self, list: &[u32], outgrown: bool) -> Copy {
-            let slot = self.next;
-            let Some(range) = ink_copy_range(self.filled[slot], list.len()) else {
-                return Copy {
-                    from: 0,
-                    bytes: 0,
-                    outgrown,
-                };
-            };
-
-            let reused = !outgrown;
-            // A buffer the device kept holds what the slot claims; one that had to be made is given room
-            // for the whole list, which is the length `Surface::upload_at` allocates.
-            let mut buffer = if reused {
-                self.buffers[slot].clone()
-            } else {
-                vec![u32::MAX; list.len()]
-            };
-            let from = ink_copy_start(range.start, reused);
-            // The buffer is the list's length once the copy lands — no longer, no shorter.
-            buffer.resize(list.len(), u32::MAX);
-            buffer[from..range.end].copy_from_slice(&list[from..range.end]);
-
-            self.filled[slot] = list.len();
-            self.buffers[slot] = buffer;
-            Copy {
-                from,
-                bytes: (range.end - from) * std::mem::size_of::<u32>(),
-                outgrown,
-            }
-        }
-
-        /// What the frame's most recently used slot holds — the page the GPU would draw.
-        fn last_buffer(&self) -> &[u32] {
-            &self.buffers[(self.next + 2) % 3]
-        }
-    }
-
-    /// What one frame's slot was given: where the copy began, how many bytes, and whether its buffer had
-    /// to be made.
-    #[derive(Clone, Copy, Debug, PartialEq)]
-    struct Copy {
-        from: usize,
-        bytes: usize,
-        outgrown: bool,
-    }
-
-    impl Copy {
-        /// How many corners the copy was.
-        fn corners(&self) -> usize {
-            self.bytes / std::mem::size_of::<u32>()
-        }
-    }
-
-    /// A page's finished ink, as `count` corners with a value each, so what lands in a slot's copy can be
-    /// compared with what the list holds.
-    fn corners(count: usize) -> Vec<u32> {
-        (0..count as u32).collect()
-    }
-
-    /// A page of one-stroke-per-colour, as the canvas describes it: the fixture the append tests start
-    /// from. Three strokes, each a short line, closed, so every one of them is triangles.
-    fn three_strokes(colours: [u32; 3]) -> Canvas {
         let mut canvas = Canvas::default();
-        canvas.ink.strokes = Arc::new(
-            colours
-                .iter()
-                .enumerate()
-                .map(|(index, colour)| {
-                    let mut stroke = note_format::ink::Stroke::new(
-                        note_format::ink::InkPoint::new(index as f32 * 20.0, 0.0, 2.0),
-                        *colour,
-                    );
-                    stroke.points.push(note_format::ink::InkPoint::new(
-                        index as f32 * 20.0 + 10.0,
-                        0.0,
-                        2.0,
-                    ));
-                    stroke.close();
-                    Arc::new(stroke)
-                })
-                .collect::<Vec<_>>(),
-        );
+        let mut strokes = Vec::new();
+
+        // Twelve strokes, one colour in three, each a line across the page at the app's spacing.
+        for index in 0..12u32 {
+            let colour = colours[index as usize % colours.len()];
+            let y = index as f32 * 20.0;
+            let mut stroke = Stroke::new(
+                InkPoint::new(0.0, y, 2.0),
+                note_format::ink::with_alpha(colour, 0.65),
+            );
+            let mut x = 0.0f32;
+            while x < 80.0 {
+                x += note_format::settings::Settings::default().resample_spacing;
+                stroke.points.push(InkPoint::new(x, y, 2.0));
+            }
+            stroke.close();
+            strokes.push(Arc::new(stroke));
+        }
+
+        canvas.ink.strokes = Arc::new(strokes);
         canvas
     }
 
-    /// A frame after an append copies the corners *its own slot* is missing, not the corners that arrived.
+    /// A real surface on that page, built by the surface's own `rebuild_ink` — the fixture the slot tests
+    /// start from, so what they upload is the geometry a frame would.
     ///
-    /// `append_ink` used to set every slot's figure to the list's length before the new stroke, which is
-    /// true of the one slot that held the whole list and a lie about the other two. A slot that held `100`
-    /// of `120` corners, then appended, was claimed to hold `120` of them: the next frame to use it copied
-    /// `120..130` and drew the page with corners `100..120` never written — a stroke with a hundred and
-    /// twenty corners of whatever the buffer was made from in front of it. The three slots here start as
-    /// `[120, 100, 0]` of a list that was `120` long, which is what a rebuild followed by two frames
-    /// leaves behind, and the append is the surface's own: a device-free `Surface` with a page it has
-    /// drawn and one stroke more.
-    #[test]
-    fn an_append_copies_what_each_slot_is_missing() {
-        let mut surface = Surface::with_device().expect("a surface needs a Metal device");
-        let mut canvas = three_strokes([0x11_11_11, 0x22_22_22, 0x33_33_33]);
+    /// `None` on a machine with no Metal device, which is a machine that cannot draw ink at all: the same
+    /// skip the other device tests here take.
+    fn surface_on_a_page() -> Option<(Surface, Canvas)> {
+        let mut surface = Surface::with_device()?;
+        let canvas = page_of([0x11_11_11, 0x22_22_22, 0x33_33_33]);
+        surface.rebuild_ink(&canvas, Demotion::Cold);
+        assert!(!surface.ink.is_empty(), "the page is not triangles");
 
-        // A rebuild of the three-stroke page, which is what empties the slots before a frame fills one.
-        surface.refresh_ink(&canvas);
-        assert_eq!(surface.filled, [0; 3], "a rebuild did not empty the slots");
-        let longest = surface.ink.len();
-        assert!(longest > 0, "the page's ink is not triangles");
+        Some((surface, canvas))
+    }
 
-        // The slots as a rebuild followed by two frames leaves them: the front the first slot was given,
-        // three quarters of it in the second, and nothing at all in the third.
-        let fronts = [longest, longest / 4 * 3, 0];
-        surface.filled = fronts;
-
-        // The append: a fourth stroke at the end of the page, and no slot's figure moves with it.
+    /// The same page with one more stroke at its end, and the change that says so: an append.
+    fn appended(page: &Canvas) -> Canvas {
+        let mut canvas = page.clone();
         let mut strokes = (*canvas.ink.strokes).clone();
-        // The fourth stroke is the third's geometry at a new place, so the append adds triangles and the
-        // page it grows to is not the page it was.
-        let mut fourth = (*canvas.ink.strokes[2]).clone();
+        let last = strokes.len() - 1;
+        let mut fourth = (*canvas.ink.strokes[last]).clone();
         for point in &mut fourth.points {
-            point.y += 30.0;
+            point.y += 20.0;
         }
         strokes.push(Arc::new(fourth));
         canvas.ink.strokes = Arc::new(strokes);
 
-        let id = StrokeId::of(&canvas.ink.strokes[3]);
-        canvas.ink.edit = 1;
-        canvas.ink.delta = Some(note_ui::ink::PageDelta::new(
-            0,
-            vec![InkChange::Append { id, at: 3 }],
+        let at = canvas.ink.strokes.len() - 1;
+        let id = StrokeId::of(&canvas.ink.strokes[at]);
+        canvas.ink.edit += 1;
+        canvas.ink.delta = Some(note_page_delta(
+            canvas.ink.edit,
+            InkChange::Append { id, at },
         ));
 
+        canvas
+    }
+
+    /// The page's change, stamped as the app stamps it: from the revision before to this one.
+    fn note_page_delta(after: u64, change: InkChange) -> note_ui::ink::PageDelta {
+        note_ui::ink::PageDelta::new(after - 1, vec![change])
+    }
+
+    /// What a buffer holding `vertices` holds byte for byte, which is what [`Surface::contents`] reads
+    /// back: the comparison a slot's copy is checked by.
+    fn drawn_from(vertices: &[Vertex]) -> Vec<u8> {
+        vertices
+            .iter()
+            .flat_map(|vertex| {
+                // SAFETY: `Vertex` is `repr(C)` with no padding (`vertex_tests` pins its size), so its
+                // bytes are exactly what a copy into the buffer writes, and one `size_of` of them is
+                // inside the one vertex the reference points at.
+                unsafe {
+                    std::slice::from_raw_parts(
+                        (vertex as *const Vertex).cast::<u8>(),
+                        std::mem::size_of::<Vertex>(),
+                    )
+                }
+                .to_vec()
+            })
+            .collect()
+    }
+
+    /// The page a slot would draw from its buffer: the first `vertices` of what [`Surface::contents`]
+    /// reads back.
+    ///
+    /// A slot's buffer is room for a page, not the page — an upload allocates room to grow into, so the
+    /// bytes past the list are none of the draw's business and are not compared.
+    fn drawn(held: &[u8], vertices: usize) -> &[u8] {
+        &held[..vertices * std::mem::size_of::<Vertex>()]
+    }
+
+    /// Asserts that a buffer holds exactly what `vertices` would be copied into it, naming the first
+    /// vertex that differs rather than a page of bytes.
+    fn assert_holds(held: &[u8], vertices: &[Vertex], what: &str) {
+        let wanted = drawn_from(vertices);
+        let held = drawn(held, vertices.len());
+        let stride = std::mem::size_of::<Vertex>();
+
+        assert_eq!(
+            held.len(),
+            wanted.len(),
+            "{what}: the buffer is {} vertices, the page {}",
+            held.len() / stride,
+            vertices.len()
+        );
+
+        for corner in 0..vertices.len() {
+            let at = corner * stride;
+            assert_eq!(
+                &held[at..at + stride],
+                &wanted[at..at + stride],
+                "{what}: vertex {corner} is not the page's"
+            );
+        }
+    }
+
+    /// A frame after an append copies the vertices *its own slot* is missing, not the vertices that arrived.
+    ///
+    /// `append_ink` used to set every slot's figure to the list's length before the new stroke, which was
+    /// true of the one slot that held the whole list and a lie about the other two. A slot that held `100`
+    /// of `120` corners, then appended, was claimed to hold `120` of them: the next frame to use it copied
+    /// `120..130` and drew the page with corners `100..120` never written — a stroke with a hundred and
+    /// twenty vertices of whatever the buffer was made from in front of it.
+    ///
+    /// The three slots here start at `[n, ¾n, 0]` of a page `n` vertices long, which is what a rebuild
+    /// followed by two frames leaves behind, and the append is the surface's own `refresh_ink`. What is
+    /// then checked is what a frame would draw from each of the three: the slot's own `MTLBuffer`, read
+    /// back after `upload_ink`, against the vertices the CPU built — the slot that was given three
+    /// quarters of the page included, which is the one the old code left a hole in.
+    #[test]
+    fn an_append_copies_what_each_slot_is_missing() {
+        let Some((mut surface, page)) = surface_on_a_page() else {
+            return;
+        };
+
+        // The slots as a rebuild followed by two frames leaves them: the front the first slot was given,
+        // three quarters of it in the second, and nothing at all in the third.
+        let longest = surface.ink.len();
+        let fronts = [longest, longest / 4 * 3, 0];
+        assert!(longest / 4 * 3 > 0, "the page in this test is too small");
+        surface.stage_fronts(fronts);
+
+        // The append: a fourth stroke at the end of the page, and no slot's figure moves with it.
+        let grown = appended(&page);
         assert!(
-            surface.refresh_ink(&canvas),
+            surface.refresh_ink(&grown),
             "one stroke at the end of the page was not an append"
         );
         assert_eq!(
@@ -3016,77 +3088,125 @@ mod tests {
             "the append moved a slot's figure past what its buffer was given"
         );
         let longest = surface.ink.len();
+        assert!(longest > fronts[1], "the append added no triangles");
+        let arena = surface.ink.clone();
 
         // The three frames after it, one per slot, each into the buffer it already has.
-        let list = corners(longest);
-        let mut slots = Slots::at(fronts, &list);
-        slots.append(&list);
-        let copied: Vec<Copy> = (0..3).map(|_| slots.draw(InkPlan::Append, &list)).collect();
+        let mut copied = Vec::new();
+        for slot in 0..surface.slots() {
+            let before = surface.uploaded_bytes;
+            surface.upload_ink(slot);
+            copied.push(surface.uploaded_bytes - before);
+        }
 
         assert_eq!(
-            copied.iter().map(|copy| copy.from).collect::<Vec<usize>>(),
-            vec![fronts[0], fronts[1], 0],
-            "a slot was given a range that begins past the corners it never had"
-        );
-        assert_eq!(
-            copied.iter().map(Copy::corners).collect::<Vec<usize>>(),
-            vec![longest - fronts[0], longest - fronts[1], longest],
+            copied,
+            [longest - fronts[0], longest - fronts[1], longest]
+                .map(|vertices| vertices as u64 * std::mem::size_of::<Vertex>() as u64),
             "the copy was not what each slot was missing"
         );
         assert_eq!(
-            slots.filled, [longest; 3],
+            surface.filled,
+            [longest, longest, longest],
             "a slot's figure was not the list's length once its copy had landed"
         );
-        assert_eq!(
-            slots.last_buffer(),
-            &list[..],
-            "the frame drew corners the copy never wrote"
-        );
-        // Keep the list's last value from being `u32::MAX`, which is what an unwritten corner reads as
-        // here: the check above would then pass on a buffer with holes in it.
-        assert!(list.last().is_some_and(|last| *last != u32::MAX));
+
+        // Each slot's own buffer, which is the page the GPU would draw from it — including the slot that
+        // only ever held three quarters of it.
+        for slot in 0..surface.slots() {
+            assert_holds(
+                &surface.contents(slot),
+                &arena,
+                &format!("slot {slot} would draw vertices its copy never wrote"),
+            );
+        }
     }
 
     /// A slot whose buffer had to be made is copied *from zero*, in the same frame.
     ///
     /// A frame's buffer was too small for the page, so it was made again. A fresh buffer holds nothing,
-    /// whatever the slot's figure remembers; copying only `120..130` into it leaves the front the draw
-    /// reads as the buffer was allocated, and the frame presents a page whose first stroke is noise. The
-    /// copy is therefore `0..130`, and the frame that made the buffer draws the whole list.
+    /// whatever the slot's figure remembers; copying only the tail into it leaves the front the draw reads
+    /// as the buffer was allocated, and the frame presents a page whose first stroke is noise. The copy is
+    /// therefore from the list's first vertex, and the frame that made the buffer draws the whole list.
+    ///
+    /// The one scenario this pins, end to end on a real device: slot 0 is given 120 vertices of the page,
+    /// the page grows past what that buffer can hold, and `upload_ink` is asked once. Before the next
+    /// frame the slot's own `MTLBuffer` is read back and compared with the CPU list, vertex for vertex.
+    ///
+    /// Two assertions, and both are needed. The window is pinned directly — a copy that began at the
+    /// slot's figure is the regression, and this is the line that names it — because a device hands back a
+    /// *zeroed* buffer: a short copy would leave vertices at the origin, which the bytes of this page do
+    /// not happen to be, but a page that did start near the origin would pass the byte check while the
+    /// frame drew a stroke it never copied. The bytes are checked as well, because a zeroed buffer is one
+    /// device's behaviour and not the contract the shader relies on.
     #[test]
     fn a_made_buffer_is_copied_from_zero_in_the_same_frame() {
-        let list = corners(INK_130);
-        let mut slots = Slots::at([INK_120, INK_120, INK_120], &list);
-        slots.append(&list);
+        let Some((mut surface, page)) = surface_on_a_page() else {
+            return;
+        };
 
-        // The first frame after the append outgrows its buffer: a new one, copied from the first corner.
-        let copied = slots.fill(&list, true);
+        // Slot 0 holds the first `INK_120` vertices in a buffer sized for `arena.len() + 1` vertices — a
+        // frame's allocation for a page just one stroke longer. The page then grows past that.
+        let arena = surface.ink.clone();
         assert!(
-            copied.outgrown,
-            "the frame was told its buffer was reused when it had to be made"
+            arena.len() > INK_120,
+            "the page is shorter than the front this test gives a slot"
+        );
+        let room = arena.len() + 1;
+        surface.give_front(0, INK_120, room);
+
+        // The page grows by more than the room the buffer has: a rebuild, so every figure is empty and the
+        // copy is the whole page rather than a tail.
+        let mut bigger = page.clone();
+        let mut strokes = (*page.ink.strokes).clone();
+        for step in 0..3 {
+            let mut more = (*page.ink.strokes[0]).clone();
+            for point in &mut more.points {
+                point.y += 200.0 + step as f32 * 20.0;
+            }
+            strokes.push(Arc::new(more));
+        }
+        bigger.ink.strokes = Arc::new(strokes);
+        bigger.ink.edit += 1;
+        surface.rebuild_ink(&bigger, Demotion::NotAnAppend);
+        assert_eq!(
+            surface.filled, [0; 3],
+            "a rebuild left a slot holding the page"
+        );
+
+        // Slot 0 keeps its buffer, which is now too small: this frame makes one and copies the list into
+        // it, in this frame.
+        surface.upload_ink(0);
+
+        let longest = surface.ink.len();
+        assert!(
+            longest > room,
+            "the page did not grow past the slot's {room}-vertex buffer"
         );
         assert_eq!(
-            copied.from, 0,
+            (surface.filled[0], surface.filled[1], surface.filled[2]),
+            (longest, 0, 0),
+            "the frame's own slot did not record the copy its buffer was given, or another slot's did"
+        );
+        assert_eq!(
+            surface.uploaded_bytes,
+            (longest * std::mem::size_of::<Vertex>()) as u64,
             "a made buffer was given only the tail, leaving the front uninitialised"
         );
+
+        // The window the copy was, decided by the production function the upload itself calls: a made
+        // buffer is written from its first vertex, not from where the slot's figure had got to.
         assert_eq!(
-            copied.corners(),
-            INK_130,
-            "a made buffer was not given the list"
+            ink_write(INK_120, longest, false),
+            Some(0..longest),
+            "a made buffer was given only the tail, leaving the front uninitialised"
         );
-        assert_eq!(
-            slots.filled[0], INK_130,
-            "the slot did not record the copy its buffer was given"
-        );
-        assert_eq!(
-            slots.filled[1..],
-            [INK_120, INK_120],
-            "another slot's figure moved with a frame that did not use it"
-        );
-        assert_eq!(
-            slots.buffers[0],
-            list[..],
-            "the buffer did not carry the page's corners"
+
+        // The buffer itself, vertex for vertex.
+        assert_holds(
+            &surface.contents(0),
+            &arena,
+            "a made buffer did not carry the page's vertices",
         );
     }
 
@@ -3098,21 +3218,48 @@ mod tests {
     /// the page again, which is the cost the explicit-rebuild design exists to remove.
     #[test]
     fn a_slot_that_was_given_the_list_reuses_it_without_a_copy() {
-        let list = corners(INK_130);
-        let mut slots = Slots::at([INK_120, INK_100, 0], &list);
-        slots.append(&list);
+        let Some((mut surface, page)) = surface_on_a_page() else {
+            return;
+        };
+
+        // The slots as a rebuild followed by three frames leaves them, one shorter than the next.
+        let longest = surface.ink.len();
+        let fronts = [INK_120.min(longest), INK_100.min(longest), 0];
+        assert_eq!(
+            fronts,
+            [INK_120, INK_100, 0],
+            "the page is shorter than the fronts"
+        );
+        surface.stage_fronts(fronts);
 
         // Each slot catches up, once, with what it was missing.
-        let caught_up: Vec<usize> = (0..3)
-            .map(|_| slots.draw(InkPlan::Append, &list).corners())
+        let grown = appended(&page);
+        assert!(surface.refresh_ink(&grown), "the append rebuilt the page");
+        let longest = surface.ink.len();
+        let caught_up: Vec<u64> = (0..surface.slots())
+            .map(|slot| {
+                let before = surface.uploaded_bytes;
+                surface.upload_ink(slot);
+                (surface.uploaded_bytes - before) / std::mem::size_of::<Vertex>() as u64
+            })
             .collect();
-        assert_eq!(caught_up, vec![10, 30, 130]);
+        assert_eq!(
+            caught_up,
+            vec![
+                (longest - fronts[0]) as u64,
+                (longest - fronts[1]) as u64,
+                longest as u64
+            ]
+        );
 
         // Now the page is unchanged: a frame of a pan copies nothing, into any of the three.
-        let after: Vec<Copy> = (0..3).map(|_| slots.draw(InkPlan::Reuse, &list)).collect();
-        assert!(
-            after.iter().all(|copy| copy.bytes == 0),
-            "a frame of the unchanged page copied ink it already had: {after:?}"
+        surface.take_stages();
+        for slot in 0..surface.slots() {
+            surface.upload_ink(slot);
+        }
+        assert_eq!(
+            surface.uploaded_bytes, 0,
+            "a frame of the unchanged page copied ink it already had"
         );
     }
 
@@ -5259,7 +5406,10 @@ mod vertex_tests {
         assert_eq!(clamped.colour[3], 255, "alpha above one is opaque");
     }
 
-    /// Three strokes in a line, as a page hands them to a frame.
+    /// The page fixture is the one the slot tests use — see [`super::tests::page_of`] — so an edit and an
+    /// upload are judged on the same page rather than on two that happen to look alike.
+    use super::tests::page_of;
+
     /// The region a build covers in these tests: the whole plane, so no view is ever outside it.
     const COVERED: Bounds = Bounds::new(
         (f32::NEG_INFINITY, f32::NEG_INFINITY),
@@ -5278,30 +5428,6 @@ mod vertex_tests {
             rotation: canvas.ink.rotation.into(),
             paper: paper_of(canvas),
         }
-    }
-
-    fn page_of(three: [u32; 3]) -> Canvas {
-        let mut canvas = Canvas::default();
-        let strokes = three
-            .iter()
-            .enumerate()
-            .map(|(index, colour)| {
-                let mut stroke = note_format::ink::Stroke::new(
-                    note_format::ink::InkPoint::new(index as f32 * 20.0, 0.0, 2.0),
-                    *colour,
-                );
-                stroke.points.push(note_format::ink::InkPoint::new(
-                    index as f32 * 20.0 + 10.0,
-                    0.0,
-                    2.0,
-                ));
-                stroke.close();
-                Arc::new(stroke)
-            })
-            .collect::<Vec<_>>();
-
-        canvas.ink.strokes = Arc::new(strokes);
-        canvas
     }
 
     /// Erasing a stroke from the *middle* of a page is a rebuild, and says why.

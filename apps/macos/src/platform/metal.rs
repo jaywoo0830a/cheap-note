@@ -41,6 +41,7 @@ use note_ui::cursor::{
     BODY_HALO_ALPHA, BODY_HALO_GROW, NIB_ALPHA, NIB_BLOOM_ALPHA, NIB_BLOOM_SPREAD, NIB_RADIUS_MAX,
     NIB_RADIUS_MIN,
 };
+use note_ui::ink::{InkChange, StrokeId};
 use note_ui::ink_layer::canvas::{Ink, Rect};
 use note_ui::ink_layer::{ink_colour, Canvas};
 use note_ui::paint::finite_or_one;
@@ -534,12 +535,16 @@ impl Surface {
     /// already holds — the page's revision, how many of its strokes are covered, the rung and turn they
     /// were baked for — plus the change the model published. Nothing here walks the page:
     ///
-    /// * **Nothing.** The page is the one below. A pan, a frame while the hand is still, a second draw
-    ///   from one edit.
-    /// * **An append.** One stroke was added at the end (see [`Self::append_ink`]). The triangles before
-    ///   it are kept and only the tail is filled.
-    /// * **A rebuild**, with the reason recorded ([`Demotion`]): a rung crossed, the page turned, a
-    ///   change that went by unread, an edit that was not an append, a selection.
+    /// * **A reuse** ([`InkPlan::Reuse`]). The page is the one below. A pan, a frame while the hand is
+    ///   still, a second draw from one edit.
+    /// * **An append** ([`InkPlan::Append`]). One stroke was added at the end (see
+    ///   [`Self::append_ink`]). The triangles before it are kept and only the tail is filled.
+    /// * **A rebuild**, with the reason recorded ([`InkPlan::Rebuild`]): a rung crossed, the page
+    ///   turned, a change that went by unread, an edit that was not an append, a selection.
+    ///
+    /// Which of the three is [`decide`]'s to say, so a test asks the same function this path runs: a
+    /// decision a test read differently from the frame that shipped it is how a middle erase's undo came
+    /// to be drawn out of order.
     ///
     /// `true` when triangles were made, which is the only thing that makes the uploaded buffers stale. A
     /// frame that reuses the ink must not upload it again: the triangle list has not changed, and copying
@@ -547,42 +552,36 @@ impl Surface {
     /// frame of `memcpy` for nothing. The slots keep their validity across such frames, so each of the
     /// three is written once per rebuild rather than once per frame.
     fn refresh_ink(&mut self, canvas: &Canvas) -> bool {
-        let ink = &canvas.ink;
-
-        // A build covers the visible rectangle grown by the margin; every frame after it is free while the
-        // screen still fits inside that.
-        let within = fits(ink.visible, self.ink_covered);
-
         // What the edit was, decided from the page's own revision and the change the model published —
-        // never from a walk of the page. `None` means the page below is already exactly this page.
-        let demotion = match self.delta {
-            Some(state)
-                if state.revision == ink.edit
-                    && state.covered == ink.strokes.len()
-                    && state.paper == paper_of(canvas)
-                    && state.detail == detail_of(ink)
-                    && state.rotation == u8::from(ink.rotation)
-                    && within =>
-            {
-                // The same ink, at the same rung, the same way up, and it fits: the triangles below are
-                // still the page the caller is describing, so there is nothing to rebuild and nothing to
-                // upload. What the triangles are drawn *through* is a `Transform` the shader applies, and
-                // the tint a selection and a drag bake in are re-baked by `demoted` (it names `Paint`),
-                // so neither is this arm's business.
-                return false;
-            }
-            Some(state) => self.demoted(canvas, &state),
-            None => Some(Demotion::Cold),
+        // never from a walk of the page. A page that is the one below, at the same rung and the same way
+        // up, and whose screen still fits is nothing to do: what the triangles are drawn *through* is a
+        // `Transform` the shader applies, and the tint a selection and a drag bake in are re-baked by the
+        // other half (they name `Paint`), so neither is a reuse's business.
+        let plan = match self.delta {
+            Some(state) => decide(canvas, &state, self.ink_covered),
+            None => InkPlan::Rebuild(Demotion::Cold),
         };
 
-        let Some(reason) = demotion else {
-            // An append: the page only got longer, so the vertices it already had are still right and the
-            // only new triangles are the appended stroke's.
-            let started = std::time::Instant::now();
-            self.append_ink(canvas);
-            self.stage_refresh += started.elapsed();
-            return true;
-        };
+        match plan {
+            InkPlan::Reuse => false,
+            InkPlan::Append => {
+                // The page only got longer, so the vertices it already had are still right and the only
+                // new triangles are the appended stroke's.
+                let started = std::time::Instant::now();
+                self.append_ink(canvas);
+                self.stage_refresh += started.elapsed();
+                true
+            }
+            InkPlan::Rebuild(reason) => {
+                self.rebuild_ink(canvas, reason);
+                true
+            }
+        }
+    }
+
+    /// Throws the triangles below away and builds the page again, recording `reason`.
+    fn rebuild_ink(&mut self, canvas: &Canvas, reason: Demotion) {
+        let ink = &canvas.ink;
 
         // Every rebuild names why it had to happen — see `Demotion`. "It rebuilt" is never an answer
         // without a reason, and the trace is where the reason is readable for a run that went wrong.
@@ -677,8 +676,6 @@ impl Surface {
         self.filled = [0; 3];
 
         self.stage_refresh += started.elapsed();
-
-        true
     }
 
     /// How many corners the last build made: what the upload copies and the draw reads.
@@ -732,33 +729,21 @@ impl Surface {
         }
     }
 
-    /// Decides what a frame whose page is not the one below would have to do, and whether an append is
-    /// enough.
-    ///
-    /// `None` means the page below is the one that was drawn plus one stroke at its end, and every
-    /// triangle already there is still right — [`Self::append_ink`] can extend it. `Some(reason)` means a
-    /// rebuild, and names the condition that decided it, so a measurement never has to say "it rebuilt,
-    /// for some reason".
-    ///
-    /// Everything here is read from numbers the surface already holds: the page's revision, how much of
-    /// it is covered, and what the change *said*. Nothing walks the strokes, which is what makes an
-    /// append's bookkeeping O(1) rather than O(page).
-    fn demoted(&self, canvas: &Canvas, state: &DeltaState) -> Option<Demotion> {
-        decide(canvas, state, self.ink_covered)
-    }
-
     /// Extends the triangles below with the page's last stroke, which is all an append adds.
     ///
     /// The one path the explicit-rebuild design exists for. It fills the appended stroke alone — a
     /// hundred-odd corners — and leaves every vertex before it untouched, so what the next upload copies
     /// is still the whole list but the *work* is one stroke's. Everything before it is reused as it stands.
+    ///
+    /// Only called for [`InkPlan::Append`], whose proof is exactly what this relies on: the one new stroke
+    /// is the page's last, and every stroke before it is the one already drawn.
     fn append_ink(&mut self, canvas: &Canvas) {
         let ink = &canvas.ink;
         let list = ink.strokes.as_slice();
         let mapping = Mapping::of(canvas);
         let cull = self.ink_covered;
 
-        // The number of strokes the triangles below already are: `demoted` proved they run from the
+        // The number of strokes the triangles below already are: `decide` proved they run from the
         // front of the page, so the one that is new is at this index.
         let drawn = self.delta.map_or(0, |state| state.covered);
 
@@ -1735,55 +1720,95 @@ fn fits(visible: Bounds, built_for: Bounds) -> bool {
     visible.within(built_for)
 }
 
-/// Decides what a frame whose page is not the one below would have to do, and whether an append is
-/// enough.
+/// What a frame's page needs: the triangles below as they are, one stroke more, or a rebuild.
 ///
-/// `None` means the page below is the one that was drawn plus one stroke at its end, and every triangle
-/// already there is still right — the append path can extend it. `Some(reason)` means a rebuild, and
-/// names the condition that decided it, so a measurement never has to say "it rebuilt, for some
-/// reason".
+/// `refresh_ink` and the tests share this one answer, which is the point: reuse, append and rebuild
+/// used to be two decisions — a short-circuit at the top of `refresh_ink` and a `None`/`Some` from
+/// `decide` — so a test that read `None` could not say whether the frame would have reused the ink or
+/// appended to it, and a condition the test did not share was a condition the test could not check.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum InkPlan {
+    /// The page is the one below, at the same rung, the same way up, and still inside the build.
+    Reuse,
+    /// The page is the one below plus one stroke at its end ([`Surface::append_ink`]).
+    Append,
+    /// Every triangle has to be made again, and this names why ([`Demotion`]).
+    Rebuild(Demotion),
+}
+
+/// Decides what a frame whose page may not be the one below has to do: reuse, append, or rebuild.
+///
+/// `Reuse` means the triangles below are still the page the caller is describing, so nothing is
+/// rebuilt and nothing uploaded. `Append` means the page is the one that was drawn plus one stroke at
+/// its end (`Append { at, id }`, where `at` is the length *before* the change and `id` is that stroke),
+/// and every triangle already there is still right — [`Surface::append_ink`] can extend it.
+/// `Rebuild(reason)` names the condition that decided it, so a measurement never has to say "it
+/// rebuilt, for some reason".
 ///
 /// Everything here is read from numbers the surface already holds: the page's revision, how much of it
 /// is covered, and what the change *said*. Nothing walks the strokes, which is what makes an append's
-/// bookkeeping O(1) rather than O(page). A free function rather than a method so that it can be tested
-/// without a Metal device.
-fn decide(canvas: &Canvas, state: &DeltaState, built_for: Bounds) -> Option<Demotion> {
+/// bookkeeping O(1) rather than O(page) — the one stroke it reads is the page's last, to prove the
+/// append named the stroke that is actually there, and not one put back in the middle. A free function
+/// rather than a method so that it can be tested without a Metal device.
+fn decide(canvas: &Canvas, state: &DeltaState, built_for: Bounds) -> InkPlan {
     let ink = &canvas.ink;
 
     // The detail or the turn moved: every triangle is stale, whatever the edit was.
     if state.detail != detail_of(ink) {
-        return Some(Demotion::Rung);
+        return InkPlan::Rebuild(Demotion::Rung);
     }
     if state.rotation != u8::from(ink.rotation) {
-        return Some(Demotion::Rotation);
+        return InkPlan::Rebuild(Demotion::Rotation);
     }
     if state.paper != paper_of(canvas) {
-        return Some(Demotion::Paper);
+        return InkPlan::Rebuild(Demotion::Paper);
     }
 
     // A selection, a drag or a lasso changes what is baked, not only what the change appended.
     if ink.selection.is_some() || ink.offset != (0.0, 0.0) || ink.lasso.is_some() {
-        return Some(Demotion::Paint);
+        return InkPlan::Rebuild(Demotion::Paint);
     }
 
     // The region the build covers has to still hold the screen, or the append would add a stroke nothing
     // can see and leave paper the view now shows with no triangles at all.
     if !fits(ink.visible, built_for) {
-        return Some(Demotion::Uncovered);
+        return InkPlan::Rebuild(Demotion::Uncovered);
     }
 
-    // The change has to follow the one that was applied. A revision that is not the next one is a change
-    // that went by unread, and what it did cannot be guessed: rebuild.
-    let change = ink.delta.as_ref()?;
-    if change.before != state.revision {
-        return Some(Demotion::Gap);
+    // The page is the one below: the same revision, the same strokes, and every one of them is already
+    // drawn. A pan, a zoom that stayed inside a rung, a second frame of one edit.
+    if state.revision == ink.edit
+        && state.covered == ink.strokes.len()
+        && state.paper == paper_of(canvas)
+        && state.detail == detail_of(ink)
+        && state.rotation == u8::from(ink.rotation)
+    {
+        return InkPlan::Reuse;
     }
 
-    // And it has to be exactly one append at the end. Anything else — a removal, an insert, a drag —
-    // moves ink the triangles below were built from.
-    match change.changes.as_slice() {
-        [_] if state.covered + 1 == ink.strokes.len() => None,
-        _ => Some(Demotion::NotAnAppend),
+    // The change has to follow the one that was applied: it takes the page this surface drew to the one
+    // after it. A revision that is not the next one — or no delta at all for a page that moved — is a
+    // change that went by unread, and what it did cannot be guessed: rebuild.
+    let Some(delta) = ink.delta.as_ref() else {
+        return InkPlan::Rebuild(Demotion::Gap);
+    };
+    if delta.before != state.revision || delta.before.wrapping_add(1) != ink.edit {
+        return InkPlan::Rebuild(Demotion::Gap);
+    }
+
+    // And it has to be exactly one append at the end — the page's last stroke, where the page already
+    // ended. Anything else — a removal, a stroke put back in the middle, a drag — moves ink the
+    // triangles below were built from. A redo of an erase that lands in the middle is the case a count
+    // alone let through: the page grew by one, but at a place the append path cannot reach.
+    match delta.changes.as_slice() {
+        [InkChange::Append { id, at }]
+            if *at == state.covered
+                && state.covered.checked_add(1) == Some(ink.strokes.len())
+                && ink.strokes.last().map(StrokeId::of) == Some(*id) =>
+        {
+            InkPlan::Append
+        }
+        _ => InkPlan::Rebuild(Demotion::NotAnAppend),
     }
 }
 
@@ -1792,7 +1817,7 @@ fn decide(canvas: &Canvas, state: &DeltaState, built_for: Bounds) -> Option<Demo
 /// The explicit-rebuild design's state, and the thing that decides whether a frame costs anything:
 ///
 /// * `revision` is the page's own edit count as of the last build. A frame whose page has the same
-///   revision and a change that reaches the same result has nothing to do (see [`Self::lean_on`]).
+///   revision and a covering rectangle that still fits has nothing to do (see [`decide`]).
 /// * `covered` is how many strokes at the front of the page the triangles below already are. An
 ///   append extends it; any other edit shortens it to the place the edit started.
 /// * `detail` and `paper` are the two things the triangles are a function of *besides* the strokes.
@@ -1834,7 +1859,8 @@ pub enum Demotion {
     Cold,
     /// The page's revision is not the one after the last one seen: a change went by unread.
     Gap,
-    /// The edit was not an append — a removal, an insert in the middle, a drag.
+    /// The edit was not an append — a removal, a stroke put back in the middle, a drag, or an append
+    /// that did not name the page's last stroke.
     NotAnAppend,
     /// The detail rung the zoom asks for moved, so every outline is stale whatever the edit was.
     Rung,
@@ -2565,8 +2591,7 @@ mod tests {
         let state = settled(&canvas);
 
         // A pan: the page, the rung, the turn and the screen all say the same thing as the last build.
-        let rebuilt = decide(&canvas, &state, COVERED).is_none()
-            && state.covered != canvas.ink.strokes.len();
+        let rebuilt = decide(&canvas, &state, COVERED) != InkPlan::Reuse;
 
         assert!(
             !rebuilt,
@@ -2594,7 +2619,7 @@ mod tests {
     #[test]
     fn an_append_is_decided_by_the_revision_and_the_change() {
         use note_format::ink::InkPoint;
-        use note_ui::ink::{InkChange, PageDelta, Stroke, StrokeId};
+        use note_ui::ink::{PageDelta, Stroke};
         use std::sync::Arc;
 
         let state = DeltaState {
@@ -2619,39 +2644,72 @@ mod tests {
         let id = StrokeId::of(&canvas.ink.strokes[3]);
         let covered = Bounds::new((0.0, 0.0), (800.0, 600.0));
 
+        // `at` is the page's length *before* the change: the fourth stroke landed where three ended.
+        canvas.ink.delta = Some(PageDelta::new(7, vec![InkChange::Append { id, at: 3 }]));
+        assert_eq!(
+            decide(&canvas, &state, covered),
+            InkPlan::Append,
+            "one stroke added at the end of the page is an append"
+        );
+
+        // The same new stroke, announced a place past where it landed. The count alone would let this
+        // through; the append path fills `list[covered]`, which here is not the stroke the change named.
         canvas.ink.delta = Some(PageDelta::new(7, vec![InkChange::Append { id, at: 4 }]));
         assert_eq!(
             decide(&canvas, &state, covered),
-            None,
-            "one stroke added at the end of the page is an append"
+            InkPlan::Rebuild(Demotion::NotAnAppend),
+            "an append whose `at` is not where the page ended is not the append path"
+        );
+
+        // An append that names some other stroke is the same: the page grew, but not by the stroke the
+        // change says it did.
+        canvas.ink.delta = Some(PageDelta::new(
+            7,
+            vec![InkChange::Append {
+                id: StrokeId::of(&canvas.ink.strokes[0]),
+                at: 3,
+            }],
+        ));
+        assert_eq!(
+            decide(&canvas, &state, covered),
+            InkPlan::Rebuild(Demotion::NotAnAppend),
+            "an append must name the stroke that is actually last"
         );
 
         // The same page, but the change that arrived is not the one after the last: something went by
         // unread, and the surface cannot know whether it was this append or an erase.
-        canvas.ink.delta = Some(PageDelta::new(5, vec![InkChange::Append { id, at: 4 }]));
+        canvas.ink.delta = Some(PageDelta::new(5, vec![InkChange::Append { id, at: 3 }]));
         assert_eq!(
             decide(&canvas, &state, covered),
-            Some(Demotion::Gap),
+            InkPlan::Rebuild(Demotion::Gap),
             "a revision that does not follow the last one is never an append"
+        );
+
+        // A page that moved with no change to say what it did cannot be appended to either.
+        canvas.ink.delta = None;
+        assert_eq!(
+            decide(&canvas, &state, covered),
+            InkPlan::Rebuild(Demotion::Gap),
+            "a page that changed without a delta is a gap, not an append"
         );
 
         // A transaction that adds more than one stroke is not the append path.
         canvas.ink.delta = Some(PageDelta::new(
             7,
-            vec![InkChange::Append { id, at: 0 }, InkChange::Append { id, at: 4 }],
+            vec![InkChange::Append { id, at: 0 }, InkChange::Append { id, at: 3 }],
         ));
         assert_eq!(
             decide(&canvas, &state, covered),
-            Some(Demotion::NotAnAppend),
+            InkPlan::Rebuild(Demotion::NotAnAppend),
             "a transaction that adds more than one stroke is not the append path"
         );
 
         // A selection changes what is baked, whatever the edit was.
-        canvas.ink.delta = Some(PageDelta::new(7, vec![InkChange::Append { id, at: 4 }]));
+        canvas.ink.delta = Some(PageDelta::new(7, vec![InkChange::Append { id, at: 3 }]));
         canvas.ink.selection = Some(gpui_kit::Hsla::default());
         assert_eq!(
             decide(&canvas, &state, covered),
-            Some(Demotion::Paint),
+            InkPlan::Rebuild(Demotion::Paint),
             "a selection re-bakes the ink in hand"
         );
     }
@@ -2670,7 +2728,7 @@ mod tests {
 
         assert_eq!(
             decide(&canvas, &state, COVERED),
-            None,
+            InkPlan::Reuse,
             "a scroll asked for the ink to be drawn again"
         );
         assert!(
@@ -2692,7 +2750,7 @@ mod tests {
 
         assert_eq!(
             decide(&canvas, &state, COVERED),
-            None,
+            InkPlan::Reuse,
             "a zoom asked for the ink to be drawn again"
         );
         assert!(
@@ -2704,7 +2762,7 @@ mod tests {
         canvas.ink.detail = Some(note_format::ink::detail_zoom(2.0).to_bits());
         assert_eq!(
             decide(&canvas, &state, COVERED),
-            Some(Demotion::Rung),
+            InkPlan::Rebuild(Demotion::Rung),
             "a new detail left the ink alone"
         );
     }
@@ -2719,18 +2777,19 @@ mod tests {
         canvas.ink.rotation = note_format::pages::Quarters::from_turns(1);
         assert_eq!(
             decide(&canvas, &state, COVERED),
-            Some(Demotion::Rotation),
+            InkPlan::Rebuild(Demotion::Rotation),
             "a turn left the ink alone"
         );
     }
 
     /// The other half: a frame that changed nothing needs nothing, so the ink is not rebuilt for being
-    /// asked twice — the page's triangles are tens of thousands of vertices.
+    /// asked twice — the page's triangles are tens of thousands of vertices. A reuse, not an append: the
+    /// page's length did not move, so there is no stroke to add.
     #[test]
     fn the_same_page_needs_nothing() {
         let canvas = Canvas::default();
 
-        assert_eq!(decide(&canvas, &settled(&canvas), COVERED), None);
+        assert_eq!(decide(&canvas, &settled(&canvas), COVERED), InkPlan::Reuse);
     }
 
     /// The transform places the paper exactly where the old mapping did: a point of the paper lands at
@@ -4763,8 +4822,43 @@ mod vertex_tests {
 
         assert_eq!(
             decide(&erased, &state, COVERED),
-            Some(Demotion::NotAnAppend),
+            InkPlan::Rebuild(Demotion::NotAnAppend),
             "an erase is never an append, wherever on the page it was"
+        );
+    }
+
+    /// Undoing an erase from the *middle* of a page is a rebuild too, and for the same reason the erase
+    /// was.
+    ///
+    /// The other direction of [`erasing_inside_a_page_is_a_rebuild`], and the case a length-and-count
+    /// decision got wrong. With `[A, B, C]` erased to `[A, C]` and drawn that way, an undo puts `B` back
+    /// in the middle and the page grows from 2 to 3 — one more stroke, which the count alone read as the
+    /// append path. But the append path fills the page's *last* stroke (`C`), which was already there, so
+    /// `B` would have been drawn nowhere, or out of the paint order it belongs in. The same `Arc` is kept
+    /// across the erase, so this is `B` coming back where it was, not a new stroke at the end.
+    #[test]
+    fn undoing_a_middle_erase_preserves_paint_order() {
+        let mut restored = page_of([0x11_11_11, 0x22_22_22, 0x33_33_33]);
+        let mut erased = restored.clone();
+        let strokes = &restored.ink.strokes;
+        erased.ink.strokes = Arc::new(vec![strokes[0].clone(), strokes[2].clone()]);
+        let state = settled(&erased);
+
+        let middle = &strokes[1];
+        restored.ink.edit = state.revision + 1;
+        restored.ink.delta = Some(note_ui::ink::PageDelta::new(
+            state.revision,
+            vec![note_ui::ink::InkChange::Insert {
+                id: note_ui::ink::StrokeId::of(middle),
+                at: 1,
+                bounds: middle.bounds,
+            }],
+        ));
+
+        assert_eq!(
+            decide(&restored, &state, COVERED),
+            InkPlan::Rebuild(Demotion::NotAnAppend),
+            "a stroke put back in the middle is not an append, and must not be drawn at the end"
         );
     }
 

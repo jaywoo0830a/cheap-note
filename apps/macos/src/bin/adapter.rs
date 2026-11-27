@@ -502,6 +502,14 @@ fn canvas_with(
 ///
 /// These four figures are the only place a frame contributes to a row, so a change to what a frame costs
 /// cannot be reported two different ways.
+///
+/// **The bytes are the operation's, not the one frame's.** The surface keeps three buffers in flight and
+/// gives each its own turn, so an append that leaves two of them short of the new stroke costs the frames
+/// that follow it too — and the harness asks for exactly that: *"Aggregate deferred work including all
+/// buffer slots into each operation."* One frame per sample would report only the slot this sample
+/// happened to land on, which is a third of an append. So the frame is drawn first and the two that
+/// complete the ring after it, and what they copy is added to the row. They run after the settle, outside
+/// the timed interval, so the operation's latency stays the first frame's.
 fn frame(surface: &mut Surface, canvas: &Canvas) -> FrameCost {
     // Start from nothing so the upload figure is this frame's, not the session's.
     surface.take_stages();
@@ -515,6 +523,23 @@ fn frame(surface: &mut Surface, canvas: &Canvas) -> FrameCost {
         surface.settle();
     }
     let gpu = gpu_started.elapsed();
+
+    // The rest of the ring: the slots the next two frames use, given what they are missing now. Nothing
+    // new is uploaded unless this operation left them short — a still page copies nothing here.
+    let following = if drawn {
+        let mut drawn = 0;
+        for _ in 0..surface.slots() - 1 {
+            if surface.draw(canvas, None) {
+                drawn += 1;
+            }
+        }
+        if drawn > 0 {
+            surface.settle();
+        }
+        drawn
+    } else {
+        0
+    };
     let (_, _, uploaded, _) = surface.take_stages();
 
     FrameCost {
@@ -522,7 +547,7 @@ fn frame(surface: &mut Surface, canvas: &Canvas) -> FrameCost {
         drawable_wait_ns: waited.as_nanos() as u64,
         gpu_ns: gpu.as_nanos() as u64,
         uploaded_bytes: uploaded,
-        drawn,
+        drawn: drawn || following > 0,
         vertices: surface.vertices() as u64,
     }
 }

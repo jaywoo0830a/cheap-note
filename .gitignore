@@ -28,3 +28,6 @@ cheap-note.settings.json
 # OS metadata.
 .DS_Store
 Thumbs.db
+
+NEXT-STEP.md
+PROBLEMS.md

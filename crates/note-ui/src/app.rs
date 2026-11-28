@@ -1294,8 +1294,6 @@ pub struct NoteApp {
     pans: HashMap<usize, (f32, f32)>,
     /// The sheet as the last frame drew it.
     sheet: Sheet,
-    /// The bar's bottom edge, in window logical pixels, as the last frame laid it out.
-    bar_bottom: Rc<Cell<Option<f32>>>,
     /// Every control that floats over the sheet, in the box the last frame drew it in: the bar, the page
     /// pill and the zoom pill. Overwritten each frame, so the region the pen is refused in is the region
     /// a control is drawn in *now* (see [`Controls::ui_at`]).
@@ -1619,7 +1617,6 @@ impl NoteApp {
             zoom_settles_at: None,
             pans: HashMap::new(),
             sheet: Sheet::default(),
-            bar_bottom: Rc::new(Cell::new(None)),
             controls: Rc::new(Cell::new(Controls::default())),
             nib_owner: None,
             timings: Arc::new(Timings::default()),
@@ -2260,7 +2257,7 @@ impl NoteApp {
     fn bar_edge(&self) -> f32 {
         bar_line(
             self.settings.show_toolbar,
-            self.bar_bottom.get(),
+            self.controls.get().toolbar.map(|bar| bar.bottom),
             self.metrics.bar_height,
         )
     }
@@ -2850,7 +2847,6 @@ impl NoteApp {
 
         // Measurements at the old scale are old pixels: the bar's bottom edge and the pills' boxes
         // are re-measured by the next frame, and until then their estimates are the new scale's.
-        self.bar_bottom.set(None);
         self.controls.set(Controls::default());
         // A `Down` measured at the old scale was measured against old boxes, and the frame that answers
         // it has not been laid out yet: the next `Down` decides again.
@@ -3404,6 +3400,11 @@ impl NoteApp {
     /// the strip it is about to give back to the page, and a frame's delay there is the system arrow
     /// appearing under the hand that hid it (see [`Self::bar_edge`]).
     fn set_toolbar_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if !shown {
+            let mut controls = self.controls.get();
+            controls.toolbar = None;
+            self.controls.set(controls);
+        }
         self.settings.show_toolbar = shown;
         self.publish_cursor();
         self.finish_setting(cx);
@@ -5972,8 +5973,6 @@ impl NoteApp {
         let theme = cx.theme();
         let (surface, hairline) = (theme.title_bar, theme.title_bar_border);
 
-        // The mark below writes through this; the pump reads it later, with no window to ask.
-        let bar_bottom = Rc::clone(&self.bar_bottom);
         let margin = self.bar_margin();
 
         // Full width from a stretched box with a margin's worth of padding, not from both insets on the bar:
@@ -5985,18 +5984,6 @@ impl NoteApp {
             .left_0()
             .w_full()
             .px(px(margin))
-            // A zero-height box pinned to the bar's own bottom edge, so it reports the real edge whatever
-            // the bar's height turned out to be. It paints nothing, takes no pointer, and is out of the
-            // layout: it exists to be measured.
-            .child(
-                canvas(
-                    move |bounds, _, _| bar_bottom.set(Some(f32::from(bounds.bottom()))),
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .bottom_0()
-                .h_0(),
-            )
             .child(
                 div()
                     .flex()
@@ -6013,7 +6000,9 @@ impl NoteApp {
                     // path in a paint callback, and a callback cannot put a layer behind itself.
                     .shadow_md()
                     .child(self.command_row(cx))
-                    .child(self.sheet_row(cx)),
+                    .child(self.sheet_row(cx))
+                    .relative()
+                    .child(self.control_probe(ControlPlace::Toolbar)),
             )
     }
 
@@ -6810,25 +6799,28 @@ impl NoteApp {
     /// A zero-height probe beside the pill is what made this measure nothing at all on the first attempt
     /// (a box with no content and no width is laid out at zero), so the probe is the pill's own size.
     fn pill_box(&self, place: ControlPlace, pill: impl IntoElement) -> impl IntoElement {
+        div()
+            .relative()
+            .child(pill)
+            .child(self.control_probe(place))
+    }
+
+    fn control_probe(&self, place: ControlPlace) -> impl IntoElement {
         let controls = Rc::clone(&self.controls);
-
-        div().relative().child(pill).child(
-            canvas(
-                move |bounds, _, _| {
-                    let box_ = BoxRect::new(
-                        f32::from(bounds.left()),
-                        f32::from(bounds.top()),
-                        f32::from(bounds.right()),
-                        f32::from(bounds.bottom()),
-                    );
-
-                    controls.set(controls.get().measured(place, box_));
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .inset_0(),
+        canvas(
+            move |bounds, _, _| {
+                let box_ = BoxRect::new(
+                    f32::from(bounds.left()),
+                    f32::from(bounds.top()),
+                    f32::from(bounds.right()),
+                    f32::from(bounds.bottom()),
+                );
+                controls.set(controls.get().measured(place, box_));
+            },
+            |_, _, _, _| {},
         )
+        .absolute()
+        .inset_0()
     }
 
     /// Which page is on the desk, the way to the others, and the way to make a new one.

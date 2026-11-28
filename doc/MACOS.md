@@ -69,18 +69,35 @@ tests and the whole workspace goes green. If you only want one crate, name it:
 `cargo test -p note-format`, `-p note-ui`, `-p cheap-note-macos`, or `-p pen-macos`.
 
 The package is **`cheap-note-macos`** but the **binary is `cheap-note`** — Cargo refuses two packages of
-one name in a workspace, and both apps are one program as far as a person is concerned. To hand the app to
-someone as a `.app`:
+one name in a workspace, and both apps are one program as far as a person is concerned. To put the app on
+the desktop there is one script, `scripts/macos/install-desktop.sh`, which does all of it in order and stops
+at the first failure: a plain release build (never the PGO one — that is `--binary`,
+[COMPILE.md](../COMPILE.md) §2), the tests, the `.app` in `dist/`, the zip to carry, the desktop copy, and a
+check that the copy exists and still verifies.
 
 ```bash
-apps/macos/bundle.sh              # → dist/Cheap Note.app (release build, Info.plist, ad-hoc signature)
-apps/macos/bundle.sh --install-desktop
-                                  # the same, and a copy at ~/Desktop/Cheap Note.app to open from there
+scripts/macos/install-desktop.sh              # build → cargo test --workspace → bench → dist/ → ~/Desktop
+scripts/macos/install-desktop.sh --fast       # the mac crates' tests only (-p cheap-note-macos -p pen-macos)
+scripts/macos/install-desktop.sh --no-build   # package target/release/cheap-note as it is
+scripts/macos/install-desktop.sh --app-only   # skip the tests
+scripts/macos/install-desktop.sh --no-install # build, test, package into dist/; no desktop copy
+scripts/macos/install-desktop.sh --binary target/aarch64-apple-darwin/release/cheap-note
+                                              # pack the PGO build instead, as …-pgo.zip
+scripts/macos/install-desktop.sh --dry-run    # print the commands, run none
 ```
 
-The desktop copy is a copy and not a link, because `bundle.sh` deletes and rebuilds `dist/` on every run;
-it is made after the zip, so a failed pack does not leave an app on the desktop that was never finished.
-Run it again after a change and it replaces the old copy rather than merging into it.
+The packaging step is the one `apps/macos/bundle.sh` used to do — `Info.plist`, an icon made from the
+Windows build's `.ico`, an ad-hoc signature, and a `ditto`-made zip — now inside the same script, so the
+whole release is one file to read. The signature is ad-hoc: it runs on the machine that built it, and a
+build handed to someone else needs a Developer ID and a notarisation step.
+
+It also runs the release binary's `--bench` (the one check of the Metal canvas that needs neither a person
+nor a pen), and it warns rather than passes if the installed bundle has no `libpdfium.dylib` beside the
+executable — the same caution as the paragraph below: a green run is not proof that a page renders.
+
+The desktop copy is a copy and not a link, because `dist/` is rebuilt from scratch on every run; it is made
+after the zip, so a failed pack does not leave an app on the desktop that was never finished. Run it again
+after a change and it replaces the old copy rather than merging into it.
 
 One caution about a green run: the pdf tests that need a real Pdfium skip themselves when none is on the
 machine (`crates/note-ui/src/pdfium/api.rs`'s `available()`), so green is *not* proof that a page renders.

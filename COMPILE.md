@@ -131,7 +131,9 @@ cargo pgo optimize build -- -p cheap-note-macos
 
 ## 4. 권장 전략
 
-배포는 지금 그대로: `apps/macos/bundle.sh`.
+배포는 지금 그대로 macOS는 `scripts/macos/install-desktop.sh` 하나입니다(일반 릴리즈 빌드 → 테스트 →
+`.app`/zip → 바탕화면 설치). PGO 릴리즈는 같은 스크립트의
+`--binary target/aarch64-apple-darwin/release/cheap-note`로 포장합니다.
 
 PGO는 배포 형태로 판단합니다:
 

@@ -42,7 +42,7 @@ A release build is the window and nothing else — no console beside it — beca
 is linked as a *windows* subsystem program (see the crate attribute in `apps/windows/src/main.rs`): started
 by double-click, by a shortcut, or through a file association, it opens without the black window a
 console-subsystem program gets. On a Mac the same release build is wrapped in a `.app` by
-`apps/macos/bundle.sh`. Debug builds and `cargo test` keep the console, where the diagnostics a run can
+`scripts/macos/install-desktop.sh`. Debug builds and `cargo test` keep the console, where the diagnostics a run can
 print and the measurements the timing tests take are readable.
 
 ## Four workspace members

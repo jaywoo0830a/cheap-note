@@ -1163,34 +1163,43 @@ fn the_bar_is_a_line_in_the_window() {
     );
 }
 
-/// The desk's own row is the same rule at the other end of the window: a reading below it is a press
-/// on a pill, measured in the window and not on the sheet, whatever the scale factor is.
+/// The foot is **not** a line in the window: nothing below it is refused by the model.
+///
+/// It used to be one, symmetric with the bar, and that is the window-mode bug: the page and zoom pills
+/// float in a full-width row, so a line at the row's top refused the paper between them too. The pills are
+/// two boxes, and a box is the app's to ask (`NoteApp::ui_at`); the model is left with the bar.
 #[test]
-fn the_bottom_row_is_a_line_in_the_window() {
+fn the_bottom_row_is_not_a_line_in_the_window() {
     let footed = |foot: f32| InkTransform { foot, ..papered() };
     let scaled = InkTransform {
         scale: 2.0,
         ..footed(700.0)
     };
 
-    assert!(scaled.on_bar(1400.0), "1400 physical pixels is 700 logical");
     assert!(
         !scaled.on_bar(1398.0),
-        "and the pixel above the line is not"
+        "1398 physical pixels is 699 logical, a pixel above the row"
     );
     assert!(
-        !footed(700.0).on_bar(400.0),
-        "a reading on the sheet is not on the row, however far down it is"
+        !scaled.on_bar(1400.0),
+        "and the row's own first pixel is not refused either: the foot refuses nothing"
+    );
+    assert!(
+        !footed(700.0).on_bar(2000.0),
+        "however far down the window the reading is: the paper at the foot is paper"
     );
     assert!(
         !InkTransform::identity().on_bar(0.0),
-        "no row refuses nothing either"
+        "and no row refuses nothing"
     );
 }
 
-/// Both lines at once: the sheet is between them, and either edge of the interface is a press.
+/// The bar is the one edge the model keeps: the sheet is everything below it.
+///
+/// The desk's row is deliberately left out of this, because it is not a line — see
+/// [`the_bottom_row_is_not_a_line_in_the_window`].
 #[test]
-fn the_sheet_is_between_the_two_lines() {
+fn the_sheet_is_below_the_bar() {
     let both = InkTransform {
         bar: 100.0,
         foot: 700.0,
@@ -1199,8 +1208,14 @@ fn the_sheet_is_between_the_two_lines() {
 
     assert!(both.on_bar(100.0), "the bar's own last pixel");
     assert!(!both.on_bar(101.0));
-    assert!(!both.on_bar(699.0));
-    assert!(both.on_bar(700.0), "and the foot's first pixel");
+    assert!(
+        !both.on_bar(699.0),
+        "the page just above where the row begins"
+    );
+    assert!(
+        !both.on_bar(700.0),
+        "and the row's own first pixel is the app's to refuse, not the model's"
+    );
 }
 
 /// A pen with no pressure sensor draws at the constant width, not at zero.
@@ -3801,9 +3816,7 @@ fn a_change_from_another_page_is_renumbered() {
     // written over it.
     notes.go_to(1);
     notes.put_page(0, held);
-    let kept: &InkDocument = notes
-        .held(0)
-        .expect("the note keeps a page it was given");
+    let kept: &InkDocument = notes.held(0).expect("the note keeps a page it was given");
     assert!(
         kept.revision() > 0,
         "the page the note holds has a revision of its own ({} strokes)",
@@ -3909,7 +3922,9 @@ fn a_skipped_frame_shows_as_a_gap_in_the_revisions() {
         );
     }
 
-    let delta = page.take_delta().expect("the newest edit is still reported");
+    let delta = page
+        .take_delta()
+        .expect("the newest edit is still reported");
 
     assert_eq!(page.revision(), 2, "two edits happened");
     assert_eq!(
@@ -4006,7 +4021,9 @@ fn an_edit_that_changes_nothing_is_not_reported() {
     let mut page = InkDocument::from_strokes(vec![curve()]);
 
     assert!(
-        !page.record(Edit::Erased { removed: Vec::new() }),
+        !page.record(Edit::Erased {
+            removed: Vec::new()
+        }),
         "nothing was removed"
     );
 

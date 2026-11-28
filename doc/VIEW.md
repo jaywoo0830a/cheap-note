@@ -294,20 +294,30 @@ app refuses the pen itself. There are four refusals, and three of them are app *
   written on, and both halves of that are the same state: the `NoteApp::palette` that refuses the ink is
   what reads the tap (`palette_from_pen`), so there is no press for a stroke to arrive on — and, as with
   a screen, no rectangle that could be wrong by a frame.
-* **The pills at the desk's foot** (§4): a reading over the page pill or the zoom pill is a press on it.
-  This one is the exception, and it is a rectangle — but a measured one rather than a guessed one: each
-  pill reports its own top edge and width from the frame that laid it out (`NoteApp::pill_box`), and the
-  strip refused is that rectangle grown by `FOOT_SLACK` (`FootStrips`). It is *not* the whole row: the
-  desk beside the pills is still desk, and a reader writing on paper behind the gap between the two must
-  be able to. The measurement is of the layout that is on screen, so a strip can only be a frame stale if
-  a pill changed size on the frame the pen was over it — which is exactly when the pen was not writing
-  there anyway.
+* **The controls over the sheet** (§4): a reading over the bar, the page pill or the zoom pill is a press
+  on it. This is the exception, and it is a *box* — a measured one rather than a guessed one: the bar and
+  each pill report their own rectangle from the frame that laid them out (`NoteApp::pill_box`), the pill's
+  box is grown by `FOOT_SLACK`, and a reading is the interface's when it falls inside one of them
+  (`Controls::ui_at`). It is *not* a line across the window and *not* the whole row: the desk beside the
+  pills is still desk, and a reader writing on paper behind the gap between the two must be able to — a
+  line at the row's top is what made that gap unwritable. Each measurement is **overwritten** by the frame
+  that draws the control, so a window made small and then large again moves the boxes down with the pills
+  instead of leaving a refused band behind. The measurement is of the layout that is on screen, so a box
+  can only be a frame stale if a control changed size on the frame the pen was over it — which is exactly
+  when the pen was not writing there anyway.
 
-That second rule is *why* the two lists are screens rather than panels floating on the sheet: a panel
-would have had to add a rectangle to the ink rule, and a rectangle that is wrong by a frame is ink drawn
-under a control. The foot's pills are the one place where the rectangle is the *right* shape, because
-they are pinned to the window rather than moving over the sheet: the page pill is always the middle of the
-desk and the zoom pill always its right margin, so there is nothing for a frame to have moved.
+**A stroke belongs to whatever its `Down` landed on.** The owner is decided once, on the reading that
+begins a stroke, and held until the reading that ends it: a press that began on a pill is the pill's even
+if the hand slides onto the paper, and a line that began on the paper keeps its own `Up` even if it
+finishes over a pill. Asking per reading instead tore strokes in half and dropped the `Up` that closes
+them; one decision also means the batch the pen sends is passed on whole, with no copy filtered out of it.
+
+That second rule — screens rather than panels — is *why* the two lists are screens rather than panels
+floating on the sheet: a panel would have had to add a rectangle to the ink rule, and a rectangle that is
+wrong by a frame is ink drawn under a control. The controls at the window's edges are the one place where
+the rectangle is the *right* shape, because they are pinned to the window rather than moving over the
+sheet: the page pill is always the middle of the desk and the zoom pill always its right margin, so there
+is nothing for a frame to have moved.
 
 ### The ghost cursor
 
@@ -1262,7 +1272,7 @@ spelled in pixels: the bar's control names, the status pill and the title chip.
 | `SCREEN_MARGIN` | 56 logical px | the air the home, bookmarks and contents screens keep from the window's edges: their card reads as a page rather than as a panel |
 | `BAR_MARGIN` | 12 logical px | how far the floating bar and the page pill sit from the window's edges: the desk showing in that gap is what makes the sheet read as paper on a desk |
 | `BAR_HEIGHT` | 148 logical px | the estimate `bar_edge` falls back to only on the frame before the bar has been measured; the *measured* edge is the one line ink, the ghost cursor and the system pointer all use |
-| `FOOT_BAND` | 72 logical px | the estimate `foot_edge` falls back to only until a frame has measured the pills at the desk's foot; an upper bound, so the first frame refuses a little more desk rather than writing on a pill |
+| `FOOT_BAND` | 72 logical px | the estimate `foot_edge` falls back to only until a frame has measured the pills at the desk's foot; it is where the ghost's *paint band* stops, not a refusal, so a few pixels either way cost no ink |
 | `FOOT_SLACK` | 12 logical px | how far past a pill's own edge a reading still counts as a press on it: a nib that lands just beside a button is a press that missed, not a line |
 | `STATUS_PILL_WIDTH` | 0.6 | the fraction of the window the status pill may use; it wraps, and the fraction is what decides into how many lines |
 | `STATUS_DROP` | 12 logical px at 100% | how far below the bar's measured bottom edge the status pill hangs — its own design token, resolved from the same snapshot |

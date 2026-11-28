@@ -1,21 +1,22 @@
 // Imported by name, not by glob: `use super::*` would bring GPUI's own `test` macro into
 // scope and shadow the attribute this module needs.
 use super::{
-    bar_line, confirmed, file_label, file_stem, held_by_cap, page_after_insert, page_of_write,
-    page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face, palette_id,
-    palette_in_hand, palette_pick_answers, palette_point, parse_zoom, pdf_render_due,
+    bar_line, confirmed, file_label, file_stem, held_by_cap, nib_owner, page_after_insert,
+    page_of_write, page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face,
+    palette_id, palette_in_hand, palette_pick_answers, palette_point, parse_zoom, pdf_render_due,
     pen_cursor_shows, pinch_zoom_factor, quantise_width, samples_vitals, scale_label,
     screen_in_front, scroll_of, sheet_is_front, sheet_matches, spun, touches_paper, window_px,
-    zoom_text, Confirmation, Edge, EdgeSwipe, FootPills, FootPlace, FootStrips, PaletteGeometry,
-    PalettePart, PenGesture, Screens, SwatchGeometry, Swipe, Turn, WeightControl, EDGE_SWIPE_BAND,
-    EDGE_SWIPE_TRAVEL, PALETTE_DISC, PALETTE_DISC_BOX, PALETTE_DISC_PAD, PALETTE_DISC_RING,
-    PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH,
-    PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL,
-    PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
+    zoom_text, BoxRect, Confirmation, ControlBoxes, ControlPlace, Controls, Edge, EdgeSwipe,
+    NibOwner, PaletteGeometry, PalettePart, PenGesture, Screens, SwatchGeometry, Swipe, Turn,
+    WeightControl, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC, PALETTE_DISC_BOX,
+    PALETTE_DISC_PAD, PALETTE_DISC_RING, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN,
+    PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC,
+    PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
 use crate::design::{LayoutMetrics, ScaleStep};
 use crate::ink::{Notes, Tool};
+use crate::input::Reading;
 use crate::pages::Pages;
 use gpui_kit::ElementId;
 use std::time::{Duration, Instant};
@@ -416,63 +417,133 @@ fn a_page_added_before_this_one_leaves_the_reader_where_they_were() {
 ///
 /// The row is full-width and the pills float in it, so the desk beside them is still desk: a reader
 /// may be writing on paper behind the gap between the two pills, and refusing the whole row would take
-/// that away. Each strip is the pill's own measured box grown by the snapshot's `foot_slack`.
+/// that away. Each box is the pill's own measured rectangle grown by the snapshot's `foot_slack`.
 #[test]
 fn the_foot_refuses_the_pills_and_not_the_row() {
-    // The page pill measured at 400..600 and the zoom pill at 700..900, with 12 px of slack either side.
-    let strips = FootPills::default()
-        .measured(FootPlace::Page, 400.0, 600.0, 930.0)
-        .measured(FootPlace::Zoom, 700.0, 900.0, 910.0)
-        .strips(LayoutMetrics::default().foot_slack);
+    // The page pill measured at 400..600 across and 930..980 down, the zoom pill at 700..900 across
+    // and 910..960 down, with 12 px of slack all round.
+    let controls = Controls::default()
+        .measured(ControlPlace::Page, BoxRect::new(400.0, 930.0, 600.0, 980.0))
+        .measured(ControlPlace::Zoom, BoxRect::new(700.0, 910.0, 900.0, 960.0));
+    let slack = LayoutMetrics::default().foot_slack;
 
-    let held = |x: f32, y: f32| strips.held((x, y), 900.0);
+    let ui = |x: f32, y: f32| controls.ui_at((x, y), slack);
 
-    assert!(held(500.0, 950.0), "the middle of the page pill");
-    assert!(held(400.0, 950.0), "its left edge");
+    assert!(ui(500.0, 950.0), "the middle of the page pill");
+    assert!(ui(400.0, 950.0), "its left edge");
     assert!(
-        held(388.0, 950.0),
+        ui(388.0, 950.0),
         "and the slack beside it, a press that missed"
     );
-    assert!(!held(300.0, 950.0), "but not the desk further out");
+    assert!(!ui(300.0, 950.0), "but not the desk further out");
 
-    assert!(held(712.0, 950.0), "the slack before the zoom pill");
-    assert!(held(900.0, 950.0), "its right edge");
-    assert!(!held(930.0, 950.0), "and not past the slack after it");
+    assert!(ui(712.0, 950.0), "the slack before the zoom pill");
+    assert!(ui(900.0, 950.0), "its right edge");
+    assert!(!ui(930.0, 950.0), "and not past the slack after it");
 
     assert!(
-        !held(500.0, 899.0),
-        "above the line the row begins at is page, whatever the x is"
+        ui(500.0, 918.0),
+        "the slack above the page pill, where a nib that missed by a hair still pressed it"
+    );
+    assert!(
+        !ui(500.0, 899.0),
+        "but above the slack it is page, whatever the x is"
     );
 
-    // An unmeasured pill is no strip at all: the pen is refused nowhere it cannot see a pill.
-    assert!(!FootPills::default()
-        .strips(LayoutMetrics::default().foot_slack)
-        .held((500.0, 950.0), 900.0));
+    // An unmeasured pill is no box at all: the pen is refused nowhere it cannot see a pill.
+    assert!(!Controls::default().ui_at((500.0, 950.0), slack));
 }
 
-/// Each pill's measured box becomes its strip, and the taller pill's top is the line — because a
-/// reading over either pill is a press.
+/// **The regression this change is for:** the paper between the two pills is paper.
+///
+/// The old rule refused every reading below the taller pill's top whatever its `x`, so the gap between
+/// the pills — bare paper, with no control on it — could not be written on. A box refuses only the box.
 #[test]
-fn the_foot_takes_the_tallest_pill_as_its_line() {
-    let measured = FootPills::default()
-        .measured(FootPlace::Page, 400.0, 600.0, 930.0)
-        .measured(FootPlace::Zoom, 700.0, 900.0, 910.0);
+fn the_paper_between_the_pills_is_paper() {
+    let controls = Controls::default()
+        .measured(ControlPlace::Page, BoxRect::new(400.0, 930.0, 600.0, 980.0))
+        .measured(ControlPlace::Zoom, BoxRect::new(700.0, 910.0, 900.0, 960.0));
+    let slack = LayoutMetrics::default().foot_slack;
 
-    assert_eq!(measured.page, Some((400.0, 600.0)), "the page pill's box");
-    assert_eq!(measured.zoom, Some((700.0, 900.0)), "and the zoom pill's");
-    assert_eq!(
-        measured.top,
-        Some(910.0),
-        "the taller pill is where the row really begins"
+    // Between the two pills, below both of their tops, and below the row's own line: this is the
+    // reading the old foot refused and a reader was right to expect ink from.
+    assert!(
+        !controls.ui_at((650.0, 950.0), slack),
+        "the gap between them"
+    );
+    assert!(!controls.ui_at((650.0, 1000.0), slack), "and below it");
+    assert!(
+        !controls.ui_at((1000.0, 950.0), slack),
+        "and the desk to the right of the zoom pill"
+    );
+}
+
+/// A window shrunk and grown again moves the boxes back down with the pills.
+///
+/// The old measurement kept the smallest `top` ever seen, so growing the window left the refused line
+/// where it had been in the smaller one — a band of dead paper across the middle of a desk with no
+/// control in it at all.
+#[test]
+fn a_reshaped_window_takes_its_old_boxes_with_it() {
+    let slack = LayoutMetrics::default().foot_slack;
+
+    // A short window: the pills sit high, at 400.
+    let small = Controls::default()
+        .measured(ControlPlace::Page, BoxRect::new(400.0, 400.0, 600.0, 450.0))
+        .measured(ControlPlace::Zoom, BoxRect::new(700.0, 400.0, 900.0, 450.0));
+    assert!(
+        small.ui_at((500.0, 420.0), slack),
+        "over the pill while small"
     );
 
-    let strips = measured.strips(LayoutMetrics::default().foot_slack);
-    assert_eq!(
-        strips.page,
-        Some((388.0, 612.0)),
-        "the strip is the box grown by the slack"
+    // The window grows: the pills are laid out again, lower down. The measurement is replaced, not
+    // accumulated, so the place they used to be is page again.
+    let large = small
+        .measured(ControlPlace::Page, BoxRect::new(400.0, 900.0, 600.0, 950.0))
+        .measured(ControlPlace::Zoom, BoxRect::new(700.0, 900.0, 900.0, 950.0));
+
+    assert!(
+        !large.ui_at((500.0, 420.0), slack),
+        "where the pill used to be is paper once it has moved"
     );
-    assert_eq!(strips.zoom, Some((688.0, 912.0)));
+    assert!(
+        !large.ui_at((300.0, 420.0), slack),
+        "and nothing spans the window at the old height"
+    );
+    assert!(
+        large.ui_at((500.0, 920.0), slack),
+        "the pill where it is now"
+    );
+}
+
+/// The column of a pill is its own: one pill's height does not decide the other's column.
+///
+/// The two pills are not aligned vertically (one is a line of buttons, the other a row of them), so a
+/// single "row begins here" line made the taller one govern the shorter one's column too.
+#[test]
+fn one_pills_height_does_not_decide_the_others_column() {
+    let slack = LayoutMetrics::default().foot_slack;
+    // The page pill is taller (900..980); the zoom pill is shorter (930..960).
+    let controls = Controls::default()
+        .measured(ControlPlace::Page, BoxRect::new(400.0, 900.0, 600.0, 980.0))
+        .measured(ControlPlace::Zoom, BoxRect::new(700.0, 930.0, 900.0, 960.0));
+
+    assert!(
+        controls.ui_at((500.0, 910.0), slack),
+        "over the page pill, which is the tall one"
+    );
+    assert!(
+        !controls.ui_at((650.0, 910.0), slack),
+        "but the gap at the taller pill's own height is paper"
+    );
+    assert!(
+        controls.ui_at((850.0, 955.0), slack),
+        "the zoom pill where it really is"
+    );
+    assert!(
+        !controls.ui_at((850.0, 990.0), slack),
+        "and below the shorter pill's own box is paper, though the taller pill still goes on"
+    );
 }
 
 /// The system pointer is the cursor over the bar and over the desk's pills; the ghost is the pen's
@@ -485,41 +556,54 @@ fn the_foot_takes_the_tallest_pill_as_its_line() {
 /// crossed. So this is asked per reading, and this test is the rule it asks.
 #[test]
 fn the_arrow_is_the_cursor_over_the_bar_and_the_pills() {
-    // A bar 100 tall, and a foot whose pills begin at 900: the page pill at 400..600 and the zoom pill
-    // at 700..900.
-    let (bar, foot) = (100.0, 900.0);
-    let strips = FootPills::default()
-        .measured(FootPlace::Page, 400.0, 600.0, 930.0)
-        .measured(FootPlace::Zoom, 700.0, 900.0, 910.0)
-        .strips(LayoutMetrics::default().foot_slack);
-    let shows = |x: f32, y: f32| pen_cursor_shows((x, y), bar, foot, strips);
+    // A bar 0..100, a page pill at 400..600 across and a zoom pill at 700..900, both 930..980 down,
+    // grown by the snapshot's slack.
+    let slack = LayoutMetrics::default().foot_slack;
+    let controls = Controls::default()
+        .measured(
+            ControlPlace::Toolbar,
+            BoxRect::new(300.0, 0.0, 700.0, 100.0),
+        )
+        .measured(ControlPlace::Page, BoxRect::new(400.0, 930.0, 600.0, 980.0))
+        .measured(ControlPlace::Zoom, BoxRect::new(700.0, 930.0, 900.0, 980.0));
+    let boxes = controls.boxes(slack);
+    let shows = |x: f32, y: f32| pen_cursor_shows((x, y), boxes);
 
     assert!(!shows(500.0, 50.0), "on the bar, the arrow is the cursor");
-    assert!(!shows(500.0, bar), "and on the bar's own last pixel");
-    assert!(shows(500.0, bar + 1.0), "one pixel below it is page again");
+    assert!(!shows(500.0, 100.0), "and on the bar's own last pixel");
+    assert!(shows(500.0, 101.0), "one pixel below it is page again");
 
     assert!(!shows(500.0, 950.0), "over the page pill, the arrow");
     assert!(!shows(800.0, 950.0), "over the zoom pill too");
     assert!(shows(650.0, 950.0), "and the desk between them is page");
 }
 
-/// The two edges answer on their own: a hidden bar has no line, and a foot nobody has measured refuses
+/// The controls answer on their own: a hidden bar is no box, and a foot nobody has measured refuses
 /// nothing.
 #[test]
 fn the_two_edges_answer_on_their_own() {
-    let none = FootStrips::default();
+    let none = ControlBoxes::default();
 
     assert!(
-        pen_cursor_shows((500.0, 500.0), 0.0, 0.0, none),
+        pen_cursor_shows((500.0, 500.0), none),
         "no bar and no pills leaves the page the ghost's"
     );
     assert!(
-        pen_cursor_shows((500.0, 990.0), 0.0, 900.0, none),
+        pen_cursor_shows((500.0, 990.0), none),
         "and an unmeasured foot refuses nothing"
     );
+
+    let bar_only = Controls::default()
+        .measured(ControlPlace::Toolbar, BoxRect::new(0.0, 0.0, 1000.0, 100.0))
+        .boxes(LayoutMetrics::default().foot_slack);
+
     assert!(
-        !pen_cursor_shows((500.0, 0.0), 0.0, 900.0, none),
-        "the window's top pixel is still the bar's line, which a hidden bar puts at zero"
+        !pen_cursor_shows((500.0, 0.0), bar_only),
+        "the window's top pixel belongs to the bar, and the bar is a box"
+    );
+    assert!(
+        pen_cursor_shows((500.0, 990.0), bar_only),
+        "while the desk below a bar with no pills measured is page"
     );
 }
 
@@ -527,50 +611,126 @@ fn the_two_edges_answer_on_their_own() {
 ///
 /// This is the failure that made the pen write on its own pills: a zero-size probe measured every pill at
 /// nothing, and an answer derived from a width then came out as the whole row. Reading the box itself
-/// means an empty measurement is an empty strip, which is the safe way round.
+/// means an empty measurement is an empty box, which is the safe way round.
 #[test]
 fn a_pill_laid_out_at_no_width_covers_only_its_own_point() {
-    let strips = FootPills::default()
-        .measured(FootPlace::Page, 626.0, 626.0, 752.0)
-        .measured(FootPlace::Zoom, 1013.0, 1013.0, 752.0)
-        .strips(LayoutMetrics::default().foot_slack);
+    let slack = LayoutMetrics::default().foot_slack;
+    let controls = Controls::default()
+        .measured(ControlPlace::Page, BoxRect::new(626.0, 752.0, 626.0, 752.0))
+        .measured(
+            ControlPlace::Zoom,
+            BoxRect::new(1013.0, 752.0, 1013.0, 752.0),
+        );
 
+    let boxes = controls.boxes(slack);
     assert_eq!(
-        (strips.page, strips.zoom),
-        (Some((614.0, 638.0)), Some((1001.0, 1025.0))),
+        (boxes.pills[0], boxes.pills[1]),
+        (
+            Some(BoxRect::new(614.0, 740.0, 638.0, 764.0)),
+            Some(BoxRect::new(1001.0, 740.0, 1025.0, 764.0)),
+        ),
         "an unmeasured pill is a point grown by the slack, not a strip across the desk"
     );
     assert!(
-        !strips.held((500.0, 950.0), 752.0),
+        !controls.ui_at((500.0, 950.0), slack),
         "so the desk beside it is still page"
     );
 }
 
-/// A probe's measurement has to *land*, one pill after the other.
+/// **The four strokes NEXT-STEP.md asks for**, asked of the ownership rule without a window.
 ///
-/// This is the bug the strips had on the first day: `row_width` answered a new value rather than mutating
-/// the receiver, the probe dropped the answer, and so `row` stayed `None` and no strip was ever derived —
-/// the pen wrote on its own pills and the ghost drew its mark over them, with no error anywhere. The
-/// builder is `#[must_use]` so a dropped answer is a warning rather than silence, and each probe now
-/// records the pill it measured rather than a piece of a geometry to be reassembled.
+/// Each row is one of the reported cases: a tap on a control, writing where a control is *not*, a hand
+/// that starts on a control and slides onto the paper, and a line that starts on the paper and lifts over
+/// a control. The rule that satisfies all four is one decision per stroke, made on the `Down`.
 #[test]
-fn the_two_pills_measure_themselves_one_after_the_other() {
-    let mut measured = FootPills::default();
+fn a_stroke_belongs_to_whatever_the_nib_came_down_on() {
+    use crate::input::Phase;
 
-    measured = measured.measured(FootPlace::Page, 400.0, 600.0, 930.0);
-    assert!(
-        measured
-            .strips(LayoutMetrics::default().foot_slack)
-            .page
-            .is_some(),
-        "one pill is enough for a strip"
+    let reading = |phase: Phase| Reading {
+        phase,
+        id: 1,
+        pixel: crate::input::Point { x: 0.0, y: 0.0 },
+        pressure: None,
+        tilt: None,
+        inverted: false,
+        eraser: false,
+        at_us: 0,
+        delay_ms: 0,
+    };
+    // A control covers nothing here except where the test says; `is_ui` is the whole of "is it the
+    // interface's" for these cases, keyed on the pointer id so one batch can mix the two.
+    let is_ui = |reading: &Reading| reading.id == 2;
+    let down_ui = reading(Phase::Down);
+    let down_ui = Reading { id: 2, ..down_ui };
+    let move_ = reading(Phase::Move);
+    let up = reading(Phase::Up);
+
+    // 1. `Down → Up` on a control: the control owns it, and nothing is left remembered.
+    let (owner, after) = nib_owner(&[down_ui, up], None, is_ui);
+    assert_eq!(owner, NibOwner::Control, "a tap on a pill is the pill's");
+    assert_eq!(
+        after, None,
+        "and the stroke is over, so nothing is remembered"
     );
 
-    measured = measured.measured(FootPlace::Zoom, 700.0, 900.0, 910.0);
+    // 2. `Down` on the paper: the page owns it, and keeps owning it when the nib keeps moving.
+    let (owner, remembered) = nib_owner(&[reading(Phase::Down)], None, is_ui);
+    assert_eq!(owner, NibOwner::Page, "a press on the paper is ink's");
+    let (owner, _) = nib_owner(&[move_], remembered, is_ui);
+    assert_eq!(owner, NibOwner::Page, "and so is the rest of that stroke");
 
-    let strips = measured.strips(LayoutMetrics::default().foot_slack);
-    assert!(strips.page.is_some(), "the page pill's strip");
-    assert!(strips.zoom.is_some(), "and the zoom pill's");
+    // 3. Down on a control, then onto the paper: the control keeps it. Nothing is drawn by a hand that
+    //    began on a button and slid off it.
+    let (owner, remembered) = nib_owner(&[down_ui], None, is_ui);
+    assert_eq!(owner, NibOwner::Control);
+    let (owner, _) = nib_owner(&[move_], remembered, is_ui);
+    assert_eq!(
+        owner,
+        NibOwner::Control,
+        "a stroke that began on a pill does not become a line when it slides off"
+    );
+
+    // 4. Down on the paper, then the `Up` lands over a control: the page keeps the stroke, so the `Up`
+    //    is delivered and the line is closed where it ended.
+    let up_on_ui = Reading { id: 2, ..up };
+    let (owner, remembered) = nib_owner(&[reading(Phase::Down)], None, is_ui);
+    assert_eq!(owner, NibOwner::Page);
+    let (owner, after) = nib_owner(&[up_on_ui], remembered, is_ui);
+    assert_eq!(
+        owner,
+        NibOwner::Page,
+        "a line that began on the paper owns its own `Up`, even over a pill"
+    );
+    assert_eq!(after, None, "and the stroke is finished");
+}
+
+/// A probe's measurement has to *land*, one pill after the other, and replace rather than accumulate.
+///
+/// This is the bug the strips had on the first day: `row_width` answered a new value rather than mutating
+/// the receiver, the probe dropped the answer, and so no strip was ever derived — the pen wrote on its
+/// own pills with no error anywhere. The builder is `#[must_use]` so a dropped answer is a warning rather
+/// than silence, and each probe now records the pill it measured rather than a piece of a geometry to be
+/// reassembled.
+#[test]
+fn the_two_pills_measure_themselves_one_after_the_other() {
+    let slack = LayoutMetrics::default().foot_slack;
+    let mut controls = Controls::default();
+
+    controls = controls.measured(ControlPlace::Page, BoxRect::new(400.0, 930.0, 600.0, 980.0));
+    assert!(controls.page_pill.is_some(), "one pill is enough for a box");
+    assert!(
+        controls.zoom_pill.is_none(),
+        "and says nothing about the other"
+    );
+
+    controls = controls.measured(ControlPlace::Zoom, BoxRect::new(700.0, 910.0, 900.0, 960.0));
+
+    assert!(controls.page_pill.is_some(), "the page pill's box");
+    assert!(controls.zoom_pill.is_some(), "and the zoom pill's");
+    assert!(
+        controls.ui_at((500.0, 950.0), slack) && controls.ui_at((800.0, 930.0), slack),
+        "and both refuse the pen where they are drawn"
+    );
 }
 
 /// A page is written out again when an append cannot say what happened to it.
@@ -1129,15 +1289,19 @@ fn the_views_estimates_follow_the_layout_step() {
             step.percent()
         );
 
-        let strips = FootPills::default()
-            .measured(FootPlace::Page, 400.0, 600.0, 900.0)
-            .strips(metrics.foot_slack);
+        let controls = Controls::default()
+            .measured(ControlPlace::Page, BoxRect::new(400.0, 900.0, 600.0, 950.0));
         let slack = window_px(metrics.foot_slack);
 
         assert_eq!(
-            strips.page,
-            Some((400.0 - slack, 600.0 + slack)),
-            "the pill's slack at {}%",
+            controls.boxes(metrics.foot_slack).pills[0],
+            Some(BoxRect::new(
+                400.0 - slack,
+                900.0 - slack,
+                600.0 + slack,
+                950.0 + slack
+            )),
+            "the pill's slack on all four sides at {}%",
             step.percent()
         );
     }

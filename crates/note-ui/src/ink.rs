@@ -160,14 +160,13 @@ pub struct InkTransform {
     /// the one question this model asks of every reading: is it *on the page the user is writing
     /// on* — and the top of the page behind a bar is not somewhere a nib can write.
     pub bar: f32,
-    /// Where the desk's own row begins: the top of the strip at the window's foot that the page pill
-    /// and the zoom pill float in, in window logical pixels. Everything below it is *in front of* the
-    /// sheet for the same reason the bar is — those are controls, pressed with the pen — and a reading
-    /// there is a press rather than a line. `0.0` means "no such strip", which is a window too short
-    /// to have one or a frame that has not measured the row yet.
+    /// Where the desk's own row begins: the top of the pills the page and zoom pill float in, in window
+    /// logical pixels.
     ///
-    /// Symmetric with [`Self::bar`] in every way that matters: one line at each edge, both the window's
-    /// rather than the sheet's, and [`Self::on_bar`] refuses a reading in either of them.
+    /// **Nothing is refused below this line any more.** It is carried because the transform is the
+    /// window's geometry and the ghost publishes it as the end of its paint band — but the paper between
+    /// the two pills is paper, and the boxes that are controls are the app's own measurement
+    /// (`NoteApp::ui_at`). A line here would refuse the gap as well; that was the bug.
     pub foot: f32,
     /// How far the page has been turned, in quarter turns clockwise.
     ///
@@ -311,18 +310,19 @@ impl InkTransform {
     }
 
     /// Whether a point of the window's **logical** pixels is on the interface rather than on the page:
-    /// above [`Self::bar`], or below [`Self::foot`].
+    /// above [`Self::bar`].
     ///
-    /// The line version of [`Self::on_bar`], and the one the app asks: it has already converted the
-    /// reading through [`crate::paint::logical`] — because it needs the logical point for its own
-    /// reason, to know whether a pill is under the nib — and dividing a second time here would be the
-    /// same arithmetic answered twice.
+    /// This is the bar's line, and only the bar's. It used to be two lines — the bar's and the desk's row
+    /// at the foot — but the foot is not a line: the two pills float in a full-width row, and refusing
+    /// every reading below the row's top refused the paper between them too. The pills are two
+    /// rectangles, and a rectangle is asked by the frame that measured it (`NoteApp::ui_at`), so the
+    /// model is left with the one control that really is a line across the window.
     ///
-    /// A line of no height refuses nothing. A point exactly on one is the interface's: the line is the
+    /// A line of no height refuses nothing. A point exactly on it is the interface's: the line is the
     /// bar's last pixel, and a pixel of ink behind a button is a dot the user never saw themselves
     /// write.
     pub fn in_interface(&self, y: f32) -> bool {
-        (self.bar > 0.0 && y <= self.bar) || (self.foot > 0.0 && y >= self.foot)
+        self.bar > 0.0 && y <= self.bar
     }
 
     /// Whether a reading, at a vertical position in **physical client** pixels, landed on the
@@ -982,7 +982,10 @@ impl InkDocument {
 
         let mut end = 0;
         while end < shared - start
-            && Arc::ptr_eq(&before[before.len() - 1 - end], &after[after.len() - 1 - end])
+            && Arc::ptr_eq(
+                &before[before.len() - 1 - end],
+                &after[after.len() - 1 - end],
+            )
         {
             end += 1;
         }
@@ -990,7 +993,12 @@ impl InkDocument {
         let mut changes = Vec::new();
 
         // What left: from the page it was on, box and all.
-        for (index, stroke) in before.iter().enumerate().take(before.len() - end).skip(start) {
+        for (index, stroke) in before
+            .iter()
+            .enumerate()
+            .take(before.len() - end)
+            .skip(start)
+        {
             changes.push(InkChange::Remove {
                 id: StrokeId::of(stroke),
                 at: index,
@@ -1235,10 +1243,17 @@ impl InkDocument {
     /// the sheet's zoom, where the sheet is drawn, and how large the paper is. All of them are
     /// applied here, once, so that nothing downstream has to know about any of them — the ink, the
     /// eraser and the geometry all work in the sheet's own coordinates, and everything they produce
-    /// is *on the paper*, because a reading that is not on it is not ink. The interface over the paper
-    /// counts as part of that same question, one layer nearer the eye: a reading that lands on the bar
-    /// at the top of the window, or on the desk's own row at its foot, is a press on a control (see
-    /// [`InkTransform::on_bar`]).
+    /// is *on the paper*, because a reading that is not on it is not ink.
+    ///
+    /// **Who owns the nib is not decided here.** A press on a control — the bar at the top of the window,
+    /// a pill at its foot — never reaches this function: the app decides once, on the `Down`, and either
+    /// keeps the whole stroke or passes none of it (see `NoteApp::consume_ink`). The model used to refuse
+    /// a `Down` above [`InkTransform::bar`] and below [`InkTransform::foot`] as well, which was a second
+    /// copy of the rule: the foot's copy refused **every** reading below the row whatever its `x`, so the
+    /// paper between the two pills could not be written on.
+    ///
+    /// `scale` is not used to refuse anything: a press on a control is the app's decision, made before a
+    /// batch reaches this function (see the note above).
     ///
     /// Returns whether anything changed, which is what the caller uses to decide whether a
     /// repaint is worth scheduling.
@@ -1274,18 +1289,19 @@ impl InkDocument {
                     self.lasso = None;
 
                     if transform.on_bar(sample.pixel.y) {
-                        // A nib that comes down on the bar — or on the page and zoom pills at the foot
-                        // of the window — opens nothing either: both are in front of the page and their
-                        // controls are pressed *with the pen*, so the reading is a press on a control
-                        // and not a line. A tap that opened a stroke here would leave a dot on the page
-                        // behind a pill — ink the user never saw themselves write, saved with the note
-                        // and hidden there until the pill was moved. Nothing opens, so the readings that
-                        // follow the `Down` have no stroke to extend: a tap on a pill leaves the page
-                        // exactly as it was.
+                        // A nib that comes down on the bar opens nothing: the bar floats in front of the
+                        // page and its controls are pressed *with the pen*, so the reading is a press and
+                        // not a line. A tap that opened a stroke here would leave a dot on the page behind
+                        // the bar — ink the user never saw themselves write, saved with the note.
                         //
-                        // Only the `Down` is refused. A line that began on the page and ran up behind
-                        // the bar keeps the ink it has, for the reason the paper's own edge is a clamp
-                        // rather than a cut: the user cannot see the line a cut would be made on.
+                        // This is the bar's own bottom edge, and only the bar's: the pills at the foot of
+                        // the window are not a line but two boxes, and a box is the app's to ask (see
+                        // `NoteApp::ui_at`). Refusing a *line* across the foot as well is what made the
+                        // paper between the two pills unwritable.
+                        //
+                        // Only the `Down` is refused. A line that began on the page and ran up behind the
+                        // bar keeps the ink it has, for the reason the paper's own edge is a clamp rather
+                        // than a cut: the user cannot see the line a cut would be made on.
                     } else if !on_paper {
                         // Clipping cannot help a nib that comes down on the desk: there is no line
                         // to clip yet, and starting one would put a dot on the nearest edge of the

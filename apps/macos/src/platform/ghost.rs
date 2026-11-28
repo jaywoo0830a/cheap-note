@@ -69,26 +69,20 @@ impl Ghost {
             return None;
         }
 
-        // The lines are in physical pixels and a cursor is measured in logical ones: above the bar's
-        // edge is a place the pen presses rather than writes, and so is a page or zoom pill at the foot
-        // of the window. Beside those pills is desk, and the ghost is the pen's there as it is
-        // everywhere else — the row is full-width and the pills do not fill it.
+        // The controls are boxes in physical pixels and a cursor is measured in logical ones: over the
+        // bar, or over either pill at the foot of the window, the system pointer is the cursor and the
+        // ghost is not drawn. Beside a pill is desk — the row is full-width and the pills do not fill it
+        // — so the box each pill reported is what decides, not a line across the window. This is the same
+        // answer the ink gives for the nib (see `note_ui::app`, `Controls::ui_at`).
         let scale = note_ui::paint::finite_or_one(screen.scale);
         let at = cursor.position();
         let (x, y) = (at[0], at[1]);
-        if y <= screen.sheet_top / scale {
-            return None;
-        }
 
-        let over = |strip: Option<(f32, f32)>| {
-            strip.is_some_and(|(left, right)| {
-                let (left, right) = (left / scale, right / scale);
-                (left..=right).contains(&x)
-            })
+        let inside = |box_: Option<note_ui::platform::ControlRect>| {
+            box_.is_some_and(|box_| box_.contains((x * scale, y * scale)))
         };
-        if y >= screen.sheet_bottom / scale
-            && (over(screen.pill_strips.0) || over(screen.pill_strips.1))
-        {
+
+        if inside(screen.controls.toolbar) || screen.controls.pills.iter().copied().any(inside) {
             return None;
         }
 

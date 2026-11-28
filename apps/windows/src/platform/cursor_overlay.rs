@@ -65,7 +65,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use note_ui::input::Reading;
-use note_ui::platform::Screen;
+use note_ui::platform::{ControlRect, ControlRects, Screen};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
@@ -196,9 +196,14 @@ pub struct CursorShape {
     pub nib_radius: f32,
     /// The line the ghost is drawn below, in physical client pixels.
     pub sheet_top: f32,
-    /// The line the ghost is drawn above, in physical client pixels: where the desk's own row — the page
-    /// and zoom pills — begins, so a body leaning down ends under the controls rather than over them.
-    pub sheet_bottom: f32,
+    /// The boxes drawn over the sheet, in physical client pixels: the bar's, and the two pills at the desk's
+    /// foot.
+    ///
+    /// Each carries its own four edges, so the ghost asks the same question the ink does — *is the nib
+    /// inside a control's rectangle* — rather than "is the nib below one line and between two others". The
+    /// shared line refused the paper between the pills and left a band of dead desk behind after a window
+    /// was resized.
+    pub controls: ControlRects,
 }
 
 /// The side of the overlay's window for a scale factor, in physical pixels: twice [`REACH`], so the
@@ -705,19 +710,14 @@ struct Pending {
 /// It answers the reading as well as the shape because the drawing still needs the pen's own
 /// position: the shape is in logical pixels, and the surface it is drawn on is in physical ones.
 fn cursor_for(sample: Reading, screen: &Screen) -> Option<(Reading, CursorShape)> {
-    if screen.suppressed || sample.pixel.y <= screen.sheet_top {
+    if screen.suppressed {
         return None;
     }
 
-    // The pills at the foot of the window are pressed with the pen, so a reading over one has no
-    // ghost — while the desk beside them is page, and has one. The strips are in physical pixels like
-    // the reading, which is why nothing is scaled here.
-    let over = |strip: Option<(f32, f32)>| {
-        strip.is_some_and(|(left, right)| (left..=right).contains(&sample.pixel.x))
-    };
-    if sample.pixel.y >= screen.sheet_bottom
-        && (over(screen.pill_strips.0) || over(screen.pill_strips.1))
-    {
+    // The controls are boxes in physical pixels, like the reading: over the bar or over a pill at the foot
+    // of the window there is no ghost, and beside them — the paper between the two pills — there is. The
+    // same answer the ink gives for the nib (see `note_ui::app`, `Controls::ui_at`).
+    if screen.controls.held((sample.pixel.x, sample.pixel.y)) {
         return None;
     }
 
@@ -730,7 +730,7 @@ fn cursor_for(sample: Reading, screen: &Screen) -> Option<(Reading, CursorShape)
         halo: screen.halo,
         nib_radius: screen.nib_radius,
         sheet_top: screen.sheet_top,
-        sheet_bottom: screen.sheet_bottom,
+        controls: screen.controls,
     };
 
     Some((sample, shape))
@@ -1017,11 +1017,20 @@ impl Overlay {
         let origin = window_origin(nib_screen, span);
         let nib = nib_offset(nib_screen, origin);
 
-        // The band is the two lines in this surface's coordinates: the bar's bottom edge and the top of
-        // the desk's own row, both measured from the nib, which is where the drawing starts from.
+        // The band is what the surface may paint in: below the bar's bottom edge, and above the top of the
+        // desk's own row, both measured from the nib, which is where the drawing starts from. These are
+        // *drawing* limits — the ghost must not lean into a control — so one row's top is enough, and the
+        // pen itself is refused by the boxes ([`ControlRects`]).
+        let foot = shape
+            .controls
+            .pills
+            .iter()
+            .flatten()
+            .map(|pill| pill.top)
+            .fold(f32::INFINITY, f32::min);
         let band = Band {
             top: nib[1] + (shape.sheet_top - sample.pixel.y),
-            bottom: nib[1] + (shape.sheet_bottom - sample.pixel.y),
+            bottom: nib[1] + (foot - sample.pixel.y),
         };
 
         self.surface.clear();
@@ -1268,8 +1277,7 @@ mod tests {
             halo: 0x00_00_00,
             nib_radius: note_ui::cursor::nib_radius_for_width(4.5),
             sheet_top: 0.0,
-            sheet_bottom: 10_000.0,
-            pill_strips: (None, None),
+            controls: ControlRects::default(),
             suppressed: false,
         }
     }
@@ -1627,7 +1635,15 @@ mod tests {
         assert!(
             hidden(
                 Screen {
-                    sheet_top: 320.0,
+                    controls: ControlRects {
+                        toolbar: Some(ControlRect {
+                            left: 0.0,
+                            top: 300.0,
+                            right: 800.0,
+                            bottom: 320.0,
+                        }),
+                        ..ControlRects::default()
+                    },
                     ..screen()
                 },
                 Phase::Hover
@@ -1637,8 +1653,18 @@ mod tests {
         assert!(
             hidden(
                 Screen {
-                    sheet_bottom: 200.0,
-                    pill_strips: (Some((60.0, 140.0)), None),
+                    controls: ControlRects {
+                        pills: [
+                            Some(ControlRect {
+                                left: 60.0,
+                                top: 200.0,
+                                right: 140.0,
+                                bottom: 240.0,
+                            }),
+                            None,
+                        ],
+                        ..ControlRects::default()
+                    },
                     ..screen()
                 },
                 Phase::Hover
@@ -1648,8 +1674,18 @@ mod tests {
         assert!(
             !hidden(
                 Screen {
-                    sheet_bottom: 200.0,
-                    pill_strips: (Some((300.0, 400.0)), None),
+                    controls: ControlRects {
+                        pills: [
+                            Some(ControlRect {
+                                left: 300.0,
+                                top: 200.0,
+                                right: 400.0,
+                                bottom: 240.0,
+                            }),
+                            None,
+                        ],
+                        ..ControlRects::default()
+                    },
                     ..screen()
                 },
                 Phase::Hover

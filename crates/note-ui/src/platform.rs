@@ -108,28 +108,66 @@ pub struct Screen {
     /// The line the ghost is drawn above, in physical client pixels: where the desk's own row begins —
     /// the page and zoom pills at the foot of the window (`NoteApp::foot_edge`).
     ///
-    /// The same line, from the other end, for the same three consumers: the row is a control the pen
-    /// presses, so a ghost drawn over it would be a cursor pointing at a pill the pen cannot write on.
-    /// `0.0` means the same thing for both lines — nothing has been measured yet — which draws no ghost
-    /// above the bar and none below the pills.
+    /// A **drawing** line, not a refusal: the ghost paints in a band between this line and `sheet_top`,
+    /// and a band needs one row rather than two boxes. Whether the pen may write at a point is
+    /// [`Self::controls`]' answer, which is exact.
     pub sheet_bottom: f32,
-    /// The strips at the foot the ghost is not drawn over: the page pill's, and the zoom pill's, as `x`
-    /// bounds in physical client pixels.
+    /// The boxes drawn over the sheet, in physical client pixels: the bar's, and the two pills at the
+    /// desk's foot.
     ///
-    /// The row is full-width and the pills float in it, so only the part each pill covers is a press —
-    /// the desk beside them is still page, and the ghost belongs there. `None` until the pills have been
-    /// measured, and then `sheet_bottom` keeps the ghost off the whole row for the frame it takes to
-    /// measure them, which is the safe side of the same rule.
-    pub pill_strips: PillStrips,
+    /// Each carries its own four edges, so the ghost asks the same question the ink does — *is the nib
+    /// inside a control's rectangle* — rather than "is the nib below one line and between two others".
+    /// That difference is the window-mode bug: a shared line refused the paper between the pills, and a
+    /// line remembered from a smaller window refused a band across the middle of the desk.
+    ///
+    /// `None` while a control has not been measured, and then nothing is refused for it — which is the
+    /// safe side, because a frame that has not drawn a control has not drawn its ghost either.
+    pub controls: ControlRects,
     /// Whether there is nothing to draw a ghost for on this screen.
     pub suppressed: bool,
 }
 
-/// One strip of the window's foot, as `x` bounds in the window's own pixels.
-pub type Strip = (f32, f32);
+/// One control's box, in the window's own pixels (see [`Screen::controls`]).
+///
+/// Named edges, like the app's own [`Rect`], because the two are converted from one to the other and a
+/// tuple would have to be read by position twice.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ControlRect {
+    /// The left edge.
+    pub left: f32,
+    /// The top edge.
+    pub top: f32,
+    /// The right edge.
+    pub right: f32,
+    /// The bottom edge.
+    pub bottom: f32,
+}
 
-/// The strips at the foot of the window: the page pill's, and the zoom pill's (see [`Screen::pill_strips`]).
-pub type PillStrips = (Option<Strip>, Option<Strip>);
+impl ControlRect {
+    /// Whether a point in the same pixels is inside this box, its edges included.
+    #[must_use]
+    pub fn contains(&self, (x, y): (f32, f32)) -> bool {
+        (self.left..=self.right).contains(&x) && (self.top..=self.bottom).contains(&y)
+    }
+}
+
+/// Every control drawn over the sheet (see [`Screen::controls`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ControlRects {
+    /// The floating bar's box, `None` while the bar is hidden.
+    pub toolbar: Option<ControlRect>,
+    /// The page pill's, then the zoom pill's.
+    pub pills: [Option<ControlRect>; 2],
+}
+
+impl ControlRects {
+    /// Whether a point in the window's own pixels is over a control rather than the page.
+    #[must_use]
+    pub fn held(&self, at: (f32, f32)) -> bool {
+        self.toolbar.is_some_and(|bar| bar.contains(at))
+            || self.pills.iter().flatten().any(|pill| pill.contains(at))
+    }
+}
 
 impl Default for Screen {
     /// The state before the first frame has said anything: no ghost, which is the honest answer for a
@@ -144,7 +182,7 @@ impl Default for Screen {
             nib_radius: crate::cursor::NIB_RADIUS_MIN,
             sheet_top: 0.0,
             sheet_bottom: 0.0,
-            pill_strips: (None, None),
+            controls: ControlRects::default(),
             suppressed: true,
         }
     }

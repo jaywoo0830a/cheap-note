@@ -533,17 +533,18 @@ impl Sheet {
 
     /// Where a reading in physical client pixels lands on the sheet.
     ///
-    /// `bar` is where the interface ends at the top of the window and `foot` where it begins at the
-    /// bottom: both are lines the window draws, not the sheet, and a reading on either side of them is a
-    /// press on a control rather than ink (see [`InkTransform::on_bar`]).
-    fn transform(&self, scale: f32, bar: f32, foot: f32) -> InkTransform {
+    /// `bar` is where the interface ends at the top of the window: it is a line the window draws, not
+    /// the sheet, and a reading above it is a press on a control rather than ink (see
+    /// [`InkTransform::on_bar`]). The desk's foot is deliberately **not** here: the page and zoom pills
+    /// are boxes, asked by [`NoteApp::ui_at`], and a line across the row refused the paper between them
+    /// (see [`Self::visible`] for the transform a caller with no bar wants).
+    fn transform(&self, scale: f32, bar: f32) -> InkTransform {
         InkTransform {
             scale,
             zoom: self.zoom,
             origin: self.origin,
             paper: self.ink_paper(),
             bar,
-            foot,
             rotation: self.rotation,
         }
     }
@@ -560,7 +561,7 @@ impl Sheet {
     /// — with the DPI scale set to one, because the window's own size is already logical. Composing the
     /// two steps here instead was a second copy of the arithmetic that decides which way up a page is.
     fn visible(&self) -> crate::ink::Bounds {
-        let window = self.transform(1.0, 0.0, 0.0);
+        let window = self.transform(1.0, 0.0);
 
         let corners = [
             window.sheet_point((0.0, 0.0)),
@@ -581,12 +582,15 @@ impl Sheet {
 ///
 /// Each is **overwritten** by every frame that lays it out, and is `None` while the control is not drawn.
 /// Nothing is derived from them — they are where a control *is* — so the region the pen is refused in is
-/// the control's own box, rather than a line worked out again from a width and a margin.
+/// the control's own box, rather than a line worked out again from a width and a margin. This is the
+/// only record of that: [`Self::boxes`] is what the ink, the pen's gestures and the ghost's rule ask, so
+/// there is no second set of rectangles to disagree with these.
 ///
 /// One shared *line* across the window was the bug this replaces. The foot's two pills were measured with
 /// the smallest `top` ever seen, and the ink model then refused every reading below that line whatever
 /// its `x`: a window shrunk and grown again left the line behind where the pills used to be, and the
-/// paper between the pills was refused along with them.
+/// paper between the pills was refused along with them. The line, and the `foot` the transform carried
+/// for it, are gone; what replaced them is this box and the one question asked of it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Controls {
     /// The bar's own box, `None` while the bar is hidden or before it has been measured.
@@ -614,35 +618,17 @@ impl Controls {
         self
     }
 
-    /// The box recorded for a control, if the frame drew it.
-    #[must_use]
-    fn box_of(&self, place: ControlPlace) -> Option<BoxRect> {
-        match place {
-            ControlPlace::Toolbar => self.toolbar,
-            ControlPlace::Page => self.page_pill,
-            ControlPlace::Zoom => self.zoom_pill,
-        }
-    }
-
-    /// Whether a point in window logical pixels is over a control rather than the page.
-    ///
-    /// The one answer to that question — the ink, the ghost cursor and the pen's gestures all ask it —
-    /// so a nib can never be writing where its cursor says it is pressing. The pills are grown by
-    /// `slack`; the bar is not, because its edge is already placed by a margin and a reader writing just
-    /// under the bar meant to.
-    #[must_use]
-    fn ui_at(&self, at: (f32, f32), slack: LayoutPx) -> bool {
-        self.toolbar.is_some_and(|bar| bar.contains(at))
-            || [self.page_pill, self.zoom_pill]
-                .into_iter()
-                .flatten()
-                .any(|pill| pill.grown(slack).contains(at))
-    }
-
     /// Every box drawn over the sheet, with the pills grown by `slack`.
     ///
-    /// The ghost cursor draws in a window of its own, on the pen's thread, and cannot ask the app
-    /// anything: it is handed the boxes as they were measured instead.
+    /// The frame's own answer to "where is a control", and the only one: the ink
+    /// ([`NoteApp::ui_at`]), the pen's gestures and the ghost's rule ([`pen_cursor_shows`]) all ask
+    /// [`ControlBoxes::held`] of this, and a platform that draws in a window of its own is handed the
+    /// same boxes (see [`NoteApp::publish_screen`]).
+    ///
+    /// One conversion rather than two was the point. The ink used to ask [`BoxRect::contains`] of the
+    /// toolbar and [`BoxRect::grown`] of the pills while the cursor composed its own set, so the two
+    /// answers were adjacent code — and the next change to a pill's slack could have reached one and
+    /// missed the other, leaving a nib writing where its cursor says it is pressing.
     #[must_use]
     fn boxes(&self, slack: LayoutPx) -> ControlBoxes {
         ControlBoxes {
@@ -652,27 +638,6 @@ impl Controls {
                 self.zoom_pill.map(|pill| pill.grown(slack)),
             ],
         }
-    }
-
-    /// The top of the bottom row of pills, in window logical pixels — or `estimate` until a frame has
-    /// measured one.
-    ///
-    /// This is a *drawing* number, not a refusal: the ghost's paint band ends where the pills begin, so
-    /// the band needs one row rather than two boxes. The pen is refused by [`Self::ui_at`], which is
-    /// exact, so an estimate that is a little too high costs a few pixels of ghost and no ink.
-    #[must_use]
-    fn foot_line(&self, estimate: LayoutPx) -> f32 {
-        self.pills()
-            .map(|pill| pill.top)
-            .fold(Option::<f32>::None, |line, top| {
-                Some(line.map_or(top, |line: f32| line.min(top)))
-            })
-            .unwrap_or_else(|| window_px(estimate))
-    }
-
-    /// The two pills the frame drew, in order.
-    fn pills(&self) -> impl Iterator<Item = BoxRect> {
-        [self.page_pill, self.zoom_pill].into_iter().flatten()
     }
 }
 
@@ -750,7 +715,13 @@ struct ControlBoxes {
 }
 
 impl ControlBoxes {
-    /// Whether a point in window logical pixels is over one of these boxes.
+    /// Whether a point in window logical pixels is over a control rather than the page.
+    ///
+    /// The one answer to that question — the ink, the pen's gestures, the ghost cursor and the system
+    /// pointer all ask it, through [`NoteApp::ui_at`] and [`pen_cursor_shows`] — so a nib can never be
+    /// writing where its cursor says it is pressing. The pills arrive already grown by the frame's slack;
+    /// the bar is not grown, because its edge is already placed by a margin and a reader writing just
+    /// under the bar meant to.
     #[must_use]
     fn held(&self, at: (f32, f32)) -> bool {
         self.toolbar.is_some_and(|bar| bar.contains(at))
@@ -2277,23 +2248,14 @@ impl NoteApp {
         window_px(self.metrics.bar_margin)
     }
 
-    /// Where the desk's own row begins, in window logical pixels, as the last frame laid the pills
-    /// out — or the snapshot's [`LayoutMetrics::foot_band`] until a frame has measured one.
-    ///
-    /// This is a **drawing** number now, not a refusal: it is where the ghost's paint band stops. The pen
-    /// is refused by the boxes themselves ([`Controls::ui_at`]), which is why a stale line can no longer
-    /// cost a reader any paper. The pills differ in height (the page's is a line of buttons, the zoom's a
-    /// row of them), so the *taller* one's top is the row's.
-    fn foot_edge(&self) -> f32 {
-        self.controls.get().foot_line(self.metrics.foot_band)
-    }
-
     /// Whether a point in window logical pixels belongs to a control rather than to the page.
     ///
     /// The one answer the ink, the ghost cursor and the pen's gestures ask, so a nib cannot be writing
-    /// where its own cursor is showing the arrow.
+    /// where its own cursor is showing the arrow. It is the frame's own boxes ([`Controls::boxes`]) and
+    /// [`ControlBoxes::held`], which is also what [`pen_cursor_shows`] asks — one judgement, so a change
+    /// to a control's slack cannot reach the cursor and miss the ink.
     fn ui_at(&self, at: (f32, f32)) -> bool {
-        self.controls.get().ui_at(at, self.metrics.foot_slack)
+        self.controls.get().boxes(self.metrics.foot_slack).held(at)
     }
 
     /// Whether a reading, in physical client pixels, is a press on a control rather than ink.
@@ -2375,9 +2337,7 @@ impl NoteApp {
             return false;
         }
 
-        let transform = self
-            .sheet
-            .transform(self.scale, self.bar_edge(), self.foot_edge());
+        let transform = self.sheet.transform(self.scale, self.bar_edge());
 
         // Who owns the nib for this batch, decided once: a batch that begins a stroke is either a press
         // on a control or a line on the page, and it stays that until the stroke ends.
@@ -3478,19 +3438,15 @@ impl NoteApp {
         // Below the bar's own edge — the measured one, and a bar that is hidden has no edge at all, so
         // the strip its switch sat in is page again (see [`Self::bar_edge`]). The ghost's line is the
         // same one; a pointer that followed a different line would leave the arrow under a ghost, or a
-        // ghost under the arrow. And not over a pill at the foot of the window: the page and zoom pills
-        // are controls the pen presses, so the arrow is the cursor there — beside them is desk, and the
-        // ghost is the pen's there as it is everywhere else on the page. The rule itself is
-        // [`pen_cursor_shows`], which is what a test can ask without a window.
-        // Over a control the arrow is the cursor — the bar, or either pill at the desk's foot — and
-        // everywhere else on the page the ghost is the pen's. The boxes are the ones the frame measured,
-        // so this is the same answer the ink gives when the nib comes down (see [`Self::ui_at`]), and a
-        // stale line can no longer leave the arrow over paper a stroke can be drawn on.
-        let boxes = self.controls.get().boxes(self.metrics.foot_slack);
+        // ghost under the arrow. And not over a control: the bar, or either pill at the desk's foot. The
+        // rule itself is [`pen_cursor_shows`], asked of the frame's own boxes — the same boxes
+        // [`Self::ui_at`] refuses the ink in — so a nib can never be writing where its cursor says it is
+        // pressing. It is a free function because a test can ask it without a window.
+        let controls = self.controls.get();
 
         self.pen_cursor().is_some_and(|cursor| {
             let at = cursor.position();
-            pen_cursor_shows((at[0], at[1]), boxes)
+            pen_cursor_shows((at[0], at[1]), controls, self.metrics.foot_slack)
         })
     }
 
@@ -3519,26 +3475,17 @@ impl NoteApp {
             // pixels. One line, three consumers — the ghost that is drawn below it, the ink that is
             // refused above it, and the system pointer that is the cursor there.
             sheet_top: self.bar_edge() * self.scale,
-            // And the line at the other end: the desk's own row, where the page and zoom pills float.
-            // A reading below it is a press on a pill, so the ghost is not drawn there and the system
-            // pointer is the cursor (see [`Self::foot_edge`]).
-            sheet_bottom: self.foot_edge() * self.scale,
             // The boxes drawn over the page, each with its own four edges, in physical pixels: the bar's,
             // the page pill's and the zoom pill's. The ghost draws everywhere else — the paper between
-            // the pills included — which is the same answer the ink gives (see [`Self::ui_at`]).
-            //
-            // `sheet_bottom` is still published beside them because the ghost's *paint band* stops at one
-            // row: it is a drawing line, not a refusal.
+            // the pills included — which is the same answer the ink gives (see [`Self::ui_at`]). There is
+            // no line at the foot beside them: a band stops where the pills begin, and a line would say
+            // the whole row is a control, which is what made the gap between the two unwritable.
             controls: {
                 let boxes = self.controls.get().boxes(self.metrics.foot_slack);
                 let at = |box_: Option<BoxRect>| box_.map(|box_| scale_rect(box_, self.scale));
 
                 ControlRects {
-                    toolbar: self
-                        .controls
-                        .get()
-                        .box_of(ControlPlace::Toolbar)
-                        .map(|bar| scale_rect(bar, self.scale)),
+                    toolbar: at(boxes.toolbar),
                     pills: [at(boxes.pills[0]), at(boxes.pills[1])],
                 }
             },
@@ -5921,27 +5868,18 @@ impl NoteApp {
     /// `task_info` call, and the numbers must not move on their own — a memory figure that changed
     /// every time an unrelated switch was thrown would be a figure nobody could read.
     ///
-    /// Asking is skipped entirely while the status line is hidden, which is the one case where a
-    /// reader has said outright that they are not reading numbers.
+    /// Sampling is skipped entirely while the status line is hidden, and it is asked right here: a
+    /// hidden line asks the platform nothing, which is the one case where a reader has said outright
+    /// that they are not reading numbers. It used to be a free function that returned its own argument
+    /// (`samples_vitals(show_status)`), so the *decision* looked tested while the sample was taken
+    /// whatever it answered. What is left is the body below, [`vitals_clause`], and the switch is the
+    /// first thing it does — a test holds it to the platform's own call count, not to a boolean.
     fn sample_vitals(&mut self) {
-        if !samples_vitals(self.settings.show_status) {
-            // Cleared rather than left stale: a line that was shown, hidden and shown again must not
-            // print a figure from a minute ago before the first new sample lands.
-            self.vitals.clear();
-            return;
-        }
-
-        let Some(stats) = self.system_stats.as_mut() else {
-            return;
-        };
-
-        self.vitals = match stats.vitals() {
-            Some(vitals) => vitals.summary(),
-            // A platform that cannot say leaves the clause empty. It is not an error and it is not a
-            // zero: the line simply has one fewer thing in it, which is the same rule the counters
-            // follow for a note that has no marks, no history and no document.
-            None => String::new(),
-        };
+        vitals_clause(
+            self.settings.show_status,
+            &mut self.vitals,
+            self.system_stats.as_deref_mut(),
+        );
     }
 
     /// Starts or stops the measurement session, and puts what it found on the status line.
@@ -7866,18 +7804,6 @@ fn screen_in_front(screens: Screens) -> bool {
     screens.home || screens.marks || screens.outline || screens.asking || screens.palette
 }
 
-/// The whole of the geometric half of [`NoteApp::pen_has_its_own_cursor`], as a free function because
-/// it is the part worth testing: the app's own answer also asks whether a ghost was installed at all
-/// and whether a screen is in front, and neither of those can be asked without a window.
-///
-/// The rule is [`Controls::ui_at`]'s, written once: the system pointer is the cursor over a control, and
-/// the ghost is the pen's everywhere else. `boxes` are the controls' own rectangles as the frame measured
-/// them, so a pill's top and bottom are its own — the paper between the pills is paper, whatever line the
-/// desk's row begins at.
-fn pen_cursor_shows(at: (f32, f32), boxes: ControlBoxes) -> bool {
-    !boxes.held(at)
-}
-
 /// Who owns the nib for a batch, and who owns it afterwards — the whole of the rule, as a free function
 /// so that it can be asked without a window.
 ///
@@ -7953,13 +7879,50 @@ enum NibOwner {
     Control,
 }
 
-/// Whether a machine's counters should be read at all.
+/// Whether the ghost is the pen's cursor at `at`, given the boxes the frame measured.
 ///
-/// A free function because the decision is the part worth testing, and it is the whole of what the switch
-/// does: a hidden status line asks the platform nothing, so hiding the line is also how a reader stops
-/// paying for the sample (see [`NoteApp::sample_vitals`]).
-fn samples_vitals(status_shown: bool) -> bool {
-    status_shown
+/// [`ControlBoxes::held`] inverted, and that is the whole of it: over the bar or a pill the system
+/// pointer is the cursor, and everywhere else on the page the ghost is. Asked of the frame's own
+/// [`Controls`] and the same slack [`NoteApp::ui_at`] refuses the ink in, so the ink and the cursor are
+/// one judgement — a free function for the reason the geometry it reads is a plain struct: it is the
+/// part worth testing, and a test can ask it without a window.
+fn pen_cursor_shows(at: (f32, f32), controls: Controls, slack: LayoutPx) -> bool {
+    !controls.boxes(slack).held(at)
+}
+
+/// The status line's hardware clause, sampled — and the whole of the rule that keeps it free when
+/// nobody is reading it.
+///
+/// * A **hidden** line asks the platform nothing, and drops whatever the last sample said: a figure
+///   from a minute ago is a figure nobody asked to see, and one printed after the line was shown again
+///   would be that minute-old figure until the first new sample landed.
+/// * A **shown** line asks once and keeps the answer. A platform that cannot say leaves the clause
+///   empty, which is not an error and not a zero: the line simply has one fewer thing in it, the same
+///   rule the counters follow for a note that has no marks, no history and no document.
+///
+/// A function rather than a method because its state is two values and a seam: this is the part worth
+/// testing, and a test asks it with a sampler that counts its own calls. [`NoteApp::sample_vitals`] is
+/// the app's one caller, and it passes the reader's `show_status` — so what a test holds is that the
+/// platform's `vitals` is not called at all while the line is hidden, rather than that a boolean came
+/// back as itself.
+fn vitals_clause(
+    shown: bool,
+    clause: &mut String,
+    stats: Option<&mut (dyn crate::platform::SystemStats + '_)>,
+) {
+    clause.clear();
+
+    if !shown {
+        return;
+    }
+
+    let Some(stats) = stats else {
+        return;
+    };
+
+    if let Some(vitals) = stats.vitals() {
+        *clause = vitals.summary();
+    }
 }
 
 /// Whether the reader's frame cap holds back a frame, given how long ago the last one was handed over.

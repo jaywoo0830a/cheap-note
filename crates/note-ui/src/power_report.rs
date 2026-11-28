@@ -50,10 +50,10 @@ use crate::report::{Command, Format, Report, Row, Value, Verdict};
 pub const FLAG: &str = "--power-report";
 
 /// The energy columns, `null` together when no energy source was read.
-pub const ENERGY_COLUMNS: [&'static str; 2] = ["joules_per_op", "ops_per_joule"];
+pub const ENERGY_COLUMNS: [&str; 2] = ["joules_per_op", "ops_per_joule"];
 
 /// The columns, fixed and in this order — the same on every platform.
-pub const COLUMNS: [&'static str; 10] = [
+pub const COLUMNS: [&str; 10] = [
     "strokes",
     "phase",
     "threads",
@@ -948,7 +948,7 @@ fn frame(
     let mut canvas = canvas_of(&synthetic_page(strokes));
 
     // Warmup: the first frame bakes every realization, so it is not the steady cost a pan pays.
-    if let Err(_) = surface(&canvas) {
+    if surface(&canvas).is_err() {
         return (
             Measured::Skipped("no-surface"),
             empty_energy(clock, plan.meter_offset),

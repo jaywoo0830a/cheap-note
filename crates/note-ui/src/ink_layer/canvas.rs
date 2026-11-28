@@ -226,8 +226,8 @@ impl Ink {
     /// its unit steps asks *here* rather than composing them itself. That is what both platforms do (see
     /// [`InkTransform::basis`]), and it is why a page turned the wrong way is one bug and not two.
     ///
-    /// No interface lines: a canvas description is about the sheet, and the bar and the foot are the
-    /// window's, refused before a reading ever reaches the model.
+    /// No interface lines: a canvas description is about the sheet, and the bar is the window's,
+    /// refused before a reading ever reaches the model.
     pub fn transform(&self) -> InkTransform {
         InkTransform {
             scale: 1.0,
@@ -235,7 +235,6 @@ impl Ink {
             origin: self.origin,
             paper: self.paper,
             bar: 0.0,
-            foot: 0.0,
             rotation: self.rotation,
         }
     }

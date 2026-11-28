@@ -105,13 +105,6 @@ pub struct Screen {
     /// three consumers. A ghost drawn below a different line than the ink obeys is a cursor pointing at
     /// a page the pen cannot write on, or an arrow over a place the ghost says is the pen's.
     pub sheet_top: f32,
-    /// The line the ghost is drawn above, in physical client pixels: where the desk's own row begins —
-    /// the page and zoom pills at the foot of the window (`NoteApp::foot_edge`).
-    ///
-    /// A **drawing** line, not a refusal: the ghost paints in a band between this line and `sheet_top`,
-    /// and a band needs one row rather than two boxes. Whether the pen may write at a point is
-    /// [`Self::controls`]' answer, which is exact.
-    pub sheet_bottom: f32,
     /// The boxes drawn over the sheet, in physical client pixels: the bar's, and the two pills at the
     /// desk's foot.
     ///
@@ -181,7 +174,6 @@ impl Default for Screen {
             halo: 0x00_00_00,
             nib_radius: crate::cursor::NIB_RADIUS_MIN,
             sheet_top: 0.0,
-            sheet_bottom: 0.0,
             controls: ControlRects::default(),
             suppressed: true,
         }

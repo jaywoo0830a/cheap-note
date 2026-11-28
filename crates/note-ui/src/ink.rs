@@ -160,14 +160,6 @@ pub struct InkTransform {
     /// the one question this model asks of every reading: is it *on the page the user is writing
     /// on* — and the top of the page behind a bar is not somewhere a nib can write.
     pub bar: f32,
-    /// Where the desk's own row begins: the top of the pills the page and zoom pill float in, in window
-    /// logical pixels.
-    ///
-    /// **Nothing is refused below this line any more.** It is carried because the transform is the
-    /// window's geometry and the ghost publishes it as the end of its paint band — but the paper between
-    /// the two pills is paper, and the boxes that are controls are the app's own measurement
-    /// (`NoteApp::ui_at`). A line here would refuse the gap as well; that was the bug.
-    pub foot: f32,
     /// How far the page has been turned, in quarter turns clockwise.
     ///
     /// A reading is turned back by it — see [`paper_of_drawn`] — so ink written on a page the reader
@@ -241,7 +233,6 @@ impl InkTransform {
             origin: (0.0, 0.0),
             paper: (0.0, 0.0),
             bar: 0.0,
-            foot: 0.0,
             rotation: Quarters::UPRIGHT,
         }
     }
@@ -312,11 +303,12 @@ impl InkTransform {
     /// Whether a point of the window's **logical** pixels is on the interface rather than on the page:
     /// above [`Self::bar`].
     ///
-    /// This is the bar's line, and only the bar's. It used to be two lines — the bar's and the desk's row
-    /// at the foot — but the foot is not a line: the two pills float in a full-width row, and refusing
-    /// every reading below the row's top refused the paper between them too. The pills are two
-    /// rectangles, and a rectangle is asked by the frame that measured it (`NoteApp::ui_at`), so the
-    /// model is left with the one control that really is a line across the window.
+    /// This is the bar's line, and only the bar's. The desk's foot is no line at all, and never was
+    /// meant to be: the page and zoom pills float in a full-width row at the bottom of the window, and
+    /// every reading at the row's top or below was refused whatever its `x`, so the paper between the
+    /// two pills could not be written on. The pills are rectangles, and the frame that measured them
+    /// asks about them (`NoteApp::ui_at`); the model is left with the one control that really is a line
+    /// across the window.
     ///
     /// A line of no height refuses nothing. A point exactly on it is the interface's: the line is the
     /// bar's last pixel, and a pixel of ink behind a button is a dot the user never saw themselves
@@ -325,15 +317,13 @@ impl InkTransform {
         self.bar > 0.0 && y <= self.bar
     }
 
-    /// Whether a reading, at a vertical position in **physical client** pixels, landed on the
-    /// interface rather than on the page: the bar at the top of the window, or the desk's own row at
-    /// the foot.
+    /// Whether a reading, at a vertical position in **physical client** pixels, landed on the bar at
+    /// the top of the window rather than on the page.
     ///
-    /// Both lines are the *window's*, not the sheet's: a page panned up out from under the bar is
-    /// still covered where the two overlap, so this is asked of the reading's own pixels — which is
-    /// why the DPI scale divides here, exactly as [`Self::sheet_point`] divides it. The rule itself is
-    /// [`Self::in_interface`]'s, written once, because the two edges are the same thing — a floating
-    /// control the pen presses — even though only one of them was ever meant to be written on.
+    /// The line is the *window's*, not the sheet's: a page panned up out from under the bar is still
+    /// covered where the two overlap, so this is asked of the reading's own pixels — which is why the
+    /// DPI scale divides here, exactly as [`Self::sheet_point`] divides it. The rule itself is
+    /// [`Self::in_interface`]'s, written once.
     pub fn on_bar(&self, pixel_y: f32) -> bool {
         self.in_interface(pixel_y / finite_or_one(self.scale))
     }
@@ -1246,11 +1236,11 @@ impl InkDocument {
     /// is *on the paper*, because a reading that is not on it is not ink.
     ///
     /// **Who owns the nib is not decided here.** A press on a control — the bar at the top of the window,
-    /// a pill at its foot — never reaches this function: the app decides once, on the `Down`, and either
-    /// keeps the whole stroke or passes none of it (see `NoteApp::consume_ink`). The model used to refuse
-    /// a `Down` above [`InkTransform::bar`] and below [`InkTransform::foot`] as well, which was a second
-    /// copy of the rule: the foot's copy refused **every** reading below the row whatever its `x`, so the
-    /// paper between the two pills could not be written on.
+    /// a pill at its foot — never reaches this function as a stroke: the app decides once, on the `Down`,
+    /// and either keeps the whole stroke or passes none of it (see `NoteApp::consume_ink`). The model
+    /// used to refuse a `Down` below a line at the desk's foot as well, which was a second copy of the
+    /// rule: that copy refused **every** reading below the row whatever its `x`, so the paper between
+    /// the two pills could not be written on. Only the bar's own line is left here.
     ///
     /// `scale` is not used to refuse anything: a press on a control is the app's decision, made before a
     /// batch reaches this function (see the note above).

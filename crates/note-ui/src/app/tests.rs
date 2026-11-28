@@ -4,21 +4,23 @@ use super::{
     bar_line, confirmed, file_label, file_stem, held_by_cap, nib_owner, page_after_insert,
     page_of_write, page_owes_a_rewrite, palette_at, palette_centre, palette_colours, palette_face,
     palette_id, palette_in_hand, palette_pick_answers, palette_point, parse_zoom, pdf_render_due,
-    pen_cursor_shows, pinch_zoom_factor, quantise_width, samples_vitals, scale_label,
-    screen_in_front, scroll_of, sheet_is_front, sheet_matches, spun, touches_paper, window_px,
-    zoom_text, BoxRect, Confirmation, ControlBoxes, ControlPlace, Controls, Edge, EdgeSwipe,
-    NibOwner, PaletteGeometry, PalettePart, PenGesture, Screens, SwatchGeometry, Swipe, Turn,
-    WeightControl, EDGE_SWIPE_BAND, EDGE_SWIPE_TRAVEL, PALETTE_DISC, PALETTE_DISC_BOX,
-    PALETTE_DISC_PAD, PALETTE_DISC_RING, PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN,
-    PALETTE_RADIUS, PALETTE_REACH, PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC,
-    PALETTE_TOOL_RADIUS, PALETTE_WELL, PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
+    pen_cursor_shows, pinch_zoom_factor, quantise_width, scale_label, screen_in_front, scroll_of,
+    sheet_is_front, sheet_matches, spun, touches_paper, vitals_clause, window_px, zoom_text,
+    BoxRect, Confirmation, ControlPlace, Controls, Edge, EdgeSwipe, NibOwner, PaletteGeometry,
+    PalettePart, PenGesture, Screens, SwatchGeometry, Swipe, Turn, WeightControl, EDGE_SWIPE_BAND,
+    EDGE_SWIPE_TRAVEL, PALETTE_DISC, PALETTE_DISC_BOX, PALETTE_DISC_PAD, PALETTE_DISC_RING,
+    PALETTE_HUB, PALETTE_HUB_RING, PALETTE_MARGIN, PALETTE_RADIUS, PALETTE_REACH,
+    PALETTE_RING_RADIUS, PALETTE_TOOLS, PALETTE_TOOL_DISC, PALETTE_TOOL_RADIUS, PALETTE_WELL,
+    PALETTE_WELL_PAD, PDF_QUIET_INTERVAL, WHEEL_PAN_PER_LINE,
 };
 use crate::canvas::{HIGHLIGHTER_COLORS, INK_COLORS};
 use crate::design::{LayoutMetrics, ScaleStep};
 use crate::ink::{Notes, Tool};
 use crate::input::Reading;
 use crate::pages::Pages;
+use crate::timing::Vitals;
 use gpui_kit::ElementId;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// A destructive command is reachable only through an answer.
@@ -427,7 +429,9 @@ fn the_foot_refuses_the_pills_and_not_the_row() {
         .measured(ControlPlace::Zoom, BoxRect::new(700.0, 910.0, 900.0, 960.0));
     let slack = LayoutMetrics::default().foot_slack;
 
-    let ui = |x: f32, y: f32| controls.ui_at((x, y), slack);
+    // The one judgement the ink, the pen's gestures and the ghost's rule all ask (see `NoteApp::ui_at`
+    // and [`pen_cursor_shows`]): the frame's boxes, grown by the slack, and a point inside one.
+    let ui = |x: f32, y: f32| controls.boxes(slack).held((x, y));
 
     assert!(ui(500.0, 950.0), "the middle of the page pill");
     assert!(ui(400.0, 950.0), "its left edge");
@@ -451,7 +455,7 @@ fn the_foot_refuses_the_pills_and_not_the_row() {
     );
 
     // An unmeasured pill is no box at all: the pen is refused nowhere it cannot see a pill.
-    assert!(!Controls::default().ui_at((500.0, 950.0), slack));
+    assert!(!Controls::default().boxes(slack).held((500.0, 950.0)));
 }
 
 /// **The regression this change is for:** the paper between the two pills is paper.
@@ -468,12 +472,12 @@ fn the_paper_between_the_pills_is_paper() {
     // Between the two pills, below both of their tops, and below the row's own line: this is the
     // reading the old foot refused and a reader was right to expect ink from.
     assert!(
-        !controls.ui_at((650.0, 950.0), slack),
+        !controls.boxes(slack).held((650.0, 950.0)),
         "the gap between them"
     );
-    assert!(!controls.ui_at((650.0, 1000.0), slack), "and below it");
+    assert!(!controls.boxes(slack).held((650.0, 1000.0)), "and below it");
     assert!(
-        !controls.ui_at((1000.0, 950.0), slack),
+        !controls.boxes(slack).held((1000.0, 950.0)),
         "and the desk to the right of the zoom pill"
     );
 }
@@ -492,7 +496,7 @@ fn a_reshaped_window_takes_its_old_boxes_with_it() {
         .measured(ControlPlace::Page, BoxRect::new(400.0, 400.0, 600.0, 450.0))
         .measured(ControlPlace::Zoom, BoxRect::new(700.0, 400.0, 900.0, 450.0));
     assert!(
-        small.ui_at((500.0, 420.0), slack),
+        small.boxes(slack).held((500.0, 420.0)),
         "over the pill while small"
     );
 
@@ -503,15 +507,15 @@ fn a_reshaped_window_takes_its_old_boxes_with_it() {
         .measured(ControlPlace::Zoom, BoxRect::new(700.0, 900.0, 900.0, 950.0));
 
     assert!(
-        !large.ui_at((500.0, 420.0), slack),
+        !large.boxes(slack).held((500.0, 420.0)),
         "where the pill used to be is paper once it has moved"
     );
     assert!(
-        !large.ui_at((300.0, 420.0), slack),
+        !large.boxes(slack).held((300.0, 420.0)),
         "and nothing spans the window at the old height"
     );
     assert!(
-        large.ui_at((500.0, 920.0), slack),
+        large.boxes(slack).held((500.0, 920.0)),
         "the pill where it is now"
     );
 }
@@ -529,19 +533,19 @@ fn one_pills_height_does_not_decide_the_others_column() {
         .measured(ControlPlace::Zoom, BoxRect::new(700.0, 930.0, 900.0, 960.0));
 
     assert!(
-        controls.ui_at((500.0, 910.0), slack),
+        controls.boxes(slack).held((500.0, 910.0)),
         "over the page pill, which is the tall one"
     );
     assert!(
-        !controls.ui_at((650.0, 910.0), slack),
+        !controls.boxes(slack).held((650.0, 910.0)),
         "but the gap at the taller pill's own height is paper"
     );
     assert!(
-        controls.ui_at((850.0, 955.0), slack),
+        controls.boxes(slack).held((850.0, 955.0)),
         "the zoom pill where it really is"
     );
     assert!(
-        !controls.ui_at((850.0, 990.0), slack),
+        !controls.boxes(slack).held((850.0, 990.0)),
         "and below the shorter pill's own box is paper, though the taller pill still goes on"
     );
 }
@@ -554,10 +558,14 @@ fn one_pills_height_does_not_decide_the_others_column() {
 /// back on that very reading. A platform that restores the arrow only when the *state* changes leaves a
 /// transparent cursor over its own controls, because the pen arrived there without any state edge being
 /// crossed. So this is asked per reading, and this test is the rule it asks.
+///
+/// The controls are *measured*, which is the path the bar and the pills really take: each frame's
+/// `top_bar`/`pill_box` probe calls [`Controls::measured`], and this is the answer the pen and the
+/// ghost then get from those boxes. A box registered as `None` — the bar hidden, a pill not laid out
+/// yet — is no box at all, and the page under it is the ghost's.
 #[test]
 fn the_arrow_is_the_cursor_over_the_bar_and_the_pills() {
-    // A bar 0..100, a page pill at 400..600 across and a zoom pill at 700..900, both 930..980 down,
-    // grown by the snapshot's slack.
+    // A bar 0..100, a page pill at 400..600 across and a zoom pill at 700..900, both 930..980 down.
     let slack = LayoutMetrics::default().foot_slack;
     let controls = Controls::default()
         .measured(
@@ -566,8 +574,7 @@ fn the_arrow_is_the_cursor_over_the_bar_and_the_pills() {
         )
         .measured(ControlPlace::Page, BoxRect::new(400.0, 930.0, 600.0, 980.0))
         .measured(ControlPlace::Zoom, BoxRect::new(700.0, 930.0, 900.0, 980.0));
-    let boxes = controls.boxes(slack);
-    let shows = |x: f32, y: f32| pen_cursor_shows((x, y), boxes);
+    let shows = |x: f32, y: f32| pen_cursor_shows((x, y), controls, slack);
 
     assert!(!shows(500.0, 50.0), "on the bar, the arrow is the cursor");
     assert!(!shows(500.0, 100.0), "and on the bar's own last pixel");
@@ -576,33 +583,44 @@ fn the_arrow_is_the_cursor_over_the_bar_and_the_pills() {
     assert!(!shows(500.0, 950.0), "over the page pill, the arrow");
     assert!(!shows(800.0, 950.0), "over the zoom pill too");
     assert!(shows(650.0, 950.0), "and the desk between them is page");
+
+    // A bar the frame did not draw — hidden, or not measured yet — leaves the strip the ink refuses
+    // above as page for both: the cursor rule reads the box, not a remembered edge.
+    let hidden = Controls {
+        toolbar: None,
+        ..controls
+    };
+    assert!(
+        pen_cursor_shows((500.0, 50.0), hidden, slack),
+        "with no bar measured the strip is page, and the ghost is the pen's there"
+    );
 }
 
 /// The controls answer on their own: a hidden bar is no box, and a foot nobody has measured refuses
 /// nothing.
 #[test]
 fn the_two_edges_answer_on_their_own() {
-    let none = ControlBoxes::default();
+    let slack = LayoutMetrics::default().foot_slack;
+    let none = Controls::default();
 
     assert!(
-        pen_cursor_shows((500.0, 500.0), none),
+        pen_cursor_shows((500.0, 500.0), none, slack),
         "no bar and no pills leaves the page the ghost's"
     );
     assert!(
-        pen_cursor_shows((500.0, 990.0), none),
+        pen_cursor_shows((500.0, 990.0), none, slack),
         "and an unmeasured foot refuses nothing"
     );
 
-    let bar_only = Controls::default()
-        .measured(ControlPlace::Toolbar, BoxRect::new(0.0, 0.0, 1000.0, 100.0))
-        .boxes(LayoutMetrics::default().foot_slack);
+    let bar_only =
+        Controls::default().measured(ControlPlace::Toolbar, BoxRect::new(0.0, 0.0, 1000.0, 100.0));
 
     assert!(
-        !pen_cursor_shows((500.0, 0.0), bar_only),
+        !pen_cursor_shows((500.0, 0.0), bar_only, slack),
         "the window's top pixel belongs to the bar, and the bar is a box"
     );
     assert!(
-        pen_cursor_shows((500.0, 990.0), bar_only),
+        pen_cursor_shows((500.0, 990.0), bar_only, slack),
         "while the desk below a bar with no pills measured is page"
     );
 }
@@ -632,7 +650,7 @@ fn a_pill_laid_out_at_no_width_covers_only_its_own_point() {
         "an unmeasured pill is a point grown by the slack, not a strip across the desk"
     );
     assert!(
-        !controls.ui_at((500.0, 950.0), slack),
+        !controls.boxes(slack).held((500.0, 950.0)),
         "so the desk beside it is still page"
     );
 }
@@ -728,7 +746,7 @@ fn the_two_pills_measure_themselves_one_after_the_other() {
     assert!(controls.page_pill.is_some(), "the page pill's box");
     assert!(controls.zoom_pill.is_some(), "and the zoom pill's");
     assert!(
-        controls.ui_at((500.0, 950.0), slack) && controls.ui_at((800.0, 930.0), slack),
+        controls.boxes(slack).held((500.0, 950.0)) && controls.boxes(slack).held((800.0, 930.0)),
         "and both refuse the pen where they are drawn"
     );
 }
@@ -1676,14 +1694,66 @@ fn a_screen_in_front_is_never_the_sheet_too() {
 /// system call a second, and it happens only while the line is on screen. Hiding the line is therefore
 /// also how a reader stops paying for it, which is what lets the figure be offered without a switch of
 /// its own (see [`NoteApp::sample_vitals`]).
+///
+/// The assertion is on the *platform's* call, not on a boolean: this test used to check
+/// `samples_vitals(true) == true`, a function that returned its own argument, and it stayed green when
+/// the sample was taken on every call. The sampler below counts its calls, so a hidden line that still
+/// asked would show as a count of one.
 #[test]
 fn the_counters_are_read_only_while_the_line_is_shown() {
+    let mut sampler = PoisonedSampler::default();
+
+    let mut hidden = String::from("a figure from the last sample");
+    let present = Some(&mut sampler as &mut dyn crate::platform::SystemStats);
+    vitals_clause(false, &mut hidden, present);
+    assert_eq!(
+        sampler.calls(),
+        0,
+        "a hidden line costs the platform nothing: the sampler is not called at all"
+    );
     assert!(
-        samples_vitals(true),
+        hidden.is_empty(),
+        "and the last sample is dropped rather than left to print a minute-old figure"
+    );
+
+    // A line shown again fills its clause at once: the switch that shows it samples on the spot, so the
+    // reader never sees the line without the very thing they just asked for.
+    let mut shown = String::new();
+    vitals_clause(true, &mut shown, Some(&mut sampler));
+    assert_eq!(
+        sampler.calls(),
+        1,
         "a visible line has a hardware clause to fill"
     );
-    assert!(
-        !samples_vitals(false),
-        "and a hidden one costs the platform nothing"
-    );
+
+    // A machine that cannot say leaves the clause empty, which is not an error and not a zero.
+    let mut silent = String::from("stale");
+    vitals_clause(true, &mut silent, None);
+    assert!(silent.is_empty(), "no platform, no clause, no leftover");
+}
+
+/// A machine counter that must not be read: it counts its own calls, and every answer it gives is a
+/// number no status line could print.
+///
+/// The answer is poisoned rather than merely counted, so a line that *did* take the sample says so: a
+/// figure with a truth in the third decimal place is one a test can prove came from here.
+#[derive(Debug, Default)]
+struct PoisonedSampler {
+    /// How many times the status line asked for the machine's counters.
+    calls: AtomicUsize,
+}
+
+impl PoisonedSampler {
+    /// How many times the counters were read.
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl crate::platform::SystemStats for PoisonedSampler {
+    fn vitals(&mut self) -> Option<Vitals> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+
+        Some(Vitals::from((512 << 20, 42.5, 0)))
+    }
 }

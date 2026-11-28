@@ -775,11 +775,13 @@ impl Renderer {
         // stroke, an undo of one and a redo of an erase all arrive as the one change they are, naming the
         // place they happened, so the rebuild starts there instead of being found by a walk.
         let kept = match &canvas.ink.delta {
-            Some(change) if change.before + 1 == canvas.ink.edit => match first_touch(&change.changes) {
-                Some(at) => at,
-                // An empty change: nothing the names describe, so the page is compared.
-                None => return self.compare(canvas, strokes),
-            },
+            Some(change) if change.before + 1 == canvas.ink.edit => {
+                match first_touch(&change.changes) {
+                    Some(at) => at,
+                    // An empty change: nothing the names describe, so the page is compared.
+                    None => return self.compare(canvas, strokes),
+                }
+            }
             // No change to go on — a caller that cannot say, or one the cache never saw. The page is
             // compared element by element, which is right however the two differ.
             _ => return self.compare(canvas, strokes),

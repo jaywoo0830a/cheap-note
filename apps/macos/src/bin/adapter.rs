@@ -91,9 +91,15 @@ fn run() -> Result<i32, String> {
     let device = device(&profile)?;
 
     let mut out = std::io::stdout();
-    let code = measure(
-        &action, &case, size, samples, warmups, &profile, device, &mut out,
-    )?;
+    let request = Request {
+        action,
+        case,
+        size,
+        samples,
+        warmups,
+        device,
+    };
+    let code = measure(&request, &mut out)?;
     let _ = out.flush();
     Ok(code)
 }
@@ -120,7 +126,7 @@ fn usize_of(value: &serde_json::Value, key: &str) -> Result<usize, String> {
 fn device(profile: &str) -> Result<serde_json::Value, String> {
     let (width, height, refresh_hz, external) = display()?;
     let ram_bytes = ram_bytes()?;
-    let integrated_gpu = gpu_name().map_or(false, |name| name.contains("Apple"));
+    let integrated_gpu = gpu_name().is_some_and(|name| name.contains("Apple"));
     let macos = sw_vers();
     let machine = sysctl_str("hw.model").unwrap_or_else(|| String::from("unknown"));
 
@@ -145,7 +151,7 @@ fn device(profile: &str) -> Result<serde_json::Value, String> {
         "mac4k120" => {
             external && (width, height) == (3840, 2160) && (refresh_hz - 120.0).abs() <= 0.5
         }
-        "igpu8" => integrated_gpu && (7u64 << 30) <= ram_bytes && ram_bytes <= (8u64 << 30),
+        "igpu8" => integrated_gpu && ((7u64 << 30)..=(8u64 << 30)).contains(&ram_bytes),
         // A device the adapter invents, so its measurement path can be exercised on hardware that meets
         // neither release profile. Never used for evidence: the harness's own `validate` rejects its
         // `platform`/geometry against a real profile, which is the point of it existing.
@@ -256,9 +262,8 @@ fn replay_rate() -> f64 {
 /// the paper's right edge, which is far outside any cache margin the renderer builds for.
 ///
 /// The same page with `visible` strokes in the viewport instead of [`CONTROL`] is [`fixture_of`].
-
-/// The same page with `visible` strokes in the viewport instead of [`CONTROL`].
 ///
+/// The same page with `visible` strokes in the viewport instead of [`CONTROL`].
 /// The design document's test A ("visible ink size") sweeps the *prepared visible strokes* to 100, 1,000
 /// and 10,000 and asks for the same stroke appended at each size, so that the uploaded bytes of an append
 /// can be compared with the control row. That is this function's `visible`: every stroke it makes lies
@@ -600,20 +605,43 @@ fn vertices_of(stroke: &Stroke) -> u64 {
 
 /// Measures one interactive action over `samples` operations, after `warmups` discarded ones.
 ///
-/// Each operation: send the readings, commit them to the model, draw through the surface, and stamp the
-/// five points of the user's path — input, commit, submit, GPU done, presented — off one monotonic clock.
-/// The counters are attributed to the operation by diffing what the model and the surface did.
-#[allow(clippy::too_many_arguments)]
-fn interactive(
-    action: &str,
-    case: &str,
+/// One measurement request, as `tests/long_note.py` writes it: the fields it names, and nothing else.
+///
+/// A struct rather than eight parameters because the two halves below pass the request whole: `measure`
+/// routes on `action`, and `interactive` walks `samples` of it with `warmups` first. The field names are
+/// the protocol's own (`size`, `samples`, …), which is what `str_of`/`usize_of` read from the JSON.
+struct Request {
+    /// Which measurement to take: `append`, `blank_erase`, `traverse`, … (the adapter's `match`).
+    action: String,
+    /// The case's own parameter, which differs by action: hidden strokes for A/E, visible ones for C.
+    case: String,
+    /// The case's size: the hidden (A/E) or visible (C) stroke count, read only by those cases.
     size: usize,
+    /// How many samples to take after the warmups.
     samples: usize,
+    /// Frames drawn before the first sample, so the first measured frame is not a cold one.
     warmups: usize,
-    _profile: &str,
+    /// The machine, as [`device`] read it, written into the output beside the rows.
+    ///
+    /// The profile is **not** here: [`run`] reads it once, refuses the machine with it before any request
+    /// is measured (see [`device`]), and has no use for it afterwards — a copy would be a field no action
+    /// reads.
     device: serde_json::Value,
-    out: &mut impl Write,
-) -> Result<i32, String> {
+}
+
+fn interactive(request: &Request, out: &mut impl Write) -> Result<i32, String> {
+    // The request is borrowed whole: every field the loop reads is a `Copy` number, and the two that are
+    // not — `case` and `action` — are taken as `&str` here, once. The machine is written into this
+    // action's own output, so it is cloned once here rather than read field by field later.
+    //
+    // Each operation: send the readings, commit them to the model, draw through the surface, and stamp
+    // the five points of the user's path — input, commit, submit, GPU done, presented — off one
+    // monotonic clock. The counters are attributed to the operation by diffing what the model and the
+    // surface did.
+    let action = request.action.as_str();
+    let case = request.case.as_str();
+    let (size, samples, warmups) = (request.size, request.samples, request.warmups);
+    let device = request.device.clone();
     let mut surface = surface().ok_or("no Metal device")?;
 
     // Case A/E vary the hidden stroke count; C varies visible density; D the long stroke's length.
@@ -857,7 +885,7 @@ fn append(
     let commit_ns = input.elapsed().as_nanos() as u64;
 
     // What the edit touched: the strokes the pen's path was near, and the one it appended.
-    let inspected = scanned(&page, &readings);
+    let inspected = scanned(page, &readings);
     let appended = page.finished().get(ink_before).cloned();
     let appended_vertices = appended.as_deref().map_or(0, vertices_of);
     let appended_vertex_bytes = appended_vertices * VERTEX_BYTES;
@@ -953,7 +981,7 @@ fn blank_erase(
 
     // Nothing was erased: no stroke may have gone, and no geometry may be new.
     let erased = ink_before != page.finished().len();
-    let inspected = scanned(&page, &readings);
+    let inspected = scanned(page, &readings);
     let cost = draw_frame(surface, canvas, page, 1.0, (MARGIN, MARGIN));
 
     let observation = Observation {
@@ -1069,23 +1097,13 @@ fn pan(
     (observation, Some(window(index, cost.drawn)))
 }
 
-fn measure(
-    action: &str,
-    case: &str,
-    size: usize,
-    samples: usize,
-    warmups: usize,
-    profile: &str,
-    device: serde_json::Value,
-    out: &mut impl Write,
-) -> Result<i32, String> {
-    match action {
-        "traverse" => traverse(case, size, device, out),
-        "cold_open" => cold_open(size, device, out),
+fn measure(request: &Request, out: &mut impl Write) -> Result<i32, String> {
+    match request.action.as_str() {
+        // The two whole-document actions take the request whole: their own size, and the machine.
+        "traverse" => traverse(&request.case, request.size, request.device.clone(), out),
+        "cold_open" => cold_open(request.size, request.device.clone(), out),
         "append" | "blank_erase" | "write" | "pan_inside" | "extend" | "commit_long"
-        | "pan_across" | "zoom_rung" | "undo" | "redo" => {
-            interactive(action, case, size, samples, warmups, profile, device, out)
-        }
+        | "pan_across" | "zoom_rung" | "undo" | "redo" => interactive(request, out),
         "move_selection" => {
             // No modifier bit exists on a reading, so the app has no pen path for a selection drag. A
             // reported figure would be invented; this is the honest answer.
@@ -1104,7 +1122,7 @@ fn zoom_rung(
     index: usize,
 ) -> (Observation, Option<ActiveWindow>) {
     // Two different rungs, alternated, so every call is a real rebuild rather than a cache hit.
-    let zoom = if index % 2 == 0 { 2.25 } else { 1.0 };
+    let zoom = if index.is_multiple_of(2) { 2.25 } else { 1.0 };
 
     let started = Instant::now();
     page.set_zoom(zoom);

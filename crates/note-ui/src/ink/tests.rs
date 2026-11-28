@@ -22,7 +22,6 @@ fn a_reading_on_a_turned_page_is_stored_in_the_pages_own_coordinates() {
             origin,
             paper,
             bar: 0.0,
-            foot: 0.0,
             rotation: turns,
         };
 
@@ -58,7 +57,6 @@ fn a_reading_beside_a_turned_page_is_not_ink() {
         origin: (0.0, 0.0),
         paper: (600.0, 800.0),
         bar: 0.0,
-        foot: 0.0,
         rotation: Quarters::from_turns(1),
     };
 
@@ -1163,17 +1161,21 @@ fn the_bar_is_a_line_in_the_window() {
     );
 }
 
-/// The foot is **not** a line in the window: nothing below it is refused by the model.
+/// The desk's foot is **not** a line in the window: nothing below the row's top is refused by the model.
 ///
 /// It used to be one, symmetric with the bar, and that is the window-mode bug: the page and zoom pills
 /// float in a full-width row, so a line at the row's top refused the paper between them too. The pills are
-/// two boxes, and a box is the app's to ask (`NoteApp::ui_at`); the model is left with the bar.
+/// two boxes, and a box is the app's to ask (`NoteApp::ui_at`); the model is left with the bar — so a
+/// reading there is paper, whatever its height, and no field of the transform could say otherwise.
+///
+/// The stroke this used to refuse is the one a reader draws *from* the bottom of the page: no app-side box
+/// is near it, so it has to reach the model and finish as one stroke. See
+/// [`a_line_from_the_bottom_of_the_page_finishes_as_one_stroke`].
 #[test]
 fn the_bottom_row_is_not_a_line_in_the_window() {
-    let footed = |foot: f32| InkTransform { foot, ..papered() };
     let scaled = InkTransform {
         scale: 2.0,
-        ..footed(700.0)
+        ..papered()
     };
 
     assert!(
@@ -1182,29 +1184,61 @@ fn the_bottom_row_is_not_a_line_in_the_window() {
     );
     assert!(
         !scaled.on_bar(1400.0),
-        "and the row's own first pixel is not refused either: the foot refuses nothing"
+        "and the row's own first pixel is not refused: no row is a line"
     );
     assert!(
-        !footed(700.0).on_bar(2000.0),
+        !papered().on_bar(2000.0),
         "however far down the window the reading is: the paper at the foot is paper"
     );
     assert!(
         !InkTransform::identity().on_bar(0.0),
-        "and no row refuses nothing"
+        "and no bar refuses nothing"
     );
 }
 
-/// The bar is the one edge the model keeps: the sheet is everything below it.
+/// A stroke begun at the bottom of the page is one stroke when the pen lifts.
+///
+/// The contract the removed line was standing in for, kept at the level the input takes it: a `Down`,
+/// readings along the paper's foot, and the `Up` that closes them are one stroke with its own end — and so
+/// are a reading and a lift with nothing in between, which is the tap a line at the row's top used to
+/// swallow whole.
+#[test]
+fn a_line_from_the_bottom_of_the_page_finishes_as_one_stroke() {
+    let mut ink = InkDocument::default();
+    let s = settings();
+    // The page's own bottom row: inside the paper (595 × 842), at the foot of the desk.
+    let t = papered();
+
+    ink.consume(&[reading(7, Phase::Down, 100.0, 790.0, Some(0.5))], &t, &s);
+    assert!(ink.consume(&[reading(7, Phase::Move, 300.0, 795.0, Some(0.5))], &t, &s));
+    ink.consume(&[reading(7, Phase::Up, 500.0, 700.0, None)], &t, &s);
+
+    assert_eq!(ink.stroke_count(), 1, "the line at the foot is one stroke");
+    let stroke = &ink.finished()[0];
+    assert!(
+        stroke.bounds.max.1 >= 790.0,
+        "and it keeps its own readings, the lowest ones included: {:?}",
+        stroke.bounds
+    );
+
+    let mut tap = InkDocument::default();
+    tap.consume(&[reading(7, Phase::Down, 100.0, 790.0, Some(0.5))], &t, &s);
+    tap.consume(&[reading(7, Phase::Up, 100.0, 790.0, None)], &t, &s);
+
+    assert_eq!(
+        tap.stroke_count(),
+        1,
+        "a tap at the foot is a stroke, not a press on a row"
+    );
+}
+
+/// The bar is the one edge the model keeps: the sheet is everything below it, to the bottom of the desk.
 ///
 /// The desk's row is deliberately left out of this, because it is not a line — see
 /// [`the_bottom_row_is_not_a_line_in_the_window`].
 #[test]
 fn the_sheet_is_below_the_bar() {
-    let both = InkTransform {
-        bar: 100.0,
-        foot: 700.0,
-        ..papered()
-    };
+    let both = barred(100.0);
 
     assert!(both.on_bar(100.0), "the bar's own last pixel");
     assert!(!both.on_bar(101.0));
@@ -1537,7 +1571,6 @@ fn placing_a_paper_point_and_reading_it_back_is_the_same_point() {
                 origin: (40.0, -120.0),
                 paper,
                 bar: 0.0,
-                foot: 0.0,
                 rotation: turns,
             };
 

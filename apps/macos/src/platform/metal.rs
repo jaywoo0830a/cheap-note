@@ -5275,35 +5275,38 @@ mod fill_tests {
         // sequence, minus the `Surface` — the pipeline, the released stencil, the draw.
         let pen = quad_vertices((50.0, 50.0), (60.0, 60.0), 0x000000);
 
-        let (centre, corner) =
-            band_then(&device, &library, &vertices, &[0], (400, 200), |encoder| {
-                // SAFETY: a buffer and a pipeline that outlive the closure, drawn the way a frame draws the pen.
-                let buffer = unsafe {
-                    let pointer = std::ptr::NonNull::new(pen.as_ptr() as *mut std::ffi::c_void)
-                        .expect("the pen has vertices");
-                    device
-                        .newBufferWithBytes_length_options(
-                            pointer,
-                            std::mem::size_of_val(&pen[..]),
-                            MTLResourceOptions::StorageModeShared,
-                        )
-                        .expect("a buffer for the pen")
-                };
-                let solid =
-                    pipeline(&device, &library, "solid_vertex", "solid_fragment").expect("solid");
-                encoder.setRenderPipelineState(&solid);
-                encoder.setDepthStencilState(None);
-                bind(&encoder, &buffer, 400.0, 200.0, Transform::WINDOW);
+        let (_, corner) = band_then(&device, &library, &vertices, &[0], (400, 200), |encoder| {
+            // SAFETY: a buffer and a pipeline that outlive the closure, drawn the way a frame draws the pen.
+            let buffer = unsafe {
+                let pointer = std::ptr::NonNull::new(pen.as_ptr() as *mut std::ffi::c_void)
+                    .expect("the pen has vertices");
+                device
+                    .newBufferWithBytes_length_options(
+                        pointer,
+                        std::mem::size_of_val(&pen[..]),
+                        MTLResourceOptions::StorageModeShared,
+                    )
+                    .expect("a buffer for the pen")
+            };
+            let solid =
+                pipeline(&device, &library, "solid_vertex", "solid_fragment").expect("solid");
+            encoder.setRenderPipelineState(&solid);
+            encoder.setDepthStencilState(None);
+            // `buffer` is owned here, and `bind` borrows it for the length of the call only: the
+            // explicit `&` is what says so (the compiler's own auto-ref would count as a clippy
+            // `needless_borrow`, because it resolves the deref to the same `&ProtocolObject`).
+            #[allow(clippy::needless_borrow)]
+            bind(&encoder, &buffer, 400.0, 200.0, Transform::WINDOW);
 
-                // SAFETY: the pen's own vertices, in the buffer just bound.
-                unsafe {
-                    encoder.drawPrimitives_vertexStart_vertexCount(
-                        MTLPrimitiveType::Triangle,
-                        0,
-                        pen.len(),
-                    );
-                }
-            });
+            // SAFETY: the pen's own vertices, in the buffer just bound.
+            unsafe {
+                encoder.drawPrimitives_vertexStart_vertexCount(
+                    MTLPrimitiveType::Triangle,
+                    0,
+                    pen.len(),
+                );
+            }
+        });
 
         // Black pen over white paper: if the state leaked, the pixel is untouched paper.
         assert!(
@@ -5637,7 +5640,7 @@ mod fill_tests {
         // Two pixels: the middle of the band, and one inside the pen's square (see the caller), which is a
         // place no ink reaches — the only place the cursor can be missed. The square the caller draws spans
         // 50..60 in both axes, so its interior is 55, 55 whatever the target's size.
-        let mut read = |x: usize, y: usize| {
+        let read = |x: usize, y: usize| {
             let mut pixel = [0u8; 4];
             let region = MTLRegion {
                 origin: MTLOrigin { x, y, z: 0 },
